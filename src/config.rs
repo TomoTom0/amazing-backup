@@ -102,6 +102,8 @@ struct AwsFile {
 #[serde(deny_unknown_fields)]
 struct AwsProfile {
     #[serde(default)]
+    purpose: String,
+    #[serde(default)]
     bucket: String,
     #[serde(default)]
     region: String,
@@ -220,10 +222,10 @@ const KNOWN_STORAGE_CLASSES: [&str; 7] = [
 /// `active_profile`/直下fieldsによる既定選択)に対応する設定を返す。
 /// 旧形式(`[aws]`直下にbucket/region/...を書く)は単一profileとして扱い後方互換を維持する。
 pub fn load_aws(path: &Path) -> BackupResult<AwsConfig> {
-    load_aws_profile(path, None)
+    load_aws_profile(path, None, None)
 }
 
-pub fn load_aws_profile(path: &Path, profile_name: Option<&str>) -> BackupResult<AwsConfig> {
+pub fn load_aws_profile(path: &Path, profile_name: Option<&str>, purpose: Option<&str>) -> BackupResult<AwsConfig> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| BackupError::Config(format!("aws.tomlを読めない ({}): {e}", path.display())))?;
     let parsed: AwsFile = toml::from_str(&text)
@@ -236,10 +238,18 @@ pub fn load_aws_profile(path: &Path, profile_name: Option<&str>) -> BackupResult
         )));
     }
 
-    let selected_name = profile_name
-        .map(str::to_string)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| {
+    let env_profile = std::env::var("BACKUP_REMOTE_AWS_PROFILE").ok().filter(|v| !v.trim().is_empty());
+    let env_purpose = std::env::var("BACKUP_REMOTE_AWS_PURPOSE").ok().filter(|v| !v.trim().is_empty());
+
+    let explicit_profile = profile_name.map(str::to_string).filter(|s| !s.trim().is_empty());
+    let requested_purpose = purpose.map(str::to_string).filter(|s| !s.trim().is_empty()).or(env_purpose);
+
+    let selected_name = if let Some(n) = explicit_profile.or(env_profile) {
+        n
+    } else if let Some(pur) = requested_purpose {
+        parsed.aws.profiles.iter().find_map(|(name, prof)| {
+            if prof.purpose == pur { Some(name.clone()) } else { None }
+        }).unwrap_or_else(|| {
             if !parsed.aws.active_profile.trim().is_empty() {
                 parsed.aws.active_profile.clone()
             } else if parsed.aws.profiles.contains_key("default") {
@@ -247,7 +257,14 @@ pub fn load_aws_profile(path: &Path, profile_name: Option<&str>) -> BackupResult
             } else {
                 parsed.aws.profiles.keys().cloned().next().unwrap_or_default()
             }
-        });
+        })
+    } else if !parsed.aws.active_profile.trim().is_empty() {
+        parsed.aws.active_profile.clone()
+    } else if parsed.aws.profiles.contains_key("default") {
+        "default".to_string()
+    } else {
+        parsed.aws.profiles.keys().cloned().next().unwrap_or_default()
+    };
 
     let prof = parsed.aws.profiles.get(&selected_name).ok_or_else(|| {
         BackupError::Config(format!(

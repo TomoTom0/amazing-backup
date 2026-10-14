@@ -1040,6 +1040,7 @@ mod tests {
             bucket: bucket.map(|s| s.to_string()),
             region: None,
             aws_profile: None,
+            aws_purpose: None,
         };
 
         // 1. aws.toml不在

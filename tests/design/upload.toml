@@ -176,7 +176,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-016(2.3 TASK-6節・
 description = "CLI上書き時、未指定の項目はaws.toml値が使われ、実行後もaws.tomlファイルの内容は不変(正本の書戻しを行わない) (integration, fake seam)"
 given = "--storage-classのみ上書き指定したupload実行(aws.tomlはbucket/region/storage_class/credentials_fileすべて設定済み)"
 expect_return_shape = "未指定のbucket/regionはaws.toml値でS3 API呼び出しが行われ(HeadObject/PutObject行のbucket=<aws.toml値>・PutObject行のstorage_classは上書き値)、実行後のaws.tomlファイルの内容は実行前とbyte単位で同一"
-source_lines = "src/config.rs:839; tests/encrypt_batch.rs:891"
+source_lines = "src/config.rs:856; tests/encrypt_batch.rs:891"
 
 [[condition]]
 id = "upload.cli-storage-class-allowlist-rejected"
@@ -185,7 +185,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-017(2.3 TASK-6節・
 description = "--storage-class上書き値が3.3のallowlist外の場合は設定エラー(exit 2)となり、S3 API呼び出しは一切行われない。空文字・空白のみは未指定扱い(aws.toml値を採用)でエラーとしない (integration, fake seam)"
 given = "allowlist外の値(打ち間違い)・空文字・空白のみを--storage-classに指定したupload実行"
 expect_return_shape = "allowlist外はexit 2・fake backendの呼び出し記録不存在。空文字・空白のみはexit 0でaws.tomlのstorage_class値でPutObject実行"
-source_lines = "src/config.rs:765; tests/encrypt_batch.rs:940"
+source_lines = "src/config.rs:782; tests/encrypt_batch.rs:940"
 
 [[condition]]
 id = "upload.cli-bucket-region-blank-rejected"
@@ -194,7 +194,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-018(2.3 TASK-6節・
 description = "--bucket/--region上書き値が空文字・空白のみ・前後空白付きの場合は設定エラー(exit 2)となり、S3 API呼び出しは一切行われない(値のtrimは行わない) (integration, fake seam)"
 given = "空文字・空白のみ・前後空白付きの値を--bucketまたは--regionに指定したupload実行"
 expect_return_shape = "いずれの組合せもexit 2・fake backendの呼び出し記録不存在"
-source_lines = "src/config.rs:818; tests/encrypt_batch.rs:986"
+source_lines = "src/config.rs:835; tests/encrypt_batch.rs:986"
 
 [[condition]]
 id = "upload.cli-override-with-dry-run"

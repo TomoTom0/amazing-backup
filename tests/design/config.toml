@@ -26,7 +26,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-001(検証規則は
 description = "pipeline.toml不在・TOML parseエラー・未知キー・型不一致は設定エラー (unit)"
 given = "不在path・不正TOML・未知キー・型不一致(public_keysに文字列等)の4ケース"
 expect_throw = "ConfigError(exit code 2)"
-source_lines = "src/config.rs:464"
+source_lines = "src/config.rs:481"
 
 [[condition]]
 id = "config.recipient-keys-validation"
@@ -35,7 +35,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-002(検証規則は
 description = "public_keys空配列・鍵ファイル不在・ssh-ed25519以外の形式は設定エラー (unit)"
 given = "空配列・存在しないpath・ssh-rsa形式鍵を指定した3ケース"
 expect_throw = "ConfigError(exit code 2)"
-source_lines = "src/config.rs:500"
+source_lines = "src/config.rs:517"
 
 [[condition]]
 id = "config.aws-required-on-upload"
@@ -44,7 +44,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-003(schemaは3.3)�
 description = "aws.toml不在・bucket/region空・credentials_fileキー欠落でupload開始すると設定エラー2(案内文付き)・S3 API呼び出しは一切行われない。require_readyはcredentialファイルの存在・parse・値検査まで含めて事前検査とする(aws CLIのPATH検査は廃止) (unit, fake S3Backend)"
 given = "aws.toml不在・bucket/region空・credentials_file無しの各状態で upload を実行(S3実行はfake差替)"
 expect_throw = "ConfigError(exit code 2。plan/encrypt/verify案内文付き)。S3 API呼び出しは行われない"
-source_lines = "src/config.rs:653; src/uploader.rs:1005"
+source_lines = "src/config.rs:670; src/uploader.rs:1005"
 
 [[condition]]
 id = "config.aws-credential-keys-rejected"
@@ -53,7 +53,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-004(schemaは3.3)�
 description = "aws.tomlの[aws]にcredentials_fileを除くcredential系キー(access_key_id等の値直書き)は書けない(schemaに該当キーが存在せず未知キーエラーとなり結果的に拒否。credentialはcredentials_fileによる外部ファイル明示参照のみ) (unit)"
 given = "credentials_fileとaccess_key_id(値直書き)を併記した aws.toml"
 expect_throw = "ConfigError(exit code 2)"
-source_lines = "src/config.rs:560"
+source_lines = "src/config.rs:577"
 
 [[condition]]
 id = "config.from-list-schema-validation"
@@ -71,7 +71,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-006(検証規則は
 description = "public_keys 内の公開鍵指紋(SHA256:...)の重複は設定エラー。同一pathの重複指定・異pathで同一鍵blobを指す場合のいずれも検出する(1-of-N重複暗号化は設定ミス扱い) (unit)"
 given = "同一pathを2回列挙したケースと、同一鍵blobを異path(copy)に置いて列挙したケース"
 expect_throw = "ConfigError(exit code 2)"
-source_lines = "src/config.rs:534"
+source_lines = "src/config.rs:551"
 
 [[condition]]
 id = "config.storage-class-allowlist"
@@ -80,7 +80,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-007(2026-10-08レ�
 description = "storage_classは既知S3 storage class(STANDARD/STANDARD_IA/ONEZONE_IA/INTELLIGENT_TIERING/GLACIER/DEEP_ARCHIVE/GLACIER_IR)のallowlist検証を行う。allowlist外の値(打ち間違い等)は設定エラー2。空文字は既定DEEP_ARCHIVE (unit)"
 given = "storage_class = \"DEEP_ARCHIV\"(打ち間違い)のaws.tomlと、許容値(GLACIER等)・空文字を指定したaws.toml"
 expect_return_shape = "allowlist外は ConfigError(exit code 2)。許容値はそのまま読込まれ、空文字は DEEP_ARCHIVE となる"
-source_lines = "src/config.rs:606"
+source_lines = "src/config.rs:623"
 
 [[condition]]
 id = "config.aws-bucket-region-whitespace-rejected"
@@ -89,7 +89,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-008(2026-10-09レ�
 description = "aws.tomlの[aws].bucket/[aws].region前後空白付き値(例: \" my-bucket \")は設定エラー2(値はtrimせずそのまま使う仕様のため、quote漏れ等の打ち間違いとして弾く。CLI一時上書き値の--bucket/--regionも同一基準・UPL-018) (unit)"
 given = "bucket・regionのいずれかに前後空白付き値を指定したaws.tomlと、空白なしの値を指定したaws.toml"
 expect_return_shape = "前後空白付きは ConfigError(exit code 2)。空白なしはそのまま(trimされず)読み込まれる"
-source_lines = "src/config.rs:790"
+source_lines = "src/config.rs:807"
 
 [[condition]]
 id = "config.aws-credentials-file-required"
@@ -98,7 +98,7 @@ source = "TASK-9 SDK移行設計 3.3・9.2(tmp/tasks/tm-9/design_sdk_migration.m
 description = "aws.tomlの[aws].credentials_fileキー(credentialファイルpath)は必須キー。path解決は既存の--aws-config既定path等と同じcwd基準の相対path。キー欠落・空値は設定エラー2(明示的に与えたAPI keyという要件に合致し、書き漏れを即検出) (integration, fake seam)"
 given = "credentials_fileキーを書かないaws.toml・空値を書いたaws.tomlでupload実行"
 expect_return_shape = "いずれも exit 2(設定エラー)。S3 API呼び出しは行われない"
-source_lines = "src/config.rs:594; tests/s3_backend.rs:163"
+source_lines = "src/config.rs:611; tests/s3_backend.rs:163"
 
 [[condition]]
 id = "config.credentials-file-schema"
@@ -107,7 +107,7 @@ source = "TASK-9 SDK移行設計 3.1・3.2(tmp/tasks/tm-9/design_sdk_migration.m
 description = "credentialファイルschema: [credentials]テーブル配下はaccess_key_id/secret_access_key必須・session_token省略可(一時credential用)・deny_unknown_fields(未知キー拒否)。TOML parse失敗・[credentials]テーブル不在・必須キー欠落・空値・前後空白付き値は設定エラー2。session_token省略時も正常動作する (integration, fake seam)"
 given = "正しい形式(session_token省略)のcredentialファイルと、不正TOML・未知キー・access_key_id欠落・空値・前後空白付き値の各credentialファイルでupload実行"
 expect_return_shape = "正しい形式はexit 0(S3 API呼び出しまで到達)。不正系はいずれも exit 2(設定エラー)"
-source_lines = "src/config.rs:686; tests/s3_backend.rs:184"
+source_lines = "src/config.rs:703; tests/s3_backend.rs:184"
 
 [[condition]]
 id = "config.credentials-fail-closed"
@@ -116,7 +116,7 @@ source = "TASK-9 SDK移行設計 3.5(tmp/tasks/tm-9/design_sdk_migration.md 3章
 description = "fail-closed: credentials_fileが指すcredentialファイル不在・読込不能は設定エラー2で、credential chain(IMDS/env/~/.aws)へのfallbackは一切行わない(誤って別環境のcredentialで意図しないAWS accountへ接続する事故を構造的に防止) (integration, fake seam)"
 given = "credentials_fileに不在pathを指定したaws.tomlでupload実行"
 expect_return_shape = "exit 2(設定エラー)。fallbackせず失敗し、S3 API呼び出しは行われない"
-source_lines = "src/config.rs:733; src/s3.rs:820; tests/s3_backend.rs:220"
+source_lines = "src/config.rs:750; src/s3.rs:820; tests/s3_backend.rs:220"
 
 [[condition]]
 id = "config.credentials-value-not-leaked"

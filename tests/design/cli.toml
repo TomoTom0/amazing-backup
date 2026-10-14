@@ -24,7 +24,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-001(5章cli.rs・7.1
 description = "使用法誤り(引数誤り)は exit 64(clapのusage error既定 exit 2 を BackupError::Usage へremapし、設定エラー2と区別する) (unit)"
 given = "不明オプション・サブコマンド不足等のusage誤り実行"
 expect_return = "exit code 64"
-source_lines = "src/cli.rs:1091"
+source_lines = "src/cli.rs:1100"
 
 [[condition]]
 id = "cli.version-flag"
@@ -42,7 +42,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-003(終了コード�
 description = "終了コード区分(0/2/3/4/5)が7.1の仕様表どおりに出る(各サブコマンドの代表case) (unit)"
 given = "成功(対象なし・全skip含む)・設定エラー・対象エラー・処理エラー・転送エラーの各区画の代表ケース"
 expect_return_shape = "0(成功)・2(設定・環境)・3(対象)・4(処理)・5(転送)が各区画の代表ケースで出る"
-source_lines = "src/cli.rs:1105; src/errors.rs:56"
+source_lines = "src/cli.rs:1114; src/errors.rs:56"
 
 [[condition]]
 id = "cli.module-entrypoint-parity"
@@ -60,7 +60,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-005(2026-10-08レビ
 description = "plan / encrypt のPATH位置引数0個はusage error扱いで exit 64。PATHは1個以上必須(--from-listは併用オプション) (unit)"
 given = "plan・encrypt をPATH無し(オプションのみ、または--from-listのみ)で実行するケースと、PATH 1個(+--from-list併用)のケース"
 expect_return = "PATH 0個は exit 64。PATH 1個(+--from-list併用を含む)はusage errorとならない"
-source_lines = "src/cli.rs:1547"
+source_lines = "src/cli.rs:1556"
 
 [[condition]]
 id = "cli.date-format-usage-error"
@@ -69,7 +69,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-006(2026-10-09レビ
 description = "upload / verify の--dateはYYYY-MM-DD形式(半角数字4-2-2)を検証し、形式不正はusage error 64(誤記が対象なしexit 0で静かな未upload/未検験になるのを防ぐ。暦日としての実在性は検証しない) (unit)"
 given = "形式不正な値(2026-1-1・20260101・2026/10/01等)を--dateに指定したupload/verify実行と、形式どおり(2026-10-09)を指定した実行"
 expect_return = "形式不正は exit 64。形式どおりはusage errorとならず次段(設定読込等)へ進む"
-source_lines = "src/cli.rs:1513"
+source_lines = "src/cli.rs:1522"
 
 [[condition]]
 id = "cli.profile-option-removed"

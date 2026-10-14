@@ -86,6 +86,8 @@ pub struct UploadArgs {
     pub aws_config: Option<PathBuf>,
     #[arg(long)]
     pub aws_profile: Option<String>,
+    #[arg(long)]
+    pub aws_purpose: Option<String>,
     /// 当該batch_date分に限定(YYYY-MM-DD形式。形式不正はusage error 64)
     #[arg(long, value_parser = parse_date_arg)]
     pub date: Option<String>,
@@ -165,6 +167,8 @@ pub struct RestoreRequestArgs {
     pub aws_config: Option<PathBuf>,
     #[arg(long)]
     pub aws_profile: Option<String>,
+    #[arg(long)]
+    pub aws_purpose: Option<String>,
     /// 対象batch_date(YYYY-MM-DD形式・必須。形式不正はusage error 64)
     #[arg(long, value_parser = parse_date_arg)]
     pub date: String,
@@ -197,6 +201,8 @@ pub struct RestoreStatusArgs {
     pub aws_config: Option<PathBuf>,
     #[arg(long)]
     pub aws_profile: Option<String>,
+    #[arg(long)]
+    pub aws_purpose: Option<String>,
     /// 対象batch_date(YYYY-MM-DD形式・必須。形式不正はusage error 64)
     #[arg(long, value_parser = parse_date_arg)]
     pub date: String,
@@ -217,6 +223,8 @@ pub struct RestoreDownloadArgs {
     pub aws_config: Option<PathBuf>,
     #[arg(long)]
     pub aws_profile: Option<String>,
+    #[arg(long)]
+    pub aws_purpose: Option<String>,
     /// 対象batch_date(YYYY-MM-DD形式・必須。形式不正はusage error 64)
     #[arg(long, value_parser = parse_date_arg)]
     pub date: String,
@@ -587,13 +595,14 @@ pub fn cmd_encrypt(args: &EncryptArgs) -> i32 {
 fn merge_aws_config(
     aws_config: &Option<PathBuf>,
     aws_profile: &Option<String>,
+    aws_purpose: &Option<String>,
     overrides: &crate::config::AwsOverrides,
 ) -> Option<(crate::config::AwsConfig, String)> {
     let aws_config_path = aws_config
         .clone()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_AWS_CONFIG));
     // 1. load_awsによるtoml読込
-    let aws = match crate::config::load_aws_profile(&aws_config_path, aws_profile.as_deref()) {
+    let aws = match crate::config::load_aws_profile(&aws_config_path, aws_profile.as_deref(), aws_purpose.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: {e}");
@@ -678,7 +687,7 @@ pub fn cmd_upload(args: &UploadArgs) -> i32 {
         bucket: args.bucket.clone(),
         region: args.region.clone(),
     };
-    let Some((aws, canonical_bucket)) = merge_aws_config(&args.aws_config, &args.aws_profile, &overrides) else {
+    let Some((aws, canonical_bucket)) = merge_aws_config(&args.aws_config, &args.aws_profile, &args.aws_purpose, &overrides) else {
         return 2;
     };
     let Some(backend) = backend_or_exit(&aws) else {
@@ -935,7 +944,7 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
 /// `--days`/`--tier`の値検証はrun_restore_request内(aws実行前)。
 pub fn cmd_restore_request(args: &RestoreRequestArgs) -> i32 {
     let overrides = restore_aws_overrides(&args.bucket, &args.region);
-    let Some((aws, _)) = merge_aws_config(&args.aws_config, &args.aws_profile, &overrides) else {
+    let Some((aws, _)) = merge_aws_config(&args.aws_config, &args.aws_profile, &args.aws_purpose, &overrides) else {
         return 2;
     };
     let Some(backend) = backend_or_exit(&aws) else {
@@ -956,7 +965,7 @@ pub fn cmd_restore_request(args: &RestoreRequestArgs) -> i32 {
 /// restore status統括(2.7・TASK-5 3.3)。戻り値はexit code。
 pub fn cmd_restore_status(args: &RestoreStatusArgs) -> i32 {
     let overrides = restore_aws_overrides(&args.bucket, &args.region);
-    let Some((aws, _)) = merge_aws_config(&args.aws_config, &args.aws_profile, &overrides) else {
+    let Some((aws, _)) = merge_aws_config(&args.aws_config, &args.aws_profile, &args.aws_purpose, &overrides) else {
         return 2;
     };
     let Some(backend) = backend_or_exit(&aws) else {
@@ -975,7 +984,7 @@ pub fn cmd_restore_status(args: &RestoreStatusArgs) -> i32 {
 /// ファイル不在・decrypt_key未設定は「--key未指定」と同扱いの設定エラー2)。
 pub fn cmd_restore_download(args: &RestoreDownloadArgs) -> i32 {
     let overrides = restore_aws_overrides(&args.bucket, &args.region);
-    let Some((aws, _)) = merge_aws_config(&args.aws_config, &args.aws_profile, &overrides) else {
+    let Some((aws, _)) = merge_aws_config(&args.aws_config, &args.aws_profile, &args.aws_purpose, &overrides) else {
         return 2;
     };
     let Some(backend) = backend_or_exit(&aws) else {
