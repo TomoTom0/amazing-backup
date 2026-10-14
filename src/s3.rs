@@ -234,6 +234,7 @@ impl S3Backend for RealS3 {
                 .head_object()
                 .bucket(bucket)
                 .key(key)
+                .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
                 .send()
                 .await
             {
