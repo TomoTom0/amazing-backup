@@ -1,0 +1,16 @@
+# 秘密情報(鍵等)は集約ディレクトリ単位で除外
+configs/secret/
+
+# 一時ファイル・作業用データ
+tmp/
+
+# バックアップ成果物(暗号化済みarchive・ローカルregistry)
+data/
+
+# Rustビルド成果物
+target/
+
+# python(uv環境・検証script用キャッシュ)
+.venv/
+__pycache__/
+.pytest_cache/

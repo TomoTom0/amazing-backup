@@ -1,0 +1,264 @@
+# backup-remote テスト設計条件書(restore エリア)
+# 出典: tmp/tasks/tm-5/design_restore.md 3.9 RES-001〜024(本編8章 RES節・CLI仕様は本編2.7)
+# 2026-10-11: TASK-5(restore系)対応で新設(テスト先行。実装前のため新条件のテストは実行failを許容し
+#   [meta]はverified=falseのまま)。重要期待値(設計レビュー指摘反映済み):
+#   - restore-objectの--restore-requestは 'Days=<n>,GlacierJobParameters={Tier=<tier>}' 形式
+#     (shorthandのトップレベルTier=<tier>はSELECT用フィールドへ解決されるため不使用・軸3)
+#   - download cpの検証optionは --checksum-mode ENABLED(--checksum-algorithm SHA256は
+#     作成(upload)用optionでありdownloadでは使わない・P5)
+#   - download処理順はローカル.ageのsha256照合が先行(一致ならhead-objectのRestore確認をskip・3.4-5)
+#   - request時の不在nameはlist-objects-v2突合で発行前に対象エラー3(RES-023)
+#   - manifest head 404は「バッチ不在」の対象エラー3+専用案内文(RES-024)
+#   - request/statusの対象0件(列挙0件)は警告「当該prefixにobjectなし」+exit 0(軸7・3.2・3.3)
+# 2026-10-13: TASK-9(AWS SDK移行)対応でテスト先行の更新(tmp/tasks/tm-9/design_sdk_migration.md 10.2影響条件)。
+#   RES-001/003/007/014/015/020(6件)+RES-018の5系文言をSDK API呼び出し参数表現へ改訂
+#   (RestoreRequest days/glacier_job_parameters tier・GetObject checksum_mode=ENABLED・
+#   ListObjectsV2 paginator・SDK error→BackupError写像)。RES-020から--profileを削除(--profile廃止仕様)。
+#   全条件のaws差替え表記を「fake aws PATH差替え」から「fake seam(BACKUP_REMOTE_FAKE_S3_STATE)」へ
+#   変更(設計4章・10.3)。失敗注入env名(FAKE_S3_FAIL_CP_FOR等4種)は維持(10.3)。
+#   idは付与後不変のため旧idのまま文言のみ改訂。実装前のため更新後期待値のテストは実行failを許容し
+#   [meta]はverified=falseのまま。
+
+[meta]
+feature = "restore"
+source_file = "src/restore.rs"
+verified = false
+test_command = "cargo test"
+note = "本実装(src/restore.rs)はTASK-5実装段階で作成するためテストはbin subprocess経由の結合testのみ(テスト先行。libのrestore関数を直接参照しない)。S3実行はfake seam(env BACKUP_REMOTE_FAKE_S3_STATEで差し替わる状態を持つfake S3 backend・tests/common)で検証(実networkなし。TASK-9設計4章・10.3)。復号を含む条件は実ageバイナリ・実鍵(不在環境はskip扱い)。S3 API呼び出しの実体はsrc/s3.rsだが、source_fileはエリア主対象(src/restore.rs)を指す"
+
+[[condition]]
+id = "restore.request-restore-object-argv"
+target_function = "restore::run_restore_request"
+source = "tmp/tasks/tm-5/design_restore.md RES-001(本編8章。詳細は3.2・軸3)。TASK-9 SDK移行でRestoreRequest参数表現へ改訂(tmp/tasks/tm-9/design_sdk_migration.md 1章・6章・10.2)"
+description = "request発行: --dateバッチ内の全key(manifest含む・RESTORE_README.txt除外)へRestoreObjectが発行され、RestoreRequestはdays=<n>とglacier_job_parameters.tier=<tier>で組立される(Tier::from。SDK型のRestoreRequest{days, glacier_job_parameters{tier}})。--days/--tier指定値が反映され、省略時は既定days=7・tier=Standard。ListObjectsV2(paginator)列挙が0件の場合は警告「当該prefixにobjectなし。--date・bucketを確認」を表示してexit 0(対象なし) (integration, fake seam)"
+given = "encrypt→upload済みのfake S3(objectsに<date>/{a.zip.age,b.7z.age,manifest.jsonl.age,RESTORE_README.txt})に対するrestore request実行。--days 3 --tier Bulk指定・オプション省略・空prefixの--dateの3通り"
+expect_return_shape = "RestoreObject呼び出しは3key分のみ(READMEを除く)で各呼び出し記録がdays=3・tier=Bulk(指定時)・days=7・tier=Standard(省略時)の参数を持つ。空prefixではRestoreObject発行なし・警告表示・exit 0"
+source_lines = "tests/restore.rs:192"
+
+[[condition]]
+id = "restore.request-idempotent-skip"
+target_function = "restore::run_restore_request"
+source = "tmp/tasks/tm-5/design_restore.md RES-002(本編8章。詳細は3.2・3.8)。TASK-9 SDK移行でHeadObject表現へ改訂(設計1章)"
+description = "requestの冪等: HeadObject応答のRestore(ongoing-request=\"false\"=復元済み・\"true\"=進行中)のkeyはskip表示し再発行しない。未発行(Restore無し)のkeyのみ発行する (integration, fake seam)"
+given = "fake S3上でHeadObject応答のRestore状態をkeyごとに事前設定した状態(1 key復元済み・1 key進行中・manifestは未発行)でのrestore request実行"
+expect_return_shape = "RestoreObject発行は未発行keyのみで、復元済み・進行中keyへの発行は起きない。skip表示あり・exit 0"
+source_lines = "tests/restore.rs:269"
+
+[[condition]]
+id = "restore.request-dry-run"
+target_function = "restore::run_restore_request --dry-run"
+source = "tmp/tasks/tm-5/design_restore.md RES-003(本編8章。詳細は3.2・軸7)。TASK-9 SDK移行でAPI形式表示行へ改訂(設計10.1)"
+description = "request --dry-run: S3 API呼び出しなし(ListObjectsV2・HeadObject・RestoreObjectすべて)。「対象key一覧は未確定(全件発行想定)」として予定行(RestoreObject API形式「[dry-run] s3 RestoreObject bucket=<b> key=<k> days=<n> tier=<tier>」・--name指定時は当該name+manifestのkey)を表示しexit 0 (integration, fake seam)"
+given = "--dry-run指定のrestore request実行(fake backendは呼ばれたら呼び出し記録を残す仕掛け)"
+expect_return_shape = "S3 API呼び出しは一切起きず(呼び出し記録不存在)、[dry-run]のRestoreObject予定表示が出て exit 0"
+source_lines = "src/restore.rs:861; tests/restore.rs:304"
+
+[[condition]]
+id = "restore.request-tier-days-validation"
+target_function = "restore::run_restore_request(事前検査)"
+source = "tmp/tasks/tm-5/design_restore.md RES-004(本編8章。詳細は3.1・軸3)。TASK-9 SDK移行でS3 API呼び出しへの文言改訂(設計10.2)"
+description = "--tierがallowlist(Standard/Bulk。Deep Archiveで選択不可なExpeditedは含まない)外は設定エラー2・S3 API呼び出しなし。--daysが1〜365外(0・366)・非整数(abc)も設定エラー2・S3 API呼び出しなし (integration, fake seam)"
+given = "--tier Expedited指定・--days 0・--days 366・--days abcの各指定でのrestore request実行"
+expect_return_shape = "いずれも exit 2 でfake backendの呼び出し記録不存在(ListObjectsV2含めS3 API呼び出し前に検出)"
+source_lines = "tests/restore.rs:350"
+
+[[condition]]
+id = "restore.status-three-states"
+target_function = "restore::run_restore_status"
+source = "tmp/tasks/tm-5/design_restore.md RES-005(本編8章。詳細は3.3・軸6)。TASK-9 SDK移行でHeadObject表現へ改訂(設計1章)"
+description = "status: Restoreの3状態(restored+expiry-date原文表示/ongoing/not-requested)が正しく一覧表示されexit 0。RESTORE_README.txtは「平文・復元不要」の区別表示。列挙0件の場合は警告「当該prefixにobjectなし。--date・bucketを確認」+exit 0(空一覧) (integration, fake seam)"
+given = "fake S3上でHeadObject応答のRestore状態をkeyごとに事前設定(復元済み・進行中・未発行の混在+README)した状態でのrestore status実行。および空prefixの--dateでの実行"
+expect_return_shape = "restored・ongoing・not-requestedの3分類と各keyが表示され、README行は平文・復元不要の区別表示。exit 0。空prefixでは警告表示+exit 0"
+source_lines = "tests/restore.rs:375"
+
+[[condition]]
+id = "restore.restore-header-parse"
+target_function = "restore::RestoreState(Restore parse)"
+source = "tmp/tasks/tm-5/design_restore.md RES-006(本編8章。詳細は3.8)。TASK-9 SDK移行でHeadObject応答表現へ改訂(設計1章・6章)"
+description = "Restore parse: 値なし(HeadObject応答にRestore無し)=NotRequested・ongoing-request=\"true\"=Ongoing・ongoing-request=\"false\"=Restoredへ分類し、expiry-dateはRFC 7231 HTTP-dateのraw文字列をそのまま保持する(解析・時刻変換・JST変換をしない) (integration, fake seam・status表示経由)"
+given = "fake backendのHeadObject応答へ固定のRestore値(ongoing-request=\"false\", expiry-date=\"Wed, 14 Oct 2026 00:00:00 GMT\"・ongoing-request=\"true\"・なし)をkeyごとに返す状態でのrestore status実行"
+expect_return_shape = "status出力にexpiry-dateのraw文字列(Wed, 14 Oct 2026 00:00:00 GMT)が原文どおり含まれ、JST変換(+09:00等)・時刻解析を施した形では表示されない。3状態が正しく分類表示される"
+source_lines = "src/restore.rs:814; tests/restore.rs:406"
+
+[[condition]]
+id = "restore.download-full-roundtrip"
+target_function = "restore::run_restore_download"
+source = "tmp/tasks/tm-5/design_restore.md RES-007(本編8章。詳細は3.4・3.5・P5)。TASK-9 SDK移行でGetObject checksum_mode参数表現へ改訂(tmp/tasks/tm-9/design_sdk_migration.md 6章・10.2)"
+description = "download一気通貫(実age統合・fake seam): manifest取得→復号→parse→全.age取得→age_sha256照合→復号→source_sha256照合まで成功する。GetObject呼び出しはchecksum_mode=ENABLED(ChecksumMode::Enabled。SDKが応答checksumを検証)で、checksum_algorithm(作成(upload)用参数)は指定しない (integration, 実age・fake seam)"
+given = "encrypt→upload済み・restore request発行済み(全key復元済み)のfake S3に対するrestore download実行(--keyにrecipient秘密鍵を指定)"
+expect_return_shape = "exit 0。manifest.jsonlの復号平文がbatchヘッダ+ファイルレコードとして読める。ダウンロードのGetObject呼び出し(manifest含む)はすべてchecksum_mode=ENABLED付きでchecksum_algorithmを含まない"
+source_lines = "tests/restore.rs:438"
+
+[[condition]]
+id = "restore.download-name-filter"
+target_function = "restore::run_restore_download"
+source = "tmp/tasks/tm-5/design_restore.md RES-008(本編8章。詳細は3.4-4)"
+description = "download --name絞り込み: 指定nameのみ処理(manifest+当該name)。manifestに存在しないnameは対象エラー3。--name重複指定は対象エラー3 (integration, 実age・fake seam)"
+given = "2ファイル+manifestのバッチ(復元済み)に対する--name a.zip指定のdownload実行。および--name ghost.zip(不在)・--name a.zip --name a.zip(重複)の実行"
+expect_return_shape = "--name a.zipはa.zip分の.age・平文とmanifestのみ生成(b.7z系は不在)。不在nameはexit 3・当該nameの案内。重複指定はexit 3"
+source_lines = "tests/restore.rs:500"
+
+[[condition]]
+id = "restore.download-idempotent-skip"
+target_function = "restore::run_restore_download"
+source = "tmp/tasks/tm-5/design_restore.md RES-009(本編8章。詳細は3.4-2・3.4-5)。TASK-9 SDK移行でHeadObject/GetObject表現へ改訂(設計10.2)"
+description = "downloadの冪等: 2回目実行は対象.age・平文ともsha256一致でskip(対象keyのHeadObject・GetObject・age再実行なし。処理順はローカル.age照合が先行するためheadのRestore確認自体をskip)。manifest.jsonl.ageは毎回再取得・再復号する。exit 0 (integration, 実age・fake seam)"
+given = "download成功後の同一環境での再実行(ローカル.age・平文がすべてsha256一致している状態)"
+expect_return_shape = "exit 0。対象keyの.ageに対するGetObject・HeadObjectは再実行されず(呼び出し記録の件数不変)、manifestのGetObject・HeadObjectは再実行される(毎回再取得)。skip表示あり"
+source_lines = "tests/restore.rs:535"
+
+[[condition]]
+id = "restore.download-age-refetch"
+target_function = "restore::run_restore_download"
+source = "tmp/tasks/tm-5/design_restore.md RES-010(本編8章。詳細は3.6・軸5)。TASK-9 SDK移行でGetObject表現へ改訂(設計10.2)"
+description = ".age再取得: 既存.ageのsha256がage_sha256と不一致なら再取得し.part→renameで上書きする。再取得(GetObject)失敗時は既存(不一致).ageを保持する(削除しない) (integration, 実age・fake seam)"
+given = "download成功後にローカルのa.zip.ageを改変(追記)した状態での再実行。および改変+GetObject失敗注入(FAKE_S3_FAIL_CP_FOR)した再実行"
+expect_return_shape = "改変のみの場合はexit 0でローカル.ageがS3側正本の内容へ戻る(再取得上書き)。GetObject失敗注入時はexit 5で改変済み.ageはそのまま保持される"
+source_lines = "tests/restore.rs:590"
+
+[[condition]]
+id = "restore.download-plain-conflict"
+target_function = "restore::run_restore_download"
+source = "tmp/tasks/tm-5/design_restore.md RES-011(本編8章。詳細は3.4-5d・軸5)"
+description = "平文衝突: 既存平文のsha256がsource_sha256と不一致なら対象エラー3で当該ファイルを処理せず上書きしない(手動リネームを促す)。restore成果物である平文は検証済み復元物として保守的に扱う(.ageの中間生成物とは扱いが異なる) (integration, 実age・fake seam)"
+given = "出力先に改変済みの既存平文(sha256不一致)を事前配置した状態でのdownload実行"
+expect_return_shape = "exit 3。既存平文は事前配置の内容から不変(上書きしない)で、衝突したnameへの復号生成は行われない"
+source_lines = "tests/restore.rs:629"
+
+[[condition]]
+id = "restore.download-verification-mismatch"
+target_function = "restore::run_restore_download"
+source = "tmp/tasks/tm-5/design_restore.md RES-012(本編8章。詳細は3.4-5c/5e・3.5 L2/L3)"
+description = "検証不一致: 取得.ageのsha256 ≠ manifest記録age_sha256は検証エラー4(転送破損の疑い)。復号平文sha256 ≠ source_sha256も検証エラー4(AEAD通過後の不一致は記録側の問題) (integration, 実age・fake seam・改変fixture)"
+given = "S3側の対象.ageを改変(追記)した状態でのdownload実行。およびsource_sha256を不正値に改変したmanifestをage暗号化して配置した状態でのdownload実行"
+expect_return_shape = "いずれも exit 4(検証エラー)。.age sha256不一致は当該nameの切り分け表示。平文sha256不一致もexit 4"
+source_lines = "tests/restore.rs:656"
+
+[[condition]]
+id = "restore.download-requires-restored"
+target_function = "restore::run_restore_download"
+source = "tmp/tasks/tm-5/design_restore.md RES-013(本編8章。詳細は3.4-5b・軸7)。TASK-9 SDK移行でHeadObject/GetObject表現へ改訂(設計10.2)"
+description = "復元未了でのdownload: HeadObjectのRestoreがongoing-request=\"true\"・Restore無し(未発行)の対象はGetObjectを実行せず転送エラー5+案内文「restore requestが未完了または未発行。restore statusで確認してください」(InvalidObjectState相当を事前head判定で明示的に転送エラーとして報告) (integration, fake seam)"
+given = "manifestは復元済み・対象keyを進行中(ongoing)にした状態、および未発行(Restore無し)にした状態でのdownload実行"
+expect_return_shape = "いずれも exit 5。対象keyへのGetObjectは実行されず(manifestのGetObjectのみ)、stderrにrestore status確認の案内文が出る"
+source_lines = "tests/restore.rs:712"
+
+[[condition]]
+id = "restore.download-dry-run"
+target_function = "restore::run_restore_download --dry-run"
+source = "tmp/tasks/tm-5/design_restore.md RES-014(本編8章。詳細は3.4・軸7)。TASK-9 SDK移行でAPI形式表示行へ改訂(設計10.1・10.2)"
+description = "download --dry-run: S3 API呼び出しなし(HeadObject/GetObjectとも)・age復号も実行せず、GetObject予定のAPI形式表示(「[dry-run] s3 GetObject bucket=<b> key=<k> dest=<path>.part checksum_mode=ENABLED」・key一覧未確定・--dateバッチ全件想定。--name指定時は当該name+manifestの予定行)でexit 0 (integration, fake seam)"
+given = "--dry-run指定のrestore download実行(fake backendは呼ばれたら呼び出し記録を残す仕掛け)"
+expect_return_shape = "S3 API呼び出しは一切起きず(呼び出し記録不存在)、[dry-run]の予定表示が出て exit 0"
+source_lines = "tests/restore.rs:743"
+
+[[condition]]
+id = "restore.keep-going-continues"
+target_function = "restore::run_restore_request / run_restore_download --keep-going"
+source = "tmp/tasks/tm-5/design_restore.md RES-015(本編8章。詳細は軸7・7.2)。TASK-9 SDK移行でRestoreObject/GetObject失敗表現へ改訂(設計10.2)"
+description = "keep-going: per-object/per-file失敗(RestoreObject失敗・GetObject失敗・検証不一致)でも継続し、exitは最初のエラー区分(5)。成功分の成果物・復元状態は残る。設定エラー2は即中止(request/download共通) (integration, 実age・fake seam)"
+given = "1 keyのみRestoreObject失敗注入(FAKE_S3_FAIL_RESTORE_FOR)した--keep-going付きrequest実行。および1 keyのみGetObject失敗注入(FAKE_S3_FAIL_CP_FOR)した--keep-going付きdownload実行"
+expect_return_shape = "いずれも exit 5。requestは失敗key以外のRestoreObject発行が完了し、downloadは失敗key以外の.age・平文が生成される"
+source_lines = "tests/restore.rs:763"
+
+[[condition]]
+id = "restore.download-preflight-errors"
+target_function = "restore::run_restore_download(事前検査)"
+source = "tmp/tasks/tm-5/design_restore.md RES-016(本編8章。詳細は3.4-1・3.1注記)。TASK-9 SDK移行でS3 API呼び出しへの文言改訂(設計10.2)"
+description = "download事前検査(設定エラー2・対象処理に紛れない): --key未指定かつ[verify].decrypt_keyも解決不能(pipeline.toml不在含む)・--keyの鍵ファイル不在・ageバイナリ不在は、いずれもS3 API呼び出し前にexit 2 (integration, fake seam)"
+given = "pipeline.toml不在の作業dirでの--key未指定download実行。--keyに不在pathを指定した実行。PATHからageを除外した実行"
+expect_return_shape = "いずれも exit 2 でfake backendの呼び出し記録不存在(manifestのHeadObject等の対象処理前に検出)"
+source_lines = "tests/restore.rs:804"
+
+[[condition]]
+id = "restore.download-registry-independent"
+target_function = "restore::run_restore_download"
+source = "tmp/tasks/tm-5/design_restore.md RES-017(本編8章。詳細はP1・3.1)"
+description = "registry非依存(P1): registry.jsonl・pipeline.tomlが不在の状態(災害時の新環境相当)でも--key指定によりdownloadが完結する。restore系は作成環境資産を一切参照しない(aws CLI・~/.awsも不要。SDK内蔵+credentialファイル) (integration, 実age・fake seam)"
+given = "registry.jsonl・pipeline.tomlとも不在の作業dir(cwd)で--keyのみ指定したrestore download実行"
+expect_return_shape = "exit 0 で<out>/<date>/配下に.age・平文・manifest平文が生成される(検証は完結)"
+source_lines = "tests/restore.rs:863"
+
+[[condition]]
+id = "restore.exit-codes-integration"
+target_function = "restore::run_restore_request / run_restore_status / run_restore_download"
+source = "tmp/tasks/tm-5/design_restore.md RES-018(本編8章。詳細は3.1終了コード表・軸7)。TASK-9 SDK移行でSDK error写像の5系文言へ改訂(tmp/tasks/tm-9/design_sdk_migration.md 8章・10.2)"
+description = "終了コード統合: 0(成功・全skip・対象なし)/2(設定エラー)/3(対象エラー)/4(検証エラー)/5(転送エラー・復元未了)の代表caseが3.1表どおり。転送エラー5系のSDK error写像は設計8章どおり(HeadObject NotFound以外の404系・NoSuchBucket・throttle/認証系・network系はすべて転送エラー5。messageは操作名・bucket・key・SDK由来error文を含みcredential値を含まない)。usage error 64は--date形式不正で発生 (integration, fake seam)"
+given = "各区分の代表case実行(成功download・--tier検証不正・--name不在・sha256不一致・復元未了download・--date形式不正)"
+expect_return_shape = "各caseのexit codeが0/2/3/4/5/64にそれぞれ一致"
+source_lines = "tests/restore.rs:1097; tests/restore.rs:1121; tests/restore.rs:351; tests/restore.rs:440; tests/restore.rs:501; tests/restore.rs:630; tests/restore.rs:657; tests/restore.rs:713; tests/restore.rs:805; tests/restore.rs:906"
+
+[[condition]]
+id = "restore.date-required"
+target_function = "restore::run_restore_request / run_restore_status / run_restore_download(CLI定義)"
+source = "tmp/tasks/tm-5/design_restore.md RES-019(本編8章。詳細は3.1・軸2)"
+description = "--date必須: 3サブコマンドとも--date指定なしはusage error 64(「全バックアップ一括復元」という事故的操作を構造的に防ぐ。形式不正も64) (integration)"
+given = "--dateを指定しない各サブコマンド実行(request/status/download)"
+expect_return_shape = "いずれも exit 64(usage error)"
+source_lines = "tests/restore.rs:905"
+
+[[condition]]
+id = "restore.cli-override-argv"
+target_function = "cli::cmd_restore_request / cmd_restore_download(aws設定merge共用関数)"
+source = "tmp/tasks/tm-5/design_restore.md RES-020(本編8章。詳細は3.1・本編2.3 TASK-6節)。TASK-9 SDK移行でAPI呼び出し参数表現へ改訂し--profileを削除(tmp/tasks/tm-9/design_sdk_migration.md 3.7・9.1・10.2)"
+description = "CLI一時上書き: --bucket/--region指定時、ListObjectsV2・HeadObject・RestoreObject・GetObjectの各API呼び出しへ上書き値が反映される(bucket=<上書き値>。regionはBackend構築へ反映)。merge順(読込→require_ready→上書き適用)・検証はuploadと同一のcmd_upload共用関数による(--profileは廃止済みで存在しない) (integration, fake seam)"
+given = "--bucket ov-bucket --region us-east-1指定のrestore request実行、および同指定のrestore download実行"
+expect_return_shape = "ListObjectsV2・HeadObject・RestoreObject・GetObjectの各行に上書きbucket(bucket=ov-bucket)が反映される"
+source_lines = "tests/restore.rs:924"
+
+[[condition]]
+id = "restore.template-restore-command-line"
+target_function = "lib::RESTORE_README_TEMPLATE(src/templates/restore_readme.txt)"
+source = "tmp/tasks/tm-5/design_restore.md RES-021(本編8章・本編2.6内容要件6・軸8)。TASK-9 SDK移行でもテンプレートは変更なし(tmp/tasks/tm-9/design_sdk_migration.md 11章)"
+description = "テンプレート追記: RESTORE_READMEテンプレートの復元手順節へbackup-remote restoreコマンドによる復元の1行(restore request → restore status → restore downloadで取得・復号・検証を一括実行できる旨)が含まれる。1行のみの追記(upload.toml UPL-020期待値の更新と相互参照。READMEはaws CLI前提の人手復元手順のためTASK-9 SDK移行でも不変) (unit相当・lib定数参照)"
+given = "lib公開のRESTORE_README_TEMPLATE(src/templates/restore_readme.txt埋め込み)"
+expect_return_shape = "テンプレートにbackup-remote restoreを含む行が存在し(1行)、restore request・restore status・restore downloadの流れに言及する"
+source_lines = "tests/restore.rs:982"
+
+[[condition]]
+id = "restore.download-output-structure"
+target_function = "restore::run_restore_download"
+source = "tmp/tasks/tm-5/design_restore.md RES-022(本編8章。詳細は3.6・軸5)"
+description = "出力構造: <out>/<date>/{<name>.age,<name>,manifest.jsonl.age,manifest.jsonl}の配置。.ageは検証済み暗号文・平文は検証済み復元物として両方残る(平文+暗号文の約2倍のディスク使用は手順書で案内) (integration, 実age・fake seam)"
+given = "2ファイル+manifestのバッチをdownloadした実行"
+expect_return_shape = "<out>/<date>/配下にa.zip.age・a.zip・b.7z.age・b.7z・manifest.jsonl.age・manifest.jsonlがすべて存在する"
+source_lines = "tests/restore.rs:439"
+
+[[condition]]
+id = "restore.request-name-cross-check"
+target_function = "restore::run_restore_request"
+source = "tmp/tasks/tm-5/design_restore.md RES-023(本編8章。詳細は3.2・軸2・軸12)。TASK-9 SDK移行でListObjectsV2/RestoreObject表現へ改訂(設計10.2)"
+description = "request --name不在検出: --name指定時はListObjectsV2結果と突合し、バッチ内に存在しないname(<date>/<name>.ageが列挙結果に無い)はRestoreObject発行前に対象エラー3。--name重複指定も対象エラー3。--name絞り込み時の対象は当該name+manifest(README除外) (integration, fake seam)"
+given = "upload済みバッチに対する--name ghost.zip(不在)指定・--name a.zip --name a.zip(重複)指定・--name a.zip(存在)指定の各request実行"
+expect_return_shape = "不在・重複はいずれも exit 3 でRestoreObject発行なし(ListObjectsV2は実行)。--name a.zipはa.zip.ageとmanifest.jsonl.ageのみへ発行(b.7z.ageへは発行しない)"
+source_lines = "tests/restore.rs:1000"
+
+[[condition]]
+id = "restore.download-manifest-missing"
+target_function = "restore::run_restore_download"
+source = "tmp/tasks/tm-5/design_restore.md RES-024(本編8章。詳細は3.4-2・軸7)。TASK-9 SDK移行でHeadObject NotFound表現へ改訂(設計1章・8章)"
+description = "manifest不在: download時のmanifest.jsonl.ageのHeadObject 404(キー不在=NotFound)は「バッチ不在(--date誤り・bucket誤り)」として対象エラー3+専用案内文「manifest.jsonl.ageが存在しない=当該バッチ不在。--dateとbucket(--aws-config・CLI一時上書き)を確認してください」 (integration, fake seam)"
+given = "当該--dateのprefixにobjectが存在しない空のfake S3に対するrestore download実行"
+expect_return_shape = "exit 3(対象エラー)。stderrにバッチ不在の専用案内文(manifest.jsonl.ageが存在しない)が出る"
+source_lines = "tests/restore.rs:1075"
+
+[[excluded]]
+item = "3.9冒頭注記: aws系はすべてAwsInvoker traitのfake差替(実networkなし)。復号を含むものは実ageバイナリ(不在環境はskip扱い)"
+source = "tmp/tasks/tm-5/design_restore.md 3.9冒頭・本編8章冒頭注記"
+reason = "テスト実装のmock方針・種別skip方針であり検証対象コードの振る舞い条件ではない(test-structure §8『書かない』)。各条件のdescriptionに『fake seam』『実age』として明記し、tests/README.md の構成説明で担保(TASK-9で差替え機構をfake seamへ更新)"
+decided_at = "2026-10-11"
+decided_by = "claude"
+
+[[excluded]]
+item = "TASK-9設計6章: GetObjectはsend()成功後のstream読込中にも失敗しうる(checksum不一致・転送切断もTransfer(5)へ写像・get_to_fileは読込完了まで監視)"
+source = "tmp/tasks/tm-9/design_sdk_migration.md 6章・8章"
+reason = "SDK内部のstream読込段階の失敗であり結合testのfake seamでは注入できず、RealS3実装(src/s3.rs)のunit test領域。実装taskで条件追加・テスト追加を行う(12.3ステップ3)"
+decided_at = "2026-10-13"
+decided_by = "claude"
+
+[[excluded]]
+item = "TASK-9設計6章: ListObjectsV2 page size(paginator default 1000)の検証"
+source = "tmp/tasks/tm-9/design_sdk_migration.md 6章"
+reason = "page sizeはSDK paginatorのdefault値依存であり、repo側コードが指定しない値の検証条件にならない(挙動に差を生まない内部処理。test-structure §8『書かない』)。1000件超keyのfixtureも非現実的"
+decided_at = "2026-10-13"
+decided_by = "claude"

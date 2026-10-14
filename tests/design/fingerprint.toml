@@ -1,0 +1,58 @@
+# backup-remote テスト設計条件書(fingerprint エリア)
+# 出典: tmp/tasks/tm-1/design_backup_pipeline.md 8章 FPR-001〜FPR-004(詳細は4.4)
+# 2026-10-09: テスト全件PASS・verify-conditions.py PASSを確認し[meta]へ検証記録を書いた(レビュー指摘12件対応で条件追加・更新した際)。
+
+[meta]
+feature = "fingerprint"
+source_file = "src/fingerprint.rs"
+verified = false
+verified_at = "2026-10-09"
+verified_by = "claude"
+test_command = "cargo test"
+source_hash = "fff55fb643921e6e90eaa225e979495b9258e0d9"
+note = "FPR-001はssh-keygen外部コマンドとの一致検証だが実ageを要しないためunit扱い(設計8章の種別定義は『実ageバイナリを要するものはintegration』)。FPR-004のChaCha20は src/fingerprint.rs 内private module chacha20 の純Rust実装(設計0章・4.4)"
+
+[[condition]]
+id = "fingerprint.matches-ssh-keygen"
+target_function = "fingerprint::fingerprint"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 FPR-001(指紋仕様は4.4)"
+description = "fingerprint が ssh-keygen -lf の表示と一致する (unit)"
+given = "既知のed25519公開鍵"
+expect_return = "ssh-keygen -lf <pub> の SHA256:<base64> 表示と一致する文字列"
+source_lines = "src/fingerprint.rs:486"
+
+[[condition]]
+id = "fingerprint.stanza-tag-matches-age-header"
+target_function = "fingerprint::parse_age_header / fingerprint::parse_ssh_pubkey"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 FPR-002(stanza識別子導出は4.4)"
+description = "実age(v1.2.1)が生成する ssh-ed25519 stanzaの識別子(第1引数)が、同一公開鍵から導出した指紋prefixと一致する (integration)"
+given = "実 age -R で生成した .age ヘッダの ssh-ed25519 stanza(-> ssh-ed25519 <b64(SHA-256(blob)先頭4byte)> <ephemeral鍵>)と、同一公開鍵から計算した指紋prefix"
+expect_return = "第1引数が b64(SHA-256(pubkey_blob)先頭4byte・paddingなし) とbyte一致(旧形式の32byte ChaCha20 tagはv1.2.1ヘッダに現れない。tag導出は旧形式ヘッダ照合のため実装に維持)"
+source_lines = "tests/age_roundtrip.rs:136"
+
+[[condition]]
+id = "fingerprint.header-parse-multi-stanza"
+target_function = "fingerprint::parse_age_header"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 FPR-003(parse仕様は4.4)"
+description = "ヘッダparseは --- 終端と複数stanzaを正しく扱う (unit)"
+given = "複数stanza(-> ssh-ed25519 <tag> 等の -> 行を2つ以上)と --- ヘッダ終端行を含む合成ヘッダbytes"
+expect_return_shape = "AgeHeader.stanzas が -> 行の(type, args)列挙どおり(順序保持)で、--- 以降の本体は読まない"
+source_lines = "src/fingerprint.rs:517; src/fingerprint.rs:543"
+
+[[condition]]
+id = "fingerprint.chacha20-rfc8439-vectors"
+target_function = "fingerprint::chacha20(stanza_tag内部の純Rust ChaCha20 keystream生成)"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 FPR-004(実装方針は4.4)"
+description = "純Rust ChaCha20(keystream生成)がRFC 8439のテストベクトルと一致する(実age不要のunit) (unit)"
+given = "RFC 8439 2.4.2のテストベクトル(key・nonce・counter)"
+expect_return = "同テストベクトルのkeystream/block出力とbyte一致"
+source_lines = "src/fingerprint.rs:604"
+
+[[condition]]
+id = "fingerprint.bijective-recipient-match"
+target_function = "fingerprint::verify_recipients_for_keys"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 FPR-005(2026-10-08レビュー指摘8対応。4.4)"
+description = "ヘッダ照合は全単射(bijective): 各stanzaの識別子(旧形式tag・v1.2形式指紋prefix)が重複しない別々のrecipient鍵と1対1で対応しない限り拒否する(期待recipientの一部しか対応しない重複stanzaを多対多any-matchで通さない) (unit)"
+given = "合成ageヘッダ: (a)期待鍵2本に対し鍵1の旧形式tagのみ2つ並んだstanza列、(b)期待鍵2本に対し鍵1のv1.2形式指紋prefixのみ2つ並んだstanza列"
+expect_throw = "いずれも ProcessError(exit code 4)。期待鍵2本分のtag/prefixが1回ずつ並ぶ場合は通過"
+source_lines = "src/fingerprint.rs:662"

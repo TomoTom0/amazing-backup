@@ -1,0 +1,94 @@
+# backup-remote テスト設計条件書(plan / targets エリア)
+# 出典: tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-001〜PLAN-008(詳細は2.1・3.1)
+# 2026-10-09: テスト全件PASS・verify-conditions.py PASSを確認し[meta]へ検証記録を書いた(レビュー指摘12件対応で条件追加・更新した際)。
+
+[meta]
+feature = "plan"
+source_file = "src/targets.rs"
+verified = false
+verified_at = "2026-10-09"
+verified_by = "claude"
+test_command = "cargo test"
+source_hash = "cf64f3391629340ed7cdf8d276df8c90ed8cd117"
+note = "テスト先行の条件書段階(実装src/未作成)。各条件のdescription末尾 (unit)/(integration) は階層の目安で、設計8章の『unit=src内#[cfg(test)]・integration=tests/直下結合test(実ageバイナリを要するもの)。aws実行を含むものはAwsInvoker fake差替』に基づく"
+
+[[condition]]
+id = "plan.resolves-positional-targets"
+target_function = "targets::resolve_targets / cli::cmd_plan"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-001(表示・集計仕様は2.1)"
+description = "位置引数のみで対象解決され、各対象のpath・サイズ・mtime・合計サイズが表示される (unit)"
+given = "存在する .zip と .7z の2件を位置引数に指定して plan を実行"
+expect_return_shape = "解決対象2件のpath・size・mtimeと合計サイズを含む表示と exit code 0"
+source_lines = "src/cli.rs:1453; src/targets.rs:227"
+
+[[condition]]
+id = "plan.from-list-union"
+target_function = "targets::resolve_targets / targets::parse_from_list"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-002(--from-list仕様は2.5)"
+description = "--from-list と位置引数の和集合が解決される (unit)"
+given = "位置引数1件と、別の1件を含む from-list toml を同時に指定"
+expect_return_shape = "和集合の2件が解決・表示され exit code 0"
+source_lines = "src/targets.rs:250"
+
+[[condition]]
+id = "plan.missing-or-dir-target-error"
+target_function = "targets::resolve_targets"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-003(解決規則は3.1-1)"
+description = "対象不在・directory指定は対象エラー。解決段階のエラーは全件列挙後に一度に失敗する (unit)"
+given = "存在しないpathとdirectory pathを対象に指定"
+expect_throw = "TargetError(exit code 3)"
+source_lines = "src/targets.rs:269"
+
+[[condition]]
+id = "plan.extension-whitelist"
+target_function = "targets::resolve_targets"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-004(解決規則は3.1-2)"
+description = "拡張子は .zip/.7z のみ許容(大文字小文字無視)。.tar.gz・.7z.001 分割等は対象エラー (unit)"
+given = "対象候補に .tar.gz・.7z.001(対象外)と大文字 .ZIP(許容)を含む"
+expect_throw = "TargetError(exit code 3)。大文字 .ZIP のみ解決される"
+source_lines = "src/targets.rs:286"
+
+[[condition]]
+id = "plan.realpath-duplicate-error"
+target_function = "targets::resolve_targets"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-005(解決規則は3.1-3)"
+description = "解決後realpathの重複(位置引数×from-list間含む)は対象エラー (unit)"
+given = "同一ファイルを相対path・絶対path・from-list entryで重複指定"
+expect_throw = "TargetError(exit code 3)"
+source_lines = "src/targets.rs:306"
+
+[[condition]]
+id = "plan.output-name-collision-error"
+target_function = "targets::resolve_targets"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-006(解決規則は3.1-4)"
+description = "出力名(basenameまたはname override)の重複は対象エラー(同日バッチ内S3キー衝突防止) (unit)"
+given = "別ディレクトリ配下の同名ファイル2件(name overrideなし)"
+expect_throw = "TargetError(exit code 3)"
+source_lines = "src/targets.rs:330"
+
+[[condition]]
+id = "plan.recipient-fingerprint-display"
+target_function = "fingerprint::fingerprint / cli::cmd_plan"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-007(指紋形式は4.4)"
+description = "recipient指紋(SHA256:base64形式)が公開鍵から計算され一覧表示される。age/awsバイナリ不在でも成功する (unit)"
+given = "有効なed25519公開鍵1本を設定した plan 実行(PATH上にage/awsバイナリが無い)"
+expect_return_shape = "SHA256:<base64> 形式の指紋が表示され exit code 0"
+source_lines = "src/cli.rs:1413"
+
+[[condition]]
+id = "plan.runs-without-aws"
+target_function = "cli::cmd_plan"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-008(2.1の前提)"
+description = "plan は aws設定(aws.toml・awsバイナリ)が一切なくても exit 0 となる (unit)"
+given = "aws.toml不在・awsバイナリ不在の環境での plan 実行"
+expect_return = "exit code 0"
+source_lines = "src/cli.rs:1483"
+
+[[condition]]
+id = "plan.name-override-basename-validation"
+target_function = "targets::resolve_targets / targets::parse_from_list"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-009(2026-10-08レビュー指摘4対応。schemaは2.5・解決規則は3.1)"
+description = "from-listのname overrideはbasename形式のみ許容する。空文字・パス区切り(/)を含む・\".\"・\"..\"は対象エラー3(出力path・S3キーへの traversal や空name防止) (unit)"
+given = "name = \"\"・name = \"sub/dir/x.zip\"・name = \"..\"・name = \".\" を含む from-list での対象解決"
+expect_throw = "TargetError(exit code 3)。basename形式(\"x.zip\"等)は解決される"
+source_lines = "src/targets.rs:383"

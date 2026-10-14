@@ -1,0 +1,20 @@
+[recipients]
+# SSH ed25519公開鍵のpath列挙(1-of-N。全鍵で暗号化し、いずれか1鍵で復号可能)
+# 相対pathはrepo root(cwd)基準。1つ以上必須。ed25519形式のみ許容
+public_keys = [
+  "configs/secret/keys/private/backup_ed25519.pub",
+]
+
+[output]
+# 暗号化成果物の集約dir。配下に <YYYY-MM-DD>/<name>.age ができる
+dir = "data/out"
+# ローカル累積registry(JSONL)
+registry = "data/registry.jsonl"
+
+[behavior]
+# per-file失敗時も継続する既定値(CLIの--keep-goingで上書きon)
+keep_going = false
+
+[verify]
+# --roundtrip検証で使う秘密鍵path(秘密そのものではなくpath参照。configs/secret/はgitignore済み)
+decrypt_key = "configs/secret/keys/private/backup_ed25519"

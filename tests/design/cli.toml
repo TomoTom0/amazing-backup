@@ -1,0 +1,104 @@
+# backup-remote テスト設計条件書(CLI共通エリア)
+# 出典: tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-001〜CLI-006(詳細は2章・5章cli.rs・7.1)
+# 2026-10-09: テスト全件PASS・verify-conditions.py PASSを確認し[meta]へ検証記録を書いた(レビュー指摘12件対応で条件追加・更新した際)。
+# 2026-10-09: コードレビュー指摘対応でCLI-006(--dateのYYYY-MM-DD形式検証)を追加。
+# 2026-10-13: TASK-9(AWS SDK移行)対応でテスト先行の更新(tmp/tasks/tm-9/design_sdk_migration.md 3.7・4.3・9.1・10.2)。
+#   新規2件追加: --profile廃止(未知オプションでusage 64・--region/--bucketは維持)・
+#   fake seam(env BACKUP_REMOTE_FAKE_S3_STATE・debug build専用gate)。実装前のため新条件のテストは
+#   実行failを許容し[meta]はverified=falseのまま。
+
+[meta]
+feature = "cli"
+source_file = "src/cli.rs"
+verified = false
+verified_at = "2026-10-09"
+verified_by = "claude"
+test_command = "cargo test"
+source_hash = "0479dc4e8dfd93044db55a33f1541becc5aa6c73"
+note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)"
+
+[[condition]]
+id = "cli.usage-error-exit-64"
+target_function = "Cli::try_parse / cli::run"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-001(5章cli.rs・7.1)"
+description = "使用法誤り(引数誤り)は exit 64(clapのusage error既定 exit 2 を BackupError::Usage へremapし、設定エラー2と区別する) (unit)"
+given = "不明オプション・サブコマンド不足等のusage誤り実行"
+expect_return = "exit code 64"
+source_lines = "src/cli.rs:1082"
+
+[[condition]]
+id = "cli.version-flag"
+target_function = "Cli::parse / cli::run"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-002(2章共通オプション)"
+description = "--version でversion表示・exit 0となる (unit)"
+given = "backup-remote --version 実行"
+expect_return_shape = "version文字列がstdoutへ表示され exit code 0"
+source_lines = "tests/cli_bin.rs:8"
+
+[[condition]]
+id = "cli.exit-code-mapping"
+target_function = "cli::run / errors::BackupError"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-003(終了コード表は7.1)"
+description = "終了コード区分(0/2/3/4/5)が7.1の仕様表どおりに出る(各サブコマンドの代表case) (unit)"
+given = "成功(対象なし・全skip含む)・設定エラー・対象エラー・処理エラー・転送エラーの各区画の代表ケース"
+expect_return_shape = "0(成功)・2(設定・環境)・3(対象)・4(処理)・5(転送)が各区画の代表ケースで出る"
+source_lines = "src/cli.rs:1096; src/errors.rs:56"
+
+[[condition]]
+id = "cli.module-entrypoint-parity"
+target_function = "main.rs / cli::run"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-004(5章lib.rs・main.rs)"
+description = "cargo run -- 経由でも install済みbin backup-remote と同一挙動となる(結合testでは env!(\"CARGO_BIN_EXE_backup-remote\") でbinを直接実行して検証) (unit)"
+given = "同一引数を lib経由(cli::run直接呼出)と bin backup-remote で実行"
+expect_return_shape = "同一の出力・終了コードを返す"
+source_lines = "tests/cli_bin.rs:21"
+
+[[condition]]
+id = "cli.paths-required-usage-error"
+target_function = "clap定義(PlanArgs.paths / EncryptArgs.paths)"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-005(2026-10-08レビュー指摘3対応。2.1・2.2)"
+description = "plan / encrypt のPATH位置引数0個はusage error扱いで exit 64。PATHは1個以上必須(--from-listは併用オプション) (unit)"
+given = "plan・encrypt をPATH無し(オプションのみ、または--from-listのみ)で実行するケースと、PATH 1個(+--from-list併用)のケース"
+expect_return = "PATH 0個は exit 64。PATH 1個(+--from-list併用を含む)はusage errorとならない"
+source_lines = "src/cli.rs:1538"
+
+[[condition]]
+id = "cli.date-format-usage-error"
+target_function = "clap定義(UploadArgs.date / VerifyArgs.date のvalue_parser)"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-006(2026-10-09レビュー指摘対応。2.3・2.4)"
+description = "upload / verify の--dateはYYYY-MM-DD形式(半角数字4-2-2)を検証し、形式不正はusage error 64(誤記が対象なしexit 0で静かな未upload/未検験になるのを防ぐ。暦日としての実在性は検証しない) (unit)"
+given = "形式不正な値(2026-1-1・20260101・2026/10/01等)を--dateに指定したupload/verify実行と、形式どおり(2026-10-09)を指定した実行"
+expect_return = "形式不正は exit 64。形式どおりはusage errorとならず次段(設定読込等)へ進む"
+source_lines = "src/cli.rs:1504"
+
+[[condition]]
+id = "cli.profile-option-removed"
+target_function = "clap定義(UploadArgs / RestoreArgs系) / config::load_aws"
+source = "TASK-9 SDK移行設計 3.7・9.1(tmp/tasks/tm-9/design_sdk_migration.md 3章・9章)。10.2新規条件"
+description = "--profile廃止: CLI --profile(upload/restore全系)は未知オプション扱いのusage error 64となる(定義削除)。--helpの文言に--profileが現れない。--region/--bucket/--storage-class/--aws-configは維持される。aws.tomlのprofileキー残存はdeny_unknown_fieldsで設定エラー2(pre-productionのためbreaking変更可) (integration)"
+given = "upload --profile x・restore request --profile x実行。upload --help実行。profileキー入りaws.tomlでのupload実行"
+expect_return_shape = "--profile指定は exit 64。--helpに--profileを含まず--region/--bucketを含む。aws.tomlのprofile残存は exit 2"
+source_lines = "tests/s3_backend.rs:127"
+
+[[condition]]
+id = "cli.fake-s3-seam"
+target_function = "cli::select_backend(FakeS3 seam選択)"
+source = "TASK-9 SDK移行設計 4.3案1・10.3・12.4(tmp/tasks/tm-9/design_sdk_migration.md 4章・12章)。10.2新規条件"
+description = "fake seam: env BACKUP_REMOTE_FAKE_S3_STATE=<dir>指定時はS3 backendをfakeへ差し替える(gateは#[cfg(debug_assertions)]でrelease build・debug_assertions無効にはseam・FakeS3ともcompileされず実S3経路になる)。fakeはstate dir配下へobjects/<key>とcalls.log相当のAPI呼び出し記録(op名・bucket・key・storage_class・checksum・days・tier等のfield)を書く。fake選択時はstderr冒頭へ「WARNING: FAKE S3 MODE」を必ず表示する(誤用防御)。fakeはcredential値が不正(検出用ダミー値)でも成功する=実network不使用 (integration, fake seam)"
+given = "BACKUP_REMOTE_FAKE_S3_STATEを設定したupload実行(state dirを用意・credentialファイルはダミー値)"
+expect_return_shape = "exit 0でstate dirへobjects/<key>と呼び出し記録が書かれ、stderr冒頭にWARNING: FAKE S3 MODE表示。credential値・検出用ダミーは出力に現れない"
+source_lines = "src/s3.rs:739; src/s3.rs:779; tests/s3_backend.rs:101"
+
+[[excluded]]
+item = "8章末尾注記: conditions.toml側では各idにunit/integration種別・カバー要件(章節参照)を付記する"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章末尾注記"
+reason = "条件書の運用形式の指示であり検証対象コードの振る舞い条件ではない。種別は各条件のdescription末尾の (unit)/(integration) 付記で、カバー要件の章節参照は source 欄で対応済み(test-structure §8『書かない』: 挙動に差を生まない内部処理)"
+decided_at = "2026-10-08"
+decided_by = "claude"
+
+[[excluded]]
+item = "TASK-9設計4.3: cargo test --release(release profile・debug_assertions無効)ではseam依存testが動作しないことの実行検証"
+source = "tmp/tasks/tm-9/design_sdk_migration.md 4.3注意書き・12.4"
+reason = "cargo testはdev profileで実行するのが通常の検証経路であり、release test実行時の除外は実装受け入れ(12.4のrelease build確認)で扱う。テストコード側では表現できない条件のため"
+decided_at = "2026-10-13"
+decided_by = "claude"
