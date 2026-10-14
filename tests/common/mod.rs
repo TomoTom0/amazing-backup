@@ -251,7 +251,7 @@ pub fn aws_toml_body(
         .map(|s| format!("storage_class = \"{s}\"\n"))
         .unwrap_or_default();
     format!(
-        "[aws]\nbucket = \"{bucket}\"\nregion = \"{region}\"\ncredentials_file = \"{}\"\n{sc}",
+        "[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"{bucket}\"\nregion = \"{region}\"\ncredentials_file = \"{}\"\n{sc}",
         credentials_file.display()
     )
 }

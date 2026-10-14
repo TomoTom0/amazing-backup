@@ -19,7 +19,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-001(表示・集計
 description = "位置引数のみで対象解決され、各対象のpath・サイズ・mtime・合計サイズが表示される (unit)"
 given = "存在する .zip と .7z の2件を位置引数に指定して plan を実行"
 expect_return_shape = "解決対象2件のpath・size・mtimeと合計サイズを含む表示と exit code 0"
-source_lines = "src/cli.rs:1453; src/targets.rs:227"
+source_lines = "src/cli.rs:1462; src/targets.rs:227"
 
 [[condition]]
 id = "plan.from-list-union"
@@ -73,7 +73,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-007(指紋形式は
 description = "recipient指紋(SHA256:base64形式)が公開鍵から計算され一覧表示される。age/awsバイナリ不在でも成功する (unit)"
 given = "有効なed25519公開鍵1本を設定した plan 実行(PATH上にage/awsバイナリが無い)"
 expect_return_shape = "SHA256:<base64> 形式の指紋が表示され exit code 0"
-source_lines = "src/cli.rs:1413"
+source_lines = "src/cli.rs:1422"
 
 [[condition]]
 id = "plan.runs-without-aws"
@@ -82,7 +82,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-008(2.1の前提)"
 description = "plan は aws設定(aws.toml・awsバイナリ)が一切なくても exit 0 となる (unit)"
 given = "aws.toml不在・awsバイナリ不在の環境での plan 実行"
 expect_return = "exit code 0"
-source_lines = "src/cli.rs:1483"
+source_lines = "src/cli.rs:1492"
 
 [[condition]]
 id = "plan.name-override-basename-validation"

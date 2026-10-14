@@ -1050,7 +1050,7 @@ mod tests {
         let empty = tmp.path().join("empty-aws.toml");
         write_file(
             &empty,
-            format!("[aws]\nbucket = \"\"\nregion = \"\"\ncredentials_file = \"{}\"\n", creds.display()).as_bytes(),
+            format!("[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"\"\nregion = \"\"\ncredentials_file = \"{}\"\n", creds.display()).as_bytes(),
         );
         assert_eq!(crate::cli::cmd_upload(&args(empty.clone(), None)), 2, "bucket/region空は設定エラー2");
         assert_eq!(

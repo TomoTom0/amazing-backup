@@ -91,7 +91,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-009(skip規則は2.2
 description = "再実行skip: .age存在+registry記録一致(path・size・mtime)なら再読込せずskip表示される (unit)"
 given = "過去のencrypt記録(path・size・mtime一致)・.age・manifestが存在する状態で再実行(ENC-020: 全skipかつmanifest既存はmanifestも書き換えない)"
 expect_return_shape = "当該対象はskip表示され、平文read・age実行・registry追記なしで exit code 0"
-source_lines = "src/cli.rs:1620; src/registry.rs:590; tests/encrypt_batch.rs:383"
+source_lines = "src/cli.rs:1629; src/registry.rs:590; tests/encrypt_batch.rs:383"
 
 [[condition]]
 id = "encrypt.manifest-rebuilt-from-reduced-records"
@@ -109,7 +109,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-020(2026-10-08レビ
 description = "全対象skipかつmanifestファイルが既存の再実行はmanifestを書き換えない(skip実行のageバイナリ不要を維持。ENC-009との整合) (unit)"
 given = "過去のencrypt記録・.age・manifestが存在する状態で全対象がskipになる再実行(PATH上にageが無い環境でもexit 0)"
 expect_return_shape = "manifestファイルは不変・registry追記なし・exit code 0(年age不在でもmanifest再構築は起こらない)"
-source_lines = "src/cli.rs:1621"
+source_lines = "src/cli.rs:1630"
 
 [[condition]]
 id = "encrypt.manifest-recovery-when-missing"

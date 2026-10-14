@@ -167,7 +167,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-015(2.3 TASK-6節・
 description = "CLI一時上書き: --storage-class/--bucket/--region指定時、当該実行のS3 API呼び出し(HeadObject・PutObjectの両方)へ上書き値が反映される(bucketはHeadObject/PutObject呼び出しのbucket参数・storage_classはPutObjectのstorage_class参数。regionはBackend構築のRegion::newへ反映されupload/manifest_upload記録のs3_regionで検証。--profileは廃止済みで存在しない)。--help出力の文言: 各オプションの説明文に「当該実行限りの上書き(既定はaws.toml値)」と優先順位(CLI指定値 > aws.toml値・aws.tomlが正本)が表示される。upload/manifest_upload記録には当該実行の実効bucket/regionをs3_bucket/s3_regionとして記録する (integration, fake seam)"
 given = "encrypt済みregistry・aws.toml(bucket/region/storage_class/credentials_file設定済み)に対し、3上書きオプションを指定したupload実行"
 expect_return_shape = "fake backendの呼び出し記録のHeadObject行・PutObject行の両方に上書きbucket(bucket=<上書き値>)が反映され、PutObject行はstorage_class=<上書き値>となる。registryのupload/manifest_upload記録のs3_bucket/s3_regionは実効値。upload --helpに上書きの旨と優先順位の文言が含まれる"
-source_lines = "src/uploader.rs:1062; tests/encrypt_batch.rs:821"
+source_lines = "src/uploader.rs:1063; tests/encrypt_batch.rs:821"
 
 [[condition]]
 id = "upload.cli-override-unspecified-keeps-toml-values"
@@ -176,7 +176,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-016(2.3 TASK-6節・
 description = "CLI上書き時、未指定の項目はaws.toml値が使われ、実行後もaws.tomlファイルの内容は不変(正本の書戻しを行わない) (integration, fake seam)"
 given = "--storage-classのみ上書き指定したupload実行(aws.tomlはbucket/region/storage_class/credentials_fileすべて設定済み)"
 expect_return_shape = "未指定のbucket/regionはaws.toml値でS3 API呼び出しが行われ(HeadObject/PutObject行のbucket=<aws.toml値>・PutObject行のstorage_classは上書き値)、実行後のaws.tomlファイルの内容は実行前とbyte単位で同一"
-source_lines = "src/config.rs:785; tests/encrypt_batch.rs:891"
+source_lines = "src/config.rs:839; tests/encrypt_batch.rs:891"
 
 [[condition]]
 id = "upload.cli-storage-class-allowlist-rejected"
@@ -185,7 +185,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-017(2.3 TASK-6節・
 description = "--storage-class上書き値が3.3のallowlist外の場合は設定エラー(exit 2)となり、S3 API呼び出しは一切行われない。空文字・空白のみは未指定扱い(aws.toml値を採用)でエラーとしない (integration, fake seam)"
 given = "allowlist外の値(打ち間違い)・空文字・空白のみを--storage-classに指定したupload実行"
 expect_return_shape = "allowlist外はexit 2・fake backendの呼び出し記録不存在。空文字・空白のみはexit 0でaws.tomlのstorage_class値でPutObject実行"
-source_lines = "src/config.rs:711; tests/encrypt_batch.rs:940"
+source_lines = "src/config.rs:765; tests/encrypt_batch.rs:940"
 
 [[condition]]
 id = "upload.cli-bucket-region-blank-rejected"
@@ -194,7 +194,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-018(2.3 TASK-6節・
 description = "--bucket/--region上書き値が空文字・空白のみ・前後空白付きの場合は設定エラー(exit 2)となり、S3 API呼び出しは一切行われない(値のtrimは行わない) (integration, fake seam)"
 given = "空文字・空白のみ・前後空白付きの値を--bucketまたは--regionに指定したupload実行"
 expect_return_shape = "いずれの組合せもexit 2・fake backendの呼び出し記録不存在"
-source_lines = "src/config.rs:764; tests/encrypt_batch.rs:986"
+source_lines = "src/config.rs:818; tests/encrypt_batch.rs:986"
 
 [[condition]]
 id = "upload.cli-override-with-dry-run"
@@ -212,7 +212,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-020(2.3-7・2.6・TA
 description = "upload実行で各バッチプレフィックスへRESTORE_README.txtが配置される: S3キーは<batch_date>/RESTORE_README.txt、PutObject呼び出しのstorage_class=STANDARDが常に明示される(設定値・CLI一時上書きに依存しない固定)、配置内容は埋め込みテンプレートとbyte一致(2.6の内容要件: バケット目的・age形式・入手先URL・復元コマンド例・manifest取得例・sha256sum検証・backup-remote restoreコマンドによる復元の1行(内容要件6・TASK-5。restore request → restore status → restore downloadで取得・復号・検証を一括実行できる旨)を含み機密を含まない)、manifestより後に配置される。--date指定時は当該batch_dateのREADMEのみ配置され、他日付のbatch_dateプレフィックスへの配置呼び出しは実行されない (integration, fake seam)"
 given = "encrypt済みregistry(--date検証では複数batch_dateを含む)とfake S3 backend seam(BACKUP_REMOTE_FAKE_S3_STATE)に対するupload実行"
 expect_return_shape = "objects/<date>/RESTORE_README.txtが配置され、内容は2.6の内容要件(backup-remote restoreコマンドの1行を含む。TASK-5実装後のテンプレート)を満たす固定文面(実装後はlib公開のテンプレートpub constとbyte一致比較へ拡張)。READMEのPutObject呼び出しはkey=<date>/RESTORE_README.txt・storage_class=STANDARD固定・manifestのPutObjectより後に実行。--date指定時は他日付prefixへのHeadObject/PutObjectが呼び出し記録に現れない"
-source_lines = "src/uploader.rs:1122; src/uploader.rs:1156; tests/encrypt_batch.rs:1114; tests/encrypt_batch.rs:1197"
+source_lines = "src/uploader.rs:1123; src/uploader.rs:1157; tests/encrypt_batch.rs:1114; tests/encrypt_batch.rs:1197"
 
 [[condition]]
 id = "upload.restore-readme-idempotency"
@@ -221,7 +221,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-021(2.3-7・2.6・4.
 description = "README配置の冪等: HeadObject Size一致の既存READMEはskipされ再配置しない。HeadObject 404・Size不一致(テンプレート改訂相当)は再配置する。pending列挙が空の実行(全オブジェクトが当該実効bucketの成功記録済み)でもREADME配置のhead判定は実行され、未配置のbatch_dateがあれば配置する(判定対象はreduce後encrypt記録のmanifest_pathが持つbatch_date全集。7.3のREADME配置前crashのリカバリ経路。この場合もexit 0は変わらない)。README配置でregistryへレコードはappendされない (integration, fake seam)"
 given = "README配置済み状態での再実行(Size一致skip)・README削除後の再実行(404再配置)・配置済みREADMEのSize改変後の再実行(Size不一致再配置)・pending空でREADME削除後の再実行(7.3リカバリ)"
 expect_return_shape = "Size一致時はREADMEのPutObjectが再実行されず、404・Size不一致時は元の内容で再配置される。pending空の実行でもREADME keyへのHeadObjectが実行され(exit 0)、registryへREADME由来のレコードはappendされない(upload/manifest_upload記録のみ)"
-source_lines = "src/uploader.rs:1194; tests/encrypt_batch.rs:1231"
+source_lines = "src/uploader.rs:1195; tests/encrypt_batch.rs:1231"
 
 [[condition]]
 id = "upload.restore-readme-cp-failure"
@@ -230,7 +230,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-022(2.3-7・7.2)。T
 description = "README配置のPutObject失敗は転送エラー5。fail-fast時は即終了、--keep-going時は継続して他バッチのREADME配置・残オブジェクト処理を完走し、exitはエラー区分5 (integration, fake seam)"
 given = "fake S3 backendのPutObjectを特定key(README)のみ失敗注入(FAKE_S3_FAIL_CP_FOR)した状態でのupload実行(fail-fastと--keep-going・複数batch_date)"
 expect_return = "exit code 5(転送エラー)。fail-fastはREADME配置で即終了(対象・manifestの成功分とそのregistry記録は残る)、--keep-goingは失敗READMEのbatchを除く他バッチのREADME配置・残オブジェクト処理まで完走"
-source_lines = "src/uploader.rs:1234; tests/encrypt_batch.rs:1311"
+source_lines = "src/uploader.rs:1235; tests/encrypt_batch.rs:1311"
 
 [[condition]]
 id = "upload.restore-readme-temp-file"
@@ -239,7 +239,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-023(2.3-7。2026-10-
 description = "README送り元一時fileの作成はcreate_new(O_EXCL)で行われ、予測可能pathへ事前配置された既存file・symlinkはリトライなしで拒否される(symlink先の標的fileは破壊されない)。一時fileの作成・書込失敗は設定・環境エラー2で、--keep-going指定時も即終了する(7.2) (unit, fake S3Backend)"
 given = "一時file pathへのsymlink・通常fileの事前配置(送り元pathは実装と同一規則の実temp path含む)状態でのREADME配置を伴うupload実行"
 expect_return_shape = "事前配置されたpathへの作成は設定・環境エラー2(exit 2)で失敗しsymlink先の標的file・既存fileは無傷、READMEのPutObjectは実行されず、--keep-goingでも即終了する。新規pathへの作成は成功しDropで削除される"
-source_lines = "src/uploader.rs:1267; src/uploader.rs:1312"
+source_lines = "src/uploader.rs:1268; src/uploader.rs:1313"
 
 [[condition]]
 id = "upload.run-summary-readme-separated"
@@ -248,7 +248,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-024(2.3-7。2026-10-
 description = "upload実行summaryはREADME配置分をオブジェクト数と区別して分離表示する(N uploaded, M skipped, F failed + README配置R件(skip・fail内訳)。dry-run summaryと粒度一致)。README配置対象の無い実行ではREADME部分を付加しない (unit)"
 given = "README配置を伴う実行と伴わない実行のsummary行組立"
 expect_return_shape = "README配置分は「+ README配置 <n>件(skip <n>・fail <n>)」形式で分離され、オブジェクト数のuploaded/skipped/failedへ混入しない。README配置件数が全て0の場合は従来形式のまま"
-source_lines = "src/uploader.rs:1345"
+source_lines = "src/uploader.rs:1346"
 
 [[condition]]
 id = "upload.multipart-threshold"

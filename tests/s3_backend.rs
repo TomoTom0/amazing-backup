@@ -169,13 +169,13 @@ fn credentials_file_key_required() {
         return;
     };
     // キー欠落
-    fx.rewrite_aws_toml("[aws]\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\n");
+    fx.rewrite_aws_toml("[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\n");
     let (code, _, stderr) = fx.upload(&[]);
     assert_eq!(code, 2, "credentials_fileキー欠落は設定エラー2: {stderr}");
     assert_eq!(fx.calls(), "", "S3 API呼び出しは行われない");
     // 空値
     fx.rewrite_aws_toml(
-        "[aws]\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"\"\n",
+        "[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"\"\n",
     );
     let (code, _, stderr) = fx.upload(&[]);
     assert_eq!(code, 2, "credentials_file空値は設定エラー2: {stderr}");
@@ -228,7 +228,7 @@ fn credentials_fail_closed_no_fallback() {
     };
     // 存在しないpathへ指す(ファイル不在)
     fx.rewrite_aws_toml(
-        "[aws]\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"/nonexistent/aws-credentials.toml\"\n",
+        "[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"/nonexistent/aws-credentials.toml\"\n",
     );
     let (code, _, stderr) = fx.upload(&[]);
     assert_eq!(code, 2, "credentialファイル不在は設定エラー2(fallbackしない): {stderr}");

@@ -115,19 +115,10 @@ struct AwsProfile {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AwsSection {
-    /// 後方互換: profilesが空の場合はこの直下フィールドをdefault profileとして使う。
-    #[serde(default)]
-    bucket: String,
-    #[serde(default)]
-    region: String,
-    #[serde(default)]
-    credentials_file: String,
-    #[serde(default)]
-    storage_class: String,
-    /// 複数profileを持つ場合の既定profile名(省略時は"default"→なければ先頭/直下fields)。
+    /// 起動時に使うprofile名(省略時は"default")。
     #[serde(default)]
     active_profile: String,
-    #[serde(default)]
+    /// profile名 -> profile定義。最低1つ必須。
     profiles: std::collections::BTreeMap<String, AwsProfile>,
 }
 
@@ -238,89 +229,70 @@ pub fn load_aws_profile(path: &Path, profile_name: Option<&str>) -> BackupResult
     let parsed: AwsFile = toml::from_str(&text)
         .map_err(|e| BackupError::Config(format!("aws.tomlのparseに失敗 ({}): {e}", path.display())))?;
 
-    // 直下fieldsをanonymous profileとして扱う(後方互換)。
-    let has_direct = !parsed.aws.bucket.is_empty()
-        || !parsed.aws.region.is_empty()
-        || !parsed.aws.credentials_file.is_empty()
-        || !parsed.aws.storage_class.is_empty();
-
-    let (bucket, region, credentials_file, storage_class) = if parsed.aws.profiles.is_empty() {
-        // 旧形式: 直下fieldsをそのまま使う。
-        let storage_class = if parsed.aws.storage_class.trim().is_empty() {
-            "DEEP_ARCHIVE".to_string()
-        } else {
-            parsed.aws.storage_class.clone()
-        };
-        (parsed.aws.bucket.clone(), parsed.aws.region.clone(), parsed.aws.credentials_file.clone(), storage_class)
-    } else {
-        // profile選択。
-        let selected_name = profile_name
-            .map(str::to_string)
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| {
-                if !parsed.aws.active_profile.trim().is_empty() {
-                    parsed.aws.active_profile.clone()
-                } else if parsed.aws.profiles.contains_key("default") {
-                    "default".to_string()
-                } else {
-                    parsed.aws.profiles.keys().cloned().next().unwrap_or_default()
-                }
-            });
-        let prof = parsed.aws.profiles.get(&selected_name).ok_or_else(|| {
-            BackupError::Config(format!(
-                "指定profileが見つからない: {selected_name} ({}。利用可能: {})",
-                path.display(),
-                parsed.aws.profiles.keys().cloned().collect::<Vec<_>>().join("/")
-            ))
-        })?;
-        let credentials_file = if prof.credentials_file.trim().is_empty() {
-            parsed.aws.credentials_file.clone()
-        } else {
-            prof.credentials_file.clone()
-        };
-        let storage_class = if prof.storage_class.trim().is_empty() {
-            if parsed.aws.storage_class.trim().is_empty() {
-                "DEEP_ARCHIVE".to_string()
-            } else {
-                parsed.aws.storage_class.clone()
-            }
-        } else {
-            prof.storage_class.clone()
-        };
-        (prof.bucket.clone(), prof.region.clone(), credentials_file, storage_class)
-    };
-
-    // whitespace check
-    for (name, value) in [
-        ("bucket", &bucket),
-        ("region", &region),
-        ("credentials_file", &credentials_file),
-    ] {
-        let joined = format!("[profile].{name}");
-        if value.trim() != value {
-            return Err(BackupError::Config(format!(
-                "{joined}の値に前後の空白が含まれる: {value:?}"
-            )));
-        }
-    }
-    if credentials_file.trim().is_empty() {
+    if parsed.aws.profiles.is_empty() {
         return Err(BackupError::Config(format!(
-            "credentials_fileが空です ({})",
+            "[aws].profilesが空です(最低1つのprofileを定義してください。{})",
             path.display()
         )));
     }
+
+    let selected_name = profile_name
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            if !parsed.aws.active_profile.trim().is_empty() {
+                parsed.aws.active_profile.clone()
+            } else if parsed.aws.profiles.contains_key("default") {
+                "default".to_string()
+            } else {
+                parsed.aws.profiles.keys().cloned().next().unwrap_or_default()
+            }
+        });
+
+    let prof = parsed.aws.profiles.get(&selected_name).ok_or_else(|| {
+        BackupError::Config(format!(
+            "指定profileが見つからない: {selected_name} ({}。利用可能: {})",
+            path.display(),
+            parsed.aws.profiles.keys().cloned().collect::<Vec<_>>().join("/")
+        ))
+    })?;
+
+    let credentials_file = &prof.credentials_file;
+    // whitespace + non-empty checks
+    for (name, value) in [("bucket", &prof.bucket), ("region", &prof.region), ("credentials_file", credentials_file)] {
+        if value.trim() != value {
+            return Err(BackupError::Config(format!(
+                "[aws.profiles.{selected_name}].{name}の値に前後の空白が含まれる: {value:?}"
+            )));
+        }
+    }
+    if prof.bucket.trim().is_empty() || prof.region.trim().is_empty() {
+        return Err(BackupError::Config(format!(
+            "[aws.profiles.{selected_name}].bucket/regionが空です ({})",
+            path.display()
+        )));
+    }
+    if credentials_file.trim().is_empty() {
+        return Err(BackupError::Config(format!(
+            "[aws.profiles.{selected_name}].credentials_fileが空です ({})",
+            path.display()
+        )));
+    }
+    let storage_class = if prof.storage_class.trim().is_empty() {
+        "DEEP_ARCHIVE".to_string()
+    } else {
+        prof.storage_class.clone()
+    };
     if !KNOWN_STORAGE_CLASSES.contains(&storage_class.as_str()) {
         return Err(BackupError::Config(format!(
-            "storage_classが既知のS3 storage classでない: {storage_class}(許容値: {})",
+            "[aws.profiles.{selected_name}].storage_classが既知のS3 storage classでない: {storage_class}(許容値: {})",
             KNOWN_STORAGE_CLASSES.join("/")
         )));
     }
-    // has_direct は将来の補強用に確保 (top-level空 & profiles空の場合はbucket空でrequire_readyに弾かれる)
-    let _ = has_direct;
     Ok(AwsConfig {
-        bucket,
-        region,
-        credentials_file: std::path::PathBuf::from(credentials_file),
+        bucket: prof.bucket.clone(),
+        region: prof.region.clone(),
+        credentials_file: std::path::PathBuf::from(credentials_file.clone()),
         storage_class,
     })
 }
@@ -594,7 +566,7 @@ mod tests {
         let p = tmp.path().join("aws.toml");
         write_file(
             &p,
-            b"[aws]\nbucket = \"b\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"configs/secret/aws-credentials.toml\"\naws_access_key_id = \"AKIAxxxxxxxxxxxxxxxx\"\n",
+            b"[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"configs/secret/aws-credentials.toml\"\naws_access_key_id = \"AKIAxxxxxxxxxxxxxxxx\"\n",
         );
         let e = load_aws(&p).unwrap_err();
         let msg = config_error(&e);
@@ -607,7 +579,7 @@ mod tests {
         let p = tmp.path().join("aws.toml");
         write_file(
             &p,
-            b"[aws]\nbucket = \"my-bucket\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"configs/secret/aws-credentials.toml\"\nstorage_class = \"DEEP_ARCHIVE\"\n",
+            b"[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"my-bucket\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"configs/secret/aws-credentials.toml\"\nstorage_class = \"DEEP_ARCHIVE\"\n",
         );
         let cfg = load_aws(&p).expect("有効なaws.tomlは読み込める");
         assert_eq!(cfg.bucket, "my-bucket");
@@ -625,7 +597,7 @@ mod tests {
     fn load_aws_requires_credentials_file_key() {
         let tmp = TempDir::new("conf-aws-credreq");
         let p = tmp.path().join("aws.toml");
-        write_file(&p, b"[aws]\nbucket = \"b\"\nregion = \"ap-northeast-1\"\n");
+        write_file(&p, b"[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"ap-northeast-1\"\n");
         let e = load_aws(&p).unwrap_err();
         config_error(&e);
         assert_eq!(e.exit_code(), 2);
@@ -642,7 +614,7 @@ mod tests {
         let typo = tmp.path().join("typo.toml");
         write_file(
             &typo,
-            b"[aws]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"DEEP_ARCHIV\"\n",
+            b"[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"DEEP_ARCHIV\"\n",
         );
         let e = load_aws(&typo).unwrap_err();
         let msg = config_error(&e);
@@ -655,7 +627,7 @@ mod tests {
             let p = tmp.path().join(format!("ok-{}.toml", ok_value.to_lowercase()));
             write_file(
                 &p,
-                format!("[aws]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"{ok_value}\"\n").as_bytes(),
+                format!("[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"{ok_value}\"\n").as_bytes(),
             );
             let cfg = load_aws(&p).unwrap_or_else(|e| panic!("{ok_value}は許容値: {e}"));
             assert_eq!(cfg.storage_class, ok_value);
@@ -663,7 +635,7 @@ mod tests {
 
         // 3. 空文字は既定DEEP_ARCHIVE
         let empty = tmp.path().join("empty-sc.toml");
-        write_file(&empty, b"[aws]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"\"\n");
+        write_file(&empty, b"[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"\"\n");
         let cfg = load_aws(&empty).expect("空文字は既定値扱い");
         assert_eq!(cfg.storage_class, "DEEP_ARCHIVE");
     }
@@ -824,8 +796,8 @@ mod tests {
 
         // 1. 前後空白付きbucket/regionは設定エラー
         for (name, body) in [
-            ("bucket", "[aws]\nbucket = \" my-bucket \"\nregion = \"ap-northeast-1\"\ncredentials_file = \"c.toml\"\n"),
-            ("region", "[aws]\nbucket = \"my-bucket\"\nregion = \" ap-northeast-1\"\ncredentials_file = \"c.toml\"\n"),
+            ("bucket", "[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \" my-bucket \"\nregion = \"ap-northeast-1\"\ncredentials_file = \"c.toml\"\n"),
+            ("region", "[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"my-bucket\"\nregion = \" ap-northeast-1\"\ncredentials_file = \"c.toml\"\n"),
         ] {
             let p = tmp.path().join(format!("ws-{}.toml", name));
             write_file(&p, body.as_bytes());
@@ -837,7 +809,7 @@ mod tests {
 
         // 2. 空白なしの値はそのまま読み込まれる(trimされない)
         let p = tmp.path().join("ws-ok.toml");
-        write_file(&p, b"[aws]\nbucket = \"my-bucket\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"c.toml\"\n");
+        write_file(&p, b"[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"my-bucket\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"c.toml\"\n");
         let cfg = load_aws(&p).expect("空白なしは読み込める");
         assert_eq!(cfg.bucket, "my-bucket");
         assert_eq!(cfg.region, "ap-northeast-1");
