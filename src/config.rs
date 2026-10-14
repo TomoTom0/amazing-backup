@@ -240,13 +240,17 @@ pub fn load_aws_profile(path: &Path, profile_name: Option<&str>, purpose: Option
 
     let env_profile = std::env::var("BACKUP_REMOTE_AWS_PROFILE").ok().filter(|v| !v.trim().is_empty());
     let env_purpose = std::env::var("BACKUP_REMOTE_AWS_PURPOSE").ok().filter(|v| !v.trim().is_empty());
+    // fake seam中(=テスト環境)は test目的のprofileへ自動解決(手動切替・環境変数設定不要)。
+    let test_env = std::env::var("BACKUP_REMOTE_FAKE_S3_STATE").ok().filter(|v| !v.trim().is_empty());
 
     let explicit_profile = profile_name.map(str::to_string).filter(|s| !s.trim().is_empty());
     let requested_purpose = purpose.map(str::to_string).filter(|s| !s.trim().is_empty()).or(env_purpose);
 
+    let auto_test_purpose = test_env.map(|_| "test".to_string());
+
     let selected_name = if let Some(n) = explicit_profile.or(env_profile) {
         n
-    } else if let Some(pur) = requested_purpose {
+    } else if let Some(pur) = requested_purpose.or(auto_test_purpose) {
         parsed.aws.profiles.iter().find_map(|(name, prof)| {
             if prof.purpose == pur { Some(name.clone()) } else { None }
         }).unwrap_or_else(|| {
