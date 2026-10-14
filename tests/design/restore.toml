@@ -51,7 +51,7 @@ source = "tmp/tasks/tm-5/design_restore.md RES-003(本編8章。詳細は3.2・�
 description = "request --dry-run: S3 API呼び出しなし(ListObjectsV2・HeadObject・RestoreObjectすべて)。「対象key一覧は未確定(全件発行想定)」として予定行(RestoreObject API形式「[dry-run] s3 RestoreObject bucket=<b> key=<k> days=<n> tier=<tier>」・--name指定時は当該name+manifestのkey)を表示しexit 0 (integration, fake seam)"
 given = "--dry-run指定のrestore request実行(fake backendは呼ばれたら呼び出し記録を残す仕掛け)"
 expect_return_shape = "S3 API呼び出しは一切起きず(呼び出し記録不存在)、[dry-run]のRestoreObject予定表示が出て exit 0"
-source_lines = "src/restore.rs:846; tests/restore.rs:300"
+source_lines = "src/restore.rs:832; tests/restore.rs:300"
 
 [[condition]]
 id = "restore.request-tier-days-validation"
@@ -78,7 +78,7 @@ source = "tmp/tasks/tm-5/design_restore.md RES-006(本編8章。詳細は3.8)。
 description = "Restore parse: 値なし(HeadObject応答にRestore無し)=NotRequested・ongoing-request=\"true\"=Ongoing・ongoing-request=\"false\"=Restoredへ分類し、expiry-dateはRFC 7231 HTTP-dateのraw文字列をそのまま保持する(解析・時刻変換・JST変換をしない) (integration, fake seam・status表示経由)"
 given = "fake backendのHeadObject応答へ固定のRestore値(ongoing-request=\"false\", expiry-date=\"Wed, 14 Oct 2026 00:00:00 GMT\"・ongoing-request=\"true\"・なし)をkeyごとに返す状態でのrestore status実行"
 expect_return_shape = "status出力にexpiry-dateのraw文字列(Wed, 14 Oct 2026 00:00:00 GMT)が原文どおり含まれ、JST変換(+09:00等)・時刻解析を施した形では表示されない。3状態が正しく分類表示される"
-source_lines = "src/restore.rs:808; tests/restore.rs:396"
+source_lines = "src/restore.rs:794; tests/restore.rs:396"
 
 [[condition]]
 id = "restore.download-full-roundtrip"

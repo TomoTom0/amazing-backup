@@ -238,7 +238,6 @@ pub fn run_restore_request(backend: &dyn S3Backend, opts: &RestoreRequestOptions
             return e.exit_code();
         }
     };
-    let keys: Vec<String> = keys.into_iter().filter(|k| !is_readme(k)).collect();
     if keys.is_empty() {
         println!("WARNING: 当該prefixにobjectなし。--date・bucketを確認してください (prefix: {prefix})");
         return 0;
@@ -384,15 +383,7 @@ pub fn run_restore_status(backend: &dyn S3Backend, opts: &RestoreStatusOptions) 
         println!("WARNING: 当該prefixにobjectなし。--date・bucketを確認してください (prefix: {prefix})");
         return 0;
     }
-    let mut keys: Vec<String> = Vec::new();
-    let mut readmes: Vec<String> = Vec::new();
-    for k in listed {
-        if is_readme(&k) {
-            readmes.push(k);
-        } else {
-            keys.push(k);
-        }
-    }
+    let keys = listed;
 
     // 2. 各keyのhead → Restore parse → 3状態表示
     println!("== restore status ({}) ==", opts.date);
@@ -412,9 +403,8 @@ pub fn run_restore_status(backend: &dyn S3Backend, opts: &RestoreStatusOptions) 
                 }
                 if !opts.keep_going {
                     println!(
-                        "-- {restored} restored, {ongoing} ongoing, {not_requested} not-requested / {} objects (+{} README), {failed} failed",
-                        keys.len(),
-                        readmes.len()
+                        "-- {restored} restored, {ongoing} ongoing, {not_requested} not-requested / {} objects, {failed} failed",
+                        keys.len()
                     );
                     return e.exit_code();
                 }
@@ -438,13 +428,9 @@ pub fn run_restore_status(backend: &dyn S3Backend, opts: &RestoreStatusOptions) 
             }
         }
     }
-    for key in &readmes {
-        println!("  --              {key}  (平文・復元不要)");
-    }
     println!(
-        "-- {restored} restored, {ongoing} ongoing, {not_requested} not-requested / {} objects (+{} README), {failed} failed",
-        keys.len(),
-        readmes.len()
+        "-- {restored} restored, {ongoing} ongoing, {not_requested} not-requested / {} objects, {failed} failed",
+        keys.len()
     );
     first_err.unwrap_or(0)
 }
