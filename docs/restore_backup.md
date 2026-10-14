@@ -75,7 +75,6 @@ backup-remote restore download  取得・sha256検証・復号(data/restore/<dat
 
 - `--date YYYY-MM-DD`は全サブコマンドで必須(バッチ=日付単位の指定。「全バックアップの一括復元」という事故的操作を構造的に防ぐため省略不可)
 - 特定ファイルだけ復元する場合はrequest/downloadへ`--name`を指定する(取り出し費用を対象分に限定できる)
-- `RESTORE_README.txt`はSTANDARD配置(平文)のため復元job不要で即時取得でき、どの環境でも手順を読める(8章)
 - 復元jobを発行すると、オブジェクトの復元コピーが`--days`(既定7日)の間取得可能になる。期限(expiry-date)が切れた後の再取得には再発行が必要(5章)
 
 ## 3. 各サブコマンドの手順
@@ -102,7 +101,7 @@ backup-remote restore request --date YYYY-MM-DD [--name NAME ...] [--days N] [--
 動作:
 
 1. 事前検査: aws.tomlの正検査・credentialファイルの読込・検査・`--days`/`--tier`の値検査(S3 APIはまだ実行しない)
-2. ListObjectsV2(`<date>/`プレフィックス)で対象keyを列挙(`RESTORE_README.txt`は除外)。0件は警告「当該prefixにobjectなし。--date・bucketを確認してください」+終了コード0
+2. ListObjectsV2(`<date>/`プレフィックス)で対象keyを列挙。0件は警告「当該prefixにobjectなし。--date・bucketを確認してください」+終了コード0
 3. `--name`指定時は列挙結果と突合し、存在しないnameは発行前に対象エラー3
 4. 各keyをHeadObjectで確認し、復元済み(`restored`)・進行中(`ongoing`)はskip、未発行のみ発行する:
 
@@ -128,7 +127,7 @@ ok    2026-10-08/manifest.jsonl.age
 [dry-run] 対象key一覧は未確定(--dateバッチ全件想定・--name指定時は当該name+manifest想定・ListObjectsV2/HeadObject未実行)
 [dry-run] s3 RestoreObject bucket=example-backup-bucket key=2026-10-08/<name>.age days=7 tier=Standard
 [dry-run] s3 RestoreObject bucket=example-backup-bucket key=2026-10-08/manifest.jsonl.age days=7 tier=Standard
--- summary (dry-run): RestoreObject予定(対象key一覧は未確定・RESTORE_README.txtは除外)
+-- summary (dry-run): RestoreObject予定(対象key一覧は未確定)
 ```
 
 manifest.jsonl.ageは`--name`の指定に関わらず対象へ含まれる(downloadの検証正本になるため)。
@@ -151,7 +150,6 @@ backup-remote restore status --date YYYY-MM-DD
   restored        2026-10-08/photo.zip.age  expiry-date="Tue, 20 Oct 2026 12:00:00 GMT"
   ongoing         2026-10-08/docs.7z.age
   not-requested   2026-10-08/manifest.jsonl.age
-  --              2026-10-08/RESTORE_README.txt  (平文・復元不要)
 -- 1 restored, 1 ongoing, 1 not-requested / 3 objects (+1 README), 0 failed
 ```
 
@@ -160,7 +158,6 @@ backup-remote restore status --date YYYY-MM-DD
 | `restored` | 復元済み(取得可能)。`expiry-date`は取得可能期限 |
 | `ongoing` | 復元進行中(発行済み・未完了) |
 | `not-requested` | 復元job未発行(または期限切れでヘッダ消失) |
-| `--` | `RESTORE_README.txt`(平文・復元不要) |
 
 expiry-dateはS3応答の原文をGMT(UTC)表記のまま表示する(JSTへの変換は行わない。解釈の際は注意)。
 
@@ -291,9 +288,8 @@ fail-fastが既定。`--keep-going`指定時はper-key/per-file失敗で継続�
 
 ## 8. 手動復元(aws CLI + age)との対応
 
-各バッチの`RESTORE_README.txt`(平文・即時取得可能)には、backup-remoteを使わない環境向けの手動復元手順(`aws s3api restore-object`・`aws s3 cp`・`age -d`・`sha256sum`)が書かれている。本コマンドとの対応:
+手動復元手順(`aws s3api restore-object`・`aws s3 cp`・`age -d`・`sha256sum`)との対応:
 
-| RESTORE_README.txtの手順 | 本コマンドでの対応 |
 |---|---|
 | `aws s3api restore-object`(復元job発行) | `restore request`(HeadObjectによる済み分skip付き) |
 | 復元完了の待ち・`head-object`の`Restore`確認 | `restore status`(3状態一覧) |
@@ -302,4 +298,3 @@ fail-fastが既定。`--keep-going`指定時はper-key/per-file失敗で継続�
 | `sha256sum`とmanifestの`age_sha256`照合 | `restore download`(L2/L3検証が自動で行う) |
 
 - backup-remoteがない環境(新環境・他者の環境)ではREADMEの手順どおり手動で復元できる。手順の詳細は`docs/usage_backup.md` 9章にも同じ内容がある
-- 2026-10-12のrestore実装に合わせて`RESTORE_README.txt`のテンプレートへ本コマンドの案内行を追記した。**S3上の既存バッチのREADMEは旧版のままなので、作成環境で`backup-remote upload`を1回実行すると既存バッチのREADMEが新版へ再配置される**(README配置判定はHeadObjectのSize比較で、Size不一致は再配置として機能する。uploadは冪等で、対象の再転送は起きない)

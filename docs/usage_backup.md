@@ -15,7 +15,7 @@ NASバックアップアーカイブ(zip/7z)をageで暗号化し、S3 Deep Arch
 plan(対象解決・事前検査)
   -> encrypt(age暗号化 + ローカルregistry/manifest記録)
   -> verify(ローカル整合検証・必要に応じ復号roundtrip)
-  -> upload(S3 Deep Archiveへの転送 + RESTORE_README.txt配置)
+  -> upload(S3 Deep Archiveへの転送)
 ```
 
 各段階の成果物:
@@ -25,7 +25,7 @@ plan(対象解決・事前検査)
 | `data/out/<YYYY-MM-DD>/<name>.age` | 暗号化済みアーカイブ(age v1形式) |
 | `data/out/<YYYY-MM-DD>/manifest.jsonl.age` | バッチ目録(manifest)を同じrecipientで暗号化したもの |
 | `data/registry.jsonl` | ローカル累積registry(append-onlyのJSONLイベントログ) |
-| `s3://<bucket>/<YYYY-MM-DD>/...` | upload先。キーは `<date>/<name>.age`・`<date>/manifest.jsonl.age`・`<date>/RESTORE_README.txt` |
+| `s3://<bucket>/<YYYY-MM-DD>/...` | upload先。キーは `<date>/<name>.age`・`<date>/manifest.jsonl.age` |
 
 暗号化はSSH ed25519公開鍵の1-of-N(全鍵で暗号化し、いずれか1鍵で復号可能)。S3接続は**AWS SDK(aws-sdk-s3)をbinary内蔵**しておりaws CLIは不要。credential(access key)は`configs/secret/`配下の明示的なAPI keyファイル(2.3)から与え、`~/.aws`や環境変数のcredential chainには依存しない(fail-closed)。plan/encrypt/verifyはS3接続なしで完結する。
 
@@ -112,7 +112,7 @@ $ aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-con
 }'
 ```
 
-(upload対象のオブジェクト自体へのlifecycle移行(STANDARDからの自動移行)は設定しないこと。`RESTORE_README.txt`のSTANDARD固定がlifecycle移行の対象になると6章の鶏卵問題回避が無効になる)
+(upload対象のオブジェクト自体へのlifecycle移行(STANDARDからの自動移行)は設定しないこと)
 
 ## 3. 設定ファイル
 
@@ -345,14 +345,14 @@ backup-remote upload [--config PATH] [--aws-config PATH] [--date YYYY-MM-DD]
 3. per-object skip判定: HeadObject(S3 API)でS3側のobject有無とSizeを確認。404ならupload、Size一致ならskip(「sizeのみ検証」警告付き)、Size不一致なら再upload
 4. upload: PutObject(SHA256 checksum指定付き。**64MiB超のオブジェクトは64MiB partのmultipart upload**、失敗時はAbortMultipartUploadをbest-effort発行)。成功後HeadObjectでSize/ChecksumSHA256を取得しregistryへ記録
 5. 全ファイル後にmanifestを同じ手順でupload(キー `<date>/manifest.jsonl.age`)
-6. 各バッチプレフィックスへ `RESTORE_README.txt` を配置(6章)
+6. (削除: README自動配置機能は廃止)
 
 出力例(`--dry-run`・実機確認済み。pathは例):
 
 ```
 [dry-run] s3 PutObject bucket=example-backup-bucket key=2026-10-11/sample.zip.age src=data/out/2026-10-11/sample.zip.age storage_class=DEEP_ARCHIVE checksum=SHA256
 [dry-run] s3 PutObject bucket=example-backup-bucket key=2026-10-11/manifest.jsonl.age src=data/out/2026-10-11/manifest.jsonl.age storage_class=DEEP_ARCHIVE checksum=SHA256
-[dry-run] s3 PutObject bucket=example-backup-bucket key=2026-10-11/RESTORE_README.txt src=/tmp/backup-remote-100102.RESTORE_README.txt storage_class=STANDARD checksum=SHA256
+
 -- summary (dry-run): 2 objects + README配置予定1件 (HeadObject未実行のためskip想定は未確定・全件upload想定)
 ```
 
@@ -433,25 +433,14 @@ upload結果の確認はbackup-remote自体の機能ではないため、aws CLI
 ```console
 $ aws s3 ls s3://<bucket>/2026-10-11/
 2026-10-11 ... manifest.jsonl.age
-2026-10-11 ... RESTORE_README.txt
 2026-10-11 ... sample.zip.age
 
 $ aws s3api head-object --bucket <bucket> --key 2026-10-11/sample.zip.age
 ```
 
-head-objectで`Size`(ローカル`.age`のサイズと一致)・`StorageClass`(DEEP_ARCHIVE)・`ChecksumSHA256`を確認する。`RESTORE_README.txt`は`s3 prefix`配下に平文で存在する(6章)。
+head-objectで`Size`(ローカル`.age`のサイズと一致)・`StorageClass`(DEEP_ARCHIVE)・`ChecksumSHA256`を確認する。
 
-## 6. RESTORE_README.txt
-
-upload実行は、各バッチプレフィックス(`<date>/`)へ平文README `RESTORE_README.txt` を自動配置する。bucket一覧で気づきやすくする大文字命名で、バックアップの復元手順(ファイル形式・ageの入手先・復元コマンド例・manifestによるchecksum検証)を自己説明する固定文面。テンプレートは`src/templates/restore_readme.txt`(bin埋め込み)。
-
-運用上の要点:
-
-- **README自体は平文・STANDARD**: storage classは設定`[aws].storage_class`・CLI上書き`--storage-class`のいずれにもよらず`STANDARD`固定。READMEの取得にGlacier復元jobを要する鶏卵問題(手順書を読むために手順書の復元が必要になる)を避けるため
-- 機密は含まない(bucket名・鍵の保管場所等は書かれない)
-- registry管理対象外・verifyの検査対象外。配置済みかどうかは毎回HeadObject(S3 API)のSize一致で判定(冪等)
-- READMEが存在するプレフィックスは、fail-fastで完了した実行の場合「当該バッチのupload完了」の目印を兼ねる(`--keep-going`で一部失敗した実行ではこの保証はない)
-- bucket側のlifecycle移行ポリシーの対象外とする運用前提(lifecycleでSTANDARDから移行されると鶏卵問題回避が無効になる。除外ruleの設定は手運用)
+## 6. RESTORE_README.txt(廃止: 削除済み)
 
 ## 7. 鍵の管理
 
@@ -535,11 +524,11 @@ upload実行は、各バッチプレフィックス(`<date>/`)へ平文README `R
 
 復元は`backup-remote restore`コマンド(実装済み)で行うのが標準手順。`restore request`(復元job発行)-> `restore status`(状態確認)-> `restore download`(取得・sha256検証・復号)の3サブコマンドで構成され、手順・費用の目安・検証構成・トラブルシューティングの正本は `docs/restore_backup.md`。
 
-本章はbackup-remoteを使わない環境(新環境・他者の環境)向けの手動復元手順で、S3上の`RESTORE_README.txt`に記載の手順と同じ内容である(バックアップ作成環境には`RESTORE_README.txt`の復元手順へrestoreコマンドの案内行も追記済み)。
+本章はbackup-remoteを使わない環境(新環境・他者の環境)向けの手動復元手順である。
 
 前提:
 
-- 対象の`.age`(manifest.jsonl.ageを含む)はDeep Archive配置のため、**取得前にGlacier復元job(一時復元)が必要**(RESTORE_README.txtのみSTANDARDで即時取得可能)。ただしstorage_classをSTANDARD等へ変更してuploadしたバッチでは復元jobは不要(即時取得可能):
+- 対象の`.age`(manifest.jsonl.ageを含む)はDeep Archive配置のため、**取得前にGlacier復元job(一時復元)が必要**ただしstorage_classをSTANDARD等へ変更してuploadしたバッチでは復元jobは不要(即時取得可能):
 
   ```console
   $ aws s3api restore-object --bucket <bucket> --key <date>/<name>.age \

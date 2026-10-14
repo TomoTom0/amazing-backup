@@ -53,7 +53,7 @@ aws CLI(subprocess)依存のテスト構造をfake seamへ再構成:
 | tests/design/*.toml | テスト設計条件書(正本) | 作成済み(8ファイル・120条件・excluded 11件)。TASK-9 SDK移行の追加要件(設計10章)を反映済み |
 | tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・fake seam用helper(credentialファイル・aws.toml組立・API呼び出し記録読取)等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
-| tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seam(BACKUP_REMOTE_FAKE_S3_STATE)でのupload・RESTORE_README.txt配置(結合) | 作成済み(TASK-9でPATH差替えからseamへ更新) |
+| tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seam(BACKUP_REMOTE_FAKE_S3_STATE)でのupload(結合) | 作成済み(TASK-9でPATH差替えからseamへ更新) |
 | tests/verify_roundtrip.rs | verify --roundtrip系(結合) | 作成済み |
 | tests/restore.rs | restore系3サブコマンド(request/status/download)の復元・検証・復号(結合・TASK-5) | 作成済み(TASK-9でPATH差替えからseamへ更新) |
 | tests/s3_backend.rs | S3 backend・credentialファイル系(fake seam・multipart・abort・endpoint env警告・--profile廃止。結合・TASK-9) | 作成済み(テスト先行。src/s3.rs実装前は実行failを許容) |
