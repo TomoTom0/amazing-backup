@@ -50,7 +50,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-002(判定行列は2
 description = "HeadObjectの404(NotFound・Key不在)はupload実行に進む (unit)"
 given = "HeadObject が Ok(None)(404)を返すケース(行列行1)"
 expect_return = "SkipDecision は upload(実行)判定"
-source_lines = "src/uploader.rs:565"
+source_lines = "src/uploader.rs:378"
 
 [[condition]]
 id = "upload.head-match-skip"
@@ -59,7 +59,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-003(判定行列は2
 description = "HeadObjectのSizeがローカル .age のsizeと一致するとskipされる(行列行2・「sizeのみ検証」警告付き。bucket一致の前回成功記録がある対象はpending列挙で除外されるため、判定時点で前回記録は無い=クラッシュ再開ケース) (unit)"
 given = "HeadObject の Size がローカル .age と一致(行列行2)"
 expect_return = "SkipDecision は skip + sizeのみ検証警告(SkipWithSizeOnlyWarn)判定"
-source_lines = "src/uploader.rs:572"
+source_lines = "src/uploader.rs:385"
 
 [[condition]]
 id = "upload.skip-decision-matrix"
@@ -68,7 +68,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-004(判定行列は2
 description = "skip判定行列(404 × head Size一致の3行)が2.3-3の仕様どおり。bucket一致の前回成功記録はpending列挙で除外されるためChecksumSHA256照合は行わない (unit)"
 given = "行列3ケース: 404 / Size一致 / Size不一致"
 expect_return_shape = "各行が upload(行1)・skip+sizeのみ検証警告(行2)・再upload(行3)に判定される"
-source_lines = "src/uploader.rs:582"
+source_lines = "src/uploader.rs:395"
 
 [[condition]]
 id = "upload.cp-command-options"
@@ -77,7 +77,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-005(コマンド仕�
 description = "upload時のPutObject呼び出しにstorage_class(設定値)とchecksum_algorithm SHA256が指定される (unit, fake S3Backend)"
 given = "upload_object 実行(fake S3Backend がAPI呼び出し参数を記録)"
 expect_return_shape = "PutObject呼び出しの記録に storage_class=<設定値> と checksum_algorithm SHA256(ChecksumAlgorithm::Sha256)が含まれる"
-source_lines = "src/uploader.rs:617; tests/encrypt_batch.rs:617"
+source_lines = "src/uploader.rs:430; tests/encrypt_batch.rs:617"
 
 [[condition]]
 id = "upload.s3-key-layout-and-manifest-last"
@@ -86,7 +86,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-006(キー仕様は2
 description = "S3キーは <batch_date>/<source_name>.age・manifestは <batch_date>/manifest.jsonl.age で、manifestは最後にuploadされる (unit, fake S3Backend)"
 given = "2オブジェクト+manifestのバッチを run_upload で実行(fake S3Backend)"
 expect_return_shape = "各PutObject呼び出しのkeyが仕様どおりで、manifestのPutObject呼び出しが最後に行われる"
-source_lines = "src/uploader.rs:711; tests/encrypt_batch.rs:619"
+source_lines = "src/uploader.rs:524; tests/encrypt_batch.rs:619"
 
 [[condition]]
 id = "upload.success-record-append"
@@ -95,16 +95,16 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-007(記録schemaは4
 description = "成功後registryへupload記録(HeadObject実測値)がappendされる。manifestは manifest_upload 記録としてappendされる (unit, fake S3Backend)"
 given = "upload成功(fake S3Backend の HeadObject が Size/ChecksumSHA256/ChecksumType を返す)"
 expect_return_shape = "record_type=upload/manifest_upload の記録が s3_size・s3_checksum_sha256(S3側実測値)・s3_bucket/s3_region(実効bucket/region。4.1の追加フィールド)付きでappendされる"
-source_lines = "src/uploader.rs:747; tests/encrypt_batch.rs:621"
+source_lines = "src/uploader.rs:549; tests/encrypt_batch.rs:621"
 
 [[condition]]
 id = "upload.dry-run-no-aws-exec"
 target_function = "uploader::run_upload --dry-run"
 source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-008(2.3 --dry-run・2.3-7)。TASK-9 SDK移行でAPI形式表示行へ改訂(設計10.1)"
-description = "--dry-run はS3 API呼び出し(HeadObject/PutObject)を一切行わず、実行予定のAPI形式行とskip想定を表示する(RESTORE_README.txtの配置予定・skip想定を含む。2.3-7)。予定行は「[dry-run] s3 PutObject bucket=<b> key=<k> src=<path> storage_class=<sc> checksum=SHA256 [multipart: 64MiB x <n>]」形式(README配置はstorage_class=STANDARD) (unit, fake S3Backend)"
+description = "--dry-run はS3 API呼び出し(HeadObject/PutObject)を一切行わず、実行予定のAPI形式行とskip想定を表示する(2.3-7)。予定行は「[dry-run] s3 PutObject bucket=<b> key=<k> src=<path> storage_class=<sc> checksum=SHA256 [multipart: 64MiB x <n>]」形式(README配置はstorage_class=STANDARD) (unit, fake S3Backend)"
 given = "--dry-run 指定の run_upload(fake S3Backend は呼ばれたら記録する仕掛け)"
 expect_return_shape = "S3 API呼び出しは一切起きず、API形式の予定行とskip想定が表示され exit code 0"
-source_lines = "src/uploader.rs:784"
+source_lines = "src/uploader.rs:586"
 
 [[condition]]
 id = "upload.cp-failure-transfer-error"
@@ -113,7 +113,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-009(7.1転送エラ�
 description = "PutObject失敗(SDK error・retry上限後)は転送エラー5。messageは操作名・bucket・key・SDK由来のerror文を含み、credential値・簽署stringを含まない (unit, fake S3Backend)"
 given = "fake S3Backend の put が失敗(失敗注入FAKE_S3_FAIL_CP_FOR)"
 expect_throw = "TransferError(exit code 5)。messageに操作名・bucket・key・SDK由来error文が含まれcredential値は含まれない"
-source_lines = "src/uploader.rs:826"
+source_lines = "src/uploader.rs:616"
 
 [[condition]]
 id = "upload.missing-age-target-error"
@@ -122,7 +122,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-010(2.3-2・7.1対�
 description = "registryが指す対象 .age が不在の場合は対象エラー3 (unit)"
 given = "registryのencrypt記録が指す .age ファイルを削除した状態で upload 実行"
 expect_throw = "TargetError(exit code 3)"
-source_lines = "src/uploader.rs:879"
+source_lines = "src/uploader.rs:669"
 
 [[condition]]
 id = "upload.no-pending-exit-zero"
@@ -131,7 +131,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-011(2.3終了コー�
 description = "アップロード対象が無い場合 exit 0 で「対象なし」表示となる (unit, fake S3Backend)"
 given = "全対象upload済み(reduce後の未成功が0件)のregistry"
 expect_return = "exit code 0(対象なし表示)"
-source_lines = "src/uploader.rs:897; src/uploader.rs:947; tests/encrypt_batch.rs:623"
+source_lines = "src/uploader.rs:687; src/uploader.rs:729; tests/encrypt_batch.rs:623"
 
 [[condition]]
 id = "upload.keep-going-continues"
@@ -140,7 +140,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-012(規則は7.2)。
 description = "--keep-going でper-object失敗(PutObject失敗)でも継続し、exitは最初のエラー区分(5)。成功分のupload記録(manifest_upload含む)がregistryにappendされる (unit, fake S3Backend)"
 given = "1件put失敗+1件成功+manifest成功の --keep-going 実行"
 expect_return_shape = "exit code 5。成功分のupload記録と manifest_upload 記録がappendされる"
-source_lines = "src/uploader.rs:979"
+source_lines = "src/uploader.rs:761"
 
 [[condition]]
 id = "upload.dry-run-missing-file-note"
@@ -158,7 +158,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-014(2026-10-08レビ
 description = "upload成功後のHeadObject応答に ChecksumSHA256 が含まれない場合、s3_checksum_sha256 には空文字でなく \"UNKNOWN\" マーカーを記録し警告を表示する(空文字では照合不能と値無しの区別がつかない) (unit, fake S3Backend)"
 given = "PutObject成功後のHeadObject応答が ChecksumSHA256 を含まない(fake S3Backend)"
 expect_return_shape = "registry記録の s3_checksum_sha256 が \"UNKNOWN\" となり、警告表示が出る"
-source_lines = "src/uploader.rs:849"
+source_lines = "src/uploader.rs:639"
 
 [[condition]]
 id = "upload.cli-override-reflected-in-aws-argv"
@@ -167,7 +167,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-015(2.3 TASK-6節・
 description = "CLI一時上書き: --storage-class/--bucket/--region指定時、当該実行のS3 API呼び出し(HeadObject・PutObjectの両方)へ上書き値が反映される(bucketはHeadObject/PutObject呼び出しのbucket参数・storage_classはPutObjectのstorage_class参数。regionはBackend構築のRegion::newへ反映されupload/manifest_upload記録のs3_regionで検証。--profileは廃止済みで存在しない)。--help出力の文言: 各オプションの説明文に「当該実行限りの上書き(既定はaws.toml値)」と優先順位(CLI指定値 > aws.toml値・aws.tomlが正本)が表示される。upload/manifest_upload記録には当該実行の実効bucket/regionをs3_bucket/s3_regionとして記録する (integration, fake seam)"
 given = "encrypt済みregistry・aws.toml(bucket/region/storage_class/credentials_file設定済み)に対し、3上書きオプションを指定したupload実行"
 expect_return_shape = "fake backendの呼び出し記録のHeadObject行・PutObject行の両方に上書きbucket(bucket=<上書き値>)が反映され、PutObject行はstorage_class=<上書き値>となる。registryのupload/manifest_upload記録のs3_bucket/s3_regionは実効値。upload --helpに上書きの旨と優先順位の文言が含まれる"
-source_lines = "src/uploader.rs:1063; tests/encrypt_batch.rs:821"
+source_lines = "src/uploader.rs:846; tests/encrypt_batch.rs:821"
 
 [[condition]]
 id = "upload.cli-override-unspecified-keeps-toml-values"
@@ -176,7 +176,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-016(2.3 TASK-6節・
 description = "CLI上書き時、未指定の項目はaws.toml値が使われ、実行後もaws.tomlファイルの内容は不変(正本の書戻しを行わない) (integration, fake seam)"
 given = "--storage-classのみ上書き指定したupload実行(aws.tomlはbucket/region/storage_class/credentials_fileすべて設定済み)"
 expect_return_shape = "未指定のbucket/regionはaws.toml値でS3 API呼び出しが行われ(HeadObject/PutObject行のbucket=<aws.toml値>・PutObject行のstorage_classは上書き値)、実行後のaws.tomlファイルの内容は実行前とbyte単位で同一"
-source_lines = "src/config.rs:856; tests/encrypt_batch.rs:891"
+source_lines = "src/config.rs:860; tests/encrypt_batch.rs:891"
 
 [[condition]]
 id = "upload.cli-storage-class-allowlist-rejected"
@@ -185,7 +185,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-017(2.3 TASK-6節・
 description = "--storage-class上書き値が3.3のallowlist外の場合は設定エラー(exit 2)となり、S3 API呼び出しは一切行われない。空文字・空白のみは未指定扱い(aws.toml値を採用)でエラーとしない (integration, fake seam)"
 given = "allowlist外の値(打ち間違い)・空文字・空白のみを--storage-classに指定したupload実行"
 expect_return_shape = "allowlist外はexit 2・fake backendの呼び出し記録不存在。空文字・空白のみはexit 0でaws.tomlのstorage_class値でPutObject実行"
-source_lines = "src/config.rs:782; tests/encrypt_batch.rs:940"
+source_lines = "src/config.rs:786; tests/encrypt_batch.rs:940"
 
 [[condition]]
 id = "upload.cli-bucket-region-blank-rejected"
@@ -194,7 +194,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-018(2.3 TASK-6節・
 description = "--bucket/--region上書き値が空文字・空白のみ・前後空白付きの場合は設定エラー(exit 2)となり、S3 API呼び出しは一切行われない(値のtrimは行わない) (integration, fake seam)"
 given = "空文字・空白のみ・前後空白付きの値を--bucketまたは--regionに指定したupload実行"
 expect_return_shape = "いずれの組合せもexit 2・fake backendの呼び出し記録不存在"
-source_lines = "src/config.rs:835; tests/encrypt_batch.rs:986"
+source_lines = "src/config.rs:839; tests/encrypt_batch.rs:986"
 
 [[condition]]
 id = "upload.cli-override-with-dry-run"
@@ -206,58 +206,13 @@ expect_return_shape = "exit 0。[dry-run]のPutObject予定行に上書き値(st
 source_lines = "tests/encrypt_batch.rs:1003"
 
 [[condition]]
-id = "upload.restore-readme-placement"
-target_function = "uploader::run_upload"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-020(2.3-7・2.6・TASK-8。2026-10-11 TASK-5で内容要件6を追加)。TASK-9 SDK移行でPutObject参数表現へ改訂(設計5.5・10.2)"
-description = "upload実行で各バッチプレフィックスへRESTORE_README.txtが配置される: S3キーは<batch_date>/RESTORE_README.txt、PutObject呼び出しのstorage_class=STANDARDが常に明示される(設定値・CLI一時上書きに依存しない固定)、配置内容は埋め込みテンプレートとbyte一致(2.6の内容要件: バケット目的・age形式・入手先URL・復元コマンド例・manifest取得例・sha256sum検証・backup-remote restoreコマンドによる復元の1行(内容要件6・TASK-5。restore request → restore status → restore downloadで取得・復号・検証を一括実行できる旨)を含み機密を含まない)、manifestより後に配置される。--date指定時は当該batch_dateのREADMEのみ配置され、他日付のbatch_dateプレフィックスへの配置呼び出しは実行されない (integration, fake seam)"
-given = "encrypt済みregistry(--date検証では複数batch_dateを含む)とfake S3 backend seam(BACKUP_REMOTE_FAKE_S3_STATE)に対するupload実行"
-expect_return_shape = "objects/<date>/RESTORE_README.txtが配置され、内容は2.6の内容要件(backup-remote restoreコマンドの1行を含む。TASK-5実装後のテンプレート)を満たす固定文面(実装後はlib公開のテンプレートpub constとbyte一致比較へ拡張)。READMEのPutObject呼び出しはkey=<date>/RESTORE_README.txt・storage_class=STANDARD固定・manifestのPutObjectより後に実行。--date指定時は他日付prefixへのHeadObject/PutObjectが呼び出し記録に現れない"
-source_lines = "src/uploader.rs:1123; src/uploader.rs:1157; tests/encrypt_batch.rs:1114; tests/encrypt_batch.rs:1197"
-
-[[condition]]
-id = "upload.restore-readme-idempotency"
-target_function = "uploader::run_upload"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-021(2.3-7・2.6・4.1注記・7.3)。TASK-9 SDK移行でHeadObject/PutObject表現へ改訂(設計10.2)"
-description = "README配置の冪等: HeadObject Size一致の既存READMEはskipされ再配置しない。HeadObject 404・Size不一致(テンプレート改訂相当)は再配置する。pending列挙が空の実行(全オブジェクトが当該実効bucketの成功記録済み)でもREADME配置のhead判定は実行され、未配置のbatch_dateがあれば配置する(判定対象はreduce後encrypt記録のmanifest_pathが持つbatch_date全集。7.3のREADME配置前crashのリカバリ経路。この場合もexit 0は変わらない)。README配置でregistryへレコードはappendされない (integration, fake seam)"
-given = "README配置済み状態での再実行(Size一致skip)・README削除後の再実行(404再配置)・配置済みREADMEのSize改変後の再実行(Size不一致再配置)・pending空でREADME削除後の再実行(7.3リカバリ)"
-expect_return_shape = "Size一致時はREADMEのPutObjectが再実行されず、404・Size不一致時は元の内容で再配置される。pending空の実行でもREADME keyへのHeadObjectが実行され(exit 0)、registryへREADME由来のレコードはappendされない(upload/manifest_upload記録のみ)"
-source_lines = "src/uploader.rs:1195; tests/encrypt_batch.rs:1231"
-
-[[condition]]
-id = "upload.restore-readme-cp-failure"
-target_function = "uploader::run_upload"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-022(2.3-7・7.2)。TASK-9 SDK移行でPutObject失敗表現へ改訂(設計10.2)"
-description = "README配置のPutObject失敗は転送エラー5。fail-fast時は即終了、--keep-going時は継続して他バッチのREADME配置・残オブジェクト処理を完走し、exitはエラー区分5 (integration, fake seam)"
-given = "fake S3 backendのPutObjectを特定key(README)のみ失敗注入(FAKE_S3_FAIL_CP_FOR)した状態でのupload実行(fail-fastと--keep-going・複数batch_date)"
-expect_return = "exit code 5(転送エラー)。fail-fastはREADME配置で即終了(対象・manifestの成功分とそのregistry記録は残る)、--keep-goingは失敗READMEのbatchを除く他バッチのREADME配置・残オブジェクト処理まで完走"
-source_lines = "src/uploader.rs:1235; tests/encrypt_batch.rs:1311"
-
-[[condition]]
-id = "upload.restore-readme-temp-file"
-target_function = "uploader::write_readme_temp_at / run_upload"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-023(2.3-7。2026-10-10コードレビュー指摘対応)"
-description = "README送り元一時fileの作成はcreate_new(O_EXCL)で行われ、予測可能pathへ事前配置された既存file・symlinkはリトライなしで拒否される(symlink先の標的fileは破壊されない)。一時fileの作成・書込失敗は設定・環境エラー2で、--keep-going指定時も即終了する(7.2) (unit, fake S3Backend)"
-given = "一時file pathへのsymlink・通常fileの事前配置(送り元pathは実装と同一規則の実temp path含む)状態でのREADME配置を伴うupload実行"
-expect_return_shape = "事前配置されたpathへの作成は設定・環境エラー2(exit 2)で失敗しsymlink先の標的file・既存fileは無傷、READMEのPutObjectは実行されず、--keep-goingでも即終了する。新規pathへの作成は成功しDropで削除される"
-source_lines = "src/uploader.rs:1268; src/uploader.rs:1313"
-
-[[condition]]
-id = "upload.run-summary-readme-separated"
-target_function = "uploader::run_summary_line / run_upload"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-024(2.3-7。2026-10-10コードレビュー指摘対応)"
-description = "upload実行summaryはREADME配置分をオブジェクト数と区別して分離表示する(N uploaded, M skipped, F failed + README配置R件(skip・fail内訳)。dry-run summaryと粒度一致)。README配置対象の無い実行ではREADME部分を付加しない (unit)"
-given = "README配置を伴う実行と伴わない実行のsummary行組立"
-expect_return_shape = "README配置分は「+ README配置 <n>件(skip <n>・fail <n>)」形式で分離され、オブジェクト数のuploaded/skipped/failedへ混入しない。README配置件数が全て0の場合は従来形式のまま"
-source_lines = "src/uploader.rs:1346"
-
-[[condition]]
 id = "upload.multipart-threshold"
 target_function = "s3::RealS3::put(multipart判定)"
 source = "TASK-9 SDK移行設計 5.1〜5.3(tmp/tasks/tm-9/design_sdk_migration.md 5章)。10.2新規条件"
 description = "multipart閾値: 対象file sizeがMULTIPART_THRESHOLD_BYTES(64 MiB)超の場合はCreateMultipartUpload→UploadPart×N(part size 64 MiB)→CompleteMultipartUploadでuploadし、閾値未満(manifest・README等)は単発PutObject(設計5.3) (integration, fake seam)"
 given = "64 MiB超の対象(暗号化済み.age)と閾値未満の対象を含むupload実行(fake S3 backend)"
 expect_return_shape = "64 MiB超keyの呼び出し記録はCreateMultipartUpload→UploadPart×N→CompleteMultipartUpload(単発PutObject無し)で、閾値未満keyは単発PutObject(CreateMultipartUpload無し)。完成objectは実体とbyte一致"
-source_lines = "src/s3.rs:717; tests/s3_backend.rs:285"
+source_lines = "src/s3.rs:718; tests/s3_backend.rs:285"
 
 [[condition]]
 id = "upload.multipart-checksum-per-part"

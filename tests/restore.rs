@@ -387,11 +387,6 @@ fn status_lists_three_restore_states() {
     assert!(stdout.contains("not-requested"), "not-requested表示: {stdout}");
     let ka = fx.key("a.zip.age");
     assert!(stdout.contains(&ka), "key表示: {stdout}");
-    assert!(
-        stdout.contains("復元不要"),
-        "READMEの平文・復元不要の区別表示: {stdout}"
-    );
-
     // 空prefixの--dateは警告+exit 0(空一覧)
     let (code, stdout, stderr) = fx.run(&["status", "--date", "2099-01-01"]);
     assert_eq!(code, 0, "空バッチはexit 0: {stdout}{stderr}");

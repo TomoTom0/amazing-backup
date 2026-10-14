@@ -12,7 +12,6 @@ use crate::s3::S3Backend;
 use std::path::{Path, PathBuf};
 
 /// READMEのS3キーのファイル名部分(uploader.rsと同一の固定文名)。
-const RESTORE_README_NAME: &str = "RESTORE_README.txt";
 
 // ---------------------------------------------------------------------------
 // Restoreヘッダparse(3.8)
@@ -102,11 +101,6 @@ fn dry_run_get_line(bucket: &str, key: &str, dest_part: &Path) -> String {
 /// Backend実装がkey昇順・重複除去済みを返す。
 fn list_objects(backend: &dyn S3Backend, cfg: &AwsConfig, prefix: &str) -> BackupResult<Vec<String>> {
     backend.list_keys(&cfg.bucket, prefix)
-}
-
-/// README(STANDARD即時取得のため復元対象外)の除外判定。
-fn is_readme(key: &str) -> bool {
-    Path::new(key).file_name().map(|f| f == RESTORE_README_NAME).unwrap_or(false)
 }
 
 /// headの`Restore`から状態を得る。head 404(None)の扱いは呼び出し側で決める
@@ -230,7 +224,7 @@ pub fn run_restore_request(backend: &dyn S3Backend, opts: &RestoreRequestOptions
             );
         }
         println!(
-            "-- summary (dry-run): RestoreObject予定(対象key一覧は未確定・RESTORE_README.txtは除外)"
+            "-- summary (dry-run): RestoreObject予定(対象key一覧は未確定)"
         );
         return 0;
     }
@@ -847,15 +841,6 @@ mod tests {
             parse_restore_state(Some(r#"expiry-date="Wed, 14 Oct 2026 00:00:00 GMT""#)),
             RestoreState::NotRequested
         );
-    }
-
-    /// README除外判定の単位確認(軸12・3.2。条件単位の検証はtests/restore.rsの
-    /// RES-001結合testが担うためcovers tagは付けない)。
-    #[test]
-    fn readme_key_excluded() {
-        assert!(is_readme("2026-10-08/RESTORE_README.txt"));
-        assert!(!is_readme("2026-10-08/photo.zip.age"));
-        assert!(!is_readme("2026-10-08/manifest.jsonl.age"));
     }
 
     /// [covers:restore.request-dry-run]
