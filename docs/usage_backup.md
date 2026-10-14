@@ -86,7 +86,7 @@ secret_access_key = "<secret access key>" # 必須
   $ chmod 600 configs/secret/aws-credentials.toml
   ```
 
-- このファイルのpathを `configs/backup/aws.toml` の `[aws].credentials_file` へ記述する(3.2)。必須キーのため、書き漏れはupload/restore実行時の設定エラー2で即検出される
+- このファイルのpathを `configs/aws.toml` の `[aws].credentials_file` へ記述する(3.2)。必須キーのため、書き漏れはupload/restore実行時の設定エラー2で即検出される
 - 空値・前後空白付き値・未知キーは設定エラー2(値そのものはerror文に表示されない)
 - 値を直接aws.tomlへ書くことはできない(`credentials_file`を除くcredential系キーは未知キーとして拒否)
 
@@ -116,7 +116,7 @@ $ aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-con
 
 ## 3. 設定ファイル
 
-### 3.1 `configs/backup/pipeline.toml`
+### 3.1 `configs/pipeline.toml`
 
 暗号化・出力・検証の設定(秘密を含まない)。現行の実物:
 
@@ -160,7 +160,7 @@ decrypt_key = "configs/secret/keys/private/backup_ed25519"
 - `public_keys`内の公開鍵指紋(`SHA256:...`)の重複(同一path重複・異pathで同一鍵blobの両方を検出)
 - `[output]`の相対pathはrepo root(cwd)基準
 
-### 3.2 `configs/backup/aws.toml`
+### 3.2 `configs/aws.toml`
 
 S3接続設定(bucket/region/credentialファイル参照/storage class。credential値そのものは不含)。**upload系・restore系でのみ必須**で、plan/encrypt/verifyはこのファイルがなくても動作する。現行の実物(template):
 
@@ -221,7 +221,7 @@ backup-remote plan [--config PATH] [--from-list FILE] <PATH> [<PATH> ...]
 | 引数/オプション | 既定 | 意味 |
 |---|---|---|
 | `<PATH>`(1個以上必須) | - | 対象アーカイブ |
-| `--config` | `configs/backup/pipeline.toml` | pipeline設定 |
+| `--config` | `configs/pipeline.toml` | pipeline設定 |
 | `--from-list` | なし | 対象リストtoml(3.3)。位置引数と併用可 |
 
 出力例(実機確認済み・パスは例):
@@ -250,7 +250,7 @@ backup-remote encrypt [--config PATH] [--from-list FILE] [--out DIR] [--registry
 | 引数/オプション | 既定 | 意味 |
 |---|---|---|
 | `<PATH>`(1個以上必須) | - | 対象アーカイブ |
-| `--config` | `configs/backup/pipeline.toml` | pipeline設定 |
+| `--config` | `configs/pipeline.toml` | pipeline設定 |
 | `--from-list` | なし | 対象リストtoml |
 | `--out` | 設定`[output].dir` | 成果物dir(テスト隔離用) |
 | `--registry` | 設定`[output].registry` | registry path(テスト隔離用) |
@@ -290,7 +290,7 @@ backup-remote verify [--config PATH] [--date YYYY-MM-DD] [--checksum] [--roundtr
 
 | 引数/オプション | 既定 | 意味 |
 |---|---|---|
-| `--config` | `configs/backup/pipeline.toml` | pipeline設定 |
+| `--config` | `configs/pipeline.toml` | pipeline設定 |
 | `--date` | なし(全件) | 当該batch_date分に限定。`YYYY-MM-DD`形式(形式不正はusage error 64) |
 | `--checksum` | なし | `.age`のsha256を再計算してregistry記録と照合(全読込発生) |
 | `--roundtrip` | なし | 秘密鍵で復号し平文sha256をregistry記録と照合(平文は書き出さない)。manifest復号+registry突合も行う |
@@ -322,8 +322,8 @@ backup-remote upload [--config PATH] [--aws-config PATH] [--date YYYY-MM-DD]
 
 | 引数/オプション | 既定 | 意味 |
 |---|---|---|
-| `--config` | `configs/backup/pipeline.toml` | pipeline設定 |
-| `--aws-config` | `configs/backup/aws.toml` | aws設定 |
+| `--config` | `configs/pipeline.toml` | pipeline設定 |
+| `--aws-config` | `configs/aws.toml` | aws設定 |
 | `--date` | なし(全未upload分) | 当該batch_date分に限定。`YYYY-MM-DD`形式(形式不正はusage error 64) |
 | `--dry-run` | なし | S3 API(PutObject・HeadObject)を実行せず、実行予定とskip想定を表示 |
 | `--keep-going` | 設定`[behavior].keep_going` | per-object失敗でも継続 |
@@ -465,7 +465,7 @@ upload実行は、各バッチプレフィックス(`<date>/`)へ平文README `R
 
    秘密鍵・公開鍵とも`configs/secret/`配下に置く。秘密鍵はバックアップとは別の場所へ保管する(このdirはgitignore済み)。
 
-2. `configs/backup/pipeline.toml` の `[recipients].public_keys` へ公開鍵(.pub)を追加:
+2. `configs/pipeline.toml` の `[recipients].public_keys` へ公開鍵(.pub)を追加:
 
    ```toml
    public_keys = [
@@ -495,7 +495,7 @@ upload実行は、各バッチプレフィックス(`<date>/`)へ平文README `R
 
 ## 8. 正本bucket変更時の移行手順
 
-正本bucket(`configs/backup/aws.toml`の`[aws].bucket`)を恒久変更する場合の手順。
+正本bucket(`configs/aws.toml`の`[aws].bucket`)を恒久変更する場合の手順。
 
 背景: registryのupload記録はupload先の実効bucketを`s3_bucket`として記録し、upload実行は「`s3_bucket`が当該実行の実効bucketと一致する成功記録が無いもの」を対象に列挙する。ここで、**`s3_bucket`フィールドを持たない旧レコード(s3_bucket記録導入前の記録)は、aws.tomlのbucketと一致するものとして解釈される**(前方互換)。そのためaws.tomlのbucketを書き換えるだけだと、欠損記録の対象が「新bucketで成功済み」と誤帰属され、新bucketへの再uploadが行われないまま漏れが残る。
 

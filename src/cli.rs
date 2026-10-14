@@ -4,9 +4,9 @@ use crate::errors::{BackupError, BackupResult};
 use std::path::{Path, PathBuf};
 
 /// 既定のpipeline設定path(2章各表)。
-const DEFAULT_PIPELINE_CONFIG: &str = "configs/backup/pipeline.toml";
+const DEFAULT_PIPELINE_CONFIG: &str = "configs/pipeline.toml";
 /// 既定のaws設定path(2.3)。
-const DEFAULT_AWS_CONFIG: &str = "configs/backup/aws.toml";
+const DEFAULT_AWS_CONFIG: &str = "configs/aws.toml";
 
 /// サブコマンド引数定義(2章各表)。
 #[derive(clap::Parser)]
@@ -32,7 +32,7 @@ pub enum Command {
 
 #[derive(clap::Args)]
 pub struct PlanArgs {
-    /// pipeline設定(既定 configs/backup/pipeline.toml)
+    /// pipeline設定(既定 configs/pipeline.toml)
     #[arg(long)]
     pub config: Option<PathBuf>,
     /// 対象リストtoml(位置引数と併用可・和集合)

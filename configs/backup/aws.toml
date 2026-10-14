@@ -1,6 +1,0 @@
-[aws]
-# いずれもupload系でのみ必須(plan/encrypt/verifyはこのファイルがなくても動作)
-bucket = ""                    # S3 bucket名(空文字・未設定はupload時設定エラー2)
-region = ""                    # region名(同上)
-credentials_file = "configs/secret/aws-credentials.toml" # credential(API key)ファイルのpath。必須(2.3で作成)
-storage_class = "DEEP_ARCHIVE" # 既定DEEP_ARCHIVE

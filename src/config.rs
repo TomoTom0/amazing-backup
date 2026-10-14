@@ -3,7 +3,7 @@
 use crate::errors::{BackupError, BackupResult};
 use std::path::Path;
 
-/// `configs/backup/pipeline.toml`相当(3.2)。
+/// `configs/pipeline.toml`相当(3.2)。
 #[derive(Debug)]
 pub struct PipelineConfig {
     /// SSH ed25519公開鍵path列挙(1-of-N recipient)
@@ -18,7 +18,7 @@ pub struct PipelineConfig {
     pub decrypt_key: Option<std::path::PathBuf>,
 }
 
-/// `configs/backup/aws.toml`相当(3.3・TASK-9 9.2)。credential値は含まない
+/// `configs/aws.toml`相当(3.3・TASK-9 9.2)。credential値は含まない
 /// (credentialは`credentials_file`が指す外部ファイル明示参照のみ)。
 #[derive(Debug)]
 pub struct AwsConfig {

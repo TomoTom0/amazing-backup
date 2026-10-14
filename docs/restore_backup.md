@@ -28,7 +28,7 @@ aws CLIがあると1.4のバッチ一覧確認や8章の手動復元に使える
 
 - 1本目の秘密鍵: `configs/secret/keys/private/backup_ed25519`
 - 災害時はバックアップ作成者がバックアップとは別の場所へ保管している当該鍵を指す(bucketには秘密鍵は含まれない)
-- 指定方法: `restore download`の`--key`、または`configs/backup/pipeline.toml`の`[verify].decrypt_key`。`--key`未指定かつpipeline.tomlでも解決できない場合は設定エラー(終了コード2)。災害時のようにpipeline.tomlがない環境では`--key`が必須
+- 指定方法: `restore download`の`--key`、または`configs/pipeline.toml`の`[verify].decrypt_key`。`--key`未指定かつpipeline.tomlでも解決できない場合は設定エラー(終了コード2)。災害時のようにpipeline.tomlがない環境では`--key`が必須
 - 鍵を紛失すると該当バッチは復元できない。recipient追加前の旧鍵も廃棄しないこと(`docs/usage_backup.md` 7.3)
 
 ### 1.3 aws.toml(bucket・region・credentialファイル)
@@ -42,7 +42,7 @@ region = "ap-northeast-1"
 credentials_file = "configs/secret/aws-credentials.toml"
 ```
 
-- 既定pathは`configs/backup/aws.toml`。任意のpathは`--aws-config`で指定できる
+- 既定pathは`configs/aws.toml`。任意のpathは`--aws-config`で指定できる
 - `credentials_file`はcredential(API key)ファイルのpath(作成手順は`docs/usage_backup.md` 2.3)。**災害時の新環境ではaccess keyを入手のうえ当該ファイルも作成する**(credential値を直書きするキーはaws.tomlに存在しない)
 - **災害時の新環境ではbucket/region/credentials_fileを記載したaws.tomlとAPI keyファイルと秘密鍵のみでrestoreが動作する**(作成環境の資産は不要。1.4)
 - CLI一時上書き(`--bucket`/`--region`)はaws.toml値が正である前提の当該実行限りの上書きであり、**tomlのbucket/regionが空の項目をCLI値で補完する使い方はできない**(空値はCLI指定の有無にかかわらず設定エラー2。`docs/usage_backup.md` 3.2・4.4と同一規定)
@@ -51,7 +51,7 @@ credentials_file = "configs/secret/aws-credentials.toml"
 
 ### 1.4 作成環境の資産は不要(災害時でも動作)
 
-restore系はローカルの`data/registry.jsonl`・`data/out/`・`configs/backup/pipeline.toml`に一切依存しない。対象の発見はS3側(ListObjectsV2の`<date>/`プレフィックス列挙)で行い、検証の正本はS3上のmanifest(4章)である。例外はdownloadの`--key`既定値解決のみpipeline.tomlを参照する(1.2)。
+restore系はローカルの`data/registry.jsonl`・`data/out/`・`configs/pipeline.toml`に一切依存しない。対象の発見はS3側(ListObjectsV2の`<date>/`プレフィックス列挙)で行い、検証の正本はS3上のmanifest(4章)である。例外はdownloadの`--key`既定値解決のみpipeline.tomlを参照する(1.2)。
 
 バッチ(日付)一覧の確認はbucket側で行う(任意の確認手段。aws CLIの例):
 
@@ -94,7 +94,7 @@ backup-remote restore request --date YYYY-MM-DD [--name NAME ...] [--days N] [--
 | `--name` | なし(バッチ全体) | 対象source_name(basename・拡張子付き。repeatable)。バッチ内に存在しないname・重複指定は対象エラー3 |
 | `--days` | 7 | 復元コピーの保持日数(1〜365の整数。範囲外・非整数は設定エラー2) |
 | `--tier` | Standard | 復元Tier(`Standard`/`Bulk`。allowlist外は設定エラー2) |
-| `--aws-config` | `configs/backup/aws.toml` | aws設定(1.3) |
+| `--aws-config` | `configs/aws.toml` | aws設定(1.3) |
 | `--bucket`/`--region` | aws.toml値 | 当該実行限りのCLI一時上書き(usage_backup 4.4と同一仕様) |
 | `--dry-run` | なし | S3 API実行なし(ListObjectsV2/HeadObject/RestoreObject)。予定行を表示 |
 | `--keep-going` | なし | per-key失敗でも継続(設定エラー2は常に即中止) |
