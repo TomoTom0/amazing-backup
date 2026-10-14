@@ -16,12 +16,6 @@ pub use config::{AwsConfig, PipelineConfig};
 pub use errors::{BackupError, BackupResult};
 pub use registry::{EncryptRecord, ManifestUploadRecord, Record, Reduced, UploadRecord};
 
-/// RESTORE_README.txtの埋め込みテンプレート(2.6・TASK-8。src/templates/restore_readme.txt)。
-/// 完全固定文面であり実行時埋め込みなし(bucket名・日付等の環境依存値を含まない)。
-/// binに埋め込むためテンプレートファイルの欠損・path解決errorの経路が消え、
-/// テンプレート改訂はreleaseを伴う版管理になる(2.6の設計判断)。
-pub const RESTORE_README_TEMPLATE: &str = include_str!("templates/restore_readme.txt");
-
 /// 単体test(src内`#[cfg(test)]`)共用の補助。テスト階層専用で実装には含めない。
 #[cfg(test)]
 pub(crate) mod testutil {

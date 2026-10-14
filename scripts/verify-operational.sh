@@ -37,11 +37,11 @@ echo "== encrypt =="
 cargo run --quiet -- encrypt --config "$PIPELINE" --out "$TMP/out" --registry "$TMP/registry.jsonl" "$ZIP"
 
 echo "== upload dry-run =="
-cargo run --quiet -- upload --config "$PIPELINE" --aws-config "$ROOT/configs/aws.toml" --dry-run
+cargo run --quiet -- upload --config "$PIPELINE" --aws-config "$ROOT/configs/aws.toml" --storage-class STANDARD --dry-run
 
 if [[ "${1:-}" == "--live" || "${LIVE:-}" == "1" ]]; then
     echo "== upload (live) =="
-    cargo run --quiet -- upload --config "$PIPELINE" --aws-config "$ROOT/configs/aws.toml"
+    cargo run --quiet -- upload --config "$PIPELINE" --aws-config "$ROOT/configs/aws.toml" --storage-class STANDARD
     echo "== verify =="
     cargo run --quiet -- verify --config "$PIPELINE"
 else

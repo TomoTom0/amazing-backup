@@ -218,10 +218,6 @@ fn request_issues_restore_object_for_all_batch_keys() {
         );
     }
     assert!(
-        !ro.iter().any(|l| l.contains("RESTORE_README.txt")),
-        "READMEへは発行しない: {calls}"
-    );
-    assert!(
         ro.iter().all(|l| l.contains("days=3") && l.contains("tier=Bulk")),
         "RestoreRequest参数(days・glacier_job_parameters.tier): {calls}"
     );
@@ -391,7 +387,6 @@ fn status_lists_three_restore_states() {
     assert!(stdout.contains("not-requested"), "not-requested表示: {stdout}");
     let ka = fx.key("a.zip.age");
     assert!(stdout.contains(&ka), "key表示: {stdout}");
-    assert!(stdout.contains("RESTORE_README.txt"), "README行: {stdout}");
     assert!(
         stdout.contains("復元不要"),
         "READMEの平文・復元不要の区別表示: {stdout}"
@@ -977,24 +972,6 @@ fn cli_overrides_reflected_in_restore_argv() {
         .filter(|l| l.starts_with("s3 HeadObject") && l.contains("bucket=ov-bucket"))
         .collect();
     assert!(!dl_head.is_empty(), "download側のHeadObject: {calls}");
-}
-
-/// [covers:restore.template-restore-command-line]
-/// テンプレート追記(RES-021・2.6内容要件6): RESTORE_READMEテンプレートの復元手順節へ
-/// backup-remote restoreコマンドによる復元の1行が含まれる(UPL-020期待値と相互参照。
-/// テンプレート本体への追記はTASK-5実装段階のため実装前はfailする=テスト先行)。
-#[test]
-fn template_contains_restore_command_line() {
-    let t = backup_remote::RESTORE_README_TEMPLATE;
-    let n = t.lines().filter(|l| l.contains("backup-remote restore")).count();
-    assert_eq!(n, 1, "restoreコマンドの行は1行のみ: {t}");
-    assert!(t.contains("backup-remote restore"), "restore行: {t}");
-    assert!(
-        t.contains("restore request")
-            && t.contains("restore status")
-            && t.contains("restore download"),
-        "request→status→downloadの流れに言及: {t}"
-    );
 }
 
 /// [covers:restore.request-name-cross-check]

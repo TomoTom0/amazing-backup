@@ -155,21 +155,12 @@ pub fn run_upload(backend: &dyn S3Backend, opts: &UploadOptions) -> i32 {
             }
         }
     }
-    // README配置判定対象(2.3-7)。pending空の実行でも配置判定は実行するため
-    // 早期returnの前に算出する(7.3のREADME配置前crashリカバリ経路)
-    let readme_dates = readme_batch_dates(&reduced, opts.date.as_deref());
-
     if opts.dry_run {
-        for line in dry_run_display_lines(cfg, &pending, &readme_dates) {
+        for line in dry_run_display_lines(cfg, &pending) {
             println!("{line}");
         }
-        let readme_note = if readme_dates.is_empty() {
-            String::new()
-        } else {
-            format!(" + README配置予定{}件", readme_dates.len())
-        };
         println!(
-            "-- summary (dry-run): {} objects{readme_note} (HeadObject未実行のためskip想定は未確定・全件upload想定)",
+            "-- summary (dry-run): {} objects (HeadObject未実行のためskip想定は未確定・全件upload想定)",
             pending.len()
         );
         return 0;
@@ -179,10 +170,6 @@ pub fn run_upload(backend: &dyn S3Backend, opts: &UploadOptions) -> i32 {
     let mut skipped = 0usize;
     let mut failed = 0usize;
     let mut first_err: Option<i32> = None;
-    // README配置分は実行summaryでオブジェクト数と区別して数える(2.3-7)
-    let mut readme_placed = 0usize;
-    let mut readme_skipped = 0usize;
-    let mut readme_failed = 0usize;
     if pending.is_empty() {
         println!("upload対象なし(全オブジェクトupload済み、または対象が存在しません)");
     }
@@ -203,48 +190,14 @@ pub fn run_upload(backend: &dyn S3Backend, opts: &UploadOptions) -> i32 {
                     first_err = Some(e.exit_code());
                 }
                 if !opts.keep_going {
-                    println!("{}", run_summary_line(uploaded, skipped, failed, readme_placed, readme_skipped, readme_failed));
+                    println!("{}", run_summary_line(uploaded, skipped, failed));
                     return e.exit_code();
                 }
             }
         }
     }
 
-    // 各バッチプレフィックス(<date>/)へ平文READMEを配置する(2.3-7・2.6・TASK-8)。
-    // manifestより後に配置するため「READMEが存在するプレフィックス=当該バッチの
-    // upload完了」の目印を兼ねる(fail-fastで完了した実行の場合の目印であり、
-    // --keep-goingで一部オブジェクトが失敗した実行ではこの保証はない)。
-    // pending空の実行でも判定は実行し(7.3)、配置でregistryレコードは作らない(4.1注記)。
-    // 一時fileは初回配置時に書き出し、このscopeを抜ける時点(Drop)で削除する。
-    let mut readme_tmp: Option<ReadmeTempFile> = None;
-    for date in &readme_dates {
-        let key = format!("{date}/{RESTORE_README_NAME}");
-        match place_restore_readme(backend, cfg, &mut readme_tmp, &key) {
-            Ok(true) => {
-                readme_placed += 1;
-                println!("ok    {key}");
-            }
-            Ok(false) => {
-                readme_skipped += 1;
-                println!("skip  {key}");
-            }
-            Err(e) => {
-                readme_failed += 1;
-                eprintln!("error: {e}");
-                if first_err.is_none() {
-                    first_err = Some(e.exit_code());
-                }
-                // 送り元一時fileの書込失敗等の設定・環境エラーは、retryしても成功
-                // しないローカル環境の問題のため--keep-goingでも即終了する
-                // (7.2「設定エラーは常に即中止」・2.3-7)
-                if matches!(e, BackupError::Config(_)) || !opts.keep_going {
-                    println!("{}", run_summary_line(uploaded, skipped, failed, readme_placed, readme_skipped, readme_failed));
-                    return e.exit_code();
-                }
-            }
-        }
-    }
-    println!("{}", run_summary_line(uploaded, skipped, failed, readme_placed, readme_skipped, readme_failed));
+    println!("{}", run_summary_line(uploaded, skipped, failed));
     first_err.unwrap_or(0)
 }
 
@@ -277,20 +230,8 @@ fn revive_deleted_objects(
 /// 実行summary行(2.3・2.3-7)。README配置分はオブジェクト数に混入させず
 /// 「+ README配置 <n>件」形式で分離表示する(dry-run summaryとの粒度一致。
 /// README配置対象の無い実行ではREADME部分を付加しない)。
-fn run_summary_line(
-    uploaded: usize,
-    skipped: usize,
-    failed: usize,
-    readme_placed: usize,
-    readme_skipped: usize,
-    readme_failed: usize,
-) -> String {
-    let readme_note = if readme_placed + readme_skipped + readme_failed == 0 {
-        String::new()
-    } else {
-        format!(" + README配置 {readme_placed}件(skip {readme_skipped}・fail {readme_failed})")
-    };
-    format!("-- summary: {uploaded} uploaded, {skipped} skipped, {failed} failed{readme_note}")
+fn run_summary_line(uploaded: usize, skipped: usize, failed: usize) -> String {
+    format!("-- summary: {uploaded} uploaded, {skipped} skipped, {failed} failed")
 }
 
 /// pending 1件の処理。Ok(true)=upload実行、Ok(false)=skip、Err=失敗。
@@ -374,125 +315,6 @@ fn upload_pending(
     }
 }
 
-// ---------------------------------------------------------------------------
-// RESTORE_README.txt配置(2.3-7・2.6・TASK-8)
-
-/// READMEのS3キーのファイル名部分(2.6。bucket一覧で気づきやすい大文字命名)。
-const RESTORE_README_NAME: &str = "RESTORE_README.txt";
-
-/// README配置判定対象のbatch_date全集(2.3-7)。reduce後encrypt記録の`manifest_path`が
-/// 持つ`batch_date`プレフィックスの全集(`--date`指定時は当該日付のみ)。昇順・重複除去。
-/// pending列挙(2.3-2)へ流出した対象が属する`batch_date`は常にこの集合に含まれる。
-fn readme_batch_dates(reduced: &crate::registry::Reduced, date: Option<&str>) -> Vec<String> {
-    let mut dates: Vec<String> = reduced
-        .encrypts
-        .iter()
-        .filter(|e| date.map(|d| e.batch_date == d).unwrap_or(true))
-        .map(|e| e.batch_date.clone())
-        .collect();
-    dates.sort();
-    dates.dedup();
-    dates
-}
-
-/// READMEテンプレートをcpの送り元として書き出す一時fileのpath(実行時)。
-/// templateはbin埋め込みのため実fileが必要(2.3-7)。実行ごとに同一pathへ
-/// `create_new`(O_EXCL)で新規作成する(pathが既に存在する場合は書き換えず
-/// 設定・環境エラー2。前回実行のcrash残存・第三者によるsymlink事前配置の
-/// いずれも、symlink追従での意図しないfile破壊を起こさない)。
-fn readme_temp_path() -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "backup-remote-{}.{RESTORE_README_NAME}",
-        std::process::id()
-    ))
-}
-
-/// 書き出したREADME一時file。Dropで削除する(fail-fastの早期return経路でも残さない)。
-#[derive(Debug)]
-struct ReadmeTempFile(PathBuf);
-
-impl ReadmeTempFile {
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for ReadmeTempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// READMEテンプレートを一時fileへ書き出す(配置が必要になった時点で初回のみ呼ぶ)。
-fn write_readme_temp() -> BackupResult<ReadmeTempFile> {
-    write_readme_temp_at(&readme_temp_path())
-}
-
-/// `path`へREADMEテンプレートを`create_new`(O_EXCL)で書き出す。pathが既に存在
-/// する場合(第三者によるfile・symlinkの事前配置、前回実行のcrash残存)は
-/// リトライせず設定・環境エラー2とする(2.3-7。予測可能pathへのsymlinkを経由
-/// した標的file破壊の攻撃耐性。送り元は非機密の固定文面だが同一耐性を入れる。
-/// 失敗はローカル環境の問題のため転送エラーでなく設定・環境エラー)。
-fn write_readme_temp_at(path: &Path) -> BackupResult<ReadmeTempFile> {
-    use std::io::Write as _;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|e| {
-            BackupError::Config(format!(
-                "READMEテンプレートの一時file作成に失敗 ({}): {e}",
-                path.display()
-            ))
-        })?;
-    file.write_all(crate::RESTORE_README_TEMPLATE.as_bytes())
-        .map_err(|e| {
-            BackupError::Config(format!(
-                "READMEテンプレートの一時file書込に失敗 ({}): {e}",
-                path.display()
-            ))
-        })?;
-    Ok(ReadmeTempFile(path.to_path_buf()))
-}
-
-/// README 1バッチ分の配置判定と配置(2.3-7)。Ok(true)=配置(再配置)実行・
-/// Ok(false)=head `Size`一致でskip・Err=失敗(配置PutObject失敗は転送エラー5。
-/// 送り元一時fileの作成・書込失敗は設定・環境エラー2)。
-/// READMEはregistryレコードを作らない(2.6・4.1注記)ため冪等判定はhead `Size`のみ
-/// (2.3-3と同一の3行構造)。`readme_tmp`は一時fileのlazy書き出し用(呼び出し側で保持)。
-/// 配置PutObjectのstorage_classは設定`[aws].storage_class`・CLI一時上書き
-/// `--storage-class`のいずれにもよらず`STANDARD`を常に明示する(README本文の取得に
-/// Glacier復元jobを要する鶏卵問題の回避。2.6)。
-fn place_restore_readme(
-    backend: &dyn S3Backend,
-    cfg: &AwsConfig,
-    readme_tmp: &mut Option<ReadmeTempFile>,
-    key: &str,
-) -> BackupResult<bool> {
-    // 配置判定はregistry記録を参照せず毎回HeadObjectで行う(2.3-7)
-    let local_size = crate::RESTORE_README_TEMPLATE.len() as u64;
-    let head = backend.head(&cfg.bucket, key)?;
-    match decide_skip(local_size, head.as_ref()) {
-        SkipDecision::SkipWithSizeOnlyWarn => {
-            eprintln!(
-                "WARNING: {key} はsizeのみ検証でskipします(README配置の冪等skip・registry記録は持たない)"
-            );
-            Ok(false)
-        }
-        SkipDecision::Upload | SkipDecision::Reupload => {
-            if readme_tmp.is_none() {
-                *readme_tmp = Some(write_readme_temp()?);
-            }
-            let tmp_path = readme_tmp
-                .as_ref()
-                .map(|t| t.path().to_path_buf())
-                .unwrap_or_else(|| readme_temp_path());
-            backend.put(&cfg.bucket, key, &tmp_path, "STANDARD")?;
-            Ok(true)
-        }
-    }
-}
-
 /// dry-run表示のPutObject予定行(設計10.1のAPI形式)。
 /// 64MiB超対象はmultipart予定の注記を付ける(Backend側判定と同一閾値)。
 fn dry_run_put_line(bucket: &str, key: &str, src: &Path, storage_class: &str) -> String {
@@ -514,12 +336,9 @@ fn dry_run_put_line(bucket: &str, key: &str, src: &Path, storage_class: &str) ->
 fn dry_run_display_lines(
     cfg: &AwsConfig,
     pending: &[crate::registry::PendingUpload],
-    readme_dates: &[String],
 ) -> Vec<String> {
     let mut lines = Vec::new();
     for p in pending {
-        // dry-runでも実ファイルの存在を検査し、不在対象はPutObject予定の代わりに
-        // 「対象エラー想定」の注記を表示する(2.3。実行時に対象エラー3になる事前通知)
         if !p.local_path.is_file() {
             lines.push(format!(
                 "[dry-run] 対象エラー想定: {} (registryが指す実ファイルが不在: {})",
@@ -529,12 +348,6 @@ fn dry_run_display_lines(
             continue;
         }
         lines.push(dry_run_put_line(&cfg.bucket, &p.s3_key, &p.local_path, &cfg.storage_class));
-    }
-    // README配置予定(2.3-7): 送り元は実行時に書き出す一時file
-    let tmp = readme_temp_path();
-    for date in readme_dates {
-        let key = format!("{date}/{RESTORE_README_NAME}");
-        lines.push(dry_run_put_line(&cfg.bucket, &key, &tmp, "STANDARD"));
     }
     lines
 }
@@ -724,24 +537,13 @@ mod tests {
         let code = run_upload(&fake, &opts(&registry));
         assert_eq!(code, 0, "全upload成功");
         let puts = put_calls(&fake);
-        assert_eq!(puts.len(), 4, "オブジェクト2 + manifest 1 + README 1: {}", fake.calls());
+        assert_eq!(puts.len(), 3, "オブジェクト2 + manifest 1: {}", fake.calls());
         assert!(puts[0].contains("key=2026-10-01/a.7z.age"), "s3_key昇順: {}", puts[0]);
         assert!(puts[1].contains("key=2026-10-01/b.zip.age"), "s3_key昇順: {}", puts[1]);
         assert!(puts[2].contains("key=2026-10-01/manifest.jsonl.age"), "manifestはオブジェクトより後: {}", puts[2]);
-        assert!(
-            puts[3].contains("key=2026-10-01/RESTORE_README.txt")
-                && puts[3].contains("storage_class=STANDARD"),
-            "READMEはmanifestより後にSTANDARD固定で配置: {}",
-            puts[3]
-        );
         // simulator上のobject配置も確認
         assert_eq!(fake.object("2026-10-01/a.7z.age").unwrap(), b"age-of-a.7z".to_vec());
         assert_eq!(fake.object("2026-10-01/manifest.jsonl.age").unwrap(), b"manifest-age-bytes".to_vec());
-        // README objectは埋め込みtemplateとbyte一致(完全固定文面)
-        assert_eq!(
-            fake.object("2026-10-01/RESTORE_README.txt").unwrap(),
-            crate::RESTORE_README_TEMPLATE.as_bytes()
-        );
     }
 
     /// [covers:upload.success-record-append]
@@ -805,22 +607,10 @@ mod tests {
         let aws = aws_cfg();
         let pending =
             crate::registry::pending_uploads_for_bucket(&reduced, None, &aws.bucket, &aws.bucket);
-        let dates = readme_batch_dates(&reduced, None);
-        let lines = dry_run_display_lines(&aws, &pending, &dates);
+        let lines = dry_run_display_lines(&aws, &pending);
         let put_planned: Vec<&String> =
             lines.iter().filter(|l| l.contains("s3 PutObject")).collect();
-        assert_eq!(put_planned.len(), 3, "対象1 + manifest 1 + README 1: {lines:?}");
-        let readme_line = put_planned
-            .iter()
-            .find(|l| l.contains("RESTORE_README.txt"))
-            .expect("README配置予定行");
-        assert!(
-            readme_line.starts_with("[dry-run] s3 PutObject bucket=test-bucket")
-                && readme_line.contains("key=2026-10-01/RESTORE_README.txt")
-                && readme_line.contains("storage_class=STANDARD")
-                && readme_line.contains("checksum=SHA256"),
-            "README配置予定は同形式でSTANDARD固定: {readme_line}"
-        );
+        assert_eq!(put_planned.len(), 2, "対象1 + manifest 1: {lines:?}");
     }
 
     /// [covers:upload.cp-failure-transfer-error]
@@ -919,23 +709,15 @@ mod tests {
         let code = run_upload(&fake, &opts(&registry));
         assert_eq!(code, 0, "対象なしはexit 0");
         // 前回成功記録のある対象のS3側実在確認headは行われるが、putは再実行されない。
-        // pending空でもREADME配置判定のheadは実行され(7.3リカバリ経路)、Size一致でskip
         let calls = fake.calls();
         assert!(
-            put_calls(&fake)
-                .iter()
-                .all(|c| c.contains("RESTORE_README.txt")),
+            put_calls(&fake).is_empty(),
             "対象/manifestのputは再実行しない: {calls}"
         );
         assert!(
             calls.lines().any(|c| c.starts_with("s3 HeadObject")
                 && c.contains("key=2026-10-01/a.zip.age")),
             "前回成功記録のある対象もS3側実在確認のheadは実行: {calls}"
-        );
-        assert!(
-            calls.lines().any(|c| c.starts_with("s3 HeadObject")
-                && c.contains("key=2026-10-01/RESTORE_README.txt")),
-            "pending空でもREADME配置判定のheadは実行: {calls}"
         );
         assert_eq!(
             registry_lines(&registry).len(),
@@ -1096,17 +878,8 @@ mod tests {
             }
         }
         let puts = put_calls(&fake);
-        // README配置(2.3-7)のput行(STANDARD固定)はUPL-020系で検証するため除外
-        let put_no_readme: Vec<&String> =
-            puts.iter().filter(|l| !l.contains("RESTORE_README.txt")).collect();
-        assert!(!put_no_readme.is_empty(), "対象/manifestのput実行: {puts:?}");
-        assert!(put_no_readme.iter().all(|l| l.contains("storage_class=GLACIER")), "putのstorage_class: {puts:?}");
-        assert!(
-            puts.iter().any(|l| l.contains("RESTORE_README.txt")
-                && l.contains("storage_class=STANDARD")
-                && l.contains("bucket=alt-bucket")),
-            "README putはCLI上書きによらずSTANDARD固定(bucket等は実効値): {puts:?}"
-        );
+        assert!(!puts.is_empty(), "対象/manifestのput実行: {puts:?}");
+        assert!(puts.iter().all(|l| l.contains("storage_class=GLACIER")), "putのstorage_class: {puts:?}");
 
         // registry記録のs3_bucket/s3_regionは当該実行の実効値
         let lines = registry_lines(&registry);
@@ -1119,248 +892,5 @@ mod tests {
             assert_eq!(rec["s3_bucket"], "alt-bucket", "実効bucket記録: {rec}");
             assert_eq!(rec["s3_region"], "us-east-1", "実効region記録: {rec}");
         }
-    }
-
-    /// [covers:upload.restore-readme-placement]
-    /// 埋め込みtemplate(2.6)は内容要件(バケット目的・age v1形式・入手先URL・
-    /// SSH ed25519秘密鍵・復元コマンド例・manifest取得例・sha256sum検証・
-    /// backup-remote restoreコマンドによる復元の1行)を満たす完全固定文面で機密を含まない
-    /// (実行時埋め込みなし・bucket名等を含まない)。内容要件6のrestore行はTASK-5で追記済み
-    /// (RES-021・UPL-020期待値と相互参照)。
-    #[test]
-    fn restore_readme_template_content_requirements() {
-        let t = crate::RESTORE_README_TEMPLATE;
-        assert!(!t.trim().is_empty(), "空templateでない");
-        assert!(t.contains("バックアップ"), "バケットの目的: {t}");
-        assert!(t.contains("age v1"), "age v1形式: {t}");
-        assert!(t.contains(".age"), "拡張子.age: {t}");
-        assert!(t.contains("https://age-encryption.org"), "age入手先URL: {t}");
-        assert!(t.contains("https://github.com/FiloSottile/age"), "age入手先URL(github): {t}");
-        assert!(t.contains("SSH"), "SSH ed25519秘密鍵の必要性: {t}");
-        assert!(t.contains("ed25519"), "SSH ed25519秘密鍵の必要性: {t}");
-        assert!(t.contains("aws s3 cp"), "復元コマンド例(取得): {t}");
-        assert!(t.contains("age -d"), "復元コマンド例(復号): {t}");
-        assert!(t.contains("manifest.jsonl.age"), "manifest取得例: {t}");
-        assert!(t.contains("sha256sum"), "checksum検証手順: {t}");
-        assert!(t.contains("source_name"), "manifest.jsonl内の該当レコード特定方法: {t}");
-        assert!(t.contains("photo.zip.age"), "<名前>定義の具体例: {t}");
-        // 内容要件6(TASK-5実装で追記・RES-021/UPL-020): restoreコマンドの1行
-        assert_eq!(
-            t.lines().filter(|l| l.contains("backup-remote restore")).count(),
-            1,
-            "backup-remote restoreコマンドの行は1行のみ: {t}"
-        );
-        // 実行時埋め込みなし(bucket名等の環境依存値を含まない)
-        assert!(!t.contains("test-bucket"), "bucket名を含まない: {t}");
-        assert!(!t.contains("it-bucket"), "bucket名を含まない: {t}");
-    }
-
-    /// [covers:upload.restore-readme-placement]
-    /// README配置判定対象はreduce後encrypt記録のbatch_date全集(昇順・重複除去)で、
-    /// --date指定時は当該日付のみ(2.3-7)。
-    #[test]
-    fn readme_batch_dates_full_set_and_date_filter() {
-        let tmp = TempDir::new("upl-rdates");
-        let registry = fixture_batch(tmp.path(), &["a.zip"]);
-        // 別batch_date(2026-09-30)のencrypt記録を2件(age_pathは別)追記し、
-        // 全集・昇順・重複除去を検証する
-        let mut text = std::fs::read_to_string(&registry).unwrap();
-        let mut rec: crate::registry::EncryptRecord =
-            serde_json::from_str(text.lines().next().unwrap()).expect("encrypt記録parse");
-        for n in 0..2 {
-            rec.batch_date = "2026-09-30".into();
-            rec.age_path = format!("/data/out/2026-09-30/extra{n}.age");
-            text.push_str(&serde_json::to_string(&rec).unwrap());
-            text.push('\n');
-        }
-        write_file(&registry, text.as_bytes());
-        let records = crate::registry::load_registry(&registry).expect("registry読込");
-        let reduced = crate::registry::reduce_records(&records);
-
-        assert_eq!(
-            readme_batch_dates(&reduced, None),
-            vec!["2026-09-30".to_string(), "2026-10-01".to_string()],
-            "全集を昇順・重複除去で返す"
-        );
-        assert_eq!(
-            readme_batch_dates(&reduced, Some("2026-10-01")),
-            vec!["2026-10-01".to_string()],
-            "--date指定時は当該日付のみ"
-        );
-        assert!(
-            readme_batch_dates(&reduced, Some("2099-12-31")).is_empty(),
-            "--date不一致時は空"
-        );
-    }
-
-    /// [covers:upload.restore-readme-idempotency]
-    /// README配置の冪等(unit版・FakeS3): 2回目の実行(pending空)でもREADME配置判定の
-    /// headは実行され、head Size一致でskip(putは再実行しない)。README配置でregistryへ
-    /// レコードはappendされない(2.3-7・2.6・4.1注記・7.3)。
-    #[test]
-    fn restore_readme_idempotent_skip_unit() {
-        // README一時fileのpathはprocess内共有のためrun_upload系testと直列化
-        let _lock = crate::testutil::path_env_lock();
-        let tmp = TempDir::new("upl-rridem");
-        let registry = fixture_batch(tmp.path(), &["a.zip"]);
-        let state = tmp.path().join("s3state");
-        let fake = FakeS3::new(&state);
-        let readme_put_count = |f: &FakeS3| {
-            put_calls(f)
-                .iter()
-                .filter(|c| c.contains("RESTORE_README.txt"))
-                .count()
-        };
-
-        let code = run_upload(&fake, &opts(&registry));
-        assert_eq!(code, 0, "初回成功");
-        assert_eq!(readme_put_count(&fake), 1, "初回はREADME put 1回");
-        let lines_after_first = registry_lines(&registry).len();
-
-        // 2回目(pending空): head Size一致でskip・registry追記なし
-        let code = run_upload(&fake, &opts(&registry));
-        assert_eq!(code, 0, "pending空の再実行もexit 0");
-        assert_eq!(readme_put_count(&fake), 1, "README putは再実行しない");
-        assert_eq!(
-            registry_lines(&registry).len(),
-            lines_after_first,
-            "README由来のregistry追記なし"
-        );
-        assert_eq!(
-            fake.object("2026-10-01/RESTORE_README.txt").unwrap(),
-            crate::RESTORE_README_TEMPLATE.as_bytes(),
-            "配置objectはtemplateとbyte一致"
-        );
-    }
-
-    /// [covers:upload.restore-readme-cp-failure]
-    /// README配置のPutObject失敗は転送エラー5(2.3-7・7.2): fail-fastは即終了し、
-    /// READMEより前の対象・manifestの成功分とそのregistry記録は残る。
-    #[test]
-    fn restore_readme_put_failure_is_transfer_error_unit() {
-        // README一時fileのpathはprocess内共有のためrun_upload系testと直列化
-        let _lock = crate::testutil::path_env_lock();
-        let tmp = TempDir::new("upl-rrfail");
-        let registry = fixture_batch(tmp.path(), &["a.zip"]);
-        let state = tmp.path().join("s3state");
-        let fake = FakeS3::new(&state).fail_cp("2026-10-01/RESTORE_README.txt");
-
-        let code = run_upload(&fake, &opts(&registry));
-        assert_eq!(code, 5, "README put失敗は転送エラー5");
-        assert!(fake.object("2026-10-01/a.zip.age").is_some(), "対象はupload済み(READMEより前)");
-        assert!(fake.object("2026-10-01/manifest.jsonl.age").is_some(), "manifestもupload済み");
-        assert!(fake.object("2026-10-01/RESTORE_README.txt").is_none(), "READMEは未配置");
-        let lines = registry_lines(&registry);
-        let ups = lines
-            .iter()
-            .filter(|r| r["record_type"] == "upload" || r["record_type"] == "manifest_upload")
-            .count();
-        assert_eq!(ups, 2, "README失敗前の成功分のregistry記録");
-    }
-
-    /// test内で作成したfile/symlinkを、panic時も含めて確実に削除するguard。
-    struct RemoveOnDrop(PathBuf);
-    impl Drop for RemoveOnDrop {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    /// [covers:upload.restore-readme-temp-file]
-    /// 送り元一時fileの作成はcreate_new(O_EXCL): 事前配置されたsymlink・通常fileは
-    /// リトライなしで拒否され(設定・環境エラー2)、symlink先の標的fileは破壊されない。
-    /// 新規pathへは書き出せ、Dropで削除される。
-    #[test]
-    fn readme_temp_file_create_new_rejects_preexisting_path() {
-        let tmp = TempDir::new("upl-rrnew");
-
-        // 1. symlink事前配置: 拒否され標的fileは無傷(予測可能pathへの第三者による
-        //    symlink配置を経由した標的file破壊が成立しない)
-        let victim = tmp.path().join("victim.txt");
-        write_file(&victim, b"victim-bytes");
-        let link = tmp.path().join("readme-tmp-link");
-        std::os::unix::fs::symlink(&victim, &link).expect("symlink事前配置");
-        let e = write_readme_temp_at(&link).unwrap_err();
-        assert!(matches!(e, BackupError::Config(_)), "設定・環境エラー2: {e:?}");
-        assert_eq!(e.exit_code(), 2);
-        assert_eq!(
-            std::fs::read(&victim).unwrap(),
-            b"victim-bytes".to_vec(),
-            "symlink先の標的fileは無傷"
-        );
-        assert_eq!(std::fs::read_link(&link).unwrap(), victim, "symlink自体は置き換えない");
-
-        // 2. 通常fileの事前配置も同様に拒否(前回実行のcrash残存相当)
-        let plain = tmp.path().join("readme-tmp-plain");
-        write_file(&plain, b"preexisting");
-        assert!(matches!(
-            write_readme_temp_at(&plain),
-            Err(BackupError::Config(_))
-        ));
-        assert_eq!(std::fs::read(&plain).unwrap(), b"preexisting".to_vec(), "既存fileは無傷");
-
-        // 3. 新規pathへは書き出せる。内容は埋め込みtemplateと一致し、Dropで削除される
-        let fresh = tmp.path().join("readme-tmp-fresh");
-        {
-            let t = write_readme_temp_at(&fresh).expect("新規pathへの書き出し成功");
-            assert_eq!(
-                std::fs::read(t.path()).unwrap(),
-                crate::RESTORE_README_TEMPLATE.as_bytes()
-            );
-        }
-        assert!(!fresh.exists(), "Dropで削除される");
-    }
-
-    /// [covers:upload.restore-readme-temp-file]
-    /// 一時file作成失敗(設定・環境エラー)は--keep-goingでも即終了する(7.2・2.3-7)。
-    /// 実装と同一規則の予測可能path(実temp path)へのsymlink事前配置で発生させる。
-    #[test]
-    fn readme_temp_failure_stops_immediately_even_with_keep_going() {
-        // 実temp pathへ触る他のrun_upload系testとの直列化(実temp pathはprocess内共有)
-        let _lock = crate::testutil::path_env_lock();
-        let tmp = TempDir::new("upl-rrcfg");
-        let registry = fixture_batch(tmp.path(), &["a.zip"]);
-        let victim = tmp.path().join("victim.txt");
-        write_file(&victim, b"victim-bytes");
-        let link = readme_temp_path();
-        let _cleanup = RemoveOnDrop(link.clone());
-        std::os::unix::fs::symlink(&victim, &link).expect("symlink事前配置");
-
-        let state = tmp.path().join("s3state");
-        let fake = FakeS3::new(&state);
-        let mut o = opts(&registry);
-        o.keep_going = true;
-        let code = run_upload(&fake, &o);
-        assert_eq!(code, 2, "一時file作成失敗は設定・環境エラー2で即終了(keep-goingでも継続しない)");
-        assert_eq!(
-            std::fs::read(&victim).unwrap(),
-            b"victim-bytes".to_vec(),
-            "symlink先の標的fileは無傷"
-        );
-        let puts = put_calls(&fake);
-        assert!(
-            puts.iter().all(|c| !c.contains("RESTORE_README.txt")),
-            "READMEのputは実行されない: {puts:?}"
-        );
-    }
-
-    /// [covers:upload.run-summary-readme-separated]
-    /// 実行summaryはREADME配置分をオブジェクト数と区別して分離表示する
-    /// (dry-run summaryとの粒度一致。README配置対象の無い実行は従来形式)。
-    #[test]
-    fn run_summary_separates_readme_counts() {
-        assert_eq!(
-            run_summary_line(2, 1, 0, 1, 0, 0),
-            "-- summary: 2 uploaded, 1 skipped, 0 failed + README配置 1件(skip 0・fail 0)"
-        );
-        assert_eq!(
-            run_summary_line(1, 0, 1, 0, 1, 1),
-            "-- summary: 1 uploaded, 0 skipped, 1 failed + README配置 0件(skip 1・fail 1)"
-        );
-        assert_eq!(
-            run_summary_line(3, 0, 0, 0, 0, 0),
-            "-- summary: 3 uploaded, 0 skipped, 0 failed",
-            "README配置対象なしではREADME部分を付加しない"
-        );
     }
 }
