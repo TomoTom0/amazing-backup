@@ -97,15 +97,38 @@ struct AwsFile {
     aws: AwsSection,
 }
 
-#[derive(serde::Deserialize)]
+/// profile単位のS3設定(複数profileを1つのaws.tomlに持つためのサブテーブル)。
+#[derive(serde::Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
-struct AwsSection {
+struct AwsProfile {
+    #[serde(default)]
     bucket: String,
+    #[serde(default)]
     region: String,
-    /// 必須キー(欠落はparseエラー=設定エラー2で書き漏れを即検出)
+    /// 省略時は`[aws].credentials_file`(共通)を採用
+    #[serde(default)]
     credentials_file: String,
     #[serde(default)]
     storage_class: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AwsSection {
+    /// 後方互換: profilesが空の場合はこの直下フィールドをdefault profileとして使う。
+    #[serde(default)]
+    bucket: String,
+    #[serde(default)]
+    region: String,
+    #[serde(default)]
+    credentials_file: String,
+    #[serde(default)]
+    storage_class: String,
+    /// 複数profileを持つ場合の既定profile名(省略時は"default"→なければ先頭/直下fields)。
+    #[serde(default)]
+    active_profile: String,
+    #[serde(default)]
+    profiles: std::collections::BTreeMap<String, AwsProfile>,
 }
 
 /// credentialファイルのschema(TASK-9設計3.1・3.2。[credentials]テーブル配下は
@@ -202,43 +225,102 @@ const KNOWN_STORAGE_CLASSES: [&str; 7] = [
 /// `storage_class`は既知S3 storage classのallowlist検証を行う(3.3)。
 /// `bucket`/`region`/`credentials_file`の前後空白付き値・`credentials_file`空値は
 /// (値を trimせず使う仕様のため)設定エラーとする(3.3・TASK-9 3.3)。
+/// `aws.toml`を読み、`profile_name`(Someなら指定profile、Noneなら
+/// `active_profile`/直下fieldsによる既定選択)に対応する設定を返す。
+/// 旧形式(`[aws]`直下にbucket/region/...を書く)は単一profileとして扱い後方互換を維持する。
 pub fn load_aws(path: &Path) -> BackupResult<AwsConfig> {
+    load_aws_profile(path, None)
+}
+
+pub fn load_aws_profile(path: &Path, profile_name: Option<&str>) -> BackupResult<AwsConfig> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| BackupError::Config(format!("aws.tomlを読めない ({}): {e}", path.display())))?;
     let parsed: AwsFile = toml::from_str(&text)
         .map_err(|e| BackupError::Config(format!("aws.tomlのparseに失敗 ({}): {e}", path.display())))?;
+
+    // 直下fieldsをanonymous profileとして扱う(後方互換)。
+    let has_direct = !parsed.aws.bucket.is_empty()
+        || !parsed.aws.region.is_empty()
+        || !parsed.aws.credentials_file.is_empty()
+        || !parsed.aws.storage_class.is_empty();
+
+    let (bucket, region, credentials_file, storage_class) = if parsed.aws.profiles.is_empty() {
+        // 旧形式: 直下fieldsをそのまま使う。
+        let storage_class = if parsed.aws.storage_class.trim().is_empty() {
+            "DEEP_ARCHIVE".to_string()
+        } else {
+            parsed.aws.storage_class.clone()
+        };
+        (parsed.aws.bucket.clone(), parsed.aws.region.clone(), parsed.aws.credentials_file.clone(), storage_class)
+    } else {
+        // profile選択。
+        let selected_name = profile_name
+            .map(str::to_string)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| {
+                if !parsed.aws.active_profile.trim().is_empty() {
+                    parsed.aws.active_profile.clone()
+                } else if parsed.aws.profiles.contains_key("default") {
+                    "default".to_string()
+                } else {
+                    parsed.aws.profiles.keys().cloned().next().unwrap_or_default()
+                }
+            });
+        let prof = parsed.aws.profiles.get(&selected_name).ok_or_else(|| {
+            BackupError::Config(format!(
+                "指定profileが見つからない: {selected_name} ({}。利用可能: {})",
+                path.display(),
+                parsed.aws.profiles.keys().cloned().collect::<Vec<_>>().join("/")
+            ))
+        })?;
+        let credentials_file = if prof.credentials_file.trim().is_empty() {
+            parsed.aws.credentials_file.clone()
+        } else {
+            prof.credentials_file.clone()
+        };
+        let storage_class = if prof.storage_class.trim().is_empty() {
+            if parsed.aws.storage_class.trim().is_empty() {
+                "DEEP_ARCHIVE".to_string()
+            } else {
+                parsed.aws.storage_class.clone()
+            }
+        } else {
+            prof.storage_class.clone()
+        };
+        (prof.bucket.clone(), prof.region.clone(), credentials_file, storage_class)
+    };
+
+    // whitespace check
     for (name, value) in [
-        ("bucket", &parsed.aws.bucket),
-        ("region", &parsed.aws.region),
-        ("credentials_file", &parsed.aws.credentials_file),
+        ("bucket", &bucket),
+        ("region", &region),
+        ("credentials_file", &credentials_file),
     ] {
+        let joined = format!("[profile].{name}");
         if value.trim() != value {
             return Err(BackupError::Config(format!(
-                "[aws].{name}の値に前後の空白が含まれる(空白付き値はtrimせず設定エラーとする): {value:?}"
+                "{joined}の値に前後の空白が含まれる: {value:?}"
             )));
         }
     }
-    if parsed.aws.credentials_file.trim().is_empty() {
+    if credentials_file.trim().is_empty() {
         return Err(BackupError::Config(format!(
-            "[aws].credentials_fileが空です(credentialファイルのpathを指定してください。{}の[aws])",
+            "credentials_fileが空です ({})",
             path.display()
         )));
     }
-    let storage_class = if parsed.aws.storage_class.trim().is_empty() {
-        "DEEP_ARCHIVE".to_string()
-    } else {
-        parsed.aws.storage_class
-    };
     if !KNOWN_STORAGE_CLASSES.contains(&storage_class.as_str()) {
         return Err(BackupError::Config(format!(
-            "[aws].storage_classが既知のS3 storage classでない: {storage_class}(許容値: {})",
+            "storage_classが既知のS3 storage classでない: {storage_class}(許容値: {})",
             KNOWN_STORAGE_CLASSES.join("/")
         )));
     }
+    // has_direct は将来の補強用に確保 (top-level空 & profiles空の場合はbucket空でrequire_readyに弾かれる)
+    let _ = has_direct;
     Ok(AwsConfig {
-        bucket: parsed.aws.bucket,
-        region: parsed.aws.region,
-        credentials_file: std::path::PathBuf::from(parsed.aws.credentials_file),
+        bucket,
+        region,
+        credentials_file: std::path::PathBuf::from(credentials_file),
         storage_class,
     })
 }

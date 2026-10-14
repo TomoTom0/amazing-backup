@@ -1039,6 +1039,7 @@ mod tests {
             storage_class: None,
             bucket: bucket.map(|s| s.to_string()),
             region: None,
+            aws_profile: None,
         };
 
         // 1. aws.toml不在
