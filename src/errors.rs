@@ -55,7 +55,7 @@ mod tests {
 
     /// [covers:cli.exit-code-mapping]
     /// 7.1仕様表どおりのexit code対応(区分×codeの全行)。
-    /// 代表ケース経由の検証は cli.rs の usage/exit-code 系テストと uploader.rs のテストが担う。
+    /// 代表ケース経由の検証は cli.rs の usage/exit-code 系テストと s3.rs(転送エラー)・backup push 経路のテストが担う。
     #[test]
     fn exit_code_matches_spec_table() {
         assert_eq!(BackupError::Internal("x".into()).exit_code(), 1);

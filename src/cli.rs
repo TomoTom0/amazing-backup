@@ -1,12 +1,13 @@
 //! clap定義・サブコマンドdispatch・終了コード集約(設計5章cli.rs・2章)。
+//! TASK-11(Phase B): 旧サブコマンド(plan/encrypt/upload/verify/restore)は削除し、
+//! 機能は新体系(backup push/pull/verify・get・list jobs等)へ集約(設計7.3)。
+//! ローカル整合検査(backup verify)の実装も本moduleにある(旧verifyの引数構造を継承)。
 
-use crate::errors::{BackupError, BackupResult};
+use crate::errors::BackupResult;
 use std::path::{Path, PathBuf};
 
 /// 既定のpipeline設定path(2章各表)。
 const DEFAULT_PIPELINE_CONFIG: &str = "configs/pipeline.toml";
-/// 既定のaws設定path(2.3)。
-const DEFAULT_AWS_CONFIG: &str = "configs/aws.toml";
 
 /// サブコマンド引数定義(2章各表)。
 #[derive(clap::Parser)]
@@ -18,16 +19,6 @@ pub struct Cli {
 
 #[derive(clap::Subcommand)]
 pub enum Command {
-    /// 対象解決と事前検査(暗号化・uploadを行わない)
-    Plan(PlanArgs),
-    /// 暗号化とregistry・manifest記録
-    Encrypt(EncryptArgs),
-    /// S3 Deep Archiveへの転送
-    Upload(UploadArgs),
-    /// ローカル整合検査(明示オプションで復号roundtrip)
-    Verify(VerifyArgs),
-    /// S3 Deep Archiveからの復元(発行・状態確認・取得+検証+復号)
-    Restore(RestoreArgs),
     /// 一覧(照会のみ・正引き)
     List(crate::storage::ListArgs),
     /// 探索(逆引き・名前/path部分一致)
@@ -36,52 +27,18 @@ pub enum Command {
     Get(crate::storage::GetArgs),
     /// 完全性(索引↔S3実態の突合)
     Diff(crate::storage::DiffArgs),
-    /// 書き込み(push)/一括復元(pull)
+    /// 書き込み(push)/一括復元(pull)/ローカル整合検査(verify)
     Backup(crate::storage::BackupArgs),
     /// ピン留め版の付与/解除
     Pin(crate::storage::PinArgs),
-    /// 保持・索引・lifecycleの管理
+    /// 保持・索引・lifecycle・復元jobの管理
     Manage(crate::storage::ManageArgs),
     /// 設定の編集対象表示(検証付き)
     Edit(crate::storage::EditArgs),
 }
 
-#[derive(clap::Args)]
-pub struct PlanArgs {
-    /// pipeline設定(既定 configs/pipeline.toml)
-    #[arg(long)]
-    pub config: Option<PathBuf>,
-    /// 対象リストtoml(位置引数と併用可・和集合)
-    #[arg(long)]
-    pub from_list: Option<PathBuf>,
-    /// 対象アーカイブ(zip/7z)
-    #[arg(required = true)]
-    pub paths: Vec<PathBuf>,
-}
-
-#[derive(clap::Args)]
-pub struct EncryptArgs {
-    #[arg(long)]
-    pub config: Option<PathBuf>,
-    #[arg(long)]
-    pub from_list: Option<PathBuf>,
-    /// 成果物dir(既定は設定[output].dir)
-    #[arg(long)]
-    pub out: Option<PathBuf>,
-    /// registry path(既定は設定[output].registry)
-    #[arg(long)]
-    pub registry: Option<PathBuf>,
-    /// per-file失敗でも継続
-    #[arg(long)]
-    pub keep_going: bool,
-    /// 対象アーカイブ(zip/7z)
-    #[arg(required = true)]
-    pub paths: Vec<PathBuf>,
-}
-
-/// `--date`の形式検証(2.3・2.4): `YYYY-MM-DD`(半角数字4-2-2)以外はusage error 64。
-/// 誤記(例: `2026-1-1`)が対象なしexit 0で静かな未upload/未検証になるのを防ぐ。
-/// 暦日としての実在性(13月等)は検証しない(形式のみ)。
+/// `--date`の形式検証(backup verifyの対象日filter): `YYYY-MM-DD`(半角数字4-2-2)以外は
+/// usage error 64。暦日としての実在性(13月等)は検証しない(形式のみ)。
 fn parse_date_arg(s: &str) -> Result<String, String> {
     let parts: Vec<&str> = s.split('-').collect();
     let ok = parts.len() == 3
@@ -98,256 +55,6 @@ fn parse_date_arg(s: &str) -> Result<String, String> {
     }
 }
 
-#[derive(clap::Args)]
-pub struct UploadArgs {
-    #[arg(long)]
-    pub config: Option<PathBuf>,
-    #[arg(long)]
-    pub aws_config: Option<PathBuf>,
-    #[arg(long)]
-    pub aws_profile: Option<String>,
-    #[arg(long)]
-    pub aws_purpose: Option<String>,
-    /// 当該batch_date分に限定(YYYY-MM-DD形式。形式不正はusage error 64)
-    #[arg(long, value_parser = parse_date_arg)]
-    pub date: Option<String>,
-    /// head-object・cpを実行せず実行予定とskip想定を表示
-    #[arg(long)]
-    pub dry_run: bool,
-    #[arg(long)]
-    pub keep_going: bool,
-    /// storage classの当該実行限りの上書き(既定はaws.toml値。空文字・空白のみは未指定扱い)
-    ///
-    /// 優先順位: CLI指定値 > aws.toml値・aws.tomlが正本(aws.tomlへの書戻しはしない)
-    #[arg(long, verbatim_doc_comment)]
-    pub storage_class: Option<String>,
-    /// S3 bucketの当該実行限りの上書き(既定はaws.toml値。空文字・空白のみ・前後空白付きは設定エラー)
-    ///
-    /// 優先順位: CLI指定値 > aws.toml値・aws.tomlが正本(aws.tomlへの書戻しはしない)
-    #[arg(long, verbatim_doc_comment)]
-    pub bucket: Option<String>,
-    /// regionの当該実行限りの上書き(既定はaws.toml値。空文字・空白のみ・前後空白付きは設定エラー)
-    ///
-    /// 優先順位: CLI指定値 > aws.toml値・aws.tomlが正本(aws.tomlへの書戻しはしない)
-    #[arg(long, verbatim_doc_comment)]
-    pub region: Option<String>,
-}
-
-#[derive(clap::Args)]
-pub struct VerifyArgs {
-    #[arg(long)]
-    pub config: Option<PathBuf>,
-    /// 当該batch_date分に限定(YYYY-MM-DD形式。形式不正はusage error 64)
-    #[arg(long, value_parser = parse_date_arg)]
-    pub date: Option<String>,
-    /// .ageのsha256を再計算してregistry記録と照合
-    #[arg(long)]
-    pub checksum: bool,
-    /// 秘密鍵で復号し平文sha256をregistry記録と照合
-    #[arg(long)]
-    pub roundtrip: bool,
-    /// 復号用秘密鍵(--roundtrip時必須)
-    #[arg(long)]
-    pub key: Option<PathBuf>,
-}
-
-/// `restore`配下の3サブコマンド(2.7・TASK-5 3.1)。
-#[derive(clap::Args)]
-pub struct RestoreArgs {
-    #[command(subcommand)]
-    pub command: RestoreCommand,
-}
-
-#[derive(clap::Subcommand)]
-pub enum RestoreCommand {
-    /// 復元job発行(Deep Archive取り出し要求)
-    Request(RestoreRequestArgs),
-    /// 復元状態一覧(head-objectのRestoreヘッダ)
-    Status(RestoreStatusArgs),
-    /// 取得・検証・復号(manifest正本のsha256照合)
-    Download(RestoreDownloadArgs),
-}
-
-/// restore系共通のCLI一時上書きoptions(3.1。--storage-class・--profileは持たない。
-/// --profileはTASK-9で廃止)。
-fn restore_aws_overrides(
-    bucket: &Option<String>,
-    region: &Option<String>,
-) -> crate::config::AwsOverrides {
-    crate::config::AwsOverrides {
-        storage_class: None,
-        bucket: bucket.clone(),
-        region: region.clone(),
-    }
-}
-
-#[derive(clap::Args)]
-pub struct RestoreRequestArgs {
-    #[arg(long)]
-    pub aws_config: Option<PathBuf>,
-    #[arg(long)]
-    pub aws_profile: Option<String>,
-    #[arg(long)]
-    pub aws_purpose: Option<String>,
-    /// 対象batch_date(YYYY-MM-DD形式・必須。形式不正はusage error 64)
-    #[arg(long, value_parser = parse_date_arg)]
-    pub date: String,
-    /// 対象source_name(basename・repeatable。省略時バッチ全体。重複・不在は対象エラー3)
-    #[arg(long)]
-    pub name: Vec<String>,
-    /// 復元保持日数(1〜365の整数・既定7。範囲外・非整数は設定エラー2)
-    #[arg(long)]
-    pub days: Option<String>,
-    /// 復元Tier(Standard/Bulk・既定Standard。allowlist外は設定エラー2)
-    #[arg(long)]
-    pub tier: Option<String>,
-    /// S3 bucketの当該実行限りの上書き(既定はaws.toml値。空文字・空白のみ・前後空白付きは設定エラー)
-    #[arg(long, verbatim_doc_comment)]
-    pub bucket: Option<String>,
-    /// regionの当該実行限りの上書き(既定はaws.toml値。空文字・空白のみ・前後空白付きは設定エラー)
-    #[arg(long, verbatim_doc_comment)]
-    pub region: Option<String>,
-    /// aws実行なし(ListObjectsV2/head/RestoreObject)。予定行を表示
-    #[arg(long)]
-    pub dry_run: bool,
-    /// per-key失敗でも継続(設定エラー2は常に即中止)
-    #[arg(long)]
-    pub keep_going: bool,
-}
-
-#[derive(clap::Args)]
-pub struct RestoreStatusArgs {
-    #[arg(long)]
-    pub aws_config: Option<PathBuf>,
-    #[arg(long)]
-    pub aws_profile: Option<String>,
-    #[arg(long)]
-    pub aws_purpose: Option<String>,
-    /// 対象batch_date(YYYY-MM-DD形式・必須。形式不正はusage error 64)
-    #[arg(long, value_parser = parse_date_arg)]
-    pub date: String,
-    /// S3 bucketの当該実行限りの上書き(既定はaws.toml値。空文字・空白のみ・前後空白付きは設定エラー)
-    #[arg(long, verbatim_doc_comment)]
-    pub bucket: Option<String>,
-    /// regionの当該実行限りの上書き(既定はaws.toml値。空文字・空白のみ・前後空白付きは設定エラー)
-    #[arg(long, verbatim_doc_comment)]
-    pub region: Option<String>,
-    /// head失敗でも継続(設定エラー2は常に即中止)
-    #[arg(long)]
-    pub keep_going: bool,
-}
-
-#[derive(clap::Args)]
-pub struct RestoreDownloadArgs {
-    #[arg(long)]
-    pub aws_config: Option<PathBuf>,
-    #[arg(long)]
-    pub aws_profile: Option<String>,
-    #[arg(long)]
-    pub aws_purpose: Option<String>,
-    /// 対象batch_date(YYYY-MM-DD形式・必須。形式不正はusage error 64)
-    #[arg(long, value_parser = parse_date_arg)]
-    pub date: String,
-    /// 対象source_name(basename・repeatable。省略時manifest全件。重複・不在は対象エラー3)
-    #[arg(long)]
-    pub name: Vec<String>,
-    /// 復元先dir(既定 data/restore。配下に<date>/を作る)
-    #[arg(long)]
-    pub out: Option<PathBuf>,
-    /// 復号用SSH ed25519秘密鍵(既定はpipeline.tomlの[verify].decrypt_key)
-    #[arg(long)]
-    pub key: Option<PathBuf>,
-    /// S3 bucketの当該実行限りの上書き(既定はaws.toml値。空文字・空白のみ・前後空白付きは設定エラー)
-    #[arg(long, verbatim_doc_comment)]
-    pub bucket: Option<String>,
-    /// regionの当該実行限りの上書き(既定はaws.toml値。空文字・空白のみ・前後空白付きは設定エラー)
-    #[arg(long, verbatim_doc_comment)]
-    pub region: Option<String>,
-    /// aws実行なし(head/get)・復号もしない。GetObject予定行を表示
-    #[arg(long)]
-    pub dry_run: bool,
-    /// per-file失敗でも継続(設定エラー2は常に即中止)
-    #[arg(long)]
-    pub keep_going: bool,
-}
-
-/// plan結果の表示組み立て(2.1)。cmd_planがstdoutへ出力する文字列。
-/// (fingerprint, 公開鍵path)の組でrecipientを表示する。
-pub(crate) fn format_plan_report(
-    targets: &[crate::targets::Target],
-    recipients: &[(String, PathBuf)],
-    out_dir: &Path,
-    batch_date: &str,
-) -> String {
-    let mut s = String::from("== plan ==\n");
-    let mut total: u64 = 0;
-    for (i, t) in targets.iter().enumerate() {
-        total += t.size;
-        s.push_str(&format!(
-            "  {:>2}. {}  {:>12}  mtime {} JST\n",
-            i + 1,
-            t.source_path.display(),
-            fmt_size(t.size),
-            t.mtime.format("%Y-%m-%d %H:%M"),
-        ));
-    }
-    s.push_str(&format!(
-        "targets: {} files, {} total\n",
-        targets.len(),
-        fmt_size(total)
-    ));
-    s.push_str(&format!("recipients (1-of-N, N={}):\n", recipients.len()));
-    for (fp, path) in recipients {
-        s.push_str(&format!("  - {fp}   {}\n", path.display()));
-    }
-    let mut listing: Vec<String> = targets
-        .iter()
-        .map(|t| format!("{}.age", t.source_name))
-        .collect();
-    listing.push("manifest.jsonl.age".to_string());
-    s.push_str(&format!(
-        "output: {}/{}/{{{}}}\n",
-        out_dir.display(),
-        batch_date,
-        listing.join(", ")
-    ));
-    s.push_str(&format!("s3 prefix: {batch_date}/\n"));
-    s
-}
-
-/// サイズの表示(二進接頭辞・小数1桁)。
-fn fmt_size(bytes: u64) -> String {
-    const UNITS: [(&str, u64); 5] = [
-        ("PiB", 1 << 50),
-        ("TiB", 1 << 40),
-        ("GiB", 1 << 30),
-        ("MiB", 1 << 20),
-        ("KiB", 1 << 10),
-    ];
-    for (unit, scale) in UNITS {
-        if bytes >= scale {
-            return format!("{:.1} {}", bytes as f64 / scale as f64, unit);
-        }
-    }
-    format!("{bytes} B")
-}
-
-/// バッチ識別子`<YYYYMMDD>-<8桁hex乱数>`(4.1)。
-fn new_batch_id(batch_date: &str) -> String {
-    let mut rand = [0u8; 4];
-    let ok = std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut rand));
-    if ok.is_err() {
-        // fallback: 高精度時刻から導出(実運用で/dev/urandomが開けないことはほぼ無い)
-        let d = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        rand = (d.as_nanos() as u32).wrapping_mul(2654435761).to_le_bytes();
-    }
-    let hex: String = rand.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{}-{hex}", batch_date.replace('-', ""))
-}
-
 /// 設定読込の共通部。失敗時はstderrへ出力してNone。
 fn load_config_or_exit(config: &Option<PathBuf>) -> Option<crate::config::PipelineConfig> {
     let path = config
@@ -355,291 +62,6 @@ fn load_config_or_exit(config: &Option<PathBuf>) -> Option<crate::config::Pipeli
         .unwrap_or_else(|| PathBuf::from(DEFAULT_PIPELINE_CONFIG));
     match crate::config::load_pipeline(&path) {
         Ok(cfg) => Some(cfg),
-        Err(e) => {
-            eprintln!("error: {e}");
-            None
-        }
-    }
-}
-
-/// plan統括(2.1)。戻り値はexit code。
-pub fn cmd_plan(args: &PlanArgs) -> i32 {
-    let Some(cfg) = load_config_or_exit(&args.config) else {
-        return 2;
-    };
-    let targets = match crate::targets::resolve_targets(&args.paths, args.from_list.as_deref()) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return e.exit_code();
-        }
-    };
-    // 表示に必要なrecipient指紋(設定読込時に検証済み。ここで再計算)
-    let mut recipients: Vec<(String, PathBuf)> = Vec::new();
-    for key in &cfg.public_keys {
-        match crate::fingerprint::parse_ssh_pubkey(key) {
-            Ok(pk) => recipients.push((crate::fingerprint::fingerprint(&pk), key.clone())),
-            Err(e) => {
-                eprintln!("error: {e}");
-                return e.exit_code();
-            }
-        }
-    }
-    let batch_date = crate::targets::jst_today();
-    print!(
-        "{}",
-        format_plan_report(&targets, &recipients, &cfg.output_dir, &batch_date)
-    );
-    0
-}
-
-/// encrypt統括(2.2)。戻り値はexit code。
-pub fn cmd_encrypt(args: &EncryptArgs) -> i32 {
-    let Some(cfg) = load_config_or_exit(&args.config) else {
-        return 2;
-    };
-    let out_dir = args.out.clone().unwrap_or_else(|| cfg.output_dir.clone());
-    let registry_path = args
-        .registry
-        .clone()
-        .unwrap_or_else(|| cfg.registry_path.clone());
-    let keep_going = args.keep_going || cfg.keep_going;
-
-    let targets = match crate::targets::resolve_targets(&args.paths, args.from_list.as_deref()) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return e.exit_code();
-        }
-    };
-
-    let records = match crate::registry::load_registry(&registry_path) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return e.exit_code();
-        }
-    };
-    let reduced = crate::registry::reduce_records(&records);
-
-    let batch_date = crate::targets::jst_today();
-    let date_dir = out_dir.join(&batch_date);
-    let manifest_path = date_dir.join("manifest.jsonl.age");
-    let batch_id = new_batch_id(&batch_date);
-
-    let mut ok_records: Vec<crate::registry::EncryptRecord> = Vec::new();
-    let mut skipped = 0usize;
-    let mut failed = 0usize;
-    let mut first_err: Option<i32> = None;
-
-    for t in &targets {
-        let mtime_str = crate::targets::format_jst(&t.mtime);
-        let age_path = date_dir.join(format!("{}.age", t.source_name));
-        // skip判定(2.2-1): registryに同一source(path・size・mtime一致)のencrypt記録があり、
-        // その記録が指す出力.ageが存在する場合は再読込せずskip
-        if let Some(rec) = crate::registry::find_match(&reduced, &t.source_path, t.size, &mtime_str)
-        {
-            if Path::new(&rec.age_path).is_file() {
-                println!(
-                    "skip  {} (already encrypted: registry match)",
-                    t.source_name
-                );
-                skipped += 1;
-                continue;
-            }
-        }
-        match crate::crypto::encrypt_stream(&t.source_path, &age_path, &cfg.public_keys) {
-            Ok(res) => {
-                println!(
-                    "ok    {}  {} -> {}  sha256:{}",
-                    t.source_name,
-                    fmt_size(t.size),
-                    fmt_size(res.age_size),
-                    &res.age_sha256.chars().take(16).collect::<String>(),
-                );
-                let rec = crate::registry::EncryptRecord {
-                    schema: 1,
-                    record_type: "encrypt".into(),
-                    recorded_at: crate::targets::format_jst(&crate::targets::now_jst()),
-                    batch_id: batch_id.clone(),
-                    batch_date: batch_date.clone(),
-                    source_path: t.source_path.display().to_string(),
-                    source_name: t.source_name.clone(),
-                    source_size: t.size,
-                    source_mtime: mtime_str,
-                    source_sha256: res.source_sha256,
-                    age_path: age_path.display().to_string(),
-                    age_size: res.age_size,
-                    age_sha256: res.age_sha256,
-                    recipients: res.recipients,
-                    manifest_path: manifest_path.display().to_string(),
-                };
-                if let Err(e) = crate::registry::append_record(&registry_path, &rec) {
-                    eprintln!("error: {e}");
-                    failed += 1;
-                    if first_err.is_none() {
-                        first_err = Some(e.exit_code());
-                    }
-                    if !keep_going {
-                        return e.exit_code();
-                    }
-                    continue;
-                }
-                ok_records.push(rec);
-            }
-            Err(e) => {
-                eprintln!("error: {}: {e}", t.source_path.display());
-                failed += 1;
-                // 設定エラーは常に即中止(7.2)
-                if matches!(e, BackupError::Config(_)) {
-                    return e.exit_code();
-                }
-                if first_err.is_none() {
-                    first_err = Some(e.exit_code());
-                }
-                if !keep_going {
-                    return e.exit_code();
-                }
-            }
-        }
-    }
-
-    // バッチmanifestの再構築(2.2-6・4.3)。内容はmanifest_path単位のreduce後全encrypt記録
-    // (当該実行の成功分 + 過去実行のskip済み分)。生成条件は
-    // (i) 当該実行で成功した対象が1件以上、または (ii) reduce後encrypt記録が存在するのに
-    // manifestファイルが不在(前回のmanifest生成失敗からの復旧)。
-    // 全skipかつmanifest既存の場合は再構築しない(skip実行のage不要を維持。ENC-009)。
-    // reduce後encrypt記録が0件(全対象失敗)の場合は生成しない。
-    let mut manifest_ok = false;
-    {
-        let manifest_path_str = manifest_path.display().to_string();
-        let batch_records: Vec<crate::registry::EncryptRecord> = {
-            // 処理後のregistryを再読込し、このmanifest_pathに属する記録を集める
-            // (当該実行の成功分はappend済み。失敗分は記録されていないため含まれない)
-            let records_now = match crate::registry::load_registry(&registry_path) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    if first_err.is_none() {
-                        first_err = Some(e.exit_code());
-                    }
-                    if !keep_going {
-                        return e.exit_code();
-                    }
-                    Vec::new()
-                }
-            };
-            let reduced_now = crate::registry::reduce_records(&records_now);
-            reduced_now
-                .encrypts
-                .iter()
-                .filter(|e| e.manifest_path == manifest_path_str)
-                .cloned()
-                .collect()
-        };
-        let need_manifest = !ok_records.is_empty() || !manifest_path.is_file();
-        if !batch_records.is_empty() && need_manifest {
-            // バッチヘッダのrecipientsはmanifest再構築時の現在設定の指紋列(4.3)
-            let mut current_fingerprints = Vec::with_capacity(cfg.public_keys.len());
-            let fingerprints_result: BackupResult<()> = (|| {
-                for k in &cfg.public_keys {
-                    let pk = crate::fingerprint::parse_ssh_pubkey(k)?;
-                    current_fingerprints.push(crate::fingerprint::fingerprint(&pk));
-                }
-                Ok(())
-            })();
-            match fingerprints_result {
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    if first_err.is_none() {
-                        first_err = Some(e.exit_code());
-                    }
-                    if !keep_going {
-                        return e.exit_code();
-                    }
-                }
-                Ok(()) => {
-                    let meta = crate::manifest::BatchMeta {
-                        batch_id: batch_id.clone(),
-                        batch_date: batch_date.clone(),
-                        created_at: crate::targets::format_jst(&crate::targets::now_jst()),
-                        recipients: current_fingerprints,
-                    };
-                    let built =
-                        crate::manifest::build_manifest(&batch_records, &meta).and_then(|data| {
-                            crate::manifest::write_manifest(&manifest_path, &data, &cfg.public_keys)
-                        });
-                    match built {
-                        Ok(_) => manifest_ok = true,
-                        Err(e) => {
-                            eprintln!("error: {e}");
-                            if first_err.is_none() {
-                                first_err = Some(e.exit_code());
-                            }
-                            if !keep_going {
-                                return e.exit_code();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if manifest_ok {
-        println!(
-            "-- summary: {} encrypted, {} skipped, {} failed / out: {} / manifest: {}",
-            ok_records.len(),
-            skipped,
-            failed,
-            date_dir.display(),
-            manifest_path.display()
-        );
-    } else {
-        println!(
-            "-- summary: {} encrypted, {} skipped, {} failed / out: {}",
-            ok_records.len(),
-            skipped,
-            failed,
-            date_dir.display()
-        );
-    }
-    first_err.unwrap_or(0)
-}
-
-/// aws設定の共通merge(2.3・TASK-5 3.1): 「`load_aws`読込 → `require_ready`(toml値の
-/// 正検査) → CLI一時上書き適用」。upload/restore系の各サブコマンドが共用する。
-/// 戻り値は(実効設定, 正本bucket値)。失敗時はstderrへ出力してNone(いずれも設定エラー2)。
-fn merge_aws_config(
-    aws_config: &Option<PathBuf>,
-    aws_profile: &Option<String>,
-    aws_purpose: &Option<String>,
-    overrides: &crate::config::AwsOverrides,
-) -> Option<(crate::config::AwsConfig, String)> {
-    let aws_config_path = aws_config
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_AWS_CONFIG));
-    // 1. load_awsによるtoml読込
-    let aws = match crate::config::load_aws_profile(
-        &aws_config_path,
-        aws_profile.as_deref(),
-        aws_purpose.as_deref(),
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return None;
-        }
-    };
-    // 2. require_ready: toml値の正検査(bucket/region空はCLI指定の有無にかかわらず設定エラー2)
-    if let Err(e) = crate::config::require_ready(&aws) {
-        eprintln!("error: {e}");
-        return None;
-    }
-    let canonical_bucket = aws.bucket.clone();
-    // 3. CLI一時上書き適用(優先順位: CLI指定値 > aws.toml値・aws.tomlが正本)
-    match crate::config::apply_cli_overrides(aws, overrides) {
-        Ok(c) => Some((c, canonical_bucket)),
         Err(e) => {
             eprintln!("error: {e}");
             None
@@ -685,55 +107,55 @@ fn warn_endpoint_url_env() {
     }
 }
 
-/// S3 backend構築(merge済み実効aws設定から)。失敗時はstderrへ出力してNone
-/// (credentialファイル検証エラー・runtime生成失敗等は設定エラー2)。
-fn backend_or_exit(aws: &crate::config::AwsConfig) -> Option<Box<dyn crate::s3::S3Backend>> {
-    match select_backend(aws) {
-        Ok(b) => Some(b),
-        Err(e) => {
-            eprintln!("error: {e}");
-            None
+// ---------------------------------------------------------------------------
+// backup verify(ローカル整合検査・旧verify相当。設計3.2・2.4)
+
+/// backup verifyの引数(旧verifyサブコマンドの引数構造を継承)。
+#[derive(clap::Args)]
+pub struct VerifyArgs {
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    /// 当該batch_date分に限定(YYYY-MM-DD形式。形式不正はusage error 64)
+    #[arg(long, value_parser = parse_date_arg)]
+    pub date: Option<String>,
+    /// .ageのsha256を再計算してregistry記録と照合
+    #[arg(long)]
+    pub checksum: bool,
+    /// 秘密鍵で復号し平文sha256をregistry記録と照合
+    #[arg(long)]
+    pub roundtrip: bool,
+    /// 復号用秘密鍵(--roundtrip時必須)
+    #[arg(long)]
+    pub key: Option<PathBuf>,
+}
+
+/// fileのsha256(旧restore.rsから引き継ぎ・verify --checksumで使用)。
+fn sha256_file(path: &Path) -> crate::errors::BackupResult<String> {
+    use sha2::Digest;
+    let mut f = std::fs::File::open(path)
+        .map_err(|e| crate::errors::BackupError::Process(format!("{}: {e}", path.display())))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+    loop {
+        use std::io::Read;
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| crate::errors::BackupError::Process(format!("{}: {e}", path.display())))?;
+        if n == 0 {
+            break;
         }
+        hasher.update(&buf[..n]);
     }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
-/// upload統括(2.3)。戻り値はexit code。
-/// aws設定のmerge順は「`load_aws`読込 → `require_ready`(toml値の正検査+credential
-/// ファイル検証) → CLI一時上書き適用」(5章cli.rs・2.3 TASK-6節)。CLI上書き値は
-/// toml値が正である前提の上書きであり、tomlのbucket/region空はCLI指定の有無に
-/// かかわらず設定エラー2(aws.tomlへの書戻しは行わない)。
-pub fn cmd_upload(args: &UploadArgs) -> i32 {
-    let Some(cfg) = load_config_or_exit(&args.config) else {
-        return 2;
-    };
-    let overrides = crate::config::AwsOverrides {
-        storage_class: args.storage_class.clone(),
-        bucket: args.bucket.clone(),
-        region: args.region.clone(),
-    };
-    let Some((aws, canonical_bucket)) = merge_aws_config(
-        &args.aws_config,
-        &args.aws_profile,
-        &args.aws_purpose,
-        &overrides,
-    ) else {
-        return 2;
-    };
-    let Some(backend) = backend_or_exit(&aws) else {
-        return 2;
-    };
-    let opts = crate::uploader::UploadOptions {
-        aws,
-        canonical_bucket,
-        registry_path: cfg.registry_path.clone(),
-        date: args.date.clone(),
-        dry_run: args.dry_run,
-        keep_going: args.keep_going || cfg.keep_going,
-    };
-    crate::uploader::run_upload(backend.as_ref(), &opts)
-}
-
-/// verify統括(2.4)。戻り値はexit code。
+/// verify統括(旧2.4。registryの暗号化記録を対象としたローカル整合検査)。
+/// 旧経路の`encrypt`記録と新経路(backup push)の`file_write`記録の両方を検査する。
+/// 戻り値はexit code。
 pub fn cmd_verify(args: &VerifyArgs) -> i32 {
     let Some(cfg) = load_config_or_exit(&args.config) else {
         return 2;
@@ -757,53 +179,81 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
                 .unwrap_or(true)
         })
         .collect();
+    let writes: Vec<&crate::registry::FileWriteRecord> = reduced
+        .file_writes
+        .iter()
+        .filter(|w| {
+            args.date
+                .as_deref()
+                .map(|d| w.batch_date == d)
+                .unwrap_or(true)
+        })
+        .collect();
 
     let mut failures: Vec<String> = Vec::new();
 
-    // 段階1: 構造検査(2.4-1)
-    for e in &encrypts {
-        let age = Path::new(&e.age_path);
+    // 段階1: 構造検査(2.4-1)。旧経路(encrypt)と新経路(file_write)で同一基準
+    let structure_age = |source_path: &str,
+                         age_path: &str,
+                         age_size: u64,
+                         recipients: &[String],
+                         failures: &mut Vec<String>| {
+        let age = Path::new(age_path);
         match std::fs::metadata(age) {
             Err(_) => {
-                failures.push(format!("{}: .age不在 ({})", e.source_path, e.age_path));
+                failures.push(format!("{source_path}: .age不在 ({age_path})"));
             }
             Ok(m) => {
                 // age_sizeは実ファイルsizeと完全一致(2.4-1・VER-002): 記録値未満
                 // (切り詰め)・超過(追記)のいずれも不一致とする
                 let actual = m.len();
-                if actual != e.age_size {
+                if actual != age_size {
                     failures.push(format!(
-                        "{}: age_size不一致 recorded={} actual={} ({})",
-                        e.source_path, e.age_size, actual, e.age_path
+                        "{source_path}: age_size不一致 recorded={age_size} actual={actual} ({age_path})"
                     ));
                 }
-                // recipient照合(2.4-1・4.4・VER-013): .age(manifestの.ageは含まない)の
-                // ヘッダをparseし、ssh-ed25519 stanza識別子が記録recipients指紋から導出
-                // したv1.2形式指紋prefixと全単射で対応するか照合する(誤recipient検出の
+                // recipient照合(2.4-1・4.4・VER-013): .ageのヘッダをparseし、
+                // ssh-ed25519 stanza識別子が記録recipients指紋から導出したv1.2形式
+                // 指紋prefixと全単射で対応するか照合する(誤recipient検出の
                 // --roundtripなし実効化。導出不能・形式不正・stanza0件もfail-closedに4)
                 match crate::fingerprint::parse_age_header(age) {
                     Ok(header) => {
                         if let Err(err) = crate::fingerprint::verify_recipients_for_fingerprints(
-                            &header,
-                            &e.recipients,
+                            &header, recipients,
                         ) {
                             failures.push(format!(
-                                "{}: recipient照合不一致: {err} ({})",
-                                e.source_path, e.age_path
+                                "{source_path}: recipient照合不一致: {err} ({age_path})"
                             ));
                         }
                     }
                     Err(err) => {
                         failures.push(format!(
-                            "{}: .ageヘッダのparseに失敗: {err} ({})",
-                            e.source_path, e.age_path
+                            "{source_path}: .ageヘッダのparseに失敗: {err} ({age_path})"
                         ));
                     }
                 }
             }
         }
+    };
+    for e in &encrypts {
+        structure_age(
+            &e.source_path,
+            &e.age_path,
+            e.age_size,
+            &e.recipients,
+            &mut failures,
+        );
     }
-    // manifest存在検査(reduce後のencrypt記録が存在するバッチのみ。2.4-1)
+    for w in &writes {
+        structure_age(
+            &w.source_path,
+            &w.age_path,
+            w.age_size,
+            &w.recipients,
+            &mut failures,
+        );
+    }
+    // manifest存在検査(encrypt記録: manifest_path。file_write記録: run dirのmanifest)
     let mut seen_manifests = std::collections::HashSet::new();
     for e in &encrypts {
         if !seen_manifests.insert(e.manifest_path.clone()) {
@@ -816,11 +266,24 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
             ));
         }
     }
+    for w in &writes {
+        let Some(run_dir) = Path::new(&w.age_path).parent() else {
+            continue;
+        };
+        let manifest_path = run_dir.join("manifest.jsonl.age");
+        let key = manifest_path.display().to_string();
+        if !seen_manifests.insert(key.clone()) {
+            continue;
+        }
+        if !manifest_path.is_file() {
+            failures.push(format!("{}: manifest不在 ({key})", w.source_path));
+        }
+    }
 
     // 段階2: --checksum(.ageのsha256再計算照合。2.4-2)
     if args.checksum {
         for e in &encrypts {
-            match crate::restore::sha256_file(Path::new(&e.age_path)) {
+            match sha256_file(Path::new(&e.age_path)) {
                 Err(err) => {
                     failures.push(format!("{}: .age読込失敗: {err}", e.source_path));
                 }
@@ -829,6 +292,21 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
                         failures.push(format!(
                             "{}: age_sha256不一致 expected={} actual={} ({})",
                             e.source_path, e.age_sha256, actual, e.age_path
+                        ));
+                    }
+                }
+            }
+        }
+        for w in &writes {
+            match sha256_file(Path::new(&w.age_path)) {
+                Err(err) => {
+                    failures.push(format!("{}: .age読込失敗: {err}", w.source_path));
+                }
+                Ok(actual) => {
+                    if actual != w.age_sha256 {
+                        failures.push(format!(
+                            "{}: age_sha256不一致 expected={} actual={} ({})",
+                            w.source_path, w.age_sha256, actual, w.age_path
                         ));
                     }
                 }
@@ -875,7 +353,23 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
                 }
             }
         }
-        // manifest復号→registry突合(manifest_pathごとのバッチ)
+        for w in &writes {
+            match crate::crypto::decrypt_sha256(Path::new(&w.age_path), &key) {
+                Err(err) => {
+                    failures.push(format!("{}: 復号に失敗: {err}", w.source_path));
+                }
+                Ok(actual) => {
+                    if actual != w.source_sha256 {
+                        failures.push(format!(
+                            "{}: source_sha256不一致 expected={} actual={} ({})",
+                            w.source_path, w.source_sha256, actual, w.age_path
+                        ));
+                    }
+                }
+            }
+        }
+        // manifest復号→registry突合(旧経路: manifest_pathごとのバッチ。
+        // 新経路: run dirのmanifest.jsonl.ageをfile_write記録(batch)と突合)
         let mut batches: Vec<(String, Vec<&crate::registry::EncryptRecord>)> = Vec::new();
         for e in &encrypts {
             match batches.iter_mut().find(|(mp, _)| *mp == e.manifest_path) {
@@ -952,14 +446,94 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
                 }
             }
         }
+        // 新経路(file_write)のmanifest突合: name一致でsource_sha256・age_sha256を照合
+        let mut run_batches: Vec<(String, Vec<&crate::registry::FileWriteRecord>)> = Vec::new();
+        for w in &writes {
+            let Some(run_dir) = Path::new(&w.age_path).parent() else {
+                continue;
+            };
+            let mp = run_dir.join("manifest.jsonl.age").display().to_string();
+            match run_batches.iter_mut().find(|(m, _)| *m == mp) {
+                Some(slot) => slot.1.push(w),
+                None => run_batches.push((mp, vec![w])),
+            }
+        }
+        for (mp, recs) in &run_batches {
+            let plain = match crate::crypto::decrypt_bytes(Path::new(mp), &key) {
+                Ok(p) => p,
+                Err(err) => {
+                    failures.push(format!("{mp}: manifest復号に失敗: {err}"));
+                    continue;
+                }
+            };
+            let text = String::from_utf8_lossy(&plain);
+            let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            if lines.is_empty() {
+                failures.push(format!("{mp}: manifestが空"));
+                continue;
+            }
+            let header: serde_json::Value = match serde_json::from_str(lines[0]) {
+                Ok(v) => v,
+                Err(err) => {
+                    failures.push(format!("{mp}: manifestヘッダのparseに失敗: {err}"));
+                    continue;
+                }
+            };
+            if header.get("record_type").and_then(|v| v.as_str()) != Some("batch") {
+                failures.push(format!("{mp}: manifestヘッダのrecord_typeがbatchでない"));
+            }
+            let file_count = header.get("file_count").and_then(|v| v.as_u64());
+            if file_count != Some(recs.len() as u64) {
+                failures.push(format!(
+                    "{mp}: manifestのfile_count不一致 manifest={file_count:?} registry={}",
+                    recs.len()
+                ));
+            }
+            if lines.len() - 1 != recs.len() {
+                failures.push(format!(
+                    "{mp}: manifestのファイルレコード数不一致 manifest={} registry={}",
+                    lines.len() - 1,
+                    recs.len()
+                ));
+            }
+            for line in &lines[1..] {
+                let fr: serde_json::Value = match serde_json::from_str(line) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        failures.push(format!("{mp}: manifestレコードのparseに失敗: {err}"));
+                        continue;
+                    }
+                };
+                let name = fr.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let Some(rec) = recs.iter().find(|r| r.source_name == name) else {
+                    failures.push(format!(
+                        "{mp}: manifestにregistry記録の無いファイルがある ({name})"
+                    ));
+                    continue;
+                };
+                if fr.get("source_sha256").and_then(|v| v.as_str())
+                    != Some(rec.source_sha256.as_str())
+                {
+                    failures.push(format!(
+                        "{}: manifestのsource_sha256がregistryと不一致 ({})",
+                        rec.source_path, mp
+                    ));
+                }
+                if fr.get("age_sha256").and_then(|v| v.as_str()) != Some(rec.age_sha256.as_str()) {
+                    failures.push(format!(
+                        "{}: manifestのage_sha256がregistryと不一致 ({})",
+                        rec.source_path, mp
+                    ));
+                }
+            }
+        }
     }
 
+    let records_total = encrypts.len() + writes.len();
     if failures.is_empty() {
         println!(
-            "== verify == ok ({}) records, checksum={}, roundtrip={}",
-            encrypts.len(),
-            args.checksum,
-            args.roundtrip
+            "== verify == ok ({records_total}) records, checksum={}, roundtrip={}",
+            args.checksum, args.roundtrip
         );
         0
     } else {
@@ -967,117 +541,11 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
             eprintln!("ng {f}");
         }
         println!(
-            "== verify == FAILED: {} 件の不一致({} records)",
-            failures.len(),
-            encrypts.len()
+            "== verify == FAILED: {} 件の不一致({records_total} records)",
+            failures.len()
         );
         4
     }
-}
-
-/// restore request統括(2.7・TASK-5 3.2)。戻り値はexit code。
-/// aws設定のmergeはcmd_uploadと同一の共用関数(読込→require_ready→CLI一時上書き)。
-/// `--days`/`--tier`の値検証はrun_restore_request内(aws実行前)。
-pub fn cmd_restore_request(args: &RestoreRequestArgs) -> i32 {
-    let overrides = restore_aws_overrides(&args.bucket, &args.region);
-    let Some((aws, _)) = merge_aws_config(
-        &args.aws_config,
-        &args.aws_profile,
-        &args.aws_purpose,
-        &overrides,
-    ) else {
-        return 2;
-    };
-    let Some(backend) = backend_or_exit(&aws) else {
-        return 2;
-    };
-    let opts = crate::restore::RestoreRequestOptions {
-        aws,
-        date: args.date.clone(),
-        names: args.name.clone(),
-        days: args.days.clone().unwrap_or_else(|| "7".to_string()),
-        tier: args.tier.clone().unwrap_or_else(|| "Standard".to_string()),
-        dry_run: args.dry_run,
-        keep_going: args.keep_going,
-    };
-    crate::restore::run_restore_request(backend.as_ref(), &opts)
-}
-
-/// restore status統括(2.7・TASK-5 3.3)。戻り値はexit code。
-pub fn cmd_restore_status(args: &RestoreStatusArgs) -> i32 {
-    let overrides = restore_aws_overrides(&args.bucket, &args.region);
-    let Some((aws, _)) = merge_aws_config(
-        &args.aws_config,
-        &args.aws_profile,
-        &args.aws_purpose,
-        &overrides,
-    ) else {
-        return 2;
-    };
-    let Some(backend) = backend_or_exit(&aws) else {
-        return 2;
-    };
-    let opts = crate::restore::RestoreStatusOptions {
-        aws,
-        date: args.date.clone(),
-        keep_going: args.keep_going,
-    };
-    crate::restore::run_restore_status(backend.as_ref(), &opts)
-}
-
-/// restore download統括(2.7・TASK-5 3.4)。戻り値はexit code。
-/// `--key`未指定時のみpipeline.tomlを読み`[verify].decrypt_key`を解決する(3.1注記。
-/// ファイル不在・decrypt_key未設定は「--key未指定」と同扱いの設定エラー2)。
-pub fn cmd_restore_download(args: &RestoreDownloadArgs) -> i32 {
-    let overrides = restore_aws_overrides(&args.bucket, &args.region);
-    let Some((aws, _)) = merge_aws_config(
-        &args.aws_config,
-        &args.aws_profile,
-        &args.aws_purpose,
-        &overrides,
-    ) else {
-        return 2;
-    };
-    let Some(backend) = backend_or_exit(&aws) else {
-        return 2;
-    };
-    let key = match args.key.clone() {
-        Some(k) => k,
-        None => {
-            let path = PathBuf::from(DEFAULT_PIPELINE_CONFIG);
-            match crate::config::load_pipeline(&path) {
-                Ok(cfg) => match cfg.decrypt_key {
-                    Some(k) => k,
-                    None => {
-                        eprintln!(
-                            "error: 設定・環境エラー: 復号用秘密鍵が指定されていません(--key またはpipeline.tomlの[verify].decrypt_key)"
-                        );
-                        return 2;
-                    }
-                },
-                Err(_) => {
-                    eprintln!(
-                        "error: 設定・環境エラー: 復号用秘密鍵が指定されていません(--key が必要です。pipeline.toml({})が読めないため[verify].decrypt_keyを解決できません)",
-                        path.display()
-                    );
-                    return 2;
-                }
-            }
-        }
-    };
-    let opts = crate::restore::RestoreDownloadOptions {
-        aws,
-        date: args.date.clone(),
-        names: args.name.clone(),
-        out: args
-            .out
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("data/restore")),
-        key,
-        dry_run: args.dry_run,
-        keep_going: args.keep_going,
-    };
-    crate::restore::run_restore_download(backend.as_ref(), &opts)
 }
 
 /// dispatch(5章)。BackupErrorはmessage+exit code対応をstderrへ出力し、対応exit codeを返す。
@@ -1086,15 +554,6 @@ pub fn run(argv: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
     use clap::Parser as _;
     match Cli::try_parse_from(argv) {
         Ok(cli) => match cli.command {
-            Command::Plan(a) => cmd_plan(&a),
-            Command::Encrypt(a) => cmd_encrypt(&a),
-            Command::Upload(a) => cmd_upload(&a),
-            Command::Verify(a) => cmd_verify(&a),
-            Command::Restore(a) => match &a.command {
-                RestoreCommand::Request(r) => cmd_restore_request(r),
-                RestoreCommand::Status(s) => cmd_restore_status(s),
-                RestoreCommand::Download(d) => cmd_restore_download(d),
-            },
             Command::List(a) => crate::storage::cmd_list(&a),
             Command::Query(a) => crate::storage::cmd_query(&a),
             Command::Get(a) => crate::storage::cmd_get(&a),
@@ -1148,18 +607,6 @@ mod tests {
         p
     }
 
-    fn set_mtime(path: &Path, jst_rfc3339: &str) {
-        let dt = chrono::DateTime::parse_from_rfc3339(jst_rfc3339).expect("rfc3339");
-        let t = std::time::SystemTime::UNIX_EPOCH
-            + std::time::Duration::from_secs(dt.timestamp().max(0) as u64);
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .expect("open for set_times");
-        f.set_times(std::fs::FileTimes::new().set_modified(t))
-            .expect("set_times");
-    }
-
     /// [covers:cli.usage-error-exit-64]
     /// 使用法誤り(不明オプション・サブコマンド不足)はexit 64。
     #[test]
@@ -1176,24 +623,38 @@ mod tests {
 
     /// [covers:cli.exit-code-mapping]
     /// 代表ケースで0/2/3/4を検証(5はuploader.rsの転送エラー系テストが担う)。
+    /// TASK-11 Phase B: 旧plan経路の代表ケースはbackup pushの対象指定へ読み替え。
     #[test]
     fn exit_code_mapping_representative_cases() {
         let tmp = TempDir::new("cli-codes");
 
-        // 2: 設定エラー(不在のpipeline.tomlでplan)
-        let code = cmd_plan(&PlanArgs {
-            config: Some(tmp.path().join("absent.toml")),
-            from_list: None,
-            paths: vec![tmp.path().join("x.zip")],
-        });
+        // 2: 設定エラー(不在のpipeline.tomlでbackup push)
+        let code = run([
+            "backup-remote".into(),
+            "backup".into(),
+            "push".into(),
+            "--config".into(),
+            tmp.path().join("absent.toml").into(),
+            "x.zip".into(),
+        ]);
         assert_eq!(code, 2, "設定エラー");
 
-        // 3: 対象エラー(不在ファイルでplan)
-        let code = cmd_plan(&PlanArgs {
-            config: Some(pipeline_toml(tmp.path())),
-            from_list: None,
-            paths: vec![tmp.path().join("absent.zip")],
-        });
+        // 3: 対象エラー(不在ファイルでbackup push。aws.tomlは対象解決より前の検証まで通るものを用意)
+        let aws_toml = tmp.path().join("aws.toml");
+        write_file(
+            &aws_toml,
+            b"[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"b\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"creds.toml\"\n",
+        );
+        let code = run([
+            "backup-remote".into(),
+            "backup".into(),
+            "push".into(),
+            "--config".into(),
+            pipeline_toml(tmp.path()).into(),
+            "--aws-config".into(),
+            aws_toml.into(),
+            tmp.path().join("absent.zip").into(),
+        ]);
         assert_eq!(code, 3, "対象エラー");
 
         // 4 + 0: verify(構造検査)の不一致と成功
@@ -1326,8 +787,6 @@ mod tests {
     /// 構造検査で.age欠損・age_size不一致を検出しexit 4(欠損も不一致と同じく4に統一)。
     /// age_sizeは完全一致(設計2.4-1): 実sizeが記録値を超過(追記)・未満(切り詰め)の
     /// いずれもexit 4となる(記録値未満を警告継続にしない)。
-    /// テスト先行注記: case 3(未満)はTASK-2実装(完全一致化)前の現状実装では警告継続で
-    /// exit 0となるためfailする(実装後にexit 4を検出してpassとなる想定)。
     #[test]
     fn verify_detects_missing_and_size_mismatch() {
         let tmp = TempDir::new("cli-vermiss");
@@ -1379,9 +838,6 @@ mod tests {
     /// prefix集合と全単射で対応することを照合する。(a)正recipient(全単射一致)はexit 0、
     /// (b)誤recipient指紋(stanzaは鍵Aのprefix・記録は鍵Bの指紋)・(c)stanza数不一致
     /// (ヘッダ2 stanza vs 記録1指紋)は検証エラー4。
-    /// テスト先行注記: 本テストはTASK-2実装(構造検査でのヘッダ照合)に先行して追加しており、
-    /// 実装前の現状実装はヘッダを照合しないため(b)(c)の誤りcaseもverifyが通過してしまい
-    /// 本テストはfailする(実装後にexit 4を検出してpassとなる想定)。
     #[test]
     fn verify_structure_recipient_bijection() {
         let right = TEST_ED25519_FINGERPRINT.to_string();
@@ -1491,184 +947,37 @@ mod tests {
         assert_eq!(code, 0, "aws不在でも構造検査は完結");
     }
 
-    /// [covers:plan.recipient-fingerprint-display]
-    /// recipient指紋(SHA256:base64)が公開鍵から計算され一覧表示される。
-    /// age/awsバイナリ不在(空PATH)でも成功する。
-    #[test]
-    fn plan_displays_recipient_fingerprints() {
-        let _lock = path_env_lock();
-        let tmp = TempDir::new("cli-planfpr");
-        let target = tmp.path().join("photo.zip");
-        write_file(&target, b"photo-bytes");
-        let cfg = pipeline_toml(tmp.path());
-        let empty_bin = tmp.path().join("empty-bin");
-        std::fs::create_dir_all(&empty_bin).expect("empty bin");
-        let _guard = set_path_env(empty_bin.to_str().unwrap());
-
-        let code = cmd_plan(&PlanArgs {
-            config: Some(cfg),
-            from_list: None,
-            paths: vec![target],
-        });
-        assert_eq!(code, 0, "age/aws不在でもplanは成功");
-
-        // 表示内容: 指紋と公開鍵pathが並ぶ
-        let pubkey = tmp.path().join("test_ed25519.pub");
-        let target = crate::targets::Target {
-            source_path: tmp.path().join("photo.zip"),
-            source_name: "photo.zip".into(),
-            size: 12,
-            mtime: chrono::DateTime::parse_from_rfc3339("2026-10-08T12:00:00+09:00").unwrap(),
-        };
-        let report = format_plan_report(
-            &[target],
-            &[(TEST_ED25519_FINGERPRINT.to_string(), pubkey.clone())],
-            &tmp.path().join("out"),
-            "2026-10-08",
-        );
-        assert!(
-            report.contains(TEST_ED25519_FINGERPRINT),
-            "指紋表示: {report}"
-        );
-        assert!(
-            report.contains(&pubkey.display().to_string()),
-            "公開鍵path表示: {report}"
-        );
-        assert!(
-            report.contains("recipients"),
-            "recipient一覧セクション: {report}"
-        );
-    }
-
-    /// [covers:plan.resolves-positional-targets]
-    /// plan表示に各対象のpath・サイズ・mtime・合計サイズが含まれる(解決自体はtargets.rsの検証)。
-    #[test]
-    fn plan_report_contains_paths_sizes_mtime_total() {
-        let tmp = TempDir::new("cli-planrep");
-        let t1 = crate::targets::Target {
-            source_path: tmp.path().join("photo.zip"),
-            source_name: "photo.zip".into(),
-            size: 12_500_000_000,
-            mtime: chrono::DateTime::parse_from_rfc3339("2026-09-30T22:11:00+09:00").unwrap(),
-        };
-        let t2 = crate::targets::Target {
-            source_path: tmp.path().join("docs.7z"),
-            source_name: "docs.7z".into(),
-            size: 3_200_000_000,
-            mtime: chrono::DateTime::parse_from_rfc3339("2026-10-01T09:00:00+09:00").unwrap(),
-        };
-        let report = format_plan_report(
-            &[t1, t2],
-            &[(
-                TEST_ED25519_FINGERPRINT.to_string(),
-                tmp.path().join("k.pub"),
-            )],
-            &tmp.path().join("out"),
-            "2026-10-08",
-        );
-        assert!(
-            report.contains("photo.zip") && report.contains("docs.7z"),
-            "path: {report}"
-        );
-        assert!(report.contains("mtime"), "mtime表示: {report}");
-        assert!(report.contains("2026-09-30"), "t1のmtime(JST): {report}");
-        assert!(report.contains("total"), "合計表示: {report}");
-        assert!(report.contains("2026-10-08"), "出力日付: {report}");
-    }
-
-    /// [covers:plan.runs-without-aws]
-    /// planはaws設定(aws.toml・awsバイナリ)が一切なくてもexit 0となる。
-    #[test]
-    fn plan_runs_without_aws() {
-        let _lock = path_env_lock();
-        let tmp = TempDir::new("cli-plannoaws");
-        let target = tmp.path().join("a.zip");
-        write_file(&target, b"a");
-        let empty_bin = tmp.path().join("empty-bin");
-        std::fs::create_dir_all(&empty_bin).expect("empty bin");
-        let _guard = set_path_env(empty_bin.to_str().unwrap());
-        // aws.tomlは配置しない
-
-        let code = cmd_plan(&PlanArgs {
-            config: Some(pipeline_toml(tmp.path())),
-            from_list: None,
-            paths: vec![target],
-        });
-        assert_eq!(code, 0);
-    }
-
-    /// [covers:cli.date-format-usage-error]
-    /// upload / verify の--dateはYYYY-MM-DD形式(半角数字4-2-2)を検証し、形式不正は
-    /// usage error 64(誤記が対象なしexit 0で静かな未upload/未検証になるのを防ぐ)。
-    #[test]
-    fn date_format_violation_is_usage_error() {
-        for bad in [
-            "2026-1-1",
-            "20260101",
-            "2026/10/01",
-            "2026-10-011",
-            "2026-1-01",
-            "x",
-        ] {
-            let code = run([
-                "backup-remote".into(),
-                "upload".into(),
-                "--date".into(),
-                bad.into(),
-            ]);
-            assert_eq!(code, 64, "upload --date {bad} はusage error 64");
-            let code = run([
-                "backup-remote".into(),
-                "verify".into(),
-                "--date".into(),
-                bad.into(),
-            ]);
-            assert_eq!(code, 64, "verify --date {bad} はusage error 64");
-        }
-
-        // 形式どおり(数字4-2-2)はusage errorとならず次段(設定読込等)へ進む
-        let code = run([
-            "backup-remote".into(),
-            "upload".into(),
-            "--date".into(),
-            "2026-10-09".into(),
-            "--config".into(),
-            "absent.toml".into(),
-        ]);
-        assert_ne!(
-            code, 64,
-            "形式どおりはusage errorでない(設定エラー等の別区分)"
-        );
-    }
-
     /// [covers:cli.paths-required-usage-error]
-    /// plan / encrypt のPATH位置引数0個はusage error(exit 64)。
-    /// PATH 1個+--from-list併用はusage errorとならない。
+    /// backup push のPATH位置引数0個はusage error(exit 64)。
+    /// PATH 1個+--from-list併用はusage errorとならない(TASK-11 Phase B: backup pushの対象指定)。
     #[test]
     fn paths_required_usage_error() {
         // PATH 0個(--from-listの有無にかかわらず)は64
         let code = run([
             "backup-remote".into(),
-            "plan".into(),
+            "backup".into(),
+            "push".into(),
             "--config".into(),
             "some.toml".into(),
         ]);
-        assert_eq!(code, 64, "plan PATH 0個");
+        assert_eq!(code, 64, "backup push PATH 0個");
 
         let code = run([
             "backup-remote".into(),
-            "encrypt".into(),
+            "backup".into(),
+            "push".into(),
             "--config".into(),
             "some.toml".into(),
             "--from-list".into(),
             "list.toml".into(),
         ]);
-        assert_eq!(code, 64, "encrypt PATH 0個(--from-listのみでも不可)");
+        assert_eq!(code, 64, "backup push PATH 0個(--from-listのみでも不可)");
 
         // PATH 1個(+--from-list併用)はusage errorとならない(設定エラー等別区分)
         let code = run([
             "backup-remote".into(),
-            "plan".into(),
+            "backup".into(),
+            "push".into(),
             "--config".into(),
             "absent.toml".into(),
             "a.zip".into(),
@@ -1677,7 +986,8 @@ mod tests {
 
         let code = run([
             "backup-remote".into(),
-            "plan".into(),
+            "backup".into(),
+            "push".into(),
             "--config".into(),
             "absent.toml".into(),
             "--from-list".into(),
@@ -1721,71 +1031,5 @@ mod tests {
             key: Some(key_file),
         });
         assert_eq!(code, 2, "ageバイナリ不在は設定・環境エラー2");
-    }
-
-    /// [covers:encrypt.skip-on-registry-match]
-    /// [covers:encrypt.manifest-not-rewritten-on-all-skip]
-    /// .age存在+registry記録一致(path・size・mtime)なら再読込せずskip・exit 0。
-    /// registry追記なし・.age不変・manifest不変(全skipかつmanifest既存は再構築しない。
-    /// ENC-020)・(空PATHで)age実行不要を確認する。
-    #[test]
-    fn encrypt_skips_on_registry_match() {
-        let _lock = path_env_lock();
-        let tmp = TempDir::new("cli-encskip");
-        let cfg = pipeline_toml(tmp.path());
-        let out = tmp.path().join("out");
-        let reg = tmp.path().join("registry.jsonl");
-        let target = tmp.path().join("a.zip");
-        write_file(&target, b"plain-bytes");
-        set_mtime(&target, "2026-10-08T09:00:00+09:00");
-        // 当日バッチのfixture(JST実行日の日付dir。manifestも既存とする)
-        let batch_date = crate::targets::jst_today();
-        let date_dir = out.join(&batch_date);
-        let age = date_dir.join("a.zip.age");
-        let manifest = date_dir.join("manifest.jsonl.age");
-        write_file(&age, b"previous-age-bytes");
-        write_file(&manifest, b"previous-manifest-bytes");
-        let rec = serde_json::json!({
-            "schema": 1,
-            "record_type": "encrypt",
-            "recorded_at": format!("{batch_date}T10:00:00+09:00"),
-            "batch_id": format!("{}-abcdef01", batch_date.replace('-', "")),
-            "batch_date": batch_date,
-            "source_path": target,
-            "source_name": "a.zip",
-            "source_size": 11,
-            "source_mtime": "2026-10-08T09:00:00+09:00",
-            "source_sha256": "2".repeat(64),
-            "age_path": age,
-            "age_size": 19,
-            "age_sha256": "3".repeat(64),
-            "recipients": ["SHA256:testfingerprint"],
-            "manifest_path": manifest,
-        });
-        write_file(&reg, format!("{rec}\n").as_bytes());
-
-        let empty_bin = tmp.path().join("empty-bin");
-        std::fs::create_dir_all(&empty_bin).expect("empty bin");
-        let _guard = set_path_env(empty_bin.to_str().unwrap());
-
-        let code = cmd_encrypt(&EncryptArgs {
-            config: Some(cfg),
-            from_list: None,
-            out: Some(out),
-            registry: Some(reg.clone()),
-            keep_going: false,
-            paths: vec![target],
-        });
-        assert_eq!(code, 0, "all skipならage不在でもexit 0");
-        // registry追記なし
-        let text = std::fs::read_to_string(&reg).expect("registry read");
-        assert_eq!(text.lines().count(), 1, "registry追記なし: {text}");
-        // .age・manifestとも不変(全skipかつmanifest既存は再構築しない)
-        assert_eq!(std::fs::read(&age).unwrap(), b"previous-age-bytes".to_vec());
-        assert_eq!(
-            std::fs::read(&manifest).unwrap(),
-            b"previous-manifest-bytes".to_vec(),
-            "全skipかつmanifest既存はmanifestを書き換えない"
-        );
     }
 }

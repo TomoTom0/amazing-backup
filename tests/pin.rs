@@ -356,3 +356,70 @@ fn pin_rm_deletes_pin_object_without_restore() {
         "registryのpin_remove記録"
     );
 }
+
+/// [covers:pin.push-pin-on-skip-targets]
+/// backup push --pinでskip対象(変更なし)のfileが含まれる場合(M-6・12章レビュー):
+/// 警告表示(WARNING: 変更なしfileの件数と最新版へのpin付与を通知)のうえ、当該fileの
+/// 最新版(default.age)からCopyObjectでpin keyへ付与する(skip対象がpinなしにならないのを
+/// 防ぐ)。新規upload分はpin keyへの直接PUT。
+#[test]
+fn backup_push_pin_covers_skip_targets_on_latest() {
+    let Some(fx) = StorageFixture::new("pin-skip", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"pin-skip-a");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let b = fx.data_root.join("b.zip");
+    write_file(&b, b"pin-skip-b");
+    let file_a_key = fx.file_key("unfiled", None, "a.zip");
+
+    // a.zipは変更なし(skip)・b.zipは新規: --pin pm で警告+双方へpin付与
+    let (code, stdout, stderr) = fx.push(&[&a, &b], &["--pin", "pm"], &[]);
+    assert_eq!(
+        code, 0,
+        "skip対象を含むpush --pinはexit 0: {stdout}{stderr}"
+    );
+    assert!(stdout.contains("skip"), "skip表示: {stdout}");
+    assert!(
+        stdout.contains("WARNING") && stdout.contains("pin"),
+        "skip対象への--pin警告表示: {stdout}"
+    );
+
+    // skip対象(a.zip)は最新版からCopyObjectでpin付与(新規.ageが無いため写し)
+    let calls = fx.calls();
+    let a_pm = pin_key_of(&fx, "a.zip", "pm");
+    let copy_line = calls
+        .lines()
+        .find(|l| l.starts_with("s3 CopyObject") && l.contains(&format!("key={a_pm}")))
+        .unwrap_or_else(|| panic!("skip対象へのCopyObject pin付与: {calls}"));
+    assert!(
+        copy_line.contains(&format!("key={file_a_key}"))
+            || copy_line.contains("copy_source=")
+            || copy_line.contains(file_a_key.as_str()),
+        "写し元はdefault.age最新版: {copy_line}"
+    );
+    // 新規分(b.zip)はpin keyへの直接PUT
+    let b_pm = pin_key_of(&fx, "b.zip", "pm");
+    assert!(
+        calls
+            .lines()
+            .any(|l| l.starts_with("s3 PutObject") && l.contains(&format!("key={b_pm}"))),
+        "新規分はpin keyへの直接PUT: {calls}"
+    );
+
+    // 索引pins[]に双方反映される
+    let lines = fx.read_index();
+    for name in ["a.zip", "b.zip"] {
+        let entry = index_file_entry(&lines, name);
+        let pins = entry
+            .get("pins")
+            .and_then(|p| p.as_array())
+            .unwrap_or_else(|| panic!("{name}のpins配列: {entry}"));
+        assert!(
+            pins.iter()
+                .any(|p| p.get("pin").and_then(|v| v.as_str()) == Some("pm")),
+            "{name}の索引pins[]へpm反映: {pins:?}"
+        );
+    }
+}

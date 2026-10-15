@@ -3,6 +3,10 @@
 # 2026-10-14: TASK-10実装(Phase A)に先立つテスト先行の条件書(新設feature)。
 #   manage系実装はcli.rs+lifecycle構成生成(s3.rs put_lifecycle)+索引/ListObjectVersions(prune対象計算)に跨る。
 #   実装前のため条件に対応するテストコードは未作成(網羅検査は警告のみの段階)。
+# 2026-10-15: TASK-11(Phase B)でPhase A実装済み・未条件化の振る舞い2件を事後条件化(回帰テスト)。
+#   新規2件: retention.prune-dry-run-apply-exclusive(L-8: --dry-run/--apply併置はusage 64)・
+#   retention.prune-category-guard-early(M-2: prune冒頭のcategory guard。予約語・形式違反・
+#   未定義categoryはListObjectVersions前に設定エラー2)。出典はtmp/tasks/tm-10/design_s3_storage.md 12章。
 
 [meta]
 feature = "retention"
@@ -64,6 +68,24 @@ description = "削除条件(NCVEとprune共通の単一定義): 削除対象=同
 given = "同一keyにnoncurrent版6件ある状態で、keep=5(設定値)での--apply・--keep 2での--apply・--keep未指定での--apply"
 expect_return_shape = "keep=5では最古の1件のみ(newer noncurrent数5以上)削除され境界(5番目に新しいnoncurrent版)は残る。--keep 2ではnewer noncurrent数2以上の版(古い4件)が削除され、以降の実行でも[categories].keep設定値は不変。削除はDeleteObjectVersionで行われる"
 source_lines = "tests/retention.rs:222"
+
+[[condition]]
+id = "retention.prune-dry-run-apply-exclusive"
+target_function = "cli::cmd_manage_prune(実行mode検査)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 12章レビューL-8(Phase A実装済み・事後条件化)"
+description = "manage pruneの--dry-runと--applyは併置不可: 両方指定した場合はusage error 64(dry-runが既定のため併置は指定として矛盾する。対象計算の前に判定される) (integration, fake seam)"
+given = "manage prune --category C --dry-run --apply 実行"
+expect_return_shape = "exit 64で、S3 API呼び出し(ListObjectVersions)は行われない"
+source_lines = "tests/retention.rs:380"
+
+[[condition]]
+id = "retention.prune-category-guard-early"
+target_function = "cli::cmd_manage_prune(category guard)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 12章レビューM-2(Phase A実装済み・事後条件化)・1.2(category名規則)"
+description = "prune冒頭のcategory guard: --categoryの値がcategory名規則(^[a-z0-9][a-z0-9-]{0,63}$)違反・予約領域(sys・旧表記_sys)・pipeline.tomlの[categories]に未定義のいずれかの場合は、ListObjectVersions等のS3 API呼び出し前に設定エラー2で拒否する(guard bypassして意図しないprefixへ対する操作を行わない) (integration, fake seam)"
+given = "manage prune --category sys / --category _sys / --category BadName(規則違反) / --category ghost(未定義) の各実行"
+expect_return_shape = "いずれも exit 2(設定エラー)で、fake backendの呼び出し記録不存在(ListObjectVersions前に検出)"
+source_lines = "tests/retention.rs:406"
 
 [[excluded]]
 item = "IAM policy案(principal A: 全操作 / principal B: 復元専用最小権限)"

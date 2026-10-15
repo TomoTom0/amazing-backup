@@ -133,11 +133,12 @@ fn backup_push_runs_integrated_pipeline() {
         "index_upload記録"
     );
 
-    // 旧uploadサブコマンドのdry-run(pending列挙)に新経路分が現れない
+    // 旧uploadサブコマンドはTASK-11(Phase B)で削除され、旧uploadによる新.ageの
+    // 二重書き込み(7.3干渉防止)は構造的に不可能(未知サブコマンドでusage error 64)
     let cfg_s = fx.cfg.display().to_string();
     let aws_s = fx.aws_toml.display().to_string();
     let state_s = fx.state.display().to_string();
-    let (code, stdout, stderr) = run_bin_env(
+    let (code, _stdout, _stderr) = run_bin_env(
         &[
             "upload",
             "--config",
@@ -149,12 +150,8 @@ fn backup_push_runs_integrated_pipeline() {
         &[("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())],
     );
     assert_eq!(
-        code, 0,
-        "旧upload dry-runはexit 0(対象なし): {stdout}{stderr}"
-    );
-    assert!(
-        !stdout.contains("travel.zip.age") && !stdout.contains("album.zip.age"),
-        "旧uploadのpending列挙に新経路分は現れない: {stdout}"
+        code, 64,
+        "旧uploadサブコマンドは未知サブコマンド扱い(併用可能性の構造的消滅)"
     );
 }
 
@@ -332,6 +329,41 @@ fn backup_pull_run_restores_only_run_scope() {
             .any(|l| l.starts_with("s3 GetObject") && l.contains(&format!("key={c_key}"))),
         "対象外runのkeyへのGetObjectは行われない: {}",
         fx.calls()
+    );
+}
+
+/// [covers:cli.backup-pull-scope-options-exclusive]
+/// backup pullの--all/--category/--runの範囲指定は排他(L-7): 2つ以上の併用は
+/// usage error 64(確認ガード・索引GETの前に判定される)。
+#[test]
+fn backup_pull_scope_options_are_exclusive() {
+    let Some(fx) = StorageFixture::new("sb-pullexcl", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"pull-exclusive-a");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let run_id = run_batch_ids(&fx)[0].clone();
+    let _ = std::fs::remove_file(fx.state.join("calls.log"));
+
+    for scope in [
+        vec!["--all", "--category", "unfiled"],
+        vec!["--all", "--run", run_id.as_str()],
+        vec!["--category", "unfiled", "--run", run_id.as_str()],
+    ] {
+        let mut extra: Vec<&str> = scope.clone();
+        extra.push("--yes");
+        let (code, stdout, stderr) = fx.backup_pull(&extra);
+        assert_eq!(
+            code, 64,
+            "範囲指定の併用({scope:?})はusage error 64: {stdout}{stderr}"
+        );
+    }
+    assert_eq!(
+        read_calls(&fx.state),
+        "",
+        "S3 API呼び出し(索引GET)は行われない: {}",
+        read_calls(&fx.state)
     );
 }
 

@@ -376,3 +376,57 @@ fn lifecycle_apply_payload_matches_expected_rules() {
     });
     assert!(specs.contains(&mpu), "MPU abort rule: {payload}");
 }
+
+/// [covers:retention.prune-dry-run-apply-exclusive]
+/// manage pruneの--dry-run/--apply併置はusage error 64(L-8・12章レビュー)。
+/// 対象計算(ListObjectVersions)より前に判定される。
+#[test]
+fn prune_rejects_dry_run_and_apply_together() {
+    let Some(fx) = StorageFixture::new("ret-excl", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"prune-exclusive");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    clear_calls(&fx);
+    let (code, stdout, stderr) =
+        fx.manage("prune", &["--category", "unfiled", "--dry-run", "--apply"]);
+    assert_eq!(
+        code, 64,
+        "--dry-run/--apply併置はusage error 64: {stdout}{stderr}"
+    );
+    assert_eq!(
+        fx.calls(),
+        "",
+        "S3 API呼び出し(ListObjectVersions)は行われない: {}",
+        fx.calls()
+    );
+}
+
+/// [covers:retention.prune-category-guard-early]
+/// prune冒頭のcategory guard(M-2・12章レビュー): --categoryの値がcategory名規則違反・
+/// 予約領域(sys・旧表記_sys)・pipeline.tomlの[categories]未定義のいずれかの場合は
+/// ListObjectVersions等のS3 API呼び出し前に設定エラー2で拒否する。
+#[test]
+fn prune_category_guard_rejects_before_s3_calls() {
+    let Some(fx) = StorageFixture::new("ret-guard", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"prune-guard");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    clear_calls(&fx);
+    for category in ["sys", "_sys", "BadName", "ghost"] {
+        let (code, stdout, stderr) = fx.manage("prune", &["--category", category, "--apply"]);
+        assert_eq!(
+            code, 2,
+            "--category {category}は設定エラー2: {stdout}{stderr}"
+        );
+    }
+    assert_eq!(
+        fx.calls(),
+        "",
+        "S3 API呼び出し(ListObjectVersions前): {}",
+        fx.calls()
+    );
+}

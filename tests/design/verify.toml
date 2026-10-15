@@ -11,34 +11,39 @@
 # 2026-10-11: TASK-2実装完了(age_size完全一致・verify_recipients_for_fingerprints追加)。
 #   テスト全件PASS(cargo test 110 passed: lib 73/integration 37)・verify-conditions.py PASS
 #   を確認し[meta]の検証記録を更新した。レビュー指摘(parse_age_header行長上限64KB)対応込み。
+# 2026-10-15: TASK-11(Phase B)対応でテスト先行の更新(TASK-11 body+tmp/tasks/tm-10/design_s3_storage.md
+#   7.3/9章・3.2)。旧verifyサブコマンド削除・backup verify --roundtrip(旧verify相当のローカル整合)への
+#   集約に伴い、全13条件を実行経路verify→backup verifyへ文言改訂(廃止しない。idは付与後不変のため
+#   verify.*のまま)。旧--date(batch_date絞り込み)は--date撤廃(設計3.3)により対象外。
+#   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseのまま。
 
 [meta]
 feature = "verify"
-source_file = "src/cli.rs"
-verified = true
+source_file = "src/storage.rs"
+verified = false
 verified_at = "2026-10-11"
 verified_by = "claude"
 test_command = "cargo test"
 source_hash = "536a778d8e5633c7bdf24194829fe1451ff41414"
-note = "verifyサブコマンドの統括は cli::cmd_verify、registry読込は registry::load_registry。source_fileはエリアの主対象(src/cli.rs)を指し、実関数はtarget_functionで特定する"
+note = "ローカル整合検査(構造検査・--checksum・--roundtrip)の条件群。TASK-11(Phase B)で旧verifyサブコマンド(src/cli.rs cmd_verify)が削除され、backup verify(設計3.2・8.5維持点)へ集約。registry読込は registry::load_registry"
 
 [[condition]]
 id = "verify.structure-check-ok"
-target_function = "cli::cmd_verify"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-001(検査仕様は2.4-1)"
+target_function = "backup verify(構造検査・Phase B新配置)"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-001(検査仕様は2.4-1)。TASK-11(Phase B): 旧verify削除によりbackup verify経路へ文言改訂"
 description = "整合している状態で構造検査(既定段階)が全項目ok・exit 0となる (unit)"
-given = "正常なencrypt済registry・.age・manifestが揃った状態で verify 実行"
+given = "正常なbackup push済registry・.age・manifestが揃った状態で backup verify 実行"
 expect_return = "exit code 0(全検査項目ok表示)"
-source_lines = "src/cli.rs:1309"
+source_lines = "src/cli.rs:770"
 
 [[condition]]
 id = "verify.missing-or-size-mismatch-error"
-target_function = "cli::cmd_verify"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-002(2.4-1・7.1のexit 4統一。2026-10-11 TASK-2で2.4-1の完全一致文言を反映)"
+target_function = "backup verify(構造検査・Phase B新配置)"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-002(2.4-1・7.1のexit 4統一。2026-10-11 TASK-2で2.4-1の完全一致文言を反映)。TASK-11(Phase B): 旧verify削除によりbackup verify経路へ文言改訂"
 description = "構造検査で .age 欠損・age_sizeと実sizeの不一致を検出し、検証エラー4(欠損も不一致と同じく4に統一)。age_sizeは実ファイルsizeと完全一致を要求し、実sizeが記録値未満(切り詰め)・超過(追記)のいずれも不一致としてexit 4となる(記録値未満を警告継続にしない) (unit)"
-given = ".age を削除したcaseと、age_size と異なる実sizeの .age のcase(実sizeが記録値を超過するcaseと未満に切り詰めるcaseの両方)"
+given = ".age を削除したcaseと、age_size と異なる実sizeの .age のcase(実sizeが記録値を超過するcaseと未満に切り詰めるcaseの両方)の backup verify 実行"
 expect_return = "exit code 4(該当recordのsource_pathと期待/実測の詳細表示)"
-source_lines = "src/cli.rs:1325"
+source_lines = "src/cli.rs:786"
 
 [[condition]]
 id = "verify.torn-write-and-bad-json-lines"
@@ -51,54 +56,54 @@ source_lines = "src/registry.rs:799"
 
 [[condition]]
 id = "verify.checksum-detects-mutation"
-target_function = "cli::cmd_verify --checksum"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-004(2.4-2)"
+target_function = "backup verify --checksum"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-004(2.4-2)。TASK-11(Phase B): 旧verify削除によりbackup verify経路へ文言改訂"
 description = "--checksum で .age の改変(byte追加)をsha256再計算により検出する (unit)"
-given = ".age へ1byte追加した状態で --checksum 実行"
+given = ".age へ1byte追加した状態で backup verify --checksum 実行"
 expect_return = "exit code 4(期待age_sha256と実測の不一致表示)"
-source_lines = "src/cli.rs:1436"
+source_lines = "src/cli.rs:892"
 
 [[condition]]
 id = "verify.roundtrip-sha256-match"
-target_function = "crypto::decrypt_sha256 / cli::cmd_verify --roundtrip"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-005(2.4-3)"
+target_function = "crypto::decrypt_sha256 / backup verify --roundtrip"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-005(2.4-3)。TASK-11(Phase B): 旧verify削除によりbackup verify経路へ文言改訂(設計3.2: 旧verify相当)"
 description = "--roundtrip で復号平文sha256(ストリーム計算)がregistry記録(source_sha256)と一致することを検証する(実age統合) (integration)"
-given = "正常なencrypt済状態で --roundtrip 実行(平文はディスクに書き出さない)"
+given = "正常な暗号化済状態で backup verify --roundtrip 実行(平文はディスクに書き出さない)"
 expect_return = "exit code 0"
-source_lines = "tests/verify_roundtrip.rs:35"
+source_lines = "tests/verify_roundtrip.rs:36"
 
 [[condition]]
 id = "verify.roundtrip-wrong-key-error"
 target_function = "crypto::decrypt_sha256"
 source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-006(2.4・7.1)"
 description = "--roundtrip で鍵不一致(誤鍵)は処理エラー4となる (integration)"
-given = "暗号化recipientと対にならない秘密鍵で --roundtrip 実行"
+given = "暗号化recipientと対にならない秘密鍵で backup verify --roundtrip 実行"
 expect_return = "exit code 4(処理エラー)"
-source_lines = "tests/verify_roundtrip.rs:58"
+source_lines = "tests/verify_roundtrip.rs:59"
 
 [[condition]]
 id = "verify.roundtrip-manifest-crosscheck"
-target_function = "cli::cmd_verify --roundtrip"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-007(2.4-3)"
+target_function = "backup verify --roundtrip"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-007(2.4-3)。TASK-11(Phase B): 旧verify削除によりbackup verify経路へ文言改訂"
 description = "--roundtrip でmanifest復号→registry突合(バッチ内ファイル数・各source_sha256・age_sha256)を行い、不一致を検出する (integration)"
-given = "registry記録と突合しない内容(ファイル数・sha256を変えた)の manifest.jsonl.age を配置"
+given = "registry記録と突合しない内容(ファイル数・sha256を変えた)の manifest.jsonl.age を配置して backup verify --roundtrip 実行"
 expect_return = "exit code 4(不一致検出)"
-source_lines = "tests/verify_roundtrip.rs:100"
+source_lines = "tests/verify_roundtrip.rs:84"
 
 [[condition]]
 id = "verify.runs-without-aws"
-target_function = "cli::cmd_verify"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-008(2.4)"
-description = "verify は aws CLI不在・aws.toml不在でも完結する (unit)"
-given = "aws CLI不在・aws.toml不在の環境で verify 実行"
+target_function = "backup verify"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-008(2.4)。TASK-11(Phase B): 旧verify削除によりbackup verify経路へ文言改訂"
+description = "backup verify はローカル整合検査であり aws設定(aws.toml)が一切なくても完結する (unit)"
+given = "aws.toml不在の環境で backup verify 実行"
 expect_return = "exit code 0"
-source_lines = "src/cli.rs:1473"
+source_lines = "src/cli.rs:929"
 
 [[condition]]
 id = "verify.unknown-record-type-skipped"
 target_function = "registry::load_registry"
 source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-009(規則は4.1注記)"
-description = "registry内の未知record_type行(既知3種 encrypt/upload/manifest_upload 以外)は警告のうえ無視され読込が継続する(既知3種のみreduce・将来のschema追加への前方互換) (unit)"
+description = "registry内の未知record_type行は警告のうえ無視され読込が継続する(将来のschema追加への前方互換。Phase A以降の既知種は旧3種(encrypt/upload/manifest_upload)+新種(file_write/file_upload/manifest/index_upload/pin_write/pin_remove/prune)等の増加を含む) (unit)"
 given = "未知record_typeの行を既知レコードに混在させたregistry"
 expect_return_shape = "未知record_typeの行は警告表示のうえ結果から除外され、残り行の読込・reduceは継続する(読込エラーとならない)"
 source_lines = "src/registry.rs:835"
@@ -114,12 +119,12 @@ source_lines = "src/registry.rs:773"
 
 [[condition]]
 id = "verify.roundtrip-env-error-exit-2"
-target_function = "cli::cmd_verify --roundtrip"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-011(2026-10-08レビュー指摘6対応。2.4・7.1)"
-description = "verify --roundtrip はroundtrip開始前に秘密鍵ファイルの存在とageバイナリを事前検査し、不在なら設定・環境エラー2で即終了する(対象ファイルごとの復号失敗に紛れて検証エラー4とならない) (unit)"
-given = "秘密鍵ファイルが不在の状態、およびageバイナリがPATH上に無い状態での verify --roundtrip 実行"
+target_function = "backup verify --roundtrip"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-011(2026-10-08レビュー指摘6対応。2.4・7.1)。TASK-11(Phase B): 旧verify削除によりbackup verify経路へ文言改訂"
+description = "backup verify --roundtrip はroundtrip開始前に秘密鍵ファイルの存在とageバイナリを事前検査し、不在なら設定・環境エラー2で即終了する(対象ファイルごとの復号失敗に紛れて検証エラー4とならない) (unit)"
+given = "秘密鍵ファイルが不在の状態、およびageバイナリがPATH上に無い状態での backup verify --roundtrip 実行"
 expect_return = "exit code 2(設定・環境エラー)"
-source_lines = "src/cli.rs:1690"
+source_lines = "src/cli.rs:1000"
 
 [[condition]]
 id = "verify.decrypt-error-includes-age-stderr"
@@ -128,13 +133,13 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-012(2026-10-08レビ
 description = "復号のstdin投入threadエラー時のエラーメッセージにage stderrの内容を含める(encrypt側の「{e}; age stderr: {stderr_text}」形式と対称) (integration)"
 given = "age -d が異常終了する復号(誤鍵指定等)でstdin投入threadがEPIPE等のエラーを受け取るケース"
 expect_return_shape = "ProcessErrorのmessageに起因エラーと age stderr: <内容> が両方含まれる"
-source_lines = "tests/verify_roundtrip.rs:156"
+source_lines = "tests/verify_roundtrip.rs:135"
 
 [[condition]]
 id = "verify.structure-recipients-bijection"
-target_function = "cli::cmd_verify"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-013(2.4-1・4.4。2026-10-11 TASK-2で追加)"
-description = "構造検査(既定段階)は各encrypt記録のage_pathの.age(manifestの.ageは含まない)のヘッダをparseし、ssh-ed25519 stanza識別子がregistry記録recipients指紋から導出したv1.2形式指紋prefix集合(記録指紋SHA256:<b64>のb64部をdecodeした32byteの先頭4byteをb64(paddingなし)符号化)と全単射で対応することを照合する。誤recipient鍵で作られた.age・stanza数不一致・識別子が指紋prefix形式(decode結果4byte)でない場合・記録指紋からprefixを導出できない場合(b64 decode不能・decode結果が32byte未満)・旧形式tagのみでv1.2形式stanzaを1つも持たない.ageは、いずれも検証エラー4(fail-closed。照合skipではなく) (unit)"
-given = "合成ageヘッダ(v1.2形式ssh-ed25519 stanza+`--- `終端)の.ageとrecipients記録をSHA256:<b64(32byte)>実形式の指紋で構成した、(a)正recipient(全単射一致)・(b)誤recipient指紋(stanzaは鍵Aのprefix・記録は鍵Bの指紋)・(c)stanza数不一致(ヘッダ2 stanza vs 記録1指紋)の3case"
+target_function = "backup verify(構造検査・recipient照合)"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-013(2.4-1・4.4。2026-10-11 TASK-2で追加)。TASK-11(Phase B): 旧verify削除によりbackup verify経路へ文言改訂"
+description = "構造検査(既定段階)は各暗号化記録のage_pathの.age(manifestの.ageは含まない)のヘッダをparseし、ssh-ed25519 stanza識別子がregistry記録recipients指紋から導出したv1.2形式指紋prefix集合(記録指紋SHA256:<b64>のb64部をdecodeした32byteの先頭4byteをb64(paddingなし)符号化)と全単射で対応することを照合する。誤recipient鍵で作られた.age・stanza数不一致・識別子が指紋prefix形式(decode結果4byte)でない場合・記録指紋からprefixを導出できない場合(b64 decode不能・decode結果が32byte未満)・旧形式tagのみでv1.2形式stanzaを1つも持たない.ageは、いずれも検証エラー4(fail-closed。照合skipではなく) (unit)"
+given = "合成ageヘッダ(v1.2形式ssh-ed25519 stanza+`--- `終端)の.ageとrecipients記録をSHA256:<b64(32byte)>実形式の指紋で構成した、(a)正recipient(全単射一致)・(b)誤recipient指紋(stanzaは鍵Aのprefix・記録は鍵Bの指紋)・(c)stanza数不一致(ヘッダ2 stanza vs 記録1指紋)の3caseでの backup verify 実行"
 expect_return = "(a)はexit code 0、(b)(c)はexit code 4(recipient照合不一致の該当record特定表示)"
-source_lines = "src/cli.rs:1376; tests/verify_roundtrip.rs:200"
+source_lines = "src/cli.rs:835; tests/verify_roundtrip.rs:157"

@@ -119,20 +119,27 @@ pub struct ManifestV2File {
 
 /// manifest V2(JSONL平文)の構築。1行目=header・2行目以降=file record。
 /// 平文をdiskに置かず(`encrypt_bytes`へ渡す)運用は旧manifestと同じ。
+/// ヘッダは条件書正本のschemaへ合わせる(TASK-11 Phase B・encrypt.manifest-content-
+/// roundtrip): `record_type=batch`・`total_source_size`・`recipients`(現在設定の指紋列)。
+/// 1行の形式は旧manifestと同じ`": "`/`", "`区切り(平文を文字列照合する検証との整合)。
 pub fn build_manifest_v2(
     batch_id: &str,
     created_at: &str,
     files: &[ManifestV2File],
+    recipients: &[String],
 ) -> BackupResult<String> {
+    let total_source_size: u64 = files.iter().map(|f| f.source_size).sum();
     let header = serde_json::json!({
         "schema": 1,
-        "record_type": "manifest_header",
+        "record_type": "batch",
         "batch_id": batch_id,
         "created_at": created_at,
         "file_count": files.len(),
+        "total_source_size": total_source_size,
+        "recipients": recipients,
     });
     let mut out = String::new();
-    out.push_str(&header.to_string());
+    out.push_str(&json_line(&header));
     out.push('\n');
     for f in files {
         let rec = serde_json::json!({
@@ -154,7 +161,7 @@ pub fn build_manifest_v2(
             "source_size": f.source_size,
             "age_size": f.age_size,
         });
-        out.push_str(&rec.to_string());
+        out.push_str(&json_line(&rec));
         out.push('\n');
     }
     Ok(out)

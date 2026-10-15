@@ -111,7 +111,21 @@ pub fn build_entries(reduced: &Reduced) -> Vec<IndexFileEntry> {
         });
         folders.push(w.folder.clone());
     }
-    // versions: file_uploadをidentity_hashでentryへ接続(記録順昇順→反転でdate降順)
+    // versions: file_uploadをidentity_hashでentryへ接続(記録順昇順→反転でdate降順)。
+    // version_tsの時刻源は暗号化時刻=file_write記録のrecorded_atとする(TASK-11 Phase B。
+    // upload記録の時刻とは独立)。file_write↔file_uploadはregistry上でid直結しないため、
+    // 同一(identity+batch)の組内で記録順に対応付ける(組内のwrite数を超えるuploadは
+    // 旧記録・不正dataとしてfile_upload記録のversion_tsへfall back)
+    let mut write_ts_by_group: std::collections::HashMap<(String, String), Vec<String>> =
+        std::collections::HashMap::new();
+    for w in &reduced.file_writes {
+        write_ts_by_group
+            .entry((w.identity_hash.clone(), w.batch_id.clone()))
+            .or_default()
+            .push(w.recorded_at.clone());
+    }
+    let mut upload_ordinal: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
     for (entry, folder) in entries.iter_mut().zip(&folders) {
         let mut versions: Vec<IndexVersion> = reduced
             .file_uploads
@@ -120,16 +134,25 @@ pub fn build_entries(reduced: &Reduced) -> Vec<IndexFileEntry> {
                 u.identity_hash == entry.identity_hash
                     && !deleted.contains(&(u.s3_key.clone(), u.version_id.clone()))
             })
-            .map(|u| IndexVersion {
-                date: u.recorded_at.get(..10).unwrap_or("").to_string(),
-                version_ts: u.version_ts.clone(),
-                batch_id: u.batch_id.clone(),
-                s3_key: u.s3_key.clone(),
-                version_id: u.version_id.clone(),
-                source_sha256: u.source_sha256.clone(),
-                age_sha256: u.age_sha256.clone(),
-                source_size: u.source_size,
-                age_size: u.age_size,
+            .map(|u| {
+                let group = (u.identity_hash.clone(), u.batch_id.clone());
+                let ordinal = upload_ordinal.entry(group.clone()).or_insert(0);
+                let encrypt_ts = write_ts_by_group
+                    .get(&group)
+                    .and_then(|ws| ws.get(*ordinal).cloned())
+                    .unwrap_or_else(|| u.version_ts.clone());
+                *ordinal += 1;
+                IndexVersion {
+                    date: encrypt_ts.get(..10).unwrap_or("").to_string(),
+                    version_ts: encrypt_ts,
+                    batch_id: u.batch_id.clone(),
+                    s3_key: u.s3_key.clone(),
+                    version_id: u.version_id.clone(),
+                    source_sha256: u.source_sha256.clone(),
+                    age_sha256: u.age_sha256.clone(),
+                    source_size: u.source_size,
+                    age_size: u.age_size,
+                }
             })
             .collect();
         versions.reverse();
@@ -214,7 +237,10 @@ pub fn parse_index(plain: &str) -> BackupResult<(IndexHeader, Vec<IndexFileEntry
                 entries.push(e);
             }
             other => {
-                eprintln!("WARNING: 索引の{other:?}行は未知のrecord_typeのため無視します");
+                // 未知record_typeの警告はrecord_type文字列をそのまま表示する(L-5。
+                // registry側の未知record_type警告と表示形式を揃える)
+                let type_name = other.unwrap_or("record_typeなし");
+                eprintln!("WARNING: 索引の{type_name}行は未知のrecord_typeのため無視します");
             }
         }
     }
@@ -296,9 +322,11 @@ pub fn read_index(
             .unwrap_or(0)
     ));
     let result = (|| -> BackupResult<(IndexHeader, Vec<IndexFileEntry>)> {
+        // 索引GETのS3転送エラーは転送エラー5(cli.index-get-transfer-error。
+        // 索引不在404・復号失敗の設定エラー2と分離する)
         backend
             .get_to_file(bucket, &key, &tmp)
-            .map_err(|e| BackupError::Config(format!("{guidance} ({e})")))?;
+            .map_err(|e| BackupError::Transfer(format!("{guidance} ({e})")))?;
         let plain = crypto::decrypt_bytes(&tmp, decrypt_key)
             .map_err(|e| BackupError::Config(format!("{guidance} ({e})")))?;
         let text = String::from_utf8(plain)

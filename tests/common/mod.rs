@@ -128,13 +128,6 @@ pub fn sha256_hex(data: &[u8]) -> String {
     d.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub fn sha256_b64(data: &[u8]) -> String {
-    use base64::Engine as _;
-    use sha2::Digest;
-    let d = sha2::Sha256::digest(data);
-    base64::engine::general_purpose::STANDARD.encode(d)
-}
-
 /// 現在のJST暦日(YYYY-MM-DD)。
 pub fn jst_today() -> String {
     let jst = chrono::FixedOffset::east_opt(9 * 3600).expect("JST offset");
@@ -243,64 +236,6 @@ pub fn write_fake_credentials(dir: &Path) -> PathBuf {
         &p,
         b"[credentials]\naccess_key_id = \"AKIAFAKESEAMONLY00000A\"\nsecret_access_key = \"fake-seam-only-not-a-real-secret\"\n",
     );
-    p
-}
-
-/// credential値非露出検証用: 各値へ一意の検出マーカーを埋めたcredentialファイルを書く。
-/// (access_key_id等の実際の値ではなくマーカー文字列そのものが出力に現れないことを検証する)
-pub fn write_marked_credentials(dir: &Path) -> PathBuf {
-    let p = dir.join("aws-credentials.toml");
-    write_file(
-        &p,
-        b"[credentials]\naccess_key_id = \"LEAKMARK-AKID-9f8e7d6c\"\nsecret_access_key = \"LEAKMARK-SECRET-5a4b3c2d1e\"\nsession_token = \"LEAKMARK-TOKEN-0f9e8d7c\"\n",
-    );
-    p
-}
-
-/// fake seam検証用のaws.toml本文(bucket/region/credentials_fileは必須キー。
-/// storage_classはOptionで省略可=既定DEEP_ARCHIVE)。credentials_fileのpath解決は
-/// cwd基準の相対path仕様だが、テストは絶対pathで指定する(run_bin_envのcwdはrepo root)。
-pub fn aws_toml_body(
-    bucket: &str,
-    region: &str,
-    credentials_file: &Path,
-    storage_class: Option<&str>,
-) -> String {
-    let sc = storage_class
-        .map(|s| format!("storage_class = \"{s}\"\n"))
-        .unwrap_or_default();
-    format!(
-        "[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"{bucket}\"\nregion = \"{region}\"\ncredentials_file = \"{}\"\n{sc}",
-        credentials_file.display()
-    )
-}
-
-/// 結合test用のpipeline.tomlを書く。
-pub fn write_pipeline_toml(
-    dir: &Path,
-    recipients: &[PathBuf],
-    out_dir: &Path,
-    registry: &Path,
-    decrypt_key: Option<&Path>,
-) -> std::path::PathBuf {
-    let keys = recipients
-        .iter()
-        .map(|p| format!("\"{}\"", p.display()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let body = format!(
-        "[recipients]\npublic_keys = [{keys}]\n\
-         [output]\ndir = \"{}\"\nregistry = \"{}\"\n\
-         [behavior]\nkeep_going = false\n\
-         [verify]\ndecrypt_key = \"{}\"\n",
-        out_dir.display(),
-        registry.display(),
-        decrypt_key
-            .map(|p| p.display().to_string())
-            .unwrap_or_default(),
-    );
-    let p = dir.join("pipeline.toml");
-    write_file(&p, body.as_bytes());
     p
 }
 

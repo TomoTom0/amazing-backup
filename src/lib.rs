@@ -9,11 +9,9 @@ pub mod index;
 pub mod layout;
 pub mod manifest;
 pub mod registry;
-pub mod restore;
 pub mod s3;
 pub mod storage;
 pub mod targets;
-pub mod uploader;
 
 pub use config::{AwsConfig, PipelineConfig};
 pub use errors::{BackupError, BackupResult};

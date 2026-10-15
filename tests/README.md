@@ -68,25 +68,47 @@ aws CLI(subprocess)依存のテスト構造をfake seamへ再構成:
   5GB実体は作らない)。
   実装前のため新条件のテストは実行failを許容(cargo test --no-runのコンパイルは通る。
   既存テストは全件pass維持)
+2026-10-15: TASK-11(Phase B)テストコード更新(旧サブコマンド削除への追随・テスト先行。
+  詳細はtests/design/各ファイルのヘッダコメント)。
+- 廃止47条件のテスト削除: 該当[covers:]タグとテスト関数を除去。src内unit testも
+  廃止条件を参照するものを削除(cli 2・plan 4・encrypt 6・upload 16・restore 19の対応。
+  実装コードは無変更)。tests/common/mod.rsから旧形式helper(aws_toml_body・
+  write_pipeline_toml・write_marked_credentials・sha256_b64)を削除
+- 文言改訂39条件(id不変)への追随: tests/restore.rs・tests/encrypt_batch.rs・
+  tests/s3_backend.rsをStorageFixture+backup push/get/backup pull/list jobs経路へ
+  全面書換、tests/verify_roundtrip.rsをbackup verify経路へ、tests/cli_bin.rsの
+  parity代表ケースをbackup pushへ置換
+- 新規11条件+保留解消1条件(restore.download-plain-conflictのget/pull平文衝突保護への
+  文言改訂)+事後条件化4件(L-7/L-8/M-2/M-6)のテストを追加:
+  tests/cli_bin.rs(旧サブコマンド削除)・tests/storage_query.rs(--format系・list jobs拡張)・
+  tests/phase_b_options.rs(新設: --profile系3件・--aws-config既定・索引GET転送エラー・
+  manage jobs reissue)・tests/storage_backup.rs(pull範囲排他)・tests/retention.rs
+  (prune併置排他・category guard)・tests/pin.rs(skip対象への--pin)・
+  tests/index_storage.rs(version_ts供給源・未知record_type警告)・tests/restore.rs(平文衝突保護)
+- 条件数144(廃止47・改訂39・新規11・事後条件化4・保留解消1)。実装前のため
+  Phase B実装待ちのテスト(backup verify・--format json・--profile・manage jobs reissue・
+  get/pull平文衝突保護・list jobs noncurrent版表示)は実行failを許容
+  (cargo test --no-runのコンパイルは通る・verify-conditions.py PASS)
 
 ## 構成
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(12ファイル・170条件・excluded 24件)。TASK-10 S3ストレージ設計(9章素案+本文)を反映済み |
-| tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・fake seam用helper(credentialファイル・aws.toml組立・API呼び出し記録読取)等) | 作成済み |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(12ファイル・144条件・excluded 23件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)反映済み |
+| tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(新schema組立・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
-| tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seam(BACKUP_REMOTE_FAKE_S3_STATE)でのupload(結合) | 作成済み(TASK-9でPATH差替えからseamへ更新) |
-| tests/verify_roundtrip.rs | verify --roundtrip系(結合) | 作成済み |
-| tests/restore.rs | restore系3サブコマンド(request/status/download)の復元・検証・復号(結合・TASK-5) | 作成済み(TASK-9でPATH差替えからseamへ更新) |
-| tests/s3_backend.rs | S3 backend・credentialファイル系(fake seam・multipart・abort・endpoint env警告・--profile廃止。結合・TASK-9) | 作成済み(テスト先行。src/s3.rs実装前は実行failを許容) |
-| tests/cli_bin.rs | bin entrypoint系(--version・lib/bin parity。結合) | 作成済み |
-| tests/layout.rs | TASK-10 layoutエリア(key生成・分類解決・衝突・検証。dry-run表示とfake seamで観測) | 作成済み(テスト先行。実装前は実行failを許容) |
-| tests/index_storage.rs | TASK-10 indexエリア(索引schema・registry再構築・STANDARD・recipients・version_id・manifest再構築・pin反映) | 作成済み(テスト先行) |
-| tests/pin.rs | TASK-10 pinエリア(pin add/rm・write-once・backup時pin) | 作成済み(テスト先行) |
-| tests/retention.rs | TASK-10 retentionエリア(lifecycle NCVE/MPU abort・prune dry-run/保護/削除条件) | 作成済み(テスト先行) |
-| tests/storage_query.rs | TASK-10照会系CLI(query/get/list/diff。版特定・復元job・災害時読み取りの近傍) | 作成済み(テスト先行) |
-| tests/storage_backup.rs | TASK-10操作系CLI(backup push統合/dry-run・pull確認・versioning・索引不在・災害時動作)+keep_artifacts掃除+registry基準skip | 作成済み(テスト先行) |
+| tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
+| tests/verify_roundtrip.rs | backup verify --roundtrip系(結合) | 作成済み(TASK-11 Phase Bでbackup verify経路へ書換。実装前fail許容) |
+| tests/restore.rs | 復元job系の共通経路(tier/days検証・Restore header parse・--key事前検査・get/pull平文衝突保護)をget/backup pull/list jobs経路で検証(結合) | 作成済み(TASK-11 Phase Bで新経路へ全面書換。平文衝突保護は実装前fail許容) |
+| tests/s3_backend.rs | S3 backend・credentialファイル系(fake seam・multipart・abort・endpoint env警告)をbackup push経路で検証(結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
+| tests/cli_bin.rs | bin entrypoint系(--version・lib/bin parity・旧サブコマンド削除。結合) | 作成済み(旧サブコマンド削除はPhase B実装前fail許容) |
+| tests/layout.rs | TASK-10 layoutエリア(key生成・分類解決・衝突・検証。dry-run表示とfake seamで観測) | 作成済み |
+| tests/index_storage.rs | TASK-10/11 indexエリア(索引schema・registry再構築・STANDARD・recipients・version_id・manifest再構築・pin反映・version_ts供給源・未知record_type警告) | 作成済み(後半2件はPhase B実装前fail許容) |
+| tests/pin.rs | TASK-10/11 pinエリア(pin add/rm・write-once・backup時pin・skip対象への--pin) | 作成済み |
+| tests/retention.rs | TASK-10/11 retentionエリア(lifecycle NCVE/MPU abort・prune dry-run/保護/削除条件・併置排他・category guard) | 作成済み |
+| tests/storage_query.rs | 照会系CLI(query/get/list/diff・版特定・復元job・--format human/json) | 作成済み(--format系・list jobs noncurrent版はPhase B実装前fail許容) |
+| tests/storage_backup.rs | 操作系CLI(backup push統合/dry-run・pull確認/範囲排他・versioning・索引不在・災害時動作)+keep_artifacts掃除+registry基準skip | 作成済み |
+| tests/phase_b_options.rs | TASK-11 Phase BのCLI option系(--profile系3件・--aws-config既定path・索引GET転送エラー・manage jobs reissue) | 作成済み(テスト先行。Phase B実装前は実行failを許容) |
 | src/**/*.rs 内 #[cfg(test)] | cargo単体test(S3実行はS3Backend fake(FakeS3)差替) | 作成済み |
 
 cargo testの階層: unit=src/各モジュール内`#[cfg(test)] mod tests`、
@@ -109,21 +131,23 @@ UPL-025〜028相当) + 2026-10-14 TASK-10の新規4エリアと追加29件)を1:
 upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断は各エリアのexcludedへ記録)。
 2026-10-14の01f4af5(RESTORE_README placement機能削除)でUPL/RESのREADME配置系6条件
 (upload 5件・restore 1件)を削除した(上記TASK-8のUPL-020〜024相当は機能削除により消滅)。
+2026-10-15のTASK-11(Phase B)棚卸しで旧サブコマンド固有の47条件を廃止し、共通経路39条件を
+文言改訂(id不変)、Phase B新規11件+保留解消1件+事後条件化4件を追加(144条件・excluded 23件)。
 
 | ファイル | feature | source_file(主対象) | 条件数 | 設計対応 |
 |---|---|---|---|---|
-| plan.toml | plan | src/targets.rs | 9 | PLAN-001〜009 |
+| plan.toml | plan | src/targets.rs | 5 | PLAN-001〜009のうち対象解決共通経路5件(TASK-11でname override系等4件廃止→layout.*へ) |
 | config.toml | config | src/config.rs | 16 | CONF-001〜008 + TASK-9 credential系4件 + TASK-10 layout/prefix/keep_artifacts系4件 |
-| encrypt.toml | encrypt | src/crypto.rs | 22 | ENC-001〜020 + manifest復旧派生 + TASK-10 registry基準skip |
+| encrypt.toml | encrypt | src/crypto.rs | 16 | ENC系のうち共通暗号化経路16件(TASK-11で旧encrypt固有6件廃止。backup push経路で検証) |
 | fingerprint.toml | fingerprint | src/fingerprint.rs | 5 | FPR-001〜005 |
-| upload.toml | upload | src/uploader.rs | 23 | UPL-001〜019 + TASK-9 multipart/警告系4件(README配置系5件は01f4af5で削除) |
-| verify.toml | verify | src/cli.rs | 13 | VER-001〜013 |
-| cli.toml | cli | src/cli.rs | 32 | CLI-001〜006 + TASK-9(--profile廃止・fake seam)2件 + TASK-10照会・操作系24件 |
-| restore.toml | restore | src/restore.rs | 23 | RES系(README配置系1件は01f4af5で削除。本編8章・正本はtmp/tasks/tm-5/design_restore.md 3.9) |
+| upload.toml | upload | src/s3.rs | 7 | UPL系のうちS3転送共通経路7件(TASK-11で旧upload固有16件廃止。backup push経路で検証) |
+| verify.toml | verify | src/storage.rs | 13 | VER-001〜013(TASK-11でbackup verify経路へ文言改訂・id不変) |
+| cli.toml | cli | src/cli.rs | 43 | CLI-001〜006 + TASK-9/10系 + TASK-11 Phase B(旧サブコマンド削除・--format/--profile・manage jobs reissue・pull範囲排他等) |
+| restore.toml | restore | src/storage.rs | 4 | 復元job系共通経路4件(TASK-11で旧restore固有19件廃止。get/pull/list jobs経路で検証。平文衝突保護含む) |
 | layout.toml | layout | src/layout.rs | 9 | TASK-10設計1章(key生成・分類解決・衝突・検証。9章素案+rel_path正規化) |
-| index.toml | index | src/index.rs | 7 | TASK-10設計2章(索引schema・再構築・version_id供給) |
-| pin.toml | pin | src/cli.rs | 5 | TASK-10設計1.3・3.2(write-once・copy・backup時pin・rm) |
-| retention.toml | retention | src/cli.rs | 6 | TASK-10設計3.2・5.2(lifecycle・NCVE/prune共通削除条件) |
+| index.toml | index | src/index.rs | 11 | TASK-10設計2章 + H-1/H-3 + TASK-11(version_ts供給源・未知record_type警告) |
+| pin.toml | pin | src/cli.rs | 7 | TASK-10設計1.3・3.2 + M-4(--config早期検査) + TASK-11 M-6(skip対象への--pin) |
+| retention.toml | retention | src/cli.rs | 8 | TASK-10設計3.2・5.2 + TASK-11 L-8(prune併置排他)・M-2(category guard) |
 
 - 分割理由: test-structureの`[meta].source_file`(検証対象の実装ファイル・ファイル単位に1つ)が
   7エリアでそれぞれ別moduleに対応し、単一ファイルでは特定できないため。分割によりidの`<area>`部と
@@ -140,7 +164,7 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | 条件の種別 | テスト階層 | 条件書のsource(一次出典) |
 |---|---|---|
 | (unit) plan / config / cli / fingerprint / verify | src/<module>.rs 内 `#[cfg(test)]` | 設計書詳細設計(2章・3章・4.4・5章) |
-| (unit, fake S3Backend) upload / config.aws-required-on-upload | src/uploader.rs 内 `#[cfg(test)]`(S3Backend fake差替・実networkなし) | 設計書2.3・5章・TASK-9設計4章 |
+| (unit, fake S3Backend) uploadのmultipart系 / config.aws-required-on-upload | src/s3.rs・src/config.rs 内 `#[cfg(test)]`(S3Backend fake差替・実networkなし。TASK-11 Phase Bで旧src/uploader.rs削除に伴い移設) | 設計書2.3・5章・TASK-9設計4章 |
 | (unit) layout / index.schema-and-serialization / configのTASK-10追加系 | src/layout.rs・src/index.rs・src/config.rs 内 `#[cfg(test)]`(layout.rs・index.rsはTASK-10 Phase A実装で新設) | TASK-10設計書(tmp/tasks/tm-10/design_s3_storage.md) |
 | (integration) encrypt実age系・fingerprint.stanza-tag-matches-age-header・verify roundtrip系 | tests/age_roundtrip.rs 等(実age不在環境ではskip扱い) | 設計書4章・6章・8章 |
 | (integration, fake seam) upload系(UPL-015〜019等)・restore系・S3 backend/credential系 | tests/encrypt_batch.rs・tests/restore.rs・tests/s3_backend.rs(bin subprocess・fake seam。実ageを要するtestは不在環境でskip扱い) | TASK-5設計書(tmp/tasks/tm-5/design_restore.md)・TASK-9設計書(tmp/tasks/tm-9/design_sdk_migration.md) |
@@ -171,8 +195,8 @@ $ uv run python scripts/design/verify-conditions.py
 - (b) 全条件が1つ以上のタグでcoverされていること(網羅検査)。
   テストファイル(tests/**/test_*.py・tests/**/*.rs・src/**/*.rs)が1つも無い段階は
   警告表示のみでfailしない。テストコード作成後はfailする。
-  2026-10-14 TASK-10段階5(テスト作成)後: 170条件すべてcover済みで(b)もpass
-  (56新条件は全てcoversタグ付き。(a)(c)(d)(e)もpass)
+  2026-10-15 TASK-11 Phase Bテスト更新後: 144条件すべてcover済みで(b)もpass
+  (Phase B実装待ちの条件もテスト先行でcoversタグ付き。(a)(c)(d)(e)もpass)
 - (c) 条件書tomlのschema検査(id形式・必須フィールド・expect_*の存在・givenの実質性)
 - (d) `source_lines`をタグ走査結果へ自動同期(自動メタデータ・手書きしない)
 - (e) `[[excluded]]`の構造検査(item/source/reasonの空欄をfail)

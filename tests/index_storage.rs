@@ -659,3 +659,84 @@ fn rebuild_preserves_folder_and_restores_pins() {
         .unwrap_or_default();
     assert_eq!(pins2.len(), 2, "pm1・pm2の2件: {pins2:?}");
 }
+
+/// [covers:index.version-ts-from-file-write]
+/// 索引versions[].version_tsの時刻源は暗号化時刻(TASK-11 Phase B): registryの当該版
+/// file_write記録recorded_atと一致する(file_upload記録の時刻ではなく・file_writeと同一時刻)。
+/// 同一日内複数版の一意化(getの--version-id特定・候補表示)はこの時刻で行う。
+#[test]
+fn version_ts_comes_from_file_write_recorded_at() {
+    let Some(fx) = StorageFixture::new("idx-vts", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"version-ts-v1");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    // 同一日内2版目(mtimeを変えるためsleep)
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    write_file(&a, b"version-ts-v2-longer");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+
+    // registryのfile_write記録(recorded_at)と索引versions[].version_tsの対応
+    let writes: Vec<serde_json::Value> = fx
+        .registry_values()
+        .into_iter()
+        .filter(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_write"))
+        .collect();
+    assert_eq!(writes.len(), 2, "2版分のfile_write記録: {writes:?}");
+    let lines = fx.read_index();
+    let entry = index_file_entry(&lines, "a.zip");
+    let versions = entry_versions(entry);
+    assert_eq!(versions.len(), 2, "索引は2版: {versions:?}");
+    for v in versions.iter() {
+        let vts = v
+            .get("version_ts")
+            .and_then(|t| t.as_str())
+            .expect("version_ts");
+        assert!(
+            writes
+                .iter()
+                .any(|w| w["recorded_at"].as_str() == Some(vts)),
+            "version_ts({vts})は当該版file_write記録のrecorded_atと一致: {writes:?}"
+        );
+    }
+    // file_writeとfile_uploadの記録時刻は独立に記録されるが、version_tsは
+    // file_write側(暗号化時刻)に等しい(全version_tsがいずれかのfile_write記録に対応することで検証)
+}
+
+/// [covers:index.unknown-record-warning-plain-format]
+/// 索引parse時の未知record_type行の警告はrecord_type文字列をそのまま表示する
+/// (Some("x")等のRust Debug形式の引用でない・L-5。registry側の未知record_type警告と
+/// 表示形式が揃う)。
+#[test]
+fn unknown_record_warning_uses_plain_format() {
+    let Some(fx) = StorageFixture::new("idx-unknown", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"unknown-record-plain");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+
+    // 索引へ未知record_type行を混入
+    let mut lines = fx.read_index();
+    lines.push(serde_json::json!({
+        "schema": 1,
+        "record_type": "future_x",
+        "note": "前方互換の未知行",
+    }));
+    fx.rewrite_index(&lines);
+
+    let (code, stdout, stderr) = fx.list("files", &[]);
+    assert_eq!(
+        code, 0,
+        "未知record_type行は警告のうえ読込が継続する(exit 0): {stdout}{stderr}"
+    );
+    assert!(
+        stderr.contains("future_x"),
+        "警告にrecord_type文字列をそのまま表示: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Some("),
+        "Some(...)形式(Debug引用)では表示しない: {stderr}"
+    );
+}

@@ -3,6 +3,13 @@
 # 2026-10-14: TASK-10実装(Phase A)に先立つテスト先行の条件書(新設feature)。
 #   pin実装はcli.rs(コマンド)+uploader.rs(pin upload)+index.rs(索引更新)+s3.rs(copy_object)に跨る。
 #   実装前のため条件に対応するテストコードは未作成(網羅検査は警告のみの段階)。
+# 2026-10-15: TASK-11(Phase B低残件)対応でテスト先行の更新(TASK-11 body):
+#   pin.rm-updates-indexを文言改訂: pin rmの削除はversion実体の削除(DeleteObjectVersion相当。
+#   delete marker付与のみで実体がnoncurrentに残る形でない)とし、diffのpins報告と整合
+#   (削除済みpinは存在しない)。実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseのまま。
+# 2026-10-15: TASK-11(Phase B)でPhase A実装済み・未条件化の振る舞いを事後条件化(回帰テスト)。
+#   新規1件: pin.push-pin-on-skip-targets(M-6: skip対象がある場合のbackup push --pinは警告表示+
+#   当該fileの最新版へCopyObjectでpin付与)。出典はtmp/tasks/tm-10/design_s3_storage.md 12章。
 
 [meta]
 feature = "pin"
@@ -50,10 +57,10 @@ source_lines = "tests/pin.rs:242"
 [[condition]]
 id = "pin.rm-updates-index"
 target_function = "cli::cmd_pin_rm"
-source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(pin rm)"
-description = "pin rm: pin objectを削除し索引から該当pin entryを除去。DEEP_ARCHIVE配置のpinも復元不要で削除できる (integration, fake seam)"
-given = "pinが付与済み(DEEP_ARCHIVE配置)のfileへの pin rm --pin <版名> 実行"
-expect_return_shape = "復元jobなしでpin objectが削除され、索引pins[]から該当entryが除去され、registryへpin_remove記録され exit 0"
+source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(pin rm)。TASK-11 body(Phase B低残件: pin rm実体削除とdiff整合)"
+description = "pin rm: pin objectを削除し索引から該当pin entryを除去。削除はversion実体の削除(DeleteObjectVersion相当・delete marker付与のみで実体がnoncurrentとして残る形でない)とし、削除後のdiffのpins報告と整合する(削除済みpinは存在しない)。DEEP_ARCHIVE配置のpinも復元不要で削除できる (integration, fake seam)"
+given = "pinが付与済み(DEEP_ARCHIVE配置)のfileへの pin rm --pin <版名> 実行後の ListObjectVersions 確認と diff 実行"
+expect_return_shape = "復元jobなしでpin objectのversion実体が削除され(ListObjectVersionsに当該pin keyが現れない)、索引pins[]から該当entryが除去され、registryへpin_remove記録され、diffは当該pinを存在しないものとして報告し exit 0"
 source_lines = "tests/pin.rs:305"
 
 [[condition]]
@@ -63,4 +70,13 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(pin add)・レビューM-4"
 description = "pin add/rmはregistryへの記録を要するため--config(pipeline.toml)必須。S3変更(copy_object等)より前に設定エラー2で拒否されS3 API呼び出しは行われない(copy後にregistry解決失敗するとwrite-once滞留で手詰まりになるのを防ぐ) (integration, fake seam)"
 given = "--aws-configのみで--config/--keyなしのpin add実行"
 expect_return_shape = "exit 2(設定エラー)かつS3 API呼び出しなし(calls.log空)"
-source_lines = "tests/storage_backup.rs:644"
+source_lines = "tests/storage_backup.rs:676"
+
+[[condition]]
+id = "pin.push-pin-on-skip-targets"
+target_function = "backup push --pin(skip対象へのpin付与)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 12章レビューM-6(Phase A実装済み・事後条件化)・3.2(backup push --pin)"
+description = "backup push --pinで対象に変更なし(skip)のfileが含まれる場合は、新規upload分のpinと同時にskip対象にも警告表示(WARNING: 変更なしfileの件数と最新版へのpin付与を通知)のうえ、当該fileの最新版(索引versions先頭)へCopyObjectでpinを付与する(skip対象がpinなしになるのを防ぐ)。skip対象の当該pin keyが既に存在する場合はwrite-onceに従い付与をskipする警告を出す (integration, fake seam)"
+given = "1度push済みのfile(再実行でskip)と新規fileを同時に指定した backup push --pin <版名> 実行"
+expect_return_shape = "exit 0。skip表示とWARNING表示があり、新規分はpin keyへの直接PUT・skip分は当該fileのdefault.age最新版からCopyObjectでpin keyへ写され、索引pins[]に双方反映される"
+source_lines = "tests/pin.rs:360"

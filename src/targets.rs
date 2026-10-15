@@ -378,24 +378,6 @@ mod tests {
         assert!(msg.contains("same.zip"), "重複対象が特定される: {msg}");
     }
 
-    /// [covers:plan.output-name-collision-error]
-    /// 出力名(basename/name override)の重複は対象エラー。
-    #[test]
-    fn output_name_collision_is_target_error() {
-        let tmp = TempDir::new("plan-coll");
-        let d1 = tmp.path().join("d1");
-        let d2 = tmp.path().join("d2");
-        std::fs::create_dir_all(&d1).expect("d1");
-        std::fs::create_dir_all(&d2).expect("d2");
-        let a = write_zip(&d1, "x.zip", b"1");
-        let b = write_zip(&d2, "x.zip", b"22");
-
-        let e = resolve_targets(&[a, b], None).unwrap_err();
-        let msg = target_error(&e);
-        assert_eq!(e.exit_code(), 3);
-        assert!(msg.contains("x.zip"), "衝突名が特定される: {msg}");
-    }
-
     /// [covers:config.from-list-schema-validation]
     /// from-list tomlのpath欠落・未知キーは設定エラー。
     #[test]
@@ -435,44 +417,5 @@ mod tests {
         assert_eq!(entries[0].path, PathBuf::from("/tmp/a.zip"));
         assert_eq!(entries[0].name, None);
         assert_eq!(entries[1].name.as_deref(), Some("b-2025.7z"));
-    }
-
-    /// [covers:plan.name-override-basename-validation]
-    /// name overrideはbasename形式のみ許容: 空・"/"区切り・"."・".."は対象エラー3
-    /// (出力path・S3キーへのtraversalや空name防止)。basename形式は解決される。
-    #[test]
-    fn name_override_rejects_non_basename() {
-        let tmp = TempDir::new("plan-nameval");
-        let src = write_zip(tmp.path(), "docs.7z", b"n");
-
-        // 不正nameの各ケース(全件列挙される)
-        for bad in ["", "sub/dir/x.zip", "/abs/x.zip", "..", ".", "x.zip/"] {
-            let list = tmp.path().join("targets.toml");
-            write_file(
-                &list,
-                format!(
-                    "[[targets]]\npath = \"{}\"\nname = \"{bad}\"\n",
-                    src.display()
-                )
-                .as_bytes(),
-            );
-            let e = resolve_targets(&[], Some(&list)).unwrap_err();
-            let msg = target_error(&e);
-            assert_eq!(e.exit_code(), 3, "name={bad:?}は対象エラー3: {msg}");
-            assert!(msg.contains("basename"), "理由がmessageに含まれる: {msg}");
-        }
-
-        // basename形式は解決される
-        let list = tmp.path().join("targets-ok.toml");
-        write_file(
-            &list,
-            format!(
-                "[[targets]]\npath = \"{}\"\nname = \"docs-2025.7z\"\n",
-                src.display()
-            )
-            .as_bytes(),
-        );
-        let targets = resolve_targets(&[], Some(&list)).expect("basename形式のnameは解決される");
-        assert_eq!(targets[0].source_name, "docs-2025.7z");
     }
 }

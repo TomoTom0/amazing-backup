@@ -589,8 +589,10 @@ fn list_versions_shows_versions_and_rejects_missing_name() {
 }
 
 /// [covers:cli.list-jobs]
-/// list jobs(設計3.1): 復元job状況を全namespaceで表示(headのRestore header parse。
-/// 旧restore status相当・--dateによるprefix限定なし)。進行中・復元済み・未発行の混在一覧。
+/// list jobs(設計3.1・TASK-11 Phase B): 復元job状況を全namespaceで表示(headのRestore
+/// header parse。旧restore status相当・--dateによるprefix限定なし)。現行versionに加え
+/// noncurrent版(version_id付き)の復元状態も表示する(版指定取得の前提)。進行中・復元済み・
+/// 未発行の混在一覧。
 #[test]
 fn list_jobs_shows_restore_status_without_date_filter() {
     let Some(fx) = StorageFixture::new("q-listjobs", StorageOpts::default()) else {
@@ -605,6 +607,9 @@ fn list_jobs_shows_restore_status_without_date_filter() {
     for p in [&a, &b, &c] {
         assert_eq!(fx.push(&[p], &[], &[]).0, 0);
     }
+    // a.zipをもう1版push(noncurrent版を作る・同key別version_id)
+    write_file(&a, b"jobs-a-v2");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
     let key_a = fx.file_key("unfiled", None, "a.zip");
     let key_b = fx.file_key("unfiled", None, "b.zip");
     let key_c = fx.file_key("unfiled", None, "c.zip");
@@ -624,6 +629,20 @@ fn list_jobs_shows_restore_status_without_date_filter() {
             .find(|l| l.contains(key.as_str()))
             .unwrap_or_else(|| panic!("対象key({key})の行: {stdout}"));
         assert!(line.contains(state), "復元状態({state}): {line}");
+    }
+
+    // a.zipは2版(同key): 現行版とnoncurrent版がversion_id付きで並ぶ(get --version-id・
+    // pin対象等の版指定取得の前提)。fakeのrestore状態はkey単位のため両行とも同一状態でよい
+    let vids = index_version_ids(index_file_entry(&fx.read_index(), "a.zip"));
+    assert_eq!(vids.len(), 2, "a.zipは2版: {vids:?}");
+    for vid in &vids {
+        let line = stdout
+            .lines()
+            .find(|l| l.contains(key_a.as_str()) && l.contains(vid.as_str()))
+            .unwrap_or_else(|| {
+                panic!("a.zipの版({vid})の行(現行・noncurrentともversion_id付き): {stdout}")
+            });
+        assert!(line.contains("ongoing"), "版行にも復元状態: {line}");
     }
 }
 
@@ -744,5 +763,128 @@ fn list_categories_shows_keep_and_files() {
     assert!(
         stdout.lines().any(|l| l == "unfiled  files=4  keep=5"),
         "unfiled行: {stdout}"
+    );
+}
+
+/// [covers:cli.format-option-default-human]
+/// --format human|json(照会系共通・TASK-11 Phase B): --format省略時はhuman
+/// (現行の表示形式)。省略時と--format human明示時は同一の出力・終了コード。
+#[test]
+fn format_option_defaults_to_human() {
+    let Some(fx) = query_fixture("q-fmtdef") else {
+        return;
+    };
+    let out1 = fx.elsewhere.join("fmtdef-out1").display().to_string();
+    let out2 = fx.elsewhere.join("fmtdef-out2").display().to_string();
+    // (tag, --format省略の実行, --format human明示の実行)
+    let cases: Vec<(&str, (i32, String, String), (i32, String, String))> = vec![
+        (
+            "list files",
+            fx.list("files", &[]),
+            fx.list("files", &["--format", "human"]),
+        ),
+        (
+            "query",
+            fx.query("travel", &[]),
+            fx.query("travel", &["--format", "human"]),
+        ),
+        (
+            "get",
+            fx.get("travel.zip", &["--out", &out1]),
+            fx.get("travel.zip", &["--out", &out2, "--format", "human"]),
+        ),
+        ("diff", fx.diff(&[]), fx.diff(&["--format", "human"])),
+    ];
+    for (tag, (code_p, out_p, err_p), (code_h, out_h, err_h)) in cases {
+        assert_eq!(
+            code_p, code_h,
+            "{tag}: --format省略とhuman明示は同一終了コード"
+        );
+        assert_eq!(out_p, out_h, "{tag}: --format省略とhuman明示は同一出力");
+        assert_eq!(err_p, err_h, "{tag}: stderrも同一");
+        assert_eq!(code_p, 0, "{tag}: 実行自体はexit 0: {out_p}{err_p}");
+    }
+}
+
+/// [covers:cli.format-json-single-json]
+/// --format json(照会系・TASK-11 Phase B): list files/versions/pins/runs/categories/jobs・
+/// query・get・diffのstdout全体が機械可読な単一JSON(parse可能な1つのJSON value)。
+/// 内容はhuman形式と同一の対象データ。警告・案内等の人間向け通知(FAKE S3 MODE等)は
+/// stderrへ出しstdoutのJSONを壊さない。終了コードはhumanと同一。0件は空一覧を表す構造。
+#[test]
+fn format_json_outputs_single_json() {
+    let Some(fx) = query_fixture("q-fmtjson") else {
+        return;
+    };
+    let out1 = fx.elsewhere.join("fmtjson-out1").display().to_string();
+    let out2 = fx.elsewhere.join("fmtjson-out2").display().to_string();
+    // (tag, human実行, json実行)の対・照会系9コマンド
+    let human: Vec<(&str, (i32, String, String))> = vec![
+        ("files", fx.list("files", &[])),
+        ("versions", fx.list("versions", &[])),
+        ("pins", fx.list("pins", &[])),
+        ("runs", fx.list("runs", &[])),
+        ("categories", fx.list("categories", &[])),
+        ("jobs", fx.list("jobs", &[])),
+        ("query", fx.query("travel", &[])),
+        ("get", fx.get("travel.zip", &["--out", &out1])),
+        ("diff", fx.diff(&[])),
+    ];
+    let json: Vec<(&str, (i32, String, String))> = vec![
+        ("files", fx.list("files", &["--format", "json"])),
+        ("versions", fx.list("versions", &["--format", "json"])),
+        ("pins", fx.list("pins", &["--format", "json"])),
+        ("runs", fx.list("runs", &["--format", "json"])),
+        ("categories", fx.list("categories", &["--format", "json"])),
+        ("jobs", fx.list("jobs", &["--format", "json"])),
+        ("query", fx.query("travel", &["--format", "json"])),
+        (
+            "get",
+            fx.get("travel.zip", &["--out", &out2, "--format", "json"]),
+        ),
+        ("diff", fx.diff(&["--format", "json"])),
+    ];
+    assert_eq!(human.len(), 9, "照会系9コマンド");
+    for ((tag, (code_h, _, _)), (_, (code_j, out_j, err_j))) in human.iter().zip(json.iter()) {
+        assert_eq!(
+            code_j, code_h,
+            "{tag}: --format jsonの終了コードはhumanと同一: {out_j}{err_j}"
+        );
+        // stdout全体が単一JSONとしてparseできる(人間向け通知が混ざればparse失敗する)
+        let value: serde_json::Value = serde_json::from_str(out_j.trim())
+            .unwrap_or_else(|e| panic!("{tag}: stdoutは単一JSON: parse error {e}: {out_j}"));
+        // 警告・案内(FAKE S3 MODE等)はstderr側に出る(stdoutのJSONを壊さない)
+        assert!(
+            err_j.contains("FAKE S3 MODE"),
+            "{tag}: fake seam警告はstderrへ: {err_j}"
+        );
+        // humanと同一の対象データ(代表要素の包含確認)
+        if *tag != "get" {
+            let serialized = serde_json::to_string(&value).unwrap();
+            assert!(
+                serialized.contains("travel.zip") || serialized.contains("unfiled"),
+                "{tag}: JSONはhumanと同一データを含む: {serialized}"
+            );
+        }
+    }
+
+    // 0件は空一覧を表す構造(空索引でのlist files --format json)
+    let mut header = fx
+        .read_index()
+        .into_iter()
+        .find(|v| v.get("record_type").and_then(|r| r.as_str()) == Some("index_header"))
+        .expect("index_header");
+    if let Some(obj) = header.as_object_mut() {
+        obj.insert("entries".into(), serde_json::Value::from(0));
+    }
+    fx.rewrite_index(&[header]);
+    let (code, stdout, stderr) = fx.list("files", &["--format", "json"]);
+    assert_eq!(code, 0, "空索引もexit 0: {stdout}{stderr}");
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("0件も単一JSONとしてparseできる");
+    let serialized = serde_json::to_string(&value).unwrap();
+    assert!(
+        !serialized.contains("travel.zip"),
+        "0件のJSONに対象fileは含まれない: {serialized}"
     );
 }

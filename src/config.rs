@@ -1084,55 +1084,6 @@ mod tests {
         assert_eq!(e.exit_code(), 2);
     }
 
-    fn base_aws() -> AwsConfig {
-        AwsConfig {
-            bucket: "it-bucket".into(),
-            region: "ap-northeast-1".into(),
-            credentials_file: std::path::PathBuf::from("configs/secret/aws-credentials.toml"),
-            storage_class: "DEEP_ARCHIVE".into(),
-            prefix: "backup-remote/".into(),
-        }
-    }
-
-    fn ovr(
-        storage_class: Option<&str>,
-        bucket: Option<&str>,
-        region: Option<&str>,
-    ) -> AwsOverrides {
-        AwsOverrides {
-            storage_class: storage_class.map(|s| s.to_string()),
-            bucket: bucket.map(|s| s.to_string()),
-            region: region.map(|s| s.to_string()),
-        }
-    }
-
-    /// [covers:upload.cli-storage-class-allowlist-rejected]
-    /// --storage-class上書き値: allowlist外は設定エラー2。空文字・空白のみは未指定扱い
-    /// (aws.toml値を採用)でエラーとしない。
-    #[test]
-    fn apply_cli_overrides_validates_storage_class() {
-        // allowlist外(打ち間違い)は設定エラー2
-        let e = apply_cli_overrides(base_aws(), &ovr(Some("DEEP_ARCIVE"), None, None)).unwrap_err();
-        let msg = config_error(&e);
-        assert_eq!(e.exit_code(), 2);
-        assert!(
-            msg.contains("DEEP_ARCIVE"),
-            "対象値がmessageに含まれる: {msg}"
-        );
-
-        // 許容値は上書きされる(優先順位: CLI指定値 > aws.toml値)
-        let cfg = apply_cli_overrides(base_aws(), &ovr(Some("GLACIER"), None, None))
-            .expect("許容値は上書き");
-        assert_eq!(cfg.storage_class, "GLACIER");
-
-        // 空文字・空白のみは未指定扱い: aws.toml値を採用
-        for blank in ["", " "] {
-            let cfg = apply_cli_overrides(base_aws(), &ovr(Some(blank), None, None))
-                .unwrap_or_else(|e| panic!("空白値({blank:?})は未指定扱い: {e}"));
-            assert_eq!(cfg.storage_class, "DEEP_ARCHIVE", "aws.toml値のまま");
-        }
-    }
-
     /// [covers:config.aws-bucket-region-whitespace-rejected]
     /// [aws].bucket/[aws].regionの前後空白付き値は設定エラー2(値はtrimせず
     /// そのまま使う仕様のため、打ち間違いを拾う)。空白なしの値はそのまま読み込まれる。
@@ -1165,55 +1116,6 @@ mod tests {
         let cfg = load_aws(&p).expect("空白なしは読み込める");
         assert_eq!(cfg.bucket, "my-bucket");
         assert_eq!(cfg.region, "ap-northeast-1");
-    }
-
-    /// [covers:upload.cli-bucket-region-blank-rejected]
-    /// --bucket/--region上書き値が空文字・空白のみ・前後空白付きの場合は設定エラー2
-    /// (値のtrimは行わない)。
-    #[test]
-    fn apply_cli_overrides_rejects_blank_bucket_region() {
-        for (name, o) in [
-            ("--bucket空文字", ovr(None, Some(""), None)),
-            ("--bucket空白のみ", ovr(None, Some(" "), None)),
-            ("--bucket前後空白", ovr(None, Some(" alt-bucket "), None)),
-            ("--region空文字", ovr(None, None, Some(""))),
-            ("--region空白のみ", ovr(None, None, Some(" "))),
-            ("--region前後空白", ovr(None, None, Some(" us-east-1 "))),
-        ] {
-            let e = apply_cli_overrides(base_aws(), &o)
-                .err()
-                .unwrap_or_else(|| panic!("{name}は設定エラーになるべき: {o:?}"));
-            config_error(&e);
-            assert_eq!(e.exit_code(), 2);
-        }
-    }
-
-    /// [covers:upload.cli-override-unspecified-keeps-toml-values]
-    /// 未指定の項目はaws.toml値が使われ、CLI一時上書きはaws.tomlファイルへ書き戻さない
-    /// (apply_cli_overridesは引数の値を変換するだけでファイルI/Oを行わない)。
-    #[test]
-    fn apply_cli_overrides_keeps_unspecified_as_toml_values() {
-        // storage-classのみ指定: 他はaws.toml値のまま
-        let cfg = apply_cli_overrides(base_aws(), &ovr(Some("STANDARD"), None, None))
-            .expect("部分上書き");
-        assert_eq!(cfg.storage_class, "STANDARD", "指定項目はCLI値");
-        assert_eq!(cfg.bucket, "it-bucket", "bucketはtoml値");
-        assert_eq!(cfg.region, "ap-northeast-1", "regionはtoml値");
-        assert_eq!(
-            cfg.credentials_file,
-            std::path::PathBuf::from("configs/secret/aws-credentials.toml"),
-            "credentials_fileはtoml値"
-        );
-
-        // 全項目上書き(--profileはTASK-9で廃止済み)
-        let cfg = apply_cli_overrides(
-            base_aws(),
-            &ovr(Some("GLACIER"), Some("alt-bucket"), Some("us-east-1")),
-        )
-        .expect("全項目上書き");
-        assert_eq!(cfg.storage_class, "GLACIER");
-        assert_eq!(cfg.bucket, "alt-bucket");
-        assert_eq!(cfg.region, "us-east-1");
     }
 
     /// TASK-10設計4.1の拡張schema([layout]/[categories]/[files]/keep_artifacts)を
