@@ -407,3 +407,65 @@ fn endpoint_url_env_warns_on_stderr() {
         );
     }
 }
+
+/// [covers:cli.fake-s3-restore-validates-key-and-state]
+/// fakeのRestoreObjectは実S3と同様の事前検査を行う(L-3):
+/// (1)不在keyはNoSuchKey相当の転送エラー5 (2)archive系(GLACIER/DEEP_ARCHIVE/GLACIER_IR)
+/// 以外のstorage_classはInvalidObjectState相当の転送エラー5 (3)archive系objectへの
+/// 発行は従来どおり成功する。manage jobs reissue(restoreを直接駆動する経路)で検証する。
+#[test]
+fn fake_s3_restore_validates_key_and_archive_state() {
+    // (1)(2) STORAGE_CLASS=STANDARDでpushしたobjectと不在key
+    let Some(fx) = StorageFixture::new("sb-rstval", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"restore-validate-std");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let std_key = fx.file_key("unfiled", None, "a.zip");
+
+    // 不在keyへの復元job発行はNoSuchKey相当の転送エラー5
+    let ghost_key = "backup-remote/unfiled/ghost.zip/default.age";
+    let (code, _, stderr) = fx.manage("jobs", &["reissue", ghost_key]);
+    assert_eq!(code, 5, "不在keyへのreissueは転送エラー5: {stderr}");
+    assert!(
+        stderr.contains("存在しない") || stderr.contains("NoSuchKey"),
+        "NoSuchKey相当の文言: {stderr}"
+    );
+
+    // STANDARD objectへの復元job発行はInvalidObjectState相当の転送エラー5
+    let (code, _, stderr) = fx.manage("jobs", &["reissue", &std_key]);
+    assert_eq!(code, 5, "STANDARD objectへのreissueは転送エラー5: {stderr}");
+    assert!(
+        stderr.contains("InvalidObjectState") || stderr.contains("archive"),
+        "InvalidObjectState相当の文言: {stderr}"
+    );
+
+    // (3) DEEP_ARCHIVE objectへの発行は従来どおり成功する
+    let Some(fx_da) = StorageFixture::new(
+        "sb-rstval-da",
+        StorageOpts {
+            storage_class: "DEEP_ARCHIVE",
+            ..StorageOpts::default()
+        },
+    ) else {
+        return;
+    };
+    let b = fx_da.data_root.join("b.zip");
+    write_file(&b, b"restore-validate-da");
+    assert_eq!(fx_da.push(&[&b], &[], &[]).0, 0);
+    let da_key = fx_da.file_key("unfiled", None, "b.zip");
+    let (code, stdout, stderr) = fx_da.manage("jobs", &["reissue", &da_key]);
+    assert_eq!(
+        code, 0,
+        "DEEP_ARCHIVE objectへのreissueはexit 0: {stdout}{stderr}"
+    );
+    assert!(
+        fx_da
+            .calls()
+            .lines()
+            .any(|l| l.starts_with("s3 RestoreObject") && l.contains(&format!("key={da_key}"))),
+        "RestoreObject発行: {}",
+        fx_da.calls()
+    );
+}

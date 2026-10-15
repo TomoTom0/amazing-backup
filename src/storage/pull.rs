@@ -109,7 +109,8 @@ pub(crate) fn cmd_backup_pull(
         let mut skipped = 0usize;
         let mut first_err: Option<i32> = None;
         for t in &targets {
-            // 平文衝突保護(getと同一規則・restore.download-plain-conflict)
+            // 平文衝突保護(getと同一規則・restore.download-plain-conflict)。読込失敗
+            // (sha256検証不能)時も--yesなしでは上書きしない(get側と同一挙動・L-5)
             let dest = t.dest_path(&out_dir);
             if dest.is_file() {
                 match super::sha256_of_plain(&dest) {
@@ -127,7 +128,16 @@ pub(crate) fn cmd_backup_pull(
                         first_err.get_or_insert(3);
                         continue;
                     }
-                    _ => {} // --yes: 上書きして続行(読込失敗時は取得で上書き)
+                    Err(_) if !yes => {
+                        eprintln!(
+                            "error: 対象エラー: 既存平文の読込に失敗するためsha256を検証できず上書きしません(手動リネームまたは移動後に再実行。--yesで上書き): {} ({})",
+                            dest.display(),
+                            t.dest_name
+                        );
+                        first_err.get_or_insert(3);
+                        continue;
+                    }
+                    _ => {} // --yes: 上書きして続行
                 }
             }
             match ensure_restored(

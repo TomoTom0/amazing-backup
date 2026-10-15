@@ -10,6 +10,13 @@
 # 2026-10-15: TASK-11(Phase B)でPhase A実装済み・未条件化の振る舞いを事後条件化(回帰テスト)。
 #   新規1件: pin.push-pin-on-skip-targets(M-6: skip対象がある場合のbackup push --pinは警告表示+
 #   当該fileの最新版へCopyObjectでpin付与)。出典はtmp/tasks/tm-10/design_s3_storage.md 12章。
+# 2026-10-15: TASK-11(Phase B)コードレビュー指摘対応(M-2・L-1)でテスト先行の更新。
+#   新規2件: pin.push-pin-write-once-violation-skips-file(M-2: push --pinのwrite-once違反は
+#   警告+当該file skipでrun全体を中断しない)・pin.rm-registry-failure-guides-rebuild(L-1: pin rmの
+#   registry記録失敗時にmanage index rebuildによる回復案内)。
+# 2026-10-15: TASK-11(Phase B)再レビュー指摘対応(M-R1)でテスト先行の更新。
+#   新規1件: pin.pin-resolution-bucket-isolated(get --pin・pin rmのpin解決は当該実効bucketの
+#   索引pins[]に限る=誤profileでの実行はexit 3で正bucket側のpin object・索引を変更しない)。
 
 [meta]
 feature = "pin"
@@ -80,3 +87,30 @@ description = "backup push --pinで対象に変更なし(skip)のfileが含ま�
 given = "1度push済みのfile(再実行でskip)と新規fileを同時に指定した backup push --pin <版名> 実行"
 expect_return_shape = "exit 0。skip表示とWARNING表示があり、新規分はpin keyへの直接PUT・skip分は当該fileのdefault.age最新版からCopyObjectでpin keyへ写され、索引pins[]に双方反映される"
 source_lines = "tests/pin.rs:360"
+
+[[condition]]
+id = "pin.push-pin-write-once-violation-skips-file"
+target_function = "backup push --pin(write-once違反時の継続)"
+source = "TASK-11(Phase B)コードレビュー指摘M-2+tmp/tasks/tm-10/design_s3_storage.md 1.3(write-once)"
+description = "backup push --pinでupload済みitemへのpin keyが既に存在する(write-once違反)場合は、run全体を中断せず警告表示+当該fileのみpin付与をskipする(skip対象へのpin付与の既存挙動と統一)。fileのupload・registry記録は済んでいるため、run末尾のmanifest upload・索引再構築は必ず実行される(filesがupload+記録済みなのに索引staleのまま中断しない) (integration, fake seam)"
+given = "backup push --pin pm1 実行後、同一fileを内容変更して backup push --pin pm1(write-once違反)を再実行"
+expect_return_shape = "exit 0。WARNING表示(既存pin名・当該fileのpin付与skip)があり、fileの新version upload・manifest upload・索引更新(versionsに新version反映)が行われる。run全体の中断(exit 3)はしない"
+source_lines = "tests/pin.rs:427"
+
+[[condition]]
+id = "pin.rm-registry-failure-guides-rebuild"
+target_function = "cli::cmd_pin_rm(pin_remove記録失敗時の案内)"
+source = "TASK-11(Phase B)コードレビュー指摘L-1+tmp/tasks/tm-10/design_s3_storage.md 2.3(喪失時再構築)"
+description = "pin rmはS3削除成功後にpin_remove記録をregistryへappendするが、この記録に失敗した場合のerror文に`manage index rebuild`による回復案内を含める(索引pins[]由来の再実行は記録失敗のままではexitを繰返すため、索引再構築による回復経路を利用者へ示す。最小対応) (integration, fake seam)"
+given = "pin付与済みfileへの pin rm 実行時にregistry.jsonlへの追記が失敗する状態(registry.jsonlをdirectoryへ差し替え)での pin rm 実行"
+expect_return_shape = "S3削除は行われたうえでexit 4(処理エラー・終了コードは従来どおり)。error文に manage index rebuild による回復案内が含まれる"
+source_lines = "tests/pin.rs:478"
+
+[[condition]]
+id = "pin.pin-resolution-bucket-isolated"
+target_function = "pin rm / get --pin(索引pins[]経由のpin解決)"
+source = "TASK-11(Phase B)再レビュー指摘M-R1+tmp/tasks/tm-10/design_s3_storage.md 3.2(pin add/rm)・4.2(profile複数構成)"
+description = "get --pin・pin rmのpin解決は当該実行の実効bucketの索引pins[](bucket一致規則で構築されたもの=index.pins-bucket-isolated)に限る: 誤ったprofileでの実行は当方索引にpinが無いためpin名不在の対象エラー3で拒否され、pin objectへのS3 API呼び出し(取得・削除)は行われない(共有registryの他方bucket記録を経由して正bucket側のpin object・索引が変更されない) (integration, fake seam)"
+given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成でdev側にのみpin(pm1)が付与済みの状態での、get --pin pm1 --profile prod と pin rm --pin pm1 --profile prod の各実行"
+expect_return_shape = "いずれも exit 3(pin名は当該索引に無しの表示)でpin objectへのS3 API呼び出しは行われず、dev側索引のpins[]・pin objectは不変"
+source_lines = "tests/phase_b_options.rs:468"

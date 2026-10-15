@@ -64,6 +64,8 @@ pub enum Format {
 /// 実行context(設定読込+backend)。
 pub(crate) struct Session {
     pub(crate) aws: AwsConfig,
+    /// aws.toml正本profile(active_profile)のbucket(H-1: bucket一致規則の正本側)
+    pub(crate) canonical_bucket: String,
     pub(crate) cfg: Option<PipelineConfig>,
     pub(crate) backend: Box<dyn S3Backend>,
 }
@@ -76,8 +78,21 @@ pub(crate) fn open_session(ctx: &CtxArgs) -> Result<Session, crate::errors::Back
         None => None,
     };
     let aws = load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
+    let canonical_bucket = config::canonical_bucket(&aws_config_path(&ctx.aws_config))?;
     let backend = crate::cli::select_backend(&aws)?;
-    Ok(Session { aws, cfg, backend })
+    Ok(Session {
+        aws,
+        canonical_bucket,
+        cfg,
+        backend,
+    })
+}
+
+/// --aws-config指定の解決(None=既定path configs/aws.toml)。
+pub(crate) fn aws_config_path(aws_config: &Option<PathBuf>) -> PathBuf {
+    aws_config
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_AWS_CONFIG))
 }
 
 /// aws.toml読込(共通optionsから。--profileは一時上書き)。
@@ -85,9 +100,7 @@ pub(crate) fn load_aws(
     aws_config: &Option<PathBuf>,
     profile: Option<&str>,
 ) -> Result<AwsConfig, crate::errors::BackupError> {
-    let aws_path = aws_config
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_AWS_CONFIG));
+    let aws_path = aws_config_path(aws_config);
     config::load_aws_profile(&aws_path, profile, None)
 }
 
@@ -148,6 +161,8 @@ pub(crate) fn read_index_for_query(
 
 /// ローカルregistryに当該prefix配下へのfile_upload記録が無い(=未書込namespace)か。
 /// registry不在・読込失敗はfalse(索引不在を異常扱い)。
+/// 書込実績の判定はbucket一致(registry::record_bucket_matched。H-1)を伴う:
+/// 同一prefix・別bucketの他方profileの実績では未書込のまま(0件例外はbucket単位)。
 fn namespace_never_written(session: &Session) -> bool {
     let Some(cfg) = session.cfg.as_ref() else {
         return false;
@@ -161,10 +176,14 @@ fn namespace_never_written(session: &Session) -> bool {
     };
     let reduced = crate::registry::reduce_records(&records);
     let prefix = session.aws.prefix.clone();
-    !reduced
-        .file_uploads
-        .iter()
-        .any(|u| u.s3_key.starts_with(&prefix))
+    !reduced.file_uploads.iter().any(|u| {
+        u.s3_key.starts_with(&prefix)
+            && crate::registry::record_bucket_matched(
+                &u.s3_bucket,
+                &session.aws.bucket,
+                &session.canonical_bucket,
+            )
+    })
 }
 
 /// 書き込み系コマンドの起動時versioning確認(設計5.1)。無効は設定エラー2+有効化案内。

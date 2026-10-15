@@ -256,6 +256,9 @@ fn cmd_backup_push(
             }
         };
         let aws = load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
+        // 正本profile(active_profile)のbucket(H-1: registry記録s3_bucket欠損の旧記録は
+        // 正本bucket相当として扱うbucket一致規則の正本側)
+        let canonical_bucket = config::canonical_bucket(&super::aws_config_path(&ctx.aws_config))?;
 
         let targets = crate::targets::resolve_targets_storage(paths, from_list.as_deref())?;
         let registry_path = cfg.registry_path.clone();
@@ -311,15 +314,18 @@ fn cmd_backup_push(
             let mtime_str = mtime_jst_precise(&p.target.source_path)?;
             // skip判定(registry基準・8.3+M-1): file_write成功記録+指紋一致に加え、
             // 同一identityのfile_upload記録(=S3へ実際に載った版)が存在することも確認する
-            // (file_write記録後・file_upload記録前にcrashした対象は再uploadする)
+            // (file_write記録後・file_upload記録前にcrashした対象は再uploadする)。
+            // file_upload記録はbucket一致(H-1: registry::record_bucket_matched)を要する
+            // (同一prefix・別bucket構成で他方bucket実績によりskipされない)
             let skip = reduced.file_writes.iter().any(|w| {
                 w.identity_hash == p.identity
                     && w.source_size == p.target.size
                     && w.source_mtime == mtime_str
-            }) && reduced
-                .file_uploads
-                .iter()
-                .any(|u| u.identity_hash == p.identity && u.s3_key == p.s3_key);
+            }) && reduced.file_uploads.iter().any(|u| {
+                u.identity_hash == p.identity
+                    && u.s3_key == p.s3_key
+                    && registry::record_bucket_matched(&u.s3_bucket, &aws.bucket, &canonical_bucket)
+            });
             if skip {
                 println!("skip  {} (registry match)", p.target.source_name);
                 skipped += 1;
@@ -450,10 +456,14 @@ fn cmd_backup_push(
                     &item.folder,
                     pin_name,
                 )?;
+                // write-once違反(既存pin key)は警告+当該fileのみskip(M-2: run全体を中断
+                // しない。fileのupload・registry記録は済んでおり、run末尾の索引再構築・
+                // manifest uploadは必ず実行する。skip対象へのpin付与と挙動を統一)
                 if backend.head(&aws.bucket, &pin_key)?.is_some() {
-                    return Err(BackupError::Target(format!(
-                        "pin名({pin_name})は既に存在します(write-once)。pin rm後に再付与してください: {pin_key}"
-                    )));
+                    eprintln!(
+                        "WARNING: pin名({pin_name})は既に存在します(write-once)。当該fileのpin付与を飛ばします(pin rm後に再付与してください): {pin_key}"
+                    );
+                    continue;
                 }
                 let pin_vid = backend.put(
                     &aws.bucket,
@@ -501,12 +511,16 @@ fn cmd_backup_push(
                     else {
                         continue;
                     };
-                    // 当該identityの最新版(registry記録順の最後)
-                    let Some(version) = reduced
-                        .file_uploads
-                        .iter()
-                        .rfind(|u| &u.identity_hash == identity)
-                    else {
+                    // 当該identityの最新版(registry記録順の最後。bucket一致する記録のみが
+                    // 対象=当該bucketの最新版。H-1)
+                    let Some(version) = reduced.file_uploads.iter().rfind(|u| {
+                        &u.identity_hash == identity
+                            && registry::record_bucket_matched(
+                                &u.s3_bucket,
+                                &aws.bucket,
+                                &canonical_bucket,
+                            )
+                    }) else {
                         continue;
                     };
                     let pin_key = crate::layout::pin_object_key(
@@ -651,7 +665,7 @@ fn cmd_backup_push(
         {
             let records_now = registry::load_registry(&registry_path)?;
             let reduced_now = registry::reduce_records(&records_now);
-            let entries = crate::index::build_entries(&reduced_now);
+            let entries = crate::index::build_entries(&reduced_now, &aws.bucket, &canonical_bucket);
             crate::index::upload_index(
                 backend.as_ref(),
                 &aws.bucket,

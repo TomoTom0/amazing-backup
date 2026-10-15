@@ -2,7 +2,9 @@
 //! 事前検査(--key・ageバイナリ)は索引GETより前(restore.download-preflight-errors)。
 //! 平文衝突保護(restore.download-plain-conflict): 出力先に既存平文がありsha256が
 //! 取得対象のsource_sha256と一致→skip(冪等)・不一致→上書きせず対象エラー3
-//! (--yes指定時のみ上書き)。sha一致skipはローカルregistryからも判定でき、
+//! (--yes指定時のみ上書き)。既存平文の読込失敗(sha256検証不能)も不一致同様に
+//! --yesなしでは上書きしない(--yes=明示的上書き指示のため--yes付きは続行。
+//! pull側と同一挙動・L-R5)。sha一致skipはローカルregistryからも判定でき、
 //! その場合は索引GETを含むS3 API呼び出しを行わない。
 
 use super::{
@@ -103,6 +105,8 @@ fn run_get(args: &GetArgs) -> BackupResult<i32> {
     // skip・衝突を確定させる。registryが無い災害時等は通常経路へ続行)
     if let Some(code) = plain_conflict_precheck(
         session.cfg.as_ref(),
+        &session.aws.bucket,
+        &session.canonical_bucket,
         &args.name,
         args.path.as_deref(),
         args.version.as_deref(),
@@ -435,6 +439,8 @@ pub(crate) fn resolve_fetch_target(
 }
 
 /// 平文衝突保護(索引・ローカルregistry問わず対象のsource_sha256と比較)。
+/// 既存平文の読込失敗(sha256検証不能)も--yesなしでは上書きせず対象エラー3
+/// (--yes=明示的上書き指示のため--yes付きは続行。pull側と同一挙動・L-R5)。
 /// 戻り値Some(code)は処理確定(skip=0)・Noneは取得続行(上書き許可または既存なし)。
 pub(crate) fn plain_conflict_check(
     target: &FetchTarget,
@@ -446,7 +452,18 @@ pub(crate) fn plain_conflict_check(
     if !dest.is_file() {
         return Ok(None);
     }
-    let sha = sha256_of_plain(&dest)?;
+    let sha = match sha256_of_plain(&dest) {
+        Ok(sha) => sha,
+        Err(_) if !yes => {
+            return Err(BackupError::Target(format!(
+                "既存平文の読込に失敗するためsha256を検証できず上書きしません(手動リネームまたは移動後に再実行。--yesで上書き): {} ({})",
+                dest.display(),
+                target.dest_name
+            )));
+        }
+        // --yes: 明示的上書き指示のため検証不能でも上書きして続行(pull側と同一)
+        Err(_) => return Ok(None),
+    };
     if sha == target.source_sha256 {
         match format {
             Format::Json => print_json(&serde_json::json!({
@@ -471,8 +488,11 @@ pub(crate) fn plain_conflict_check(
 /// 平文衝突の事前検査(索引GET前)。ローカルregistryから対象を解決でき
 /// 出力先に既存平文がある場合のみS3 API呼び出しなしで確定させる。
 /// 解決不能(登録なし・registry不在・版特定失敗)・既存平文なしはNone(通常経路)。
+/// 索引組立は実効bucket一致するfile_upload記録のみ(H-1)。
 fn plain_conflict_precheck(
     cfg: Option<&PipelineConfig>,
+    effective_bucket: &str,
+    canonical_bucket: &str,
     name: &str,
     path: Option<&str>,
     version: Option<&str>,
@@ -491,7 +511,7 @@ fn plain_conflict_precheck(
     }
     let records = registry::load_registry(&registry_path)?;
     let reduced = registry::reduce_records(&records);
-    let entries = crate::index::build_entries(&reduced);
+    let entries = crate::index::build_entries(&reduced, effective_bucket, canonical_bucket);
     let target = match resolve_fetch_target(&entries, name, path, version, version_id, pin) {
         Ok(t) => t,
         Err(_) => return Ok(None), // 索引が正本のため通常経路へ(エラーはそちらで正式に報告)

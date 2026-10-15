@@ -8,6 +8,11 @@
 #   新規2件追加: index.version-ts-from-file-write(version_ts時刻源=暗号化時刻(file_write記録時刻))・
 #   index.unknown-record-warning-plain-format(L-5: 索引parseの未知record_type警告の表示形式)。
 #   実装前のため新条件のテストは実行failを許容し[meta]はverified=falseのまま。
+# 2026-10-15: TASK-11(Phase B)コードレビュー指摘対応(L-6)でテスト先行の更新。
+#   新規1件: index.parse-failure-guides-rebuild(索引parse失敗時のerror文にmanage index rebuild案内)。
+# 2026-10-15: TASK-11(Phase B)再レビュー指摘対応(M-R1・L-R1)でテスト先行の更新。
+#   新規2件: index.pins-bucket-isolated(索引pins[]構築・復元のbucket一致=M-R1)・
+#   index.entries-without-bucket-versions-excluded(当該bucketの版もpinも無いentryの索引載せ除外=L-R1)。
 
 [meta]
 feature = "index"
@@ -23,7 +28,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 2.1(schema)"
 description = "索引JSONL(暗号化前の平文)schema: index_header(schema=1・record_type=index_header・updated_at ISO8601 JST・run_id・tool_version・entries=N)+file entry(record_type=file・name・category・rel_path・source_path・identity_hash・versions[]・pins[])。versionsはdate降順(先頭=最新)で各versionはdate(表示・--version日付filter用)・version_ts(同一日内複数版の一意化)・batch_id・s3_key(実keyをそのまま記録・規約から導出しない・衝突hash付きkeyもそのまま)・version_id・source_sha256・age_sha256・source_size・age_size。pins[]はpin・s3_key・created_at・date・source_sha256・age_sha256・source_size。identity_hash=sha256(realpath)先頭8hex(衝突folder名と同一・source_pathが変わればidentityも変わる)。直列化→parseの往復で全fieldが保たれる (unit)"
 given = "2 file entry(うち1 fileにversion 2件・pin 1件)を含む索引構造の直列化→parse"
 expect_return_shape = "headerのentries=Nがfile entry数と一致し、versionsはdate降順に保たれ、全fieldが往復で失われずparse結果が構築時と等価"
-source_lines = "src/index.rs:412; tests/index_storage.rs:65"
+source_lines = "src/index.rs:455; tests/index_storage.rs:65"
 
 [[condition]]
 id = "index.rebuild-from-registry-per-run"
@@ -32,7 +37,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 2.2(更新単位)"
 description = "索引の更新単位はrun毎(backup push完了時)+索引に影響する操作後(pin add/rm・manage prune)。ローカルregistry(reduce後)から全entryを再構築し、冪等(再構築・再PUTで同一内容) (integration, fake seam)"
 given = "file_upload記録(version_id・実s3_key付き)・pin_write/pin_remove記録を含むregistryからの索引再構築と、同一registryからの2回目の再構築"
 expect_return_shape = "全entryがregistry記録から再構築され(versions[].version_id・s3_keyはregistryのfile_upload記録値)、2回目の再構築結果は1回目と同一内容(冪等)"
-source_lines = "src/index.rs:441; tests/index_storage.rs:205"
+source_lines = "src/index.rs:484; tests/index_storage.rs:205"
 
 [[condition]]
 id = "index.hot-storage-class-upload"
@@ -41,7 +46,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 1.4(storage class表)・2.2"
 description = "索引 sys/index.jsonl.age のPUTはstorage class STANDARD固定(per-object指定。bucket default・lifecycle移行に依存しない)。profileのstorage_classがDEEP_ARCHIVEでもSTANDARDで置かれる (integration, fake seam)"
 given = "storage_class=DEEP_ARCHIVEのprofileでのbackup push実行(または索引更新を伴う操作)"
 expect_return_shape = "sys/index.jsonl.age のPutObject呼び出しが storage_class=STANDARD で行われる"
-source_lines = "src/index.rs:496; tests/index_storage.rs:271"
+source_lines = "src/index.rs:644; tests/index_storage.rs:271"
 
 [[condition]]
 id = "index.encrypted-with-configured-recipients"
@@ -68,7 +73,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 2.3(喪失時再構築)・2.2(ind
 description = "manage index rebuild: (1)ListObjectsV2 <prefix>/sys/manifests/ でmanifest一覧 (2)未復元のmanifestへ復元job発行(Bulk既定。進行中は再実行で継続) (3)取得・復号・parse→file recordからentry再構築(s3_key・version_idはmanifest記録値を使用。manifestのfile recordは実s3_key+version_idを記録する拡張schema) (4)version_id欠損(旧manifest等)はListObjectVersionsでkey+LastModifiedから補完 (5)sys/index.jsonl.ageへPUT・完了報告。開始時にtier別単価で区別した費用・所要の概算を表示(Deep Archive復元: Standard≈$0.10/GB級・最大12時間 / Bulk≈$0.02/GB級・最大48時間) (integration, fake seam)"
 given = "manifestがN件(DEEP_ARCHIVE未復元)で索引objectが不在のfake S3での manage index rebuild 実行・再実行(進行中)、およびversion_id欠損manifestを混ぜた実行"
 expect_return_shape = "未復元manifestへBulkの復元jobが発行され(再実行で継続)、全manifestからentryが再構築されs3_key・version_idはmanifest記録値(欠損分はListObjectVersionsで補完)で、sys/index.jsonl.ageへPUTされ、開始時にtier別の費用・所要概算表示が出る"
-source_lines = "src/index.rs:541; tests/index_storage.rs:410"
+source_lines = "src/index.rs:689; tests/index_storage.rs:410"
 
 [[condition]]
 id = "index.pin-entries"
@@ -135,3 +140,30 @@ description = "索引parse時の未知record_type行の警告はrecord_type文�
 given = "未知record_type行(例: record_type=\"future_x\")を含む索引平文のparse"
 expect_return_shape = "警告表示にrecord_type文字列(future_x)がそのまま含まれ、Some(...)形式では表示されない"
 source_lines = "tests/index_storage.rs:707"
+
+[[condition]]
+id = "index.parse-failure-guides-rebuild"
+target_function = "index::parse_index(schema違反時の案内)"
+source = "TASK-11(Phase B)コードレビュー指摘L-6+tmp/tasks/tm-10/design_s3_storage.md 2.3(喪失時再構築)"
+description = "索引parse失敗(不正JSON行・index_header/file entryのschema違反・index_header不在)のerror文には`manage index rebuild`による索引再構築の案内を含める(終了コードは検証エラー4のまま変更しない。索引objectが壊れている場合の回復経路を利用者へ示す) (integration, fake seam)"
+given = "索引objectをschema違反の平文(file entry必須field欠損)へ書き換えた状態での list files 実行"
+expect_return_shape = "exit 4(検証エラー)。error文に manage index rebuild の案内が含まれる"
+source_lines = "tests/index_storage.rs:744"
+
+[[condition]]
+id = "index.pins-bucket-isolated"
+target_function = "index::build_entries / manage index rebuild(pins復元)"
+source = "TASK-11(Phase B)再レビュー指摘M-R1+tmp/tasks/tm-10/design_s3_storage.md 2.1(pins[])・2.3(pins復元)・registry.rs record_bucket_matched(bucket一致規則)"
+description = "索引pins[]の構築・復元はregistry記録のs3_bucket一致(registry::record_bucket_matchedと同一規則。欠損空文字は正本bucket相当)を伴う: (a) pin_write記録はs3_bucketが当該実行の実効bucketと一致するもののみ採用(同一prefix・別bucket構成で他方bucketのみのpinが当方bucketの索引へ混入せず、get --pinが当方bucketでNoSuchKeyの転送エラー5にならない) (b) pin_remove記録はs3_bucket一致するもののみ削除済み扱い(pin_s3_key一致のみでは照合しない。誤ったprofileでのpin rm等・他方bucketでの解除が正bucket側の索引からpinを消さない=pin object残留を防ぐ)。manage index rebuildのローカルregistryからのpins復元も同一規則 (integration, fake seam)"
+given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成での、(1)dev push+pin add(pm1)後のprod側pushで再構築されたprod側索引 (2)get --pin pm1 --profile prod と pin rm --pin pm1 --profile prod の各実行 (3)registryへ他方bucket(bucket-prod)のs3_bucketを持つpin_remove記録を混入した状態と正bucket(bucket-dev)のs3_bucketを持つpin_remove記録を混入した状態での、dev側索引再構築(all-skip push)と manage index rebuild"
+expect_return_shape = "(1)prod側索引の当該entry pins[]は空(dev側pm1は混入しない。dev側索引はpm1を保持) (2)いずれも exit 3(pin名は当該索引に無し)でpin objectへのS3 API呼び出し(取得・削除)を行わず、dev側索引pins[]・pin objectは不変 (3)他方bucketのpin_removeではpinは索引に残り、正bucketのpin_removeでは除去される。manage index rebuildの復元も同一結果"
+source_lines = "src/index.rs:539; tests/phase_b_options.rs:469; tests/pin.rs:545"
+
+[[condition]]
+id = "index.entries-without-bucket-versions-excluded"
+target_function = "index::build_entries"
+source = "TASK-11(Phase B)再レビュー指摘L-R1+tmp/tasks/tm-10/design_s3_storage.md 2.1(索引の意味論=当該namespaceで管理されるfile)"
+description = "file_write記録にs3_bucket字段が無いためentry組立はbucket不関だが、索引の意味論は「当該namespace(bucket)で管理されるfile」: 当該実効bucketと一致するfile_upload記録によるversions[]もbucket一致するpin_write記録によるpins[]も持たないentry(同一prefix・別bucket構成で他方bucketにしかuploadされていないfile等)は索引entriesへ載せない(list/query/diffの表示・getのname解決から除外。版が無いentryがgetで版なしエラーになる表示面の混入を防ぐ。データ破壊は無い) (integration, fake seam)"
+given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成でa.zipを両bucketへ・b.zipをdevのみへpushした状態での、prod側(--profile)からの list files・query・get・diff の各実行と、dev側(正本bucket)での list files 実行"
+expect_return_shape = "prod側はいずれもa.zipのみが現れb.zipは現れない(list files表示・query一致・getはname不在の対象エラー3・diffのentries数)。dev側は従来どおりa.zip・b.zip双方が現れる"
+source_lines = "src/index.rs:540; tests/phase_b_options.rs:555"

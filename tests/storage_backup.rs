@@ -707,3 +707,41 @@ fn pin_add_without_config_fails_before_s3_calls() {
         read_calls(&fx.state)
     );
 }
+
+/// [covers:verify.swept-run-artifacts-excluded]
+/// backup verifyはkeep_artifacts="run"既定で成功run直後に掃除されたrun
+/// (当該batchのindex_upload成功記録がありrun成果物dirが不在)のfile_write記録・
+/// run manifestを検証失敗扱いにしない(M-1: 掃除済みrunは「掃除済み・検査対象外」として
+/// 報告し、構造検査・--checksum・--roundtripの対象から除外する)。
+#[test]
+fn backup_verify_excludes_swept_run_artifacts() {
+    let Some(fx) = StorageFixture::new("sb-vsweep", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"verify-swept-plain");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    // keep_artifacts="run"既定: 成功runの成果物dirは掃除済み(.age不在)
+    assert_no_age_files(&fx.out_dir, "成功runの成果物は掃除済み");
+    let cfg_s = fx.cfg.display().to_string();
+
+    // 構造検査(既定段階): 掃除済みrunは対象外のためexit 4にならない
+    let (code, stdout, stderr) = fx.bin(&["backup", "verify", "--config", &cfg_s], &[]);
+    assert_eq!(code, 0, "掃除済みrunは検査対象外でexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.contains("掃除済み"),
+        "掃除済みrunの報告表示: {stdout}"
+    );
+
+    // --checksum: 掃除済みfile_write記録の.age読込は発生しない
+    let (code, stdout, stderr) =
+        fx.bin(&["backup", "verify", "--config", &cfg_s, "--checksum"], &[]);
+    assert_eq!(code, 0, "--checksumもexit 0: {stdout}{stderr}");
+
+    // --roundtrip: 掃除済みfile_write記録・manifest突合は対象外
+    let (code, stdout, stderr) = fx.bin(
+        &["backup", "verify", "--config", &cfg_s, "--roundtrip"],
+        &[],
+    );
+    assert_eq!(code, 0, "--roundtripもexit 0: {stdout}{stderr}");
+}

@@ -430,3 +430,119 @@ fn prune_category_guard_rejects_before_s3_calls() {
         fx.calls()
     );
 }
+
+/// versions state file(versions/<key>)の指定版のlast_modifiedを書き換える
+/// (L-4: 文字列辞書順と実時刻が逆転する組のfixture)。
+fn rewrite_version_mtimes(fx: &StorageFixture, key: &str, map: &[(String, String)]) {
+    let path = fx.state.join("versions").join(key);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("versions state file({})の読込: {e}", path.display()));
+    let mut out = String::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let mut parts: Vec<String> = line.split('\t').map(String::from).collect();
+        for (vid, mtime) in map {
+            if parts[0] == *vid {
+                parts[2] = mtime.clone();
+            }
+        }
+        out.push_str(&parts.join("\t"));
+        out.push('\n');
+    }
+    write_file(&path, out.as_bytes());
+}
+
+/// [covers:retention.prune-partial-failure-records-deleted]
+/// prune --applyの削除loopは削除成功分をその都度PruneRecordへ記録する(L-2):
+/// 削除loop途中の失敗(転送エラー5)で中断しても、それまでの削除成功分の記録が残り
+/// (以降の索引再構築で幽霊版が復活しない)、注入なしの再実行で残対象の削除が継続される。
+#[test]
+fn prune_partial_failure_records_deleted_versions() {
+    let Some(fx) = StorageFixture::new("ret-ptlfail", StorageOpts::default()) else {
+        return;
+    };
+    let key = fx.file_key("unfiled", None, "a.zip");
+    // 5版(現行1+noncurrent4)。keep=1の削除対象はnoncurrentの古い順に3版
+    let ids = push_versions(&fx, 5);
+
+    // 1版目の削除は成功させ2版目以降を失敗させる(FAKE_S3_FAIL_DELVER_FOR=<key>:<ok回数>)。
+    // 削除順はnoncurrentの新しい方から(keep=1の削除対象は ids[2]→ids[1]→ids[0] の順)
+    let (code, _, stderr) = fx.manage_env(
+        "prune",
+        &["--category", "unfiled", "--apply", "--keep", "1"],
+        &[("FAKE_S3_FAIL_DELVER_FOR", format!("{key}:1").as_str())],
+    );
+    assert_eq!(code, 5, "削除loop途中の失敗は転送エラー5: {stderr}");
+
+    // 削除成功分(先頭の1版=ids[2])のみがPruneRecordへ記録済み
+    let deleted_all: Vec<String> = fx
+        .registry_values()
+        .iter()
+        .filter(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("prune"))
+        .flat_map(|p| {
+            p.get("deleted")
+                .and_then(|d| d.as_array())
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|d| {
+            d.get("version_id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .collect();
+    assert_eq!(
+        deleted_all,
+        vec![ids[2].clone()],
+        "部分失敗時は削除成功分のみ記録: {deleted_all:?} (ids={ids:?})"
+    );
+
+    // 注入なし再実行: 残りを削除してexit 0(冪等)
+    let (code, stdout, stderr) = fx.manage(
+        "prune",
+        &["--category", "unfiled", "--apply", "--keep", "1"],
+    );
+    assert_eq!(code, 0, "再実行はexit 0: {stdout}{stderr}");
+    let vids = index_version_ids(index_file_entry(&fx.read_index(), "a.zip"));
+    for deleted in [&ids[0], &ids[1], &ids[2]] {
+        assert!(
+            !vids.contains(deleted),
+            "削除済み版は索引へ復活しない: {vids:?} (deleted={deleted})"
+        );
+    }
+}
+
+/// [covers:retention.prune-order-uses-epoch]
+/// pruneの版順sort(新しい順)はVersionInfo.last_modified_epochの数値比較で行う(L-4):
+/// last_modified文字列の辞書順と実時刻が逆転する組(timezone表記違い)でも、
+/// newer noncurrent数の数え上げは実時刻順に行われる(実時刻で古い版が削除対象)。
+#[test]
+fn prune_orders_versions_by_epoch() {
+    let Some(fx) = StorageFixture::new("ret-epoch", StorageOpts::default()) else {
+        return;
+    };
+    let key = fx.file_key("unfiled", None, "a.zip");
+    // 3版(現行=ids[2]・noncurrent=ids[0](古い)/ids[1](新しい))
+    let ids = push_versions(&fx, 3);
+    // noncurrent 2版のlast_modifiedを書き換え:
+    //   ids[0](実時刻=2026-10-14T16:00:00Z相当): "2026-10-15T01:00:00+09:00"(辞書順は新しい)
+    //   ids[1](実時刻=2026-10-14T20:00:00Z相当): "2026-10-14T20:00:00Z"(辞書順は古い)
+    // 実時刻ではids[1]が4時間新しい。keep=1なら実時刻で古いids[0]が削除対象。
+    rewrite_version_mtimes(
+        &fx,
+        &key,
+        &[
+            (ids[0].clone(), "2026-10-15T01:00:00+09:00".to_string()),
+            (ids[1].clone(), "2026-10-14T20:00:00Z".to_string()),
+        ],
+    );
+    let (code, stdout, stderr) = fx.manage(
+        "prune",
+        &["--category", "unfiled", "--apply", "--keep", "1"],
+    );
+    assert_eq!(code, 0, "prune --apply --keep 1はexit 0: {stdout}{stderr}");
+    assert_eq!(
+        deleted_versions(&fx, &key),
+        vec![ids[0].clone()],
+        "実時刻(epoch)順で最古のids[0]が削除される(文字列順ならids[1]が削除される): ids={ids:?}"
+    );
+}

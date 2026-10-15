@@ -7,6 +7,10 @@
 #   新規2件: retention.prune-dry-run-apply-exclusive(L-8: --dry-run/--apply併置はusage 64)・
 #   retention.prune-category-guard-early(M-2: prune冒頭のcategory guard。予約語・形式違反・
 #   未定義categoryはListObjectVersions前に設定エラー2)。出典はtmp/tasks/tm-10/design_s3_storage.md 12章。
+# 2026-10-15: TASK-11(Phase B)コードレビュー指摘対応(L-2・L-4)でテスト先行の更新。
+#   新規2件: retention.prune-partial-failure-records-deleted(L-2: prune削除loopの部分失敗でも
+#   削除済み版をPruneRecordへ記録)・retention.prune-order-uses-epoch(L-4: pruneの版順sortは
+#   last_modified_epoch数値比較)。
 
 [meta]
 feature = "retention"
@@ -86,6 +90,24 @@ description = "prune冒頭のcategory guard: --categoryの値がcategory名規�
 given = "manage prune --category sys / --category _sys / --category BadName(規則違反) / --category ghost(未定義) の各実行"
 expect_return_shape = "いずれも exit 2(設定エラー)で、fake backendの呼び出し記録不存在(ListObjectVersions前に検出)"
 source_lines = "tests/retention.rs:406"
+
+[[condition]]
+id = "retention.prune-partial-failure-records-deleted"
+target_function = "cli::cmd_manage_prune(削除loopの記録)"
+source = "TASK-11(Phase B)コードレビュー指摘L-2+tmp/tasks/tm-10/design_s3_storage.md 3.2(manage prune)・2.2(索引の再構築)"
+description = "prune --applyの削除loopは削除成功分をその都度PruneRecordへ記録する(削除完了後の一括記録だと、loop途中の失敗で中断した場合に削除済み版が記録に載らず、以降の索引再構築で幽霊版が復活しうるため)。途中失敗した場合もそれまでの削除成功分の記録は残り、冪等な再実行で残対象の削除・記録が継続される (integration, fake seam)"
+given = "同一keyにnoncurrent版複数(削除対象3版)のある状態で、2版目のDeleteObjectVersionから失敗する注入(FAKE_S3_FAIL_DELVER_FOR)での manage prune --apply 実行と、注入なしの再実行"
+expect_return_shape = "初回は転送エラー5で中断するが、registryのPruneRecordに削除成功済みの1版が記録されている。再実行はexit 0で残りの版を削除・記録し、索引再構築後に削除済み版がversionsへ復活しない"
+source_lines = "tests/retention.rs:454"
+
+[[condition]]
+id = "retention.prune-order-uses-epoch"
+target_function = "cli::cmd_manage_prune(版順sort)"
+source = "TASK-11(Phase B)コードレビュー指摘L-4+tmp/tasks/tm-10/design_s3_storage.md 3.2(newer noncurrent数の定義)"
+description = "pruneの対象計算における同一key内の版順sort(新しい順)はVersionInfo.last_modified_epochの数値比較で行う(文字列last_modified比較は表記形式混在(RFC3339のtimezone表記差等)で順序が崩れるため)。newer noncurrent数の数え上げ・現行version判定は実時刻順に正しく行われる (integration, fake seam)"
+given = "noncurrent 2版のlast_modifiedを文字列辞書順と実時刻が逆転する組(timezone表記違い)へ書き換えたversions stateでの manage prune --apply --keep 1 実行"
+expect_return_shape = "実時刻で古い版(辞書順では新しい方)が削除対象となり、実時刻で新しい版は残る(削除DeleteObjectVersionのversion_idが実時刻順の期待と一致)"
+source_lines = "tests/retention.rs:514"
 
 [[excluded]]
 item = "IAM policy案(principal A: 全操作 / principal B: 復元専用最小権限)"

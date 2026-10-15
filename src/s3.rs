@@ -974,6 +974,8 @@ impl S3Backend for RealS3 {
 /// - `FAKE_S3_FAIL_RESTORE_FOR` 当該keyのRestoreObjectのみ失敗
 /// - `FAKE_S3_FAIL_HEAD_FOR`    当該keyのHeadObjectのみ異常失敗(404以外)
 /// - `FAKE_S3_HEAD_404_FOR`     当該keyのHeadObjectのみ404扱い(object実体は保持)
+/// - `FAKE_S3_FAIL_DELVER_FOR`  当該keyのDeleteObjectVersionのみ失敗
+///   (`<key>:<N>`形式は先頭N回のみ成功させたうえで失敗=削除loop途中失敗の注入)
 #[cfg(debug_assertions)]
 pub struct FakeS3 {
     state_dir: PathBuf,
@@ -987,6 +989,9 @@ pub struct FakeS3 {
     /// 当該keyのHeadObject応答size上書き(FAKE_S3_OBJECT_SIZE_FOR=<key>:<bytes>。
     /// CopyObject 5GiB分岐の駆動用。object実体の長さは変えない)
     object_size_for: Option<(String, u64)>,
+    /// DeleteObjectVersionの失敗注入(FAKE_S3_FAIL_DELVER_FOR=<key>[:<成功回数N>]。
+    /// 先頭N回のみ成功させたうえで失敗。N省略時は毎回失敗)
+    fail_delver: Option<(String, u64)>,
 }
 
 /// fake内部の版情報1行(`versions/<key>`の1行)。
@@ -1015,10 +1020,11 @@ impl FakeS3 {
             omit_checksum: false,
             versioning_disabled: false,
             object_size_for: None,
+            fail_delver: None,
         }
     }
 
-    /// 結合seam用: env `BACKUP_REMOTE_FAKE_S3_STATE`選択時に失敗注入env 4種+TASK-10
+    /// 結合seam用: env `BACKUP_REMOTE_FAKE_S3_STATE`選択時に失敗注入env 5種+TASK-10
     /// のversioning系env 2種を解釈する。
     pub fn from_env(state_dir: impl Into<PathBuf>) -> FakeS3 {
         let env_key = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
@@ -1029,6 +1035,11 @@ impl FakeS3 {
                 .filter_map(|(k, v)| v.parse::<u64>().ok().map(|b| (k.to_string(), b)))
                 .next()
         });
+        // FAKE_S3_FAIL_DELVER_FOR=<key>[:<成功回数>](成功回数省略時は毎回失敗)
+        let fail_delver = env_key("FAKE_S3_FAIL_DELVER_FOR").map(|spec| {
+            let (k, n) = spec.split_once(':').unwrap_or((spec.as_str(), "0"));
+            (k.to_string(), n.parse::<u64>().unwrap_or(0))
+        });
         FakeS3 {
             state_dir: state_dir.into(),
             fail_cp: env_key("FAKE_S3_FAIL_CP_FOR"),
@@ -1038,6 +1049,7 @@ impl FakeS3 {
             omit_checksum: false,
             versioning_disabled: env_key("FAKE_S3_VERSIONING_DISABLED").is_some(),
             object_size_for,
+            fail_delver,
         }
     }
 
@@ -1268,6 +1280,58 @@ impl FakeS3 {
         use sha2::Digest;
         base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(data))
     }
+
+    /// RestoreObject共通の事前検査(L-3・実S3相当): key(版指定時は当該version)の実在と
+    /// archive storage class(GLACIER/DEEP_ARCHIVE/GLACIER_IR)を検査する。
+    /// 不在keyはNoSuchKey/NoSuchVersion相当・archive系以外はInvalidObjectState相当の
+    /// 転送エラー(不在keyやSTANDARD objectへの復元job発行がfakeで成功扱いにならない)。
+    fn restore_precheck(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+    ) -> BackupResult<()> {
+        let lines = self.version_lines(key);
+        let storage_class = match version_id {
+            Some(vid) => match lines
+                .iter()
+                .find(|l| l.version_id == vid && l.kind != "marker")
+            {
+                Some(l) => l.storage_class.clone(),
+                None => {
+                    // 版stateの無いkey(seed配置等)はobjects実体のみで判断
+                    if std::fs::read(self.object_path(key)).is_err() {
+                        return Err(BackupError::Transfer(format!(
+                            "S3 RestoreObject失敗(bucket={bucket}, key={key}): 対象keyがS3に存在しない(NoSuchKey)"
+                        )));
+                    }
+                    String::new()
+                }
+            },
+            None => {
+                if std::fs::read(self.object_path(key)).is_err() {
+                    return Err(BackupError::Transfer(format!(
+                        "S3 RestoreObject失敗(bucket={bucket}, key={key}): 対象keyがS3に存在しない(NoSuchKey)"
+                    )));
+                }
+                // 現行版のstorage_class(版stateの無いseed配置は空=STANDARD相当)
+                lines
+                    .last()
+                    .filter(|l| l.kind == "put")
+                    .map(|l| l.storage_class.clone())
+                    .unwrap_or_default()
+            }
+        };
+        if !matches!(
+            storage_class.as_str(),
+            "GLACIER" | "DEEP_ARCHIVE" | "GLACIER_IR"
+        ) {
+            return Err(BackupError::Transfer(format!(
+                "S3 RestoreObject失敗(bucket={bucket}, key={key}): 対象objectはarchive storage classでないため復元jobを発行できません(InvalidObjectState: storage_class={storage_class})"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -1416,6 +1480,7 @@ impl S3Backend for FakeS3 {
                 "S3 RestoreObject失敗(bucket={bucket}, key={key}): FAKE_S3_FAIL_RESTORE_FOR による失敗注入"
             )));
         }
+        self.restore_precheck(bucket, key, None)?;
         // 発行成功で復元済み状態にする(request_all後のdownload成功前提・tests/common)
         let path = self.state_dir.join("restore").join(key);
         if let Some(parent) = path.parent() {
@@ -1613,6 +1678,7 @@ impl S3Backend for FakeS3 {
                 "S3 RestoreObject失敗(bucket={bucket}, key={key}): FAKE_S3_FAIL_RESTORE_FOR による失敗注入"
             )));
         }
+        self.restore_precheck(bucket, key, Some(version_id))?;
         // 版単位の復元状態はkey単位のmetaに記録する(fakeの簡略化・HEAD系は同じ値を返す)
         let path = self.state_dir.join("restore").join(key);
         if let Some(parent) = path.parent() {
@@ -1681,6 +1747,28 @@ impl S3Backend for FakeS3 {
         self.record(&format!(
             "s3 DeleteObjectVersion bucket={bucket} key={key} version_id={version_id}"
         ));
+        // FAKE_S3_FAIL_DELVER_FOR=<key>[:<成功回数N>]: 当該keyのDeleteObjectVersionの
+        // うち先頭N回のみ成功させたうえで失敗させる(削除loop途中失敗の注入)
+        if let Some((fail_key, ok_count)) = &self.fail_delver
+            && fail_key == key
+        {
+            // record済みのためcalls.logの当該行数=今回を含む呼び出し回数
+            let done = std::fs::read_to_string(self.state_dir.join("calls.log"))
+                .map(|t| {
+                    t.lines()
+                        .filter(|l| {
+                            l.starts_with("s3 DeleteObjectVersion")
+                                && l.contains(&format!("key={key}"))
+                        })
+                        .count() as u64
+                })
+                .unwrap_or(0);
+            if done > *ok_count {
+                return Err(BackupError::Transfer(format!(
+                    "S3 DeleteObjectVersion失敗(bucket={bucket}, key={key}, version_id={version_id}): FAKE_S3_FAIL_DELVER_FOR による失敗注入"
+                )));
+            }
+        }
         let mut lines = self.version_lines(key);
         let Some(pos) = lines.iter().position(|l| l.version_id == version_id) else {
             return Ok(()); // 対象版なしは黙って成功(S3相当の寛容さ)

@@ -1,35 +1,48 @@
 # backup-remote 使用手順書
 
-NASバックアップアーカイブ(zip/7z)をageで暗号化し、S3 Deep Archiveへ投入するCLI `backup-remote` の使用手順書。
+NASバックアップアーカイブ(zip/7z)をageで暗号化し、S3(versioning有効bucket・Deep Archive)へ投入・管理するCLI `backup-remote` の使用手順書。書き込み・照会・復元を含む。
 
-- 対象読者: 実際にバックアップを暗号化・uploadする運用者
-- 正本参照: 設計の正本は `tmp/tasks/tm-1/design_backup_pipeline.md`(仕様詳細・背景はこちら)。AWS SDK移行(TASK-9)の設計は `tmp/tasks/tm-9/design_sdk_migration.md`。本書は運用に必要な手順・引数・設定の実務参照
+- 対象読者: バックアップの書き込み・照会・復元を行う運用者(災害時の復旧担当を含む)
+- 正本参照: 設計の正本は `tmp/tasks/tm-10/design_s3_storage.md`(S3ストレージ構成・CLI体系・保持policyの正本)。旧パイプライン(暗号化経路・registry・終了コード)の設計は `tmp/tasks/tm-1/design_backup_pipeline.md`、AWS SDK移行の設計は `tmp/tasks/tm-9/design_sdk_migration.md`。実装挙動の正本は `tests/design/`の条件書
 - 実装バージョン: 0.1.0
-- 最終確認: 2026-10-14(実機の出力・設定ファイル実物に基づく)
+- 最終確認: 2026-10-15(TASK-11 Phase B。旧サブコマンド削除・新CLI体系集約後の実装に基づく)
 
 ## 1. 概要
 
-パイプラインの流れ:
+### 1.1 コマンド体系
 
-```
-plan(対象解決・事前検査)
-  -> encrypt(age暗号化 + ローカルregistry/manifest記録)
-  -> verify(ローカル整合検証・必要に応じ復号roundtrip)
-  -> upload(S3 Deep Archiveへの転送)
-```
+旧サブコマンド(plan/encrypt/upload/verify/restore)は**削除済み**(TASK-11 Phase B)。全操作は次の体系へ集約されている(旧手順からの移行は10章)。
 
-各段階の成果物:
+| 系統 | command | 用途 |
+|---|---|---|
+| 照会 | `list files/versions/pins/runs/categories/jobs` | 目録・版一覧・pin・run・区分・復元job状況 |
+| 照会 | `query <手がかり>` | 名前/path部分一致での逆引き探索 |
+| 取得 | `get <name>` | 単一fileの取得(復元job発行を内包) |
+| 照会 | `diff` | 索引とS3実態の完全性突合 |
+| 書込み | `backup push` | 暗号化・upload・manifest・索引更新を1実行で |
+| 復元 | `backup pull` | category/run/全対象の一括復元(確認付き) |
+| 検査 | `backup verify` | ローカル成果物の整合検査 |
+| 管理 | `pin add/rm` | 世代管理対象外のピン留め版の付与・解除 |
+| 管理 | `manage prune/lifecycle/index/jobs` | 世代削除・bucket保持設定・索引再構築・復元job再発行 |
+| 設定 | `edit categories/files/layout/policy` | 設定sectionの確認 |
+
+### 1.2 パイプラインと成果物
+
+`backup push` が1実行で 対象解決 -> 分類解決 -> age暗号化 -> S3 upload -> manifest生成 -> 索引更新 までを行う(旧plan/encrypt/uploadの分割手順は廃止)。
 
 | 場所 | 内容 |
 |---|---|
-| `data/out/<YYYY-MM-DD>/<name>.age` | 暗号化済みアーカイブ(age v1形式) |
-| `data/out/<YYYY-MM-DD>/manifest.jsonl.age` | バッチ目録(manifest)を同じrecipientで暗号化したもの |
+| `data/out/<batch_id>/` | run毎の暗号化成果物(`.age`・manifest。既定はrun成功後に自動削除) |
 | `data/registry.jsonl` | ローカル累積registry(append-onlyのJSONLイベントログ) |
-| `s3://<bucket>/<YYYY-MM-DD>/...` | upload先。キーは `<date>/<name>.age`・`<date>/manifest.jsonl.age` |
+| `data/restore/` | get/pullの復元先(既定) |
+| `s3://<bucket>/<prefix>/<category>/.../<name>/default.age` | file本体(版ごと上書き・versioningで版管理) |
+| `s3://<bucket>/<prefix>/<category>/.../<name>/<pin>.age` | ピン留め版(write-once) |
+| `s3://<bucket>/<prefix>/sys/index.jsonl.age` | 索引(照会系の正本・STORAGE CLASS STANDARD固定) |
+| `s3://<bucket>/<prefix>/sys/manifests/<batch_id>.jsonl.age` | run毎manifest |
 
-暗号化はSSH ed25519公開鍵の1-of-N(全鍵で暗号化し、いずれか1鍵で復号可能)。S3接続は**AWS SDK(aws-sdk-s3)をbinary内蔵**しておりaws CLIは不要。credential(access key)は`configs/secret/`配下の明示的なAPI keyファイル(2.3)から与え、`~/.aws`や環境変数のcredential chainには依存しない(fail-closed)。plan/encrypt/verifyはS3接続なしで完結する。
+暗号化はSSH ed25519公開鍵の1-of-N(全鍵で暗号化し、いずれか1鍵で復号可能)。S3接続は**AWS SDK(aws-sdk-s3)をbinary内蔵**しておりaws CLIは不要。credential(access key)は`configs/secret/`配下の明示的なAPI keyファイル(2.2)から与え、`~/.aws`や環境変数のcredential chainには依存しない(fail-closed)。
 
-restore(復元)は実装済み。`restore request`(復元job発行)-> `restore status`(状態確認)-> `restore download`(取得・検証・復号)の3サブコマンドで復元する。手順の正本は `docs/restore_backup.md`。backup-remoteを使わない手動復元の手順は9章。
+照会系(list/query/get/diff)は**aws.toml(bucket/region/prefix)と復号用秘密鍵のみで動作する**(索引をS3から取得するため。災害時にローカルregistry・data/outは不要。9章)。
 
 ## 2. セットアップ
 
@@ -42,83 +55,55 @@ restore(復元)は実装済み。`restore request`(復元job発行)-> `restore s
 
 ageはv1.2形式のstanza識別子(指紋prefix)によるヘッダ照合の前提となるため、v1.2系を使用する。
 
-**aws CLIは不要**: S3への接続はAWS SDK(aws-sdk-s3・rustls版)をbackup-remoteが内蔵しており、aws CLIの導入・設定は必要ない。aws CLIがあるとS3側の確認(5.7)や手動復元(9章)に使えるが、あくまで任意(2.2)。
+**aws CLIは不要**: S3接続はSDKをbackup-remoteが内蔵する。aws CLIがあるとS3側の確認・手動復元(9.3)に使えるが任意である。
 
-### 2.2 AWS SDK内蔵について(aws CLI不要・参考: 導入手順)
+### 2.2 AWS credential(API keyファイル)の作成
 
-S3アクセス(HeadObject・PutObject・ListObjectsV2・RestoreObject・GetObject)はすべてSDK経由でbinary内蔵のため、aws CLIは必須要件から外れた。旧版で案内していたper-user install手順は、S3側の確認用手順(5.7・8章)や手動復元(9章)でaws CLIを使いたい場合の参考として残す:
+credential(access key)は**明示的なAPI keyファイル** `configs/secret/aws-credentials/<profile>.toml`(gitignore済み領域)へ置く。SDKへはこのファイルの値を明示渡しし、credential chainへのfallbackは**行わない**(ファイルが無い・不正なら設定エラー2で即終了するfail-closed構成)。
 
-```console
-$ curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
-$ unzip awscliv2.zip
-$ ./aws/install -i ~/.local/share/aws-cli/v2 -b ~/.local/bin --update
-$ aws --version
-aws-cli/2.37.10 ... (v2.xであればよい)
-```
-
-- インストール先: 本体 `~/.local/share/aws-cli/v2/<version>/`、コマンドsymlink `~/.local/bin/aws`
-- `~/.local/bin` にPATHが通っていること
-- `--update`は既存導入のある環境での上書き更新用。初回導入でも問題なく動作する
-
-### 2.3 AWS credential(API keyファイル)の作成
-
-credential(access key)は**明示的なAPI keyファイル** `configs/secret/aws-credentials.toml`(gitignore済み領域)へ置く。SDKへはこのファイルの値を明示渡しし、`~/.aws`・環境変数・IMDS等のcredential chainへのfallbackは**行わない**(ファイルが無い・不正なら設定エラー2で即終了するfail-closed構成。誤った別環境credentialでの接続を構造的に防ぐ)。
-
-access keyの入手先はAWS IAM(IAMユーザーのaccess key作成。S3への書き込み権限を持つもの。restore運用も見据えるなら読み取り・復元権限も付与)。
-
-ファイルを作成する(schemaは`[credentials]`テーブル配下に`access_key_id`/`secret_access_key`必須・`session_token`省略可。未知キーは設定エラー2):
-
-```console
-$ vim configs/secret/aws-credentials.toml
-```
+access keyの入手先はAWS IAM(IAMユーザーのaccess key作成。書き込み・復元・保持管理を担う権限)。
 
 ```toml
-# configs/secret/aws-credentials.toml(gitignore済み・実運用で作成する秘密ファイル)
+# configs/secret/aws-credentials/dev.toml(gitignore済み・実運用で作成する秘密ファイル)
 [credentials]
-access_key_id = "<access key id>"       # 必須
+access_key_id = "<access key id>"         # 必須
 secret_access_key = "<secret access key>" # 必須
-# session_token = "<session token>"     # 任意(一時credentialを使う場合のみ)
+# session_token = "<session token>"       # 任意(一時credentialを使う場合のみ)
 ```
 
-- **作成後`chmod 600`を推奨**(秘密情報を含むファイルのため):
-
-  ```console
-  $ chmod 600 configs/secret/aws-credentials.toml
-  ```
-
-- このファイルのpathを `configs/aws.toml` の `[aws].credentials_file` へ記述する(3.2)。必須キーのため、書き漏れはupload/restore実行時の設定エラー2で即検出される
+- 作成後`chmod 600`を推奨(秘密情報を含むファイルのため)
+- このファイルのpathを `configs/aws.toml` の各profile `credentials_file` へ記述する(3.2)
 - 空値・前後空白付き値・未知キーは設定エラー2(値そのものはerror文に表示されない)
 - 値を直接aws.tomlへ書くことはできない(`credentials_file`を除くcredential系キーは未知キーとして拒否)
 
-### 2.4 ビルドと実行形式
+### 2.3 ビルドと実行形式
 
 ```console
 $ cargo build --release          # target/release/backup-remote
 $ cargo install --path .         # PATHへ導入する場合(cargo bin)
 ```
 
-実行形式は `backup-remote <subcommand> [options]`。`cargo run --quiet -- <subcommand>` でも同一挙動。設定・出力の相対pathはrepo root(cwd)基準で解決されるため、**repo rootで実行する**のが前提。
+実行形式は `backup-remote <command> [options]`。`cargo run --quiet -- <command>` でも同一挙動。設定・出力の相対pathはrepo root(cwd)基準で解決されるため、**repo rootで実行する**のが前提。
 
-### 2.5 S3 bucket側のlifecycle設定(推奨)
+### 2.4 検証用bucket(dev)の新設手順
 
-64MiBを超えるオブジェクトはmultipart uploadで転送する(4.4)が、転送途中の失敗では`AbortMultipartUpload`をbest-effortで発行する(失敗しても警告表示のみで継続する)。このabortに失敗した場合、bucketへ不完全なmultipart uploadが残り、**完了していない部分もDEEP_ARCHIVE相当の課金対象になり得る**。この放置をbucket側で掃除するため、upload先bucketへlifecycle ruleの**AbortIncompleteMultipartUpload(7日経過で不完全MPUを削除)**設定を推奨する(aws CLIでの設定例。任意):
+dev profile向けbucket(versioning有効が必須・lifecycleなし):
 
 ```console
-$ aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration '{
-  "Rules": [
-    {"ID": "abort-incomplete-multipart-upload", "Status": "Enabled",
-     "Filter": {}, "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 7}}
-  ]
-}'
+$ aws s3api create-bucket --bucket backup-remote-dev --region ap-northeast-1 \
+    --create-bucket-configuration LocationConstraint=ap-northeast-1
+$ aws s3api put-bucket-versioning --bucket backup-remote-dev \
+    --versioning-configuration Status=Enabled
 ```
 
-(upload対象のオブジェクト自体へのlifecycle移行(STANDARDからの自動移行)は設定しないこと)
+- lifecycleは `backup-remote manage lifecycle apply` が行う(任意・5.10)
+- **全profileのbucketでversioning有効が必須**。書き込み系(backup push・pin add/rm・manage)は起動時に確認し、無効なら設定エラー2(有効化commandを表示)
 
 ## 3. 設定ファイル
 
 ### 3.1 `configs/pipeline.toml`
 
-暗号化・出力・検証の設定(秘密を含まない)。現行の実物:
+暗号化・出力・分類・保持の設定(秘密を含まない)。全項目を掲げる(`[layout]`/`[categories]`/`[files]`/`keep_artifacts`は省略時に既定で動く。現行の`configs/pipeline.toml`は既定運用のためこれらを省略している):
 
 ```toml
 [recipients]
@@ -129,71 +114,109 @@ public_keys = [
 ]
 
 [output]
-# 暗号化成果物の集約dir。配下に <YYYY-MM-DD>/<name>.age ができる
+# 暗号化成果物の集約dir。配下に <batch_id>/<name>.age と <batch_id>/manifest.jsonl.age
+# ができる(run単位。旧仕様の <date>/ から変更)
 dir = "data/out"
 # ローカル累積registry(JSONL)
 registry = "data/registry.jsonl"
+# .ageの保持policy。 "run"(run成功後に当該run分を掃除・既定) | "always"(全保持)
 
 [behavior]
-# per-file失敗時も継続する既定値(CLIの--keep-goingで上書きon)
+# per-file失敗時も継続する既定値(backup pushの--keep-goingで上書きon)
 keep_going = false
 
 [verify]
-# --roundtrip検証で使う秘密鍵path(秘密そのものではなくpath参照。configs/secret/はgitignore済み)
+# 復号検証で使う秘密鍵path(秘密そのものではなくpath参照。configs/secret/はgitignore済み)
 decrypt_key = "configs/secret/keys/private/backup_ed25519"
+
+[layout]
+# 写像/roots不一致時のcategory(既定"unfiled")
+unfiled_category = "unfiled"
+# source_path相対化のroot列挙(順序優先・絶対path。省略可)
+auto_path_roots = ["/home/tomo/data"]
+
+[categories.main]        # 管理区分(更新頻度/寿命軸。自由に増減可)
+keep = 5                 # NewerNoncurrentVersions適用値(1以上100以下)
+[categories.volatile]
+keep = 2
+[categories.unfiled]     # 削除不可の必須category(fallback先)
+keep = 5
+
+[files."travel.zip"]     # 手動写像(省略可)
+category = "photos"      # categoriesに存在するもの
+path = "2020-2023/travel" # rel_path(""でcategory直下)
 ```
 
 各キーの説明:
 
 | キー | 意味 |
 |---|---|
-| `[recipients].public_keys` | recipient公開鍵(SSH ed25519)のpath列挙。1-of-N。全鍵で暗号化し、いずれか1鍵で復号できる。鍵の追加手順は7章 |
-| `[output].dir` | 暗号化成果物の集約dir。配下に `<YYYY-MM-DD>/<name>.age` ができる |
+| `[recipients].public_keys` | recipient公開鍵(SSH ed25519)のpath列挙。1-of-N。鍵の追加手順は8.3 |
+| `[output].dir` | 暗号化成果物の集約dir。配下に `<batch_id>/` ができる |
 | `[output].registry` | ローカルregistry(JSONL・append-only)のpath |
-| `[behavior].keep_going` | per-file失敗時も継続する既定値。CLIの`--keep-going`でonに上書き |
-| `[verify].decrypt_key` | `verify --roundtrip`で使う秘密鍵のpath参照(値そのものではなくpath) |
+| `[output].keep_artifacts` | `.age`保持policy。`run`(既定: run成功後に当該run分を掃除)/`always`(全保持) |
+| `[behavior].keep_going` | per-file失敗時も継続する既定値。`--keep-going`でonに上書き |
+| `[verify].decrypt_key` | 復号用秘密鍵のpath参照。get/pull/verifyの`--key`省略時の既定 |
+| `[layout].unfiled_category` | 分類解決のfallback先category(既定`unfiled`) |
+| `[layout].auto_path_roots` | source_pathを相対化するroot列挙(最初に一致したrootを採用) |
+| `[categories.<name>].keep` | 区分毎の保持数(NewerNoncurrentVersions適用値。1〜100) |
+| `[files."<basename>"]` | 手動写像。`category`(必須・categoriesに存在するもの)と`path`(rel_path) |
+
+省略時の既定: `[layout]`全体省略時はunfiled_category="unfiled"+auto_path_roots=[]・`[categories]`全体省略時は`{unfiled: keep 5}`・`keep_artifacts`省略時は"run"。
 
 検証規則(違反はすべて設定エラー・終了コード2):
 
 - ファイル不在・TOML parseエラー・未知キー・型不一致
-- `public_keys`空配列・鍵ファイル不在・`ssh-ed25519`以外の形式(ssh-rsa等)
-- `public_keys`内の公開鍵指紋(`SHA256:...`)の重複(同一path重複・異pathで同一鍵blobの両方を検出)
-- `[output]`の相対pathはrepo root(cwd)基準
+- `public_keys`空配列・鍵ファイル不在・`ssh-ed25519`以外の形式・指紋の重複
+- category名規則違反(`^[a-z0-9][a-z0-9-]{0,63}$`。予約領域`sys`・旧表記`_sys`は拒否)
+- `[categories.unfiled]`(unfiled_categoryの設定値に対応する区分)の欠落
+- `files`写像のcategoryが`[categories]`に存在しない・写像path先頭の`sys`衝突
+- auto_path_rootsが絶対pathでない・keepが1〜100の範囲外・keep_artifacts列挙値外
 
 ### 3.2 `configs/aws.toml`
 
-S3接続設定(bucket/region/credentialファイル参照/storage class。credential値そのものは不含)。**upload系・restore系でのみ必須**で、plan/encrypt/verifyはこのファイルがなくても動作する。現行の実物(template):
+S3接続設定(credential値そのものは不含)。profile構成(dev=開発検証・prod=実運用)。現行の実物:
 
 ```toml
 [aws]
-# いずれもupload系でのみ必須(plan/encrypt/verifyはこのファイルがなくても動作)
-bucket = ""                    # S3 bucket名(空文字・未設定はupload時設定エラー2)
-region = ""                    # region名(同上)
-credentials_file = "configs/secret/aws-credentials.toml" # credential(API key)ファイルのpath。必須(2.3)
-storage_class = "DEEP_ARCHIVE" # 既定DEEP_ARCHIVE
+active_profile = "dev"
+
+[aws.profiles.dev]              # 開発検証(versioning有効bucket・STORAGE CLASS STANDARD)
+purpose = "dev"
+bucket = "backup-remote-dev"
+region = "ap-northeast-1"
+prefix = "backup-remote/"
+storage_class = "STANDARD"
+credentials_file = "configs/secret/aws-credentials/dev.toml"
+
+[aws.profiles.prod]             # 実運用(専用bucket・DEEP_ARCHIVE)
+purpose = "prod"
+bucket = "TODO-PROD-BUCKET"     # 専用bucket確定後に置換する(未確定のため明示プレースホルダ)
+region = "ap-northeast-1"
+prefix = "backup-remote/"
+storage_class = "DEEP_ARCHIVE"
+credentials_file = "configs/secret/aws-credentials/prod.toml"
 ```
 
 | キー | 意味 |
 |---|---|
-| `[aws].bucket` | 正本のupload先S3 bucket名。空文字・未設定はupload時の設定エラー(終了コード2) |
-| `[aws].region` | region名。空文字・未設定はupload時の設定エラー |
-| `[aws].credentials_file` | credentialファイル(2.3で作成したAPI keyファイル)のpath。**必須**(cwd基準の相対path)。欠落・空・指すファイルの不在・不正は設定エラー2 |
-| `[aws].storage_class` | uploadのstorage class。空文字なら`DEEP_ARCHIVE` |
+| `[aws].active_profile` | 既定で使用するprofile名 |
+| `[aws.profiles.<name>].purpose` | profileの用途(`dev`/`prod`) |
+| `bucket` / `region` | 接続先S3 bucket・region |
+| `prefix` | 名前空間root prefix。`/`終端・空でない・先頭`/`禁止・`[a-z0-9-]`と`/`区切り。省略時は`backup-remote/` |
+| `storage_class` | file objectのstorage class。`STANDARD`/`DEEP_ARCHIVE`等(allowlist検証) |
+| `credentials_file` | credentialファイル(2.2)のpath。必須 |
 
-`profile`キーは廃止された(credentialは2.3のAPI keyファイル経由に一本化)。旧aws.tomlに`profile`が残っていると未知キーの設定エラー2になるため、`credentials_file`への書き替えが必要。
-
-検証規則(upload/restore開始前の事前検査・違反は設定エラー2):
-
-- `storage_class`はallowlist検証。許容値: `STANDARD` / `STANDARD_IA` / `ONEZONE_IA` / `INTELLIGENT_TIERING` / `GLACIER` / `DEEP_ARCHIVE` / `GLACIER_IR`。allowlist外(打ち間違い等)は設定エラー
-- `bucket`/`region`/`credentials_file`の前後空白付き値(例: `" my-bucket "`)は設定エラー(値のtrimは行わず打ち間違いとして弾く)
-- `bucket`/`region`が空の項目は、uploadのCLIオプション(`--bucket`/`--region`)指定の有無にかかわらず設定エラー。CLI指定値はaws.toml値が正である前提の一時上書きであり、空値を補完する手段にはならない(4.4)
-- credential値の直書きはできない(`credentials_file`を除くcredential系キーは未知キーエラー)。credentialは`credentials_file`が指す外部ファイル(2.3)のみ
+- **test profileは廃止**(旧`test`/共用bucket your-dev-bucket構成の解除。dev/prod 2profile構成)
+- **prod bucket名はTODO-PROD-BUCKET(未確定)**。確定後は`configs/aws.toml`のprod profile `bucket`を書き換える(加えて`manage lifecycle apply`の再実行と2.2のprod用credentialファイル作成が必要)
+- profileの切替は`active_profile`書換えまたは`--profile`オプション(5.1。当該実行限りの一時上書き)
+- 検証規則(設定エラー2): prefix形式違反・storage_class allowlist外・bucket/region/credentials_fileの空・前後空白付き値・credentialファイルの不在・不正
 
 **エンドポイント確定性の注記**: SDKは環境変数`AWS_ENDPOINT_URL`/`AWS_ENDPOINT_URL_S3`を解釈して接続先endpointを切替え得る。backup-remoteは起動時にこれらのenvが設定されていれば警告をstderrへ表示する(処理は継続)。意図した検証用構成か誤設定かは利用者側で確認すること。
 
 ### 3.3 対象リストtoml(`--from-list`)
 
-対象をファイルで指定する場合は次のschemaのtomlを作る(実運用のリストはgit管理外で都度作成):
+backup pushの対象をファイルで指定する場合は次のschemaのtomlを作る(実運用のリストはgit管理外で都度作成):
 
 ```toml
 [[targets]]
@@ -201,252 +224,347 @@ path = "/mnt/nas/backup/photo.zip"
 
 [[targets]]
 path = "/mnt/nas/backup/2025/docs.7z"
-name = "docs-2025.7z"   # 任意: 出力名・S3キー名のoverride(basename衝突回避用)
 ```
 
 - `path`(必須): 対象アーカイブのpath
-- `name`(任意): 出力名のoverride。basename形式のみ(`/`を含む・`.`・`..`は対象エラー)
 - 位置引数との併用可(和集合)。未知キー・`path`欠損は設定エラー
+- 旧仕様の`name`(出力名override)は**廃止**。basenameは常に元ファイル名(拡張子付き)。同名衝突は自動的にfolder識別子で分離される(4.2)
 
-## 4. サブコマンドリファレンス
+## 4. データ配置と保持
 
-> **2026-10-15 TASK-10 Phase A注記**: 新コマンド群(`list` / `query` / `get` / `diff` / `edit` / `backup push|pull|verify` / `pin` / `manage`)を追加した(S3 versioning・索引ベースの新ストレージ構成。設計の正本は`tmp/tasks/tm-10/design_s3_storage.md`)。本章の記載は旧サブコマンド(plan/encrypt/upload/verify・現行挙動のまま凍結)に対するもので、**新旧コマンドの同一bucketへの併用は禁止**する(混在書込みの恐れ。旧サブコマンドの書込先は旧key構造のまま)。新コマンドが使用する設定項目(3章のpipeline.tomlへ`[layout]`/`[categories]`/`[files]`/`[output].keep_artifacts`追加・aws.toml profileへ`prefix`追加)も本書未記載であり、新コマンドの詳細な使用手順・設定項目・本書の全面改訂はTASK-11(Phase B)で行う。
-
-### 4.1 plan — 対象解決と事前検査
-
-暗号化・uploadを行わない事前検査。設定(recipient公開鍵)の検証、対象の存在・拡張子(`.zip`/`.7z`のみ・大文字小文字無視)・重複・出力名一意性を確認し、対象一覧・サイズ・recipient指紋・出力先を表示する。aws不要。
+### 4.1 S3側の配置
 
 ```
-backup-remote plan [--config PATH] [--from-list FILE] <PATH> [<PATH> ...]
+s3://<bucket>/<prefix>/
+  <category>/<rel_path>/<name>/
+    default.age                    # 固定key・版ごと上書き・versioningで版管理
+    <pin-name>.age                 # ピン留め版(write-once)
+  sys/                             # 予約領域(category名として不許可)
+    index.jsonl.age                # 索引(STORAGE CLASS STANDARD固定)
+    manifests/<batch_id>.jsonl.age # run毎manifest
 ```
 
-| 引数/オプション | 既定 | 意味 |
+- 索引は照会系(list/query/get/diff)の正本。run毎書込み・backup push完了時と索引に影響する操作後(pin add/rm・manage prune)に全体再構築してPUTされる(冪等)
+- 索引の旧版はS3 versioningのnoncurrent versionとして残る(小容量のため蓄積を許容)
+- storage classは索引のみSTANDARD固定、それ以外(default.age・pin・manifest)はprofileのstorage_class(prod=DEEP_ARCHIVE)
+
+### 4.2 分類解決と衝突
+
+fileの配置先は次の優先順位で解決される:
+
+1. **files写像**(最優先): `[files."<basename>"]`の`category`と`path`をそのまま用いる
+2. **auto_path_roots相対化**: source_pathがいずれかroot配下なら、最初に一致したrootからの相対pathを`rel_path`とし、categoryは`unfiled_category`
+3. **fallback**: 一致rootなし -> rel_pathなし・category=`unfiled_category`
+
+- 同一category+rel_path+nameに異なる実体(realpath)が衝突する場合、後続側はfolder名へ機械識別子 `<stem>--<hash8>`(hash8=sha256(realpath)先頭8hex)を付与して分離(決定論的・既存の無hash保持者があればそれを維持)
+- rel_pathは`.`/`..`要素の排除・正規化のみ適用(実source treeの要素名をそのまま用いる)
+- 生成keyがS3のobject key上限1024 byteを超える場合は対象エラー3(files写像のpath縮約またはauto_path_roots変更で対処)
+- category名規則は`^[a-z0-9][a-z0-9-]{0,63}$`・予約語`sys`(旧表記`_sys`も)拒否。pin名も同規則で`default`は予約
+
+### 4.3 versioningと索引
+
+- bucketのversioningは必須(2.4)。`default.age`への上書きuploadごとに新VersionIdが払い出され、索引に版として記録される(date・version_ts・version_id・sha256×2・size)
+- 索引のversions[]はdate降順(先頭=最新)。同一日内の複数版はversion_ts(暗号化時刻)で一意化される
+- 誤DELETE対策: 読み取り系はlist-object-versionsで実体を把握するためdelete markerの影響を受けない
+
+### 4.4 世代管理(lifecycle・prune)
+
+保持は「category毎のkeep値」で制御される。削除条件の定義はlifecycle(NCVE)とpruneで共通: **同一keyのnoncurrent版を新しい順に並べたとき、newer noncurrent版の数がkeep以上となった版を削除**(境界のちょうどkeep番目は残す)。
+
+- **`manage lifecycle apply`**(bucket側・自動): category毎のNCVE rule(`NoncurrentDays=180`・`NewerNoncurrentVersions=keep`)とMPU abort rule(7日)をbucketへ適用。180日はDeep Archive最小保存期間(early deletion課金)に合わせたもの
+- **`manage prune`**(即時実行・dry-run既定): 同一条件で即時にDeleteObjectVersion。現行version・pin keyは構造的保護で対象外
+- category追加時は`manage lifecycle apply`の再実行が必要
+
+## 5. コマンドリファレンス
+
+### 5.1 共通オプション
+
+新体系の全コマンドが末尾に共通option群を持つ:
+
+| option | 既定 | 意味 |
 |---|---|---|
-| `<PATH>`(1個以上必須) | - | 対象アーカイブ |
-| `--config` | `configs/pipeline.toml` | pipeline設定 |
-| `--from-list` | なし | 対象リストtoml(3.3)。位置引数と併用可 |
+| `--config PATH` | なし | pipeline.toml。**照会系は省略可**(getの`--key`既定解決に使う場合は指定)。backup push・pin・manage prune/lifecycle/indexは必須(省略は設定エラー2) |
+| `--aws-config PATH` | `configs/aws.toml` | aws.toml |
+| `--key PATH` | pipeline.toml `[verify].decrypt_key` | 復号用SSH ed25519秘密鍵(get/pull・pinの索引読込等)。どちらにも無ければ設定エラー2 |
+| `--profile NAME` | aws.toml `[aws].active_profile` | 当該実行限りprofileを上書き(aws.tomlへの書戻しはしない) |
+| `--format human|json` | `human` | 照会系9コマンド(list 6種・query・get・diff)の出力形式。`json`はstdout全体が単一JSON(人間向け通知はstderr) |
+| `--dry-run` | なし | 実行予定のみ表示(backup push/pullが対応) |
 
-出力例(実機確認済み・パスは例):
+backup verifyのみ旧形式の`--config`/`--key`/`--checksum`/`--roundtrip`を扱う(5.8)。
 
-```
-== plan ==
-   1. /mnt/nas/backup/photo.zip       12.5 GiB  mtime 2026-09-30 22:11 JST
-   2. /mnt/nas/backup/docs.7z          3.2 GiB  mtime 2026-10-01 09:00 JST
-targets: 2 files, 15.7 GiB total
-recipients (1-of-N, N=1):
-  - SHA256:oMLg8HW9EvSPC+FAEkD1fDCPQP7b/4UhLSc/Txvw9uI   configs/secret/keys/private/backup_ed25519.pub
-output: data/out/2026-10-11/{photo.zip.age, docs.7z.age, manifest.jsonl.age}
-s3 prefix: 2026-10-11/
-```
-
-終了コード: 成功0 / 設定・環境エラー2 / 対象エラー3。
-
-### 4.2 encrypt — 暗号化とregistry・manifest記録
-
-各アーカイブをageで暗号化し、registryへ記録、バッチmanifestを暗号化生成する。aws不要。
+### 5.2 list — 一覧(照会)
 
 ```
-backup-remote encrypt [--config PATH] [--from-list FILE] [--out DIR] [--registry PATH] [--keep-going] <PATH> [<PATH> ...]
+backup-remote list files [--tree] [--category C]
+backup-remote list versions [--name N] [--category C]
+backup-remote list pins [--name N]
+backup-remote list runs
+backup-remote list categories
+backup-remote list jobs
 ```
 
-| 引数/オプション | 既定 | 意味 |
+| subcommand | 表示内容 |
+|---|---|
+| `files` | category毎の目録(files数・noncurrent数・最新日・last run・最新版計size・pins数)。`--tree`でfile単位の階層表示 |
+| `versions` | file毎の版一覧(date・version_id・size・noncurrent/現行・pin紐付)。`--name`省略時は全file。nameが索引に不在は対象エラー3 |
+| `pins` | pin一覧(name・pin名・size・付与日) |
+| `runs` | run(batch_id)毎のfile数・完全性(索引由来) |
+| `categories` | category一覧とkeep・file数(設定不在の災害時はkeep=`-`) |
+| `jobs` | 復元job状況(現行/非現行版ごと・pin含む。headのRestore headerをparse) |
+
+0件は警告表示+終了コード0。
+
+### 5.3 query — 探索(逆引き)
+
+```
+backup-remote query <手がかり> [--category C] [--versions]
+```
+
+名前・rel_path・source_pathの部分一致で索引を検索。既定はfile単位要約、`--versions`で版一覧も表示。同名候補が複数ある場合は候補一覧(rel_path/folder)を表示し`get <name> --path <rel_path>`での特定を案内する。0件は警告+終了コード0。
+
+### 5.4 get — 単一file取得
+
+```
+backup-remote get <name> [--path P] [--version V] [--version-id ID] [--pin 名]
+                     [--out DIR] [--tier Standard|Bulk] [--days N] [--yes]
+```
+
+| 引数/option | 既定 | 意味 |
 |---|---|---|
-| `<PATH>`(1個以上必須) | - | 対象アーカイブ |
-| `--config` | `configs/pipeline.toml` | pipeline設定 |
-| `--from-list` | なし | 対象リストtoml |
-| `--out` | 設定`[output].dir` | 成果物dir(テスト隔離用) |
-| `--registry` | 設定`[output].registry` | registry path(テスト隔離用) |
-| `--keep-going` | なし(設定`[behavior].keep_going`がtrueなら既定on) | per-file失敗でも継続 |
+| `<name>` | -(必須) | 対象file名(basename・拡張子付き) |
+| `--path` | なし | 同名候補のrel_path特定。候補複数で`--path`なしは対象エラー3 |
+| `--version` | なし(最新) | 版の日付(YYYY-MM-DD。形式不正はusage 64)。同日に複数版がhitしたら候補表示+`--version-id`指定要求(対象エラー3) |
+| `--version-id` | なし | 版のS3 VersionId指定(最優先) |
+| `--pin` | なし | ピン留め版の取得(pin名) |
+| `--out` | `data/restore` | 出力dir。`<out>/<rel_path>/<name>`へ配置(元構造再現) |
+| `--tier` | `Standard` | 復元Tier(`Standard`/`Bulk`。allowlist外はusage 64) |
+| `--days` | `7` | 復元コピー保持日数(1〜365。範囲外は設定エラー2) |
+| `--yes` | なし | sha不一致の既存平文への上書きを許可(7.4) |
 
-動作の要点:
+動作:
 
-- skip判定: 出力`.age`が存在し、registryに同一source(path・size・mtime一致)のencrypt記録がある場合は再読込せずskip
-- `.age`が存在してもregistry記録がない(書込途中crash等)場合は上書き再暗号化。sourceのsize/mtimeが変化していても再暗号化
-- 書込は`.age.part`へ書いて完了後に原子rename。crash途中は`.part`が残るだけで既存`.age`は壊れない
-- 暗号化直後に`.age`ヘッダをparseし、recipient鍵の照合(暗号化対象を間違えたまま大量処理する事故の検出)
-- 全対象処理後、バッチmanifest(JSONL)を現在のrecipient構成で暗号化して `<out>/<date>/manifest.jsonl.age` へ
+1. 事前検査: 秘密鍵file不在・ageバイナリ不在は設定エラー2
+2. 索引を取得して対象を解決(索引が正本)
+3. 平文衝突保護(7.4)
+4. 対象が未復元(DEEP_ARCHIVE等)なら復元jobを発行し「進行中・約12〜48h後に再実行」と案内して**終了コード0**(冪等。再実行で取得が進む)
+5. 復元済みなら取得(version_id指定) -> `.age`のsha256を索引記録と照合 -> 復号 -> 平文sha256を索引記録と照合 -> `<out>/<rel_path>/<name>`へ配置
 
-出力例(実機確認済み):
+sha不一致は検証エラー4・S3 API失敗は転送エラー5。
 
-```
-ok    sample.zip  1.0 MiB -> 1.0 MiB  sha256:182eacd3e289b088
--- summary: 1 encrypted, 0 skipped, 0 failed / out: data/out/2026-10-11 / manifest: data/out/2026-10-11/manifest.jsonl.age
-```
-
-再実行時(既に暗号化済みならskip):
+### 5.5 diff — 完全性突合
 
 ```
-skip  sample.zip (already encrypted: registry match)
--- summary: 0 encrypted, 1 skipped, 0 failed / out: data/out/2026-10-11
+backup-remote diff [--run ID]
 ```
 
-終了コード: 成功0 / 設定・環境エラー2(ageバイナリ不在・recipient鍵不正を含む)/ 対象エラー3 / 暗号化処理エラー4。
+索引とS3実態(ListObjectVersions)を突合し、missing/unexpected/pinsの有無を報告する。`--run ID`指定時は索引・manifest・実態の三方突合(run完否の監査)。不一致があっても報告して終了コード0(照会command)。
 
-### 4.3 verify — ローカル整合検証
-
-registryとローカル`.age`の整合を検証する。aws不要。指定した最深の段階まで順に実施する。
+### 5.6 backup push — 書き込み
 
 ```
-backup-remote verify [--config PATH] [--date YYYY-MM-DD] [--checksum] [--roundtrip] [--key PATH]
+backup-remote backup push [--from-list FILE] [--dry-run] [--pin <版名>] [--keep-going] <PATH> [<PATH> ...]
 ```
 
-| 引数/オプション | 既定 | 意味 |
+| 引数/option | 既定 | 意味 |
 |---|---|---|
-| `--config` | `configs/pipeline.toml` | pipeline設定 |
-| `--date` | なし(全件) | 当該batch_date分に限定。`YYYY-MM-DD`形式(形式不正はusage error 64) |
-| `--checksum` | なし | `.age`のsha256を再計算してregistry記録と照合(全読込発生) |
-| `--roundtrip` | なし | 秘密鍵で復号し平文sha256をregistry記録と照合(平文は書き出さない)。manifest復号+registry突合も行う |
-| `--key` | 設定`[verify].decrypt_key` | 復号用秘密鍵(`--roundtrip`時必須) |
+| `<PATH>`(1個以上必須) | -(PATH 0個はusage 64) | 対象アーカイブ(`.zip`/`.7z`) |
+| `--from-list` | なし | 対象リストtoml(3.3)。位置引数と併用可(和集合) |
+| `--dry-run` | なし | 予定表示のみ(旧plan相当。対象・分類・衝突・size集計・予定keyを表示。S3 API・暗号化とも行わない) |
+| `--pin` | なし | backup時ピン(当該runの版を同時にpin名keyへもupload) |
+| `--keep-going` | 設定`[behavior].keep_going` | per-file失敗でも継続 |
 
-検証段階:
+動作:
 
-1. 構造検査(既定): registry全行のparse・schema検証。`.age`実ファイルのsizeが記録`age_size`と完全一致すること。`.age`ヘッダのrecipient照合(stanza識別子とregistry記録の指紋の全単射対応)。各バッチのmanifestファイルの存在
-2. `--checksum`: 各`.age`のsha256再計算と`age_sha256`照合
-3. `--roundtrip`: 復号して平文sha256が`source_sha256`と一致すること。manifest復号+registry突合
+1. pin名検証(規則違反はusage 64) -> pipeline.toml必須検査 -> 対象解決(存在・拡張子・重複) -> 分類解決(4.2)
+2. `--dry-run`なら予定表示で終了0
+3. bucketのversioning確認(無効は設定エラー2)
+4. per-file: skip判定(registry基準。file_write成功記録+指紋一致+同一identityのfile_upload記録があれば再暗号化せずskip) -> age暗号化 -> `default.age`へupload(64MiB超はmultipart) -> registryへfile_write/file_upload記録
+5. `--pin`指定時: pin keyへもupload。write-once違反(既存pin名への再付与)はrunを中断せずWARNING表示+当該fileのみpin付与をskipしてrunを完結する(manifest・索引更新は実行される。pin rm後に再付与)。skip対象(変更なし)のfileは警告のうえ最新版へCopyObjectでpin付与
+6. run manifestを暗号化生成して`sys/manifests/<batch_id>.jsonl.age`へupload
+7. 索引を全体再構築してPUT(常時・冪等。全skipの再実行でも未反映分が拾われる)
+8. `keep_artifacts="run"`(既定)なら`data/out/<batch_id>/`を掃除(run成功時のみ)
 
-出力例(実機確認済み):
+再実行は冪等: 変更の無いfileはskipされ、失敗時の再実行で残りが処理される。終了コード: 成功0 / 設定・環境2 / 対象3(不在・拡張子・key長超過等) / 処理4 / 転送5 / 使用法64。
 
-```
-== verify == ok (1) records, checksum=false, roundtrip=true
-```
-
-不一致の詳細(該当recordのsource_pathと期待/実測)は stderr に出る。終了コード: 成功0 / 設定・環境エラー2(秘密鍵不在・age不在を含む)/ 検証エラー4(検査対象ファイル欠損を含む全種類の不一致)。
-
-### 4.4 upload — S3 Deep Archiveへの転送
-
-registryから未uploadの`.age`とmanifestを列挙してS3へ転送し、各バッチプレフィックスへ平文README(6章)を配置する。S3接続はSDK内蔵(2.2・aws CLI不要)。credentialは`[aws].credentials_file`が指すAPI keyファイル(2.3)を使用する。
+### 5.7 backup pull — 一括復元
 
 ```
-backup-remote upload [--config PATH] [--aws-config PATH] [--date YYYY-MM-DD]
-                     [--dry-run] [--keep-going]
-                     [--storage-class CLASS] [--bucket NAME] [--region REGION]
+backup-remote backup pull (--all | --category C | --run ID) [--tier T] [--days N]
+                          [--out DIR] [--dry-run] [--yes]
 ```
 
-| 引数/オプション | 既定 | 意味 |
-|---|---|---|
-| `--config` | `configs/pipeline.toml` | pipeline設定 |
-| `--aws-config` | `configs/aws.toml` | aws設定 |
-| `--date` | なし(全未upload分) | 当該batch_date分に限定。`YYYY-MM-DD`形式(形式不正はusage error 64) |
-| `--dry-run` | なし | S3 API(PutObject・HeadObject)を実行せず、実行予定とskip想定を表示 |
-| `--keep-going` | 設定`[behavior].keep_going` | per-object失敗でも継続 |
-| `--storage-class` | 設定`[aws].storage_class` | storage classの当該実行限りの上書き |
-| `--bucket` | 設定`[aws].bucket` | S3 bucketの当該実行限りの上書き |
-| `--region` | 設定`[aws].region` | regionの当該実行限りの上書き |
+- `--all` / `--category C` / `--run ID` の**いずれか1つが必須**(指定なし・併用はusage 64)。`--all`と`--category`は索引の全最新版+全pin対象、`--run`は当該run(batch_id)の全版
+- **確認ガード**(一括復元の事故防止): `--yes`なしならTTYでyes/no確認(非TTY実行で`--yes`なしはusage 64。noなら中止で終了0)
+- 各対象についてgetと同一の取得・検証・復号・平文衝突保護を行う(7.4)。未復元対象は復元jobを発行してpending扱い(案内表示。約12〜48h後に再実行)
+- `--dry-run`は対象一覧の表示のみ
+- 対象0件は警告+終了0。失敗があっても継続して処理し、終了コードは最初のエラー区分
 
-**CLI一時上書きオプションと優先順位**: `--storage-class` / `--bucket` / `--region` は、当該実行のみ対応するaws.toml値を上書きする一時オプション。**優先順位は「CLI指定値 > aws.toml値」であり、aws.tomlが正本・CLI指定はその実行限りの例外**。aws.tomlへの書戻しは一切行わず、未指定の項目はaws.toml値のまま。CLI上書き値はtoml値と同一基準で検証される:
-
-- `--storage-class`: allowlist外なら設定エラー2。空文字・空白のみは未指定扱い(aws.toml値を採用)
-- `--bucket` / `--region`: 空文字・空白のみ・前後空白付きは設定エラー2
-
-なおCLI上書き値はtoml値が正である前提の上書きであり、tomlの`bucket`/`region`が空の項目をCLI値で補完する使い方はできない(toml空値はCLI指定の有無にかかわらず設定エラー)。
-
-動作の要点:
-
-1. 事前検査: aws.tomlの正検査(bucket/region空・前後空白付き・storage_class allowlist外は設定エラー2で即終了。S3 APIは実行されない)と、credentialファイル(`credentials_file`が指す2.3のAPI keyファイル)の読込・検査
-2. registryからupload対象を列挙: 「`s3_bucket`が当該実行の実効bucket(CLI一時上書き適用後の値)と一致する成功記録が無いもの」。記録bucketが不一致の対象は再upload対象になる。**前回成功記録で除外された対象もHeadObjectでS3側の実在を確認し、削除済み(404)なら再upload対象へ戻す**(S3側で削除された対象の再送担保。`--dry-run`ではこの確認を行わない)
-3. per-object skip判定: HeadObject(S3 API)でS3側のobject有無とSizeを確認。404ならupload、Size一致ならskip(「sizeのみ検証」警告付き)、Size不一致なら再upload
-4. upload: PutObject(SHA256 checksum指定付き。**64MiB超のオブジェクトは64MiB partのmultipart upload**、失敗時はAbortMultipartUploadをbest-effort発行)。成功後HeadObjectでSize/ChecksumSHA256を取得しregistryへ記録
-5. 全ファイル後にmanifestを同じ手順でupload(キー `<date>/manifest.jsonl.age`)
-6. (削除: README自動配置機能は廃止)
-
-出力例(`--dry-run`・実機確認済み。pathは例):
+### 5.8 backup verify — ローカル整合検査
 
 ```
-[dry-run] s3 PutObject bucket=example-backup-bucket key=2026-10-11/sample.zip.age src=data/out/2026-10-11/sample.zip.age storage_class=DEEP_ARCHIVE checksum=SHA256
-[dry-run] s3 PutObject bucket=example-backup-bucket key=2026-10-11/manifest.jsonl.age src=data/out/2026-10-11/manifest.jsonl.age storage_class=DEEP_ARCHIVE checksum=SHA256
-
--- summary (dry-run): 2 objects + README配置予定1件 (HeadObject未実行のためskip想定は未確定・全件upload想定)
+backup-remote backup verify [--config PATH] [--checksum] [--roundtrip] [--key PATH]
 ```
 
-64MiBを超える対象の行にはmultipart予定の注記(例: ` [multipart: 64MiB x 200]`)が付く。
+registryと`data/out`のrun成果物(`.age`)の整合を検証する(S3接続なし・aws不要)。旧経路(encrypt記録)と新経路(file_write記録)の両方を検査する。
 
-終了コード: 成功0(upload対象がなくても0)/ 設定・環境エラー2 / 対象エラー3(registryが指す`.age`が不在)/ 転送エラー5(S3 APIの失敗。認証・network含む)。
+| option | 意味 |
+|---|---|
+| `--checksum` | `.age`のsha256を再計算してregistry記録と照合 |
+| `--roundtrip` | 秘密鍵で復号し平文sha256をregistry記録と照合(平文は書き出さない)。manifest復号+registry突合も行う |
+| `--key` | 復号用秘密鍵(`--roundtrip`時必須。省略時は設定`[verify].decrypt_key`) |
 
-### 4.5 終了コード一覧
+検証段階は 構造検査(既定: `.age`のsize完全一致・ヘッダrecipient照合・manifest存在) -> `--checksum` -> `--roundtrip` の順。不一致は検証エラー4。秘密鍵・ageバイナリ不在は設定エラー2。
+
+### 5.9 pin — ピン留め版の付与/解除
+
+```
+backup-remote pin add <name> [--latest | --version V] --as <版名>
+backup-remote pin rm <name> --pin <版名>
+```
+
+`pin add`の対象版は`--version V`(日付)指定、省略時は最新版(`--latest`は明示用)。
+
+- `pin add`: 対象版の複写をpin key(`<pin名>.age`)へ作成し索引へ反映。未復元版(DEEP_ARCHIVE)は復元job発行を内包(案内+終了0・再実行で継続)。5GB超の版は分割copy(UploadPartCopy)で対応
+  - pin名規則違反・`--as`欠落はusage 64。**write-once違反(既存pin keyへの上書き)は対象エラー3**(上書きしたい場合は`pin rm`後に再付与)
+- `pin rm`: pin objectを削除(DEEP_ARCHIVE配置でも復元job不要で削除可)し索引へ反映
+- 両コマンドとも`--config`(registry記録先)が必須(設定エラー2・S3変更より前に検査)
+
+### 5.10 manage — 保持・索引・lifecycle・job管理
+
+```
+backup-remote manage prune --category C [--keep N] [--dry-run | --apply]
+backup-remote manage lifecycle show|apply
+backup-remote manage index rebuild
+backup-remote manage jobs reissue <object_key> [--tier T]
+```
+
+| subcommand | 動作 |
+|---|---|
+| `prune` | 世代削除の即時実行。`--category`必須(予約語・未定義は設定エラー2)。**dry-runが既定**(削除予定を表示)。`--apply`でDeleteObjectVersionを実行し索引を更新。`--keep N`は当該実行のみ設定値を上書き(1〜100)。`--dry-run`と`--apply`の併用はusage 64。現行version・pin keyは対象外(構造的保護) |
+| `lifecycle show` | bucketの現在のlifecycle設定を表示 |
+| `lifecycle apply` | category毎NCVE rule(NoncurrentDays=180・NewerNoncurrentVersions=keep)+MPU abort 7日ruleを適用(rule一式の置換・冪等)。`--config`必須 |
+| `index rebuild` | 索引をmanifest(`sys/manifests/`)から再構築(9.2)。`--config`必須 |
+| `jobs reissue` | 復元jobの再発行(tier変更可。Tierのallowlist外はusage 64)。対象はobject keyで指定 |
+
+`prune`/`lifecycle`/`index`は`--config`必須。`jobs reissue`はconfig不要。
+
+### 5.11 edit — 設定の確認
+
+```
+backup-remote edit categories|files|layout|policy
+```
+
+対応設定sectionの現在値を表示する(検証付き読込)。編集自体はpipeline.tomlの直接編集で行う(保存時に検証される)。対象外の指定はusage 64。
+
+### 5.12 終了コード一覧
 
 | code | 区分 | 主な発生条件 |
 |---|---|---|
-| 0 | 成功 | 対象なし・全skip完結も含む |
+| 0 | 成功 | 対象なし・全skip完結・復元job発行の案内(get/pull)も含む |
 | 1 | 内部エラー | 予期しない内部エラー(bug) |
-| 2 | 設定・環境エラー | toml不在・schema違反・recipient公開鍵不在/形式違反・ageバイナリ不在・aws.toml未設定・credentialファイル不在/不正(`credentials_file`指す先・値の検査失敗) |
-| 3 | 対象エラー | 対象ファイル不在・directory指定・拡張子対象外・realpath重複・name衝突・registryが指す`.age`不在(upload時) |
-| 4 | 処理エラー | age暗号化/復号の異常終了・ヘッダ照合不一致・verifyの検証不一致(検査対象ファイル欠損を含む) |
-| 5 | 転送エラー | S3 API(PutObject・HeadObject等SDK呼び出し)の失敗(認証・network含む) |
-| 64 | 使用法エラー | 引数誤り(不明オプション・PATH 0個・`--date`形式不正等) |
+| 2 | 設定・環境エラー | toml不在・schema違反・recipient鍵不正・ageバイナリ不在・aws.toml不正・credentialファイル不在/不正・秘密鍵不在・versioning無効bucket・索引不在(9.2) |
+| 3 | 対象エラー | 対象ファイル不在・directory指定・拡張子対象外・重複・key長超過・索引上のname/版/pin不在・候補未特定(getの--pathなし等)・write-once違反・sha不一致の既存平文(7.4) |
+| 4 | 検証エラー | 取得object/復号平文のsha256不一致・verifyの検証不一致(検査対象ファイル欠損を含む) |
+| 5 | 転送エラー | S3 APIの失敗(認証・network含む)・索引GETの失敗 |
+| 64 | 使用法エラー | 引数誤り(不明オプション・PATH 0個・pullの範囲指定違反・`--tier`/pin名/日付形式不正等) |
 
-fail-fastが既定(最初のエラーで中止。ただし対象解決段階のエラーは全件列挙してから一度に失敗)。`--keep-going`指定時はper-file/per-object失敗を捕捉して継続し、終了コードは最初に発生したエラーの区分。設定エラー2は`--keep-going`でも常に即中止。
+fail-fastが既定(最初のエラーで中止。ただし対象解決段階のエラーは全件列挙してから一度に失敗)。`--keep-going`指定時はper-file失敗を捕捉して継続し、終了コードは最初に発生したエラーの区分。設定エラー2は`--keep-going`でも常に即中止。
 
-## 5. E2E実行手順
+## 6. 通常運用の流れ(E2E)
 
 初回の一通りの流れ。repo rootで実行する。`<PATH>`は対象アーカイブ(拡張子`.zip`/`.7z`)。
 
-### 5.1 対象指定
+1. **設定準備**: pipeline.toml(3.1)・aws.toml(3.2)・credentialファイル(2.2)を用意する
+2. **予定確認(dry-run)**:
 
-位置引数で直接指定するか、対象リストtoml(3.3)を作って`--from-list`で指定する。数が多い場合はリストtomlを推奨:
+   ```console
+   $ backup-remote backup push --dry-run --from-list targets.toml --config configs/pipeline.toml
+   ```
 
-```console
-$ vim targets.toml     # [[targets]] path = "..." を列挙(3.3のschema)
-```
+   対象・分類(category/rel_path)・予定key・合計sizeを確認する(旧plan相当。エラーはこの段階で全件出る)
 
-### 5.2 plan — 事前検査
+3. **書き込み実行**:
 
-```console
-$ backup-remote plan --from-list targets.toml
-```
+   ```console
+   $ backup-remote backup push --from-list targets.toml --config configs/pipeline.toml
+   ```
 
-対象一覧・合計サイズ・recipient指紋・出力先(s3 prefix)を確認する。エラー(対象不在・拡張子違い・重複等)はこの段階で全件出る(終了コード3)。
+   per-fileの`ok`/`skip`行とrun summary(`run <batch_id>: ok=N skip=N failed=N`)が出る。大容量(数十GiB以上)では時間がかかる(進捗はper-file完了行単位)。中断した場合は再実行で再開(skip判定により二重暗号化・二重uploadは起きない)
 
-### 5.3 encrypt — 暗号化
+4. **ローカル整合検査(任意・S3不要)**:
 
-```console
-$ backup-remote encrypt --from-list targets.toml
-```
+   ```console
+   $ backup-remote backup verify --roundtrip
+   ```
 
-per-fileの`ok`/`skip`行とsummaryが出る。大容量(数十GiB以上)では時間がかかる(進捗はper-file完了行単位)。中断した場合は再実行で再開(skip判定・`.part`の仕様により二重暗号化や壊れた`.age`の混入は起きない)。
+   `keep_artifacts="run"`(既定)で掃除済みのrun(当該batchのindex_upload成功記録があり成果物dirが不在)は構造検査・`--checksum`・`--roundtrip`の対象外となり、「verify: 掃除済みrun N件(構造検査対象外)」と報告される(成功run直後のverifyが必ず検証エラー4にならないようにするため。成果物が残っているrunは従来どおり検査対象)
 
-### 5.4 verify — 復号roundtrip検証
+5. **照会**:
 
-```console
-$ backup-remote verify --roundtrip
-```
+   ```console
+   $ backup-remote list files
+   $ backup-remote query travel
+   $ backup-remote diff
+   ```
 
-秘密鍵(設定`[verify].decrypt_key`)で実際に復号し、平文sha256が記録と一致すること・manifest突合を確認する。upload前に必ず一度実行する。日付を限定する場合は `--date 2026-10-11`。
+## 7. 復元手順
 
-### 5.5 upload — 予定確認(dry-run)
-
-```console
-$ backup-remote upload --dry-run
-```
-
-実行予定のS3 API列(4.4の出力例。S3キー・storage class・bucket・multipart要否)を確認する。S3 APIは実行されない(HeadObjectを行わないためskip想定は未確定・全件upload想定で表示。前回成功記録のある対象のS3側実在確認も行われない)。aws.tomlのbucket/region/credentials_fileが未設定だとこの段階で設定エラー2になる(2.3・3.2を設定してから)。
-
-### 5.6 upload — 実行
+### 7.1 単一ファイルの復元(get)
 
 ```console
-$ backup-remote upload
+$ backup-remote get photo.zip
 ```
 
-per-objectのupload・skipとsummaryが表示される。失敗(転送エラー5)した場合は再実行で再開(HeadObjectのSize一致skipにより、upload済み分は再転送されない)。
+- DEEP_ARCHIVE配置の対象は、初回実行で復元jobを発行して案内表示+終了0(この時点で取り出し費用が発生)。**約12〜48時間後に同じcommandを再実行**すると取得・検証・復号まで行う
+- 版指定: `--version 2026-10-02`(日付)または`--version-id <ID>`(list versionsで確認)。省略時は最新版。ピン留め版は`--pin <版名>`
+- 出力は`data/restore/<rel_path>/<name>`(元構造再現)
+- 復元jobの状況は `list jobs` で確認できる(全objectの現行/非現行版ごと)
 
-### 5.7 S3側確認(任意・aws CLIによる確認手順)
-
-upload結果の確認はbackup-remote自体の機能ではないため、aws CLI等の外部ツールで行う(aws CLIは必須ではない。2.2の参考手順で導入できる。S3consoleや任意のS3 clientでもよい):
+### 7.2 一括復元(backup pull)
 
 ```console
-$ aws s3 ls s3://<bucket>/2026-10-11/
-2026-10-11 ... manifest.jsonl.age
-2026-10-11 ... sample.zip.age
-
-$ aws s3api head-object --bucket <bucket> --key 2026-10-11/sample.zip.age
+$ backup-remote backup pull --category main     # category単位(最新版+pin)
+$ backup-remote backup pull --run 20261015-abcd1234   # run単位
+$ backup-remote backup pull --all              # 全対象(最新版+全pin)
 ```
 
-head-objectで`Size`(ローカル`.age`のサイズと一致)・`StorageClass`(DEEP_ARCHIVE)・`ChecksumSHA256`を確認する。
+確認ガードあり(5.7)。大量対象では復元job発行 -> 待ち -> 再実行の2段階になる点はgetと同じ(pending分は再実行で取得される)。
 
-## 6. RESTORE_README.txt(廃止: 削除済み)
+### 7.3 Tierと費用・時間の目安
 
-## 7. 鍵の管理
+| Tier | 復元完了までの目安 | 取り出し料金の目安(GBあたり) |
+|---|---|---|
+| `Standard`(既定) | 12時間以内 | 約0.10 USD(DEEP Archive復元) |
+| `Bulk` | 48時間以内 | 約0.02 USD(Standardの約1/5) |
 
-### 7.1 recipient鍵の追加手順
+- `Expedited`はDeep Archiveでは選択不可のため、`--tier`の許容値に含まれない
+- 上記は概算値(2026-10時点のAWS公開値が基準。リージョンにより異なる)。**実測確認は実運用開始時に実施する**(TASK-4で費用実測を予定)
+- このほかに復元リクエスト単価・復元期間中の復元コピー(`--days`日間)の保管料・GETリクエスト料が発生する
+- 費用を抑えるには、(a) getで必要なファイルだけ取り出す、(b) 緊急度が低ければ`--tier Bulk`を使う、の2つが有効
+
+### 7.4 平文衝突保護と冪等再実行
+
+get/pullは出力先の既存平文を保護する:
+
+- 出力先に既存平文があり、そのsha256が索引記録の`source_sha256`と**一致**すれば、取得・復号をskipして終了0(冪等。crash後の再開も再実行で吸収する)
+- **不一致**なら上書きせず対象エラー3(手動リネーム・移動後に再実行。意図的な上書きは`--yes`)
+- 既存平文が**読込不能**(権限等でsha256検証不能)な場合も不一致同様に保護する(`--yes`なしは対象エラー3。`--yes`は明示的上書き指示のためget/pullとも上書きして続行)
+- 取得object・復号平文のsha256は常に索引記録と照合される(不一致は検証エラー4)
+
+## 8. 運用規則
+
+### 8.1 書込み系の同時実行禁止
+
+書き込み系command(**backup push・pin add/rm・manage系**)の並列実行は禁止する(registry append・索引書換えの競合防止。lock file等の自動直列化は個人運用に対し過剰のため不採用)。書き込み系を実行中は、他の書き込み系commandを起動しないこと。照会系(list/query/get/diff)は並列に実行してよい。
+
+### 8.2 profile運用(dev/prod)
+
+- dev: 開発検証(STORAGE CLASS STANDARD・復元job待ちがない。DA経路の試験はprodで実施)
+- prod: 実運用(DEEP_ARCHIVE・専用bucket。bucket名はTODO-PROD-BUCKET未確定。3.2)
+- 切替は`active_profile`の書換え(恒久)または`--profile prod`(当該実行限り)。**誤投入防止のため、prodへの書き込みは`--profile prod`を明示した実行を推奨**(active_profileはdev固定運用)
+- 名前空間の分離はbucketとprefixで働く。ローカルregistry(data/registry.jsonl)は単一だが、記録の参照(skip判定・索引構築・未書込namespace判定)は**bucket単位で分離**される。dev/prodが同一prefixでも他方bucketの書込実績は干渉しない(片方の実績で誤ってskipする・索引へ他方bucketの版が混入する事故が構造的に起きない)
+
+### 8.3 recipient鍵の管理
 
 1. 新規ed25519鍵pairを生成する(passphraseなし):
 
@@ -454,111 +572,91 @@ head-objectで`Size`(ローカル`.age`のサイズと一致)・`StorageClass`(D
    $ ssh-keygen -t ed25519 -f configs/secret/keys/private/backup_ed25519_2 -N ""
    ```
 
-   秘密鍵・公開鍵とも`configs/secret/`配下に置く。秘密鍵はバックアップとは別の場所へ保管する(このdirはgitignore済み)。
+2. `configs/pipeline.toml` の `[recipients].public_keys` へ公開鍵(.pub)を追加する
+3. `backup-remote backup push --dry-run` でrecipient指紋が2本表示されることを確認する(設定ミス・指紋重複はこの段階の設定エラーで検出される)
 
-2. `configs/pipeline.toml` の `[recipients].public_keys` へ公開鍵(.pub)を追加:
+追加以降の書き込みは新recipient構成で暗号化される(索引・manifestも同様)。
 
-   ```toml
-   public_keys = [
-     "configs/secret/keys/private/backup_ed25519.pub",
-     "configs/secret/keys/private/backup_ed25519_2.pub",
-   ]
-   ```
+- **遡及**: S3へ投入済みのobjectは暗号化時のrecipient構成のまま変わらない。全量を新構成にしたい場合は新たなrunで再pushする(旧objectの削除は`manage prune`や手運用)
+- **旧鍵の温存**: 鍵を追加しても旧秘密鍵を廃棄すると、旧recipient構成で暗号化されたobjectを復元できなくなる。追加後も旧鍵は保管し続けること
+- **第2recipientの運用要件**: 「S3と秘密鍵のみ」の災害前提が成立するには秘密鍵が単一machineにしか無い状態を解消する必要がある。第2recipient(秘密鍵の地理的第二保管場所)の登録・保管を運用要件とする
 
-3. `backup-remote plan` でrecipient指紋が2本表示されることを確認する(設定ミス・指紋重複はこの段階の設定エラーで検出される)。
+## 9. 災害時の手順
 
-追加以降のencryptは2鍵(1-of-2)で暗号化され、いずれか1本の秘密鍵で復号できる。
+### 9.1 前提(作成環境の資産は不要)
 
-### 7.2 遡及の可否(upload前後の違い)
+照会・復元(list/query/get/diff/backup pull)は**aws.toml(bucket/region/prefix/credentials_file)とAPI keyファイルといずれか1本の秘密鍵のみ**で動作する。最初に`sys/index.jsonl.age`を取得・復号し、以降の操作は索引+S3 APIで完結する(ローカルregistry・data/out・pipeline.tomlは不要。getの`--key`は必須になる)。
 
-- **upload前なら再暗号化で遡及可能**: 既存の`.age`を削除してencryptを再実行すると、新recipient構成で再暗号化される(skip判定は「`.age`が存在しregistry記録と一致」のため、`.age`を消せば必ず再暗号化される)。manifestも再生成される:
+新環境での必要資産: binary(または`cargo build`可能なrepo)・aws.toml・credentialファイル・秘密鍵。
 
-  ```console
-  $ rm data/out/<date>/<name>.age data/out/<date>/manifest.jsonl.age
-  $ backup-remote encrypt --from-list targets.toml
-  ```
+### 9.2 索引が読めない場合
 
-- **upload後は遡及不可**: S3へ投入済みのオブジェクトは旧recipient構成のままで、upload実行はbucket一致の成功記録がある対象を再uploadしない。recipientを追加した場合は、以降のバッチから新構成で暗号化する。全量を新構成にしたい場合は、別日の新バッチとして再暗号化・uploadし直す(旧オブジェクトの削除は手運用)
+照会系で索引objectの取得に失敗した(不在・復号失敗)場合は設定・環境エラー2となり、専用案内が表示される。例外として、ローカルregistryに当該prefixへの書込記録が1件も無い「未書込namespace」(dev/prod切り替え直後等)は0件+終了0で扱われる。
 
-### 7.3 旧鍵の温存
+索引を復旧する:
 
-既存の`.age`は暗号化時のrecipient構成のまま変わらない。鍵を追加しても**旧秘密鍵を廃棄すると、旧recipient構成で暗号化されたバッチ(追加前にuploadした分)を復元できなくなる**。追加後も旧鍵は保管し続けること。どのバッチがどのrecipient構成かは、registryのencrypt記録`recipients`(指紋リスト)またはmanifestで確認できる。
+```console
+$ backup-remote manage index rebuild --config configs/pipeline.toml
+```
 
-## 8. 正本bucket変更時の移行手順
+`sys/manifests/`のmanifest(DEEP_ARCHIVE)から索引を再構築する。未復元manifestへはBulk復元jobを発行する(発行したら案内+終了0。**最大48時間の待ちの後に再実行**で継続)。開始時に費用の目安(7.3)が表示される。完了すると索引がPUTされ、以降の照会が復旧する。
 
-正本bucket(`configs/aws.toml`の`[aws].bucket`)を恒久変更する場合の手順。
+それでも復旧しない場合: aws.tomlのbucket/prefixが正しいか確認する(エラー2の案内に含まれる)。aws cliによるS3側の直接確認(`aws s3api list-objects-v2 --bucket <bucket> --prefix <prefix>sys/`)は最後の手段。
 
-背景: registryのupload記録はupload先の実効bucketを`s3_bucket`として記録し、upload実行は「`s3_bucket`が当該実行の実効bucketと一致する成功記録が無いもの」を対象に列挙する。ここで、**`s3_bucket`フィールドを持たない旧レコード(s3_bucket記録導入前の記録)は、aws.tomlのbucketと一致するものとして解釈される**(前方互換)。そのためaws.tomlのbucketを書き換えるだけだと、欠損記録の対象が「新bucketで成功済み」と誤帰属され、新bucketへの再uploadが行われないまま漏れが残る。
+### 9.3 手動復元(aws CLI + age・最後の手段)
 
-移行手順:
+backup-remoteを使わない環境での復元手順。対象のkey配置(4.1)と索引(または`aws s3api list-object-versions`での列挙)から対象を特定する:
 
-1. **変更前にregistryの記録を確認する**: upload/manifest_upload記録の`s3_bucket`分布を確認する:
+1. 復元jobを発行する(DEEP_ARCHIVEの場合):
 
    ```console
-   $ jq -r 'select(.record_type=="upload" or .record_type=="manifest_upload")
-            | (.s3_bucket // "(欠損)")' data/registry.jsonl | sort | uniq -c
+   $ aws s3api restore-object --bucket <bucket> \
+       --key backup-remote/<category>/<rel_path>/<name>/default.age \
+       --restore-request 'Days=7,GlacierJobParameters={Tier=Standard}'
    ```
 
-   `(欠損)`が出る、または旧bucket名の記録がある場合は移行対象。現行実装は常に`s3_bucket`を記録するため、欠損記録は過去の旧バージョン実行分でのみ発生し得る。
+   version指定時は`--version-id <ID>`を付ける。進捗は`aws s3api head-object`の`Restore`フィールドで確認する
 
-2. **aws.tomlは旧bucketのまま、CLI一時上書きで新bucketへuploadする**(正本変更前の移行実行。優先順位は4.4のとおり):
+2. 対象を取得する:
 
    ```console
-   $ backup-remote upload --bucket <新bucket> --dry-run    # 移行対象の予定確認
-   $ backup-remote upload --bucket <新bucket>              # 実行
+   $ aws s3 cp s3://<bucket>/backup-remote/<category>/<rel_path>/<name>/default.age .
    ```
 
-   この実行では旧bucket記録・欠損記録の対象が列挙され、新bucketへuploadされる(記録には`s3_bucket: <新bucket>`が付く)。新bucketへ既に入っている分はHeadObjectのSize一致でskipされる。
-
-3. **S3側で新bucketの配置を確認する**:
+3. 秘密鍵で復号する:
 
    ```console
-   $ aws s3 ls s3://<新bucket>/<date>/
+   $ age -d -i <秘密鍵> -o <name> default.age
    ```
 
-4. **aws.tomlのbucketを新bucket名へ変更する**(正本の切替)。
-
-5. **変更後、`upload --dry-run`で対象なし(終了コード0)になることを確認する**。全記録が新bucketで成功済みとなり、移行完了。
-
-注意: 旧bucketのオブジェクトは削除しない限り残る。旧bucketの廃止・削除は移行完了を確認してから手運用で行うこと。
-
-## 9. 復元(手動復元・補助手順)
-
-復元は`backup-remote restore`コマンド(実装済み)で行うのが標準手順。`restore request`(復元job発行)-> `restore status`(状態確認)-> `restore download`(取得・sha256検証・復号)の3サブコマンドで構成され、手順・費用の目安・検証構成・トラブルシューティングの正本は `docs/restore_backup.md`。
-
-本章はbackup-remoteを使わない環境(新環境・他者の環境)向けの手動復元手順である。
-
-前提:
-
-- 対象の`.age`(manifest.jsonl.ageを含む)はDeep Archive配置のため、**取得前にGlacier復元job(一時復元)が必要**ただしstorage_classをSTANDARD等へ変更してuploadしたバッチでは復元jobは不要(即時取得可能):
-
-  ```console
-  $ aws s3api restore-object --bucket <bucket> --key <date>/<name>.age \
-      --restore-request 'Days=7,GlacierJobParameters={Tier=Standard}'
-  ```
-
-  Tierは`Standard`(完了まで12時間以内・既定)か`Bulk`(48時間以内・低費用)を選べる(取り出し費用の目安は`docs/restore_backup.md` 3.4)。復元の完了待ちの間、進捗は `aws s3api head-object` の `Restore` フィールドで確認する。
-
-手動復元手順(`<名前>`はファイル名から拡張子`.age`を除いた部分。例: `photo.zip.age`なら`photo.zip`):
-
-1. 対象ファイルを取得する:
+4. checksum検証: 索引(またはmanifest)を取得・復号し、`.age`のsha256が`age_sha256`と、平文のsha256が`source_sha256`と一致することを確認する:
 
    ```console
-   $ aws s3 cp s3://<bucket>/<date>/<名前>.age .
+   $ aws s3 cp s3://<bucket>/backup-remote/sys/index.jsonl.age .
+   $ age -d -i <秘密鍵> -o index.jsonl index.jsonl.age
+   $ sha256sum <name>
    ```
 
-2. 秘密鍵で復号する:
+手動操作は索引・versioningの前提知識を要するため、可能な限りget/backup pullを使うこと。
 
-   ```console
-   $ age -d -i configs/secret/keys/private/backup_ed25519 -o <名前> <名前>.age
-   ```
+## 10. 旧サブコマンドからの移行ガイド
 
-3. checksum検証: manifestを取得・復号し、取得した`.age`のsha256とmanifest記録値を照合する:
+旧サブコマンド(plan/encrypt/upload/verify/restore)はTASK-11(Phase B)で削除された。旧手順と新commandの対応:
 
-   ```console
-   $ aws s3 cp s3://<bucket>/<date>/manifest.jsonl.age .
-   $ age -d -i <秘密鍵> -o manifest.jsonl manifest.jsonl.age
-   $ sha256sum <名前>.age
-   ```
+| 旧手順 | 新command |
+|---|---|
+| `plan`(対象解決・事前検査) | `backup push --dry-run` |
+| `encrypt` + `upload`(暗号化して転送) | `backup push`(1実行で暗号化・upload・manifest・索引更新) |
+| `verify`(ローカル整合検査) | `backup verify` |
+| `restore request`(復元job発行) | `get` / `backup pull`(未復元なら自動発行)・`manage jobs reissue` |
+| `restore status`(復元状態確認) | `list jobs` |
+| `restore download`(取得・検証・復号) | `get` / `backup pull` |
+| `--date`(バッチ=日付指定) | 廃止。版は`--version`/`--version-id`、runは`--run`で指定 |
 
-   `sha256sum`の計算結果(16進)が、manifest.jsonl内の`source_name`が`<名前>`に一致する行の`age_sha256`の値と一致することを確認する。
+その他の変更点:
+
+- 旧手順の書込先(`<date>/<name>.age`配置)から新配置(4.1)へ変更。旧経路のobjectは新索引の管理外
+- **旧サブコマンドとの併用は構造的に不可能**(旧commandがbinaryから削除されたため)
+- 旧`encrypt`のskip判定(.ageファイル存在基準)はregistry基準へ変更(.age不在でもregistry記録+指紋一致ならskip)
+- name override(`--name`・対象リストの`name`キー)は廃止(4.2の自動衝突分離へ置換)
+- TASK-10 Phase A時点の移行として、your-dev-bucket(共用bucket)上の旧配置objectは削除して離脱した: `aws s3 rm s3://your-dev-bucket/2026-10-14/ --recursive`(検証用ダミー1バッチのみ)

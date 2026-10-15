@@ -47,6 +47,12 @@
 #     衝突保護の仕様へ文言改訂(id不変・orchestrator決定。旧download仕様の継承)。
 #     sha一致の既存平文はskip(冪等)・不一致は上書きせずexit 3(事故防止)・--yes指定時のみ上書き。
 #   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseのまま。
+# 2026-10-15: TASK-11(Phase B)コードレビュー指摘対応(L-5)でテスト先行の更新。
+#   新規1件: restore.pull-plain-conflict-unreadable-protected(pull平文衝突で既存平文の読込失敗時も
+#   --yesなしでは上書きしない=get側と同一挙動へ統一)。
+# 2026-10-15: TASK-11(Phase B)再レビュー指摘対応(L-R5)でテスト先行の更新。
+#   restore.pull-plain-conflict-unreadable-protectedを文言改訂: --yes=明示的上書き指示のため
+#   読込不能な既存平文もget/pullとも--yes付きは上書きして続行する(get側をpull側へ統一)。
 
 [meta]
 feature = "restore"
@@ -90,6 +96,15 @@ description = "平文衝突保護(get/pull出力先): 出力先に既存平文�
 given = "get(またはbackup pull)の出力先に改変済みの既存平文(sha256不一致)を事前配置した実行・sha256一致の既存平文を事前配置した実行・--yes付きの再実行"
 expect_return_shape = "不一致はexit 3で既存平文は事前配置の内容から不変(上書きしない)。一致はskip表示+exit 0(冪等)。--yes付きは上書きしてexit 0"
 source_lines = "tests/restore.rs:161"
+
+[[condition]]
+id = "restore.pull-plain-conflict-unreadable-protected"
+target_function = "storage::cmd_get / cmd_backup_pull(平文衝突・読込失敗時の保護)"
+source = "TASK-11(Phase B)コードレビュー指摘L-5+再レビュー指摘L-R5+restore.download-plain-conflict(get/pull同一規則)"
+description = "get/backup pullの平文衝突保護で既存平文の読込が失敗する(sha256検証不能)場合も、--yesなしでは上書きせず対象エラー3として保護する(検証不能な既存平文の黙示上書きをしない)。--yesは明示的上書き指示のため、get/pullとも読込不能な既存平文を上書きして続行する(L-R5: 旧get側の--yesでもexit 3をpull側の上書き許可へ統一) (integration, 実age・fake seam・pty)"
+given = "get・backup pullの出力先に読込不能(chmodで読込権限を除去)な既存平文を配置した状態での、--yesなし(getはそのまま・pullは確認をTTY入力で通す)と--yes付きの各実行"
+expect_return_shape = "--yesなしは exit 3(対象エラー)で既存平文のpath・読込失敗の案内が表示され、上書き(取得・書込)は行われない。--yes付きは取得・上書きして exit 0(get/pullとも同一挙動)"
+source_lines = "tests/restore.rs:222"
 
 [[excluded]]
 item = "3.9冒頭注記: aws系はすべてAwsInvoker traitのfake差替(実networkなし)。復号を含むものは実ageバイナリ(不在環境はskip扱い)"

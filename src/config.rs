@@ -557,6 +557,44 @@ pub fn load_aws_profile(
     })
 }
 
+/// aws.tomlの正本profile([aws].active_profile。空なら既定選択)のbucket
+/// (TASK-11 Phase BレビューH-1)。--profile一時上書き・BACKUP_REMOTE_AWS_PROFILE等の
+/// env経路の解決を介さない「正本」のbucketで、registry記録`s3_bucket`欠損の旧記録を
+/// 正本bucket相当と扱うbucket一致規則(registry::record_bucket_matched)の正本側引数。
+pub fn canonical_bucket(path: &Path) -> BackupResult<String> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        BackupError::Config(format!("aws.tomlを読めない ({}): {e}", path.display()))
+    })?;
+    let parsed: AwsFile = toml::from_str(&text).map_err(|e| {
+        BackupError::Config(format!("aws.tomlのparseに失敗 ({}): {e}", path.display()))
+    })?;
+    canonical_bucket_from(&parsed, path)
+}
+
+/// parse済みaws.tomlから正本profileのbucketを解決する。
+fn canonical_bucket_from(parsed: &AwsFile, path: &Path) -> BackupResult<String> {
+    let name = if !parsed.aws.active_profile.trim().is_empty() {
+        parsed.aws.active_profile.trim().to_string()
+    } else if parsed.aws.profiles.contains_key("default") {
+        "default".to_string()
+    } else {
+        parsed
+            .aws
+            .profiles
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_default()
+    };
+    let prof = parsed.aws.profiles.get(&name).ok_or_else(|| {
+        BackupError::Config(format!(
+            "正本profileが見つからない: {name} ({})",
+            path.display()
+        ))
+    })?;
+    Ok(prof.bucket.clone())
+}
+
 /// root prefixの既定値(TASK-10設計4.2)。
 pub const DEFAULT_ROOT_PREFIX: &str = "backup-remote/";
 

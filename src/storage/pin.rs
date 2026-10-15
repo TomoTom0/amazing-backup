@@ -218,6 +218,8 @@ fn cmd_pin_rm(ctx: &CtxArgs, name: &str, pin_name: &str) -> i32 {
                 pin.s3_key
             )));
         }
+        // 記録失敗時は索引pins[]がstaleのまま残る(再実行は索引pins[]由来の解決のため
+        // 失敗を繰返す)。manage index rebuildによる回復を案内する(L-1)
         registry::append_record(
             &registry_path,
             &registry::PinRemoveRecord {
@@ -229,7 +231,12 @@ fn cmd_pin_rm(ctx: &CtxArgs, name: &str, pin_name: &str) -> i32 {
                 pin_s3_key: pin.s3_key.clone(),
                 s3_bucket: session.aws.bucket.clone(),
             },
-        )?;
+        )
+        .map_err(|e| {
+            BackupError::Process(format!(
+                "pin_remove記録の失敗: {e}。S3側のpin object削除は完了しています。索引のpins[]が削除前のまま残るため `backup-remote manage index rebuild` で索引を再構築してください"
+            ))
+        })?;
         rebuild_and_upload_index(&session, &registry_path, "pin-rm")?;
         println!("ok: pin {pin_name} を削除しました ({})", pin.s3_key);
         Ok(0)
@@ -255,7 +262,8 @@ pub(crate) fn rebuild_and_upload_index(
         .ok_or_else(|| BackupError::Config("pipeline.tomlが必要です".to_string()))?;
     let records = registry::load_registry(registry_path)?;
     let reduced = registry::reduce_records(&records);
-    let entries = crate::index::build_entries(&reduced);
+    let entries =
+        crate::index::build_entries(&reduced, &session.aws.bucket, &session.canonical_bucket);
     crate::index::upload_index(
         session.backend.as_ref(),
         &session.aws.bucket,

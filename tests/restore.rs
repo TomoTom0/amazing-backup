@@ -218,3 +218,124 @@ fn get_plain_conflict_protection() {
         "--yes指定時は取得対象の内容で上書きされる"
     );
 }
+
+/// [covers:restore.pull-plain-conflict-unreadable-protected]
+/// get/backup pullの平文衝突で既存平文の読込が失敗する(sha256検証不能)場合(L-5+L-R5):
+/// --yesなしでは上書きせず対象エラー3として保護する。--yesは明示的上書き指示のため
+/// get/pullとも読込不能な既存平文を上書きして続行する(get側をpull側へ統一)。
+/// pullの確認ガードはTTY(yes入力)で通して検証する。読込不能化はchmod 0200
+/// (読込不可・書込可)で行い、--yes付きの上書き(書込)は成功する形で検証する。
+#[test]
+fn plain_conflict_unreadable_existing_file_protected_get_and_pull() {
+    let Some(fx) = StorageFixture::new("rs-pullread", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"pull-unreadable-v1-longer");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let out = fx.elsewhere.join("pull-out");
+    let out_s = out.display().to_string();
+    // 1度取得して既存平文を配置
+    assert_eq!(fx.get("a.zip", &["--out", &out_s]).0, 0);
+    // 新版push(既存平文とのsha256不一致)
+    write_file(&a, b"pull-unreadable-v2-long");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let dest = out.join("a.zip");
+    use std::os::unix::fs::PermissionsExt as _;
+    let make_unreadable = || {
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o200))
+            .expect("既存平文を読込不能化(読込不可・書込可)")
+    };
+    let make_readable = || {
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644))
+            .expect("既存平文を読込可能化")
+    };
+
+    // get --yesなし: 読込失敗=検証不能でも上書きしない(対象エラー3)
+    make_unreadable();
+    let (code, _, stderr) = fx.get("a.zip", &["--out", &out_s]);
+    assert_eq!(
+        code, 3,
+        "getは読込不能な既存平文を--yesなしで対象エラー3保護(上書きしない): {stderr}"
+    );
+    assert!(
+        stderr.contains("a.zip"),
+        "衝突nameの表示(読込失敗の案内): {stderr}"
+    );
+    make_readable();
+    assert_eq!(
+        std::fs::read(&dest).expect("既存平文(再読)"),
+        b"pull-unreadable-v1-longer".to_vec(),
+        "get --yesなしでは既存平文は不変"
+    );
+
+    // get --yes: 明示的上書き指示のため読込不能な既存平文も上書きして続行
+    make_unreadable();
+    let (code, stdout, stderr) = fx.get("a.zip", &["--out", &out_s, "--yes"]);
+    assert_eq!(
+        code, 0,
+        "get --yesは読込不能な既存平文を上書きしてexit 0: {stdout}{stderr}"
+    );
+    make_readable();
+    assert_eq!(
+        std::fs::read(&dest).expect("上書き後の平文"),
+        b"pull-unreadable-v2-long".to_vec(),
+        "get --yesは取得対象の内容で上書きする"
+    );
+
+    // さらに新版push(pull対象を変えて上書きの観測性を保つ)
+    write_file(&a, b"pull-unreadable-v3-longest");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+
+    // pull --yesなし(確認はTTY入力で通す): 読込失敗=検証不能でも上書きしない
+    make_unreadable();
+    let state_s = fx.state.display().to_string();
+    let cfg_s = fx.cfg.display().to_string();
+    let aws_s = fx.aws_toml.display().to_string();
+    let key_s = fx.secret.display().to_string();
+    let Some((code, output)) = run_bin_pty_stdin(
+        &[
+            "backup",
+            "pull",
+            "--all",
+            "--config",
+            &cfg_s,
+            "--aws-config",
+            &aws_s,
+            "--key",
+            &key_s,
+            "--out",
+            &out_s,
+        ],
+        &[("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())],
+        "yes",
+    ) else {
+        eprintln!("skipping: script(pty)が利用できない");
+        return;
+    };
+    assert_eq!(
+        code, 3,
+        "pullは読込不能な既存平文を--yesなしで対象エラー3保護(上書きしない): {output}"
+    );
+    assert!(output.contains("a.zip"), "衝突nameの表示: {output}");
+    make_readable();
+    assert_eq!(
+        std::fs::read(&dest).expect("既存平文(pull --yesなし後)"),
+        b"pull-unreadable-v2-long".to_vec(),
+        "pull --yesなしでは既存平文は不変"
+    );
+
+    // pull --yes: 上書きして続行
+    make_unreadable();
+    let (code, stdout, stderr) = fx.backup_pull(&["--all", "--yes", "--out", &out_s]);
+    assert_eq!(
+        code, 0,
+        "pull --yesは読込不能な既存平文を上書きしてexit 0: {stdout}{stderr}"
+    );
+    make_readable();
+    assert_eq!(
+        std::fs::read(&dest).expect("上書き後の平文(pull --yes)"),
+        b"pull-unreadable-v3-longest".to_vec(),
+        "pull --yesは取得対象の内容で上書きする"
+    );
+}

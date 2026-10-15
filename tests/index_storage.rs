@@ -740,3 +740,35 @@ fn unknown_record_warning_uses_plain_format() {
         "Some(...)形式(Debug引用)では表示しない: {stderr}"
     );
 }
+
+/// [covers:index.parse-failure-guides-rebuild]
+/// 索引parse失敗(schema違反JSON)のerror文には`manage index rebuild`による索引再構築の
+/// 案内を含める(L-6。終了コードは検証エラー4のまま)。
+#[test]
+fn parse_failure_error_guides_index_rebuild() {
+    let Some(fx) = StorageFixture::new("idx-parseguide", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"parse-guide");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+
+    // 索引objectをschema違反へ書き換える(file entryから必須field(versions)を除去)
+    let mut broken: Vec<serde_json::Value> = fx.read_index();
+    let entry = broken
+        .iter_mut()
+        .find(|v| v.get("record_type").and_then(|r| r.as_str()) == Some("file"))
+        .expect("file entry");
+    entry
+        .as_object_mut()
+        .expect("file entryはobject")
+        .remove("versions");
+    fx.rewrite_index(&broken);
+
+    let (code, _, stderr) = fx.list("files", &[]);
+    assert_eq!(code, 4, "schema違反索引は検証エラー4: {stderr}");
+    assert!(
+        stderr.contains("manage index rebuild"),
+        "manage index rebuildの案内: {stderr}"
+    );
+}

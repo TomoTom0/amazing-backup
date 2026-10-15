@@ -218,6 +218,103 @@ fn index_get_transfer_error_is_exit_5() {
     assert_eq!(code, 2, "索引不在(404)は設定エラー2: {stderr}");
 }
 
+/// dev(active_profile)とprodが同一prefix・別bucketの2profile aws.toml本文
+/// (cli.profile-namespace-isolated-by-bucket検証用。prefixが同一である点が本質)。
+fn same_prefix_diff_bucket_aws_toml(fx: &StorageFixture) -> String {
+    format!(
+        "[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"bucket-dev\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n[aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"bucket-prod\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n",
+        creds = fx.credentials.display()
+    )
+}
+
+/// 同一prefix・別bucketのfile_upload記録(version_id)をregistryから読む。
+fn upload_ids_for_bucket(fx: &StorageFixture, s3_key: &str, bucket: &str) -> Vec<String> {
+    fx.registry_values()
+        .iter()
+        .filter(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload")
+                && r.get("s3_key").and_then(|k| k.as_str()) == Some(s3_key)
+                && r.get("s3_bucket").and_then(|b| b.as_str()) == Some(bucket)
+        })
+        .filter_map(|r| {
+            r.get("version_id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .collect()
+}
+
+/// [covers:cli.profile-namespace-isolated-by-bucket]
+/// 同一prefix・別bucketの複数profile構成(H-1): namespace分離はregistry記録の
+/// s3_bucket一致で行われ、prefix一致のみの他方bucket実績には(a)push skip判定
+/// (b)索引versions構築 (c)索引不在時の未書込namespace例外 のいずれも惑わされない。
+/// bucket一致規則はregistry::record_bucket_matchedと同一(記録s3_bucket欠損の旧記録は
+/// 正本bucket=active_profile相当として扱う)。
+#[test]
+fn profile_namespace_isolated_by_bucket() {
+    let Some(fx) = StorageFixture::new("pb-nsbkt", StorageOpts::default()) else {
+        return;
+    };
+    fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"ns-by-bucket-plain");
+    let key = fx.file_key("unfiled", None, "a.zip");
+
+    // (c) 索引不在時の未書込namespace例外はbucket単位で機能する:
+    // devの書込実績(同一prefix)があってもprodから見て未書込なら0件+exit 0
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
+    let (code, stdout, stderr) = fx.list_env("files", &["--profile", "prod"], &[]);
+    assert_eq!(
+        code, 0,
+        "prod照会は未書込namespaceとして0件+exit 0: {stdout}{stderr}"
+    );
+    assert!(!stdout.contains("a.zip"), "prod側の対象は0件: {stdout}");
+    let (code, _, stderr) = fx.list("files", &[]);
+    assert_eq!(
+        code, 2,
+        "dev(書込実績ありbucket)の照会は索引不在で設定エラー2: {stderr}"
+    );
+
+    // (a) dev実績(prefix一致・内容同一)ではprod側pushはskipされない
+    // (bucket横断で1byteもuploadされないrunを作らない)
+    clear_calls(&fx);
+    let (code, stdout, stderr) = fx.push(&[&a], &["--profile", "prod"], &[]);
+    assert_eq!(code, 0, "prod pushはexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.contains("ok    a.zip"),
+        "prod側はskipされずuploadされる: {stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|l| l.starts_with("skip")),
+        "dev実績によるskipは起こらない(末尾集計のskip=0は除外): {stdout}"
+    );
+    assert!(
+        fx.calls()
+            .lines()
+            .any(|l| l.starts_with("s3 PutObject") && l.contains(&format!("key={key}"))),
+        "file keyへのPUTが行われる: {}",
+        fx.calls()
+    );
+
+    // (b) 索引versionsにはprod bucketのfile_upload記録のみが載る(dev版の混入なし)
+    let dev_ids = upload_ids_for_bucket(&fx, &key, "bucket-dev");
+    let prod_ids = upload_ids_for_bucket(&fx, &key, "bucket-prod");
+    assert_eq!(dev_ids.len(), 1, "dev実績1件: {dev_ids:?}");
+    assert_eq!(prod_ids.len(), 1, "prod実績1件: {prod_ids:?}");
+    assert_ne!(dev_ids[0], prod_ids[0], "版は別");
+    let vids = index_version_ids(index_file_entry(&fx.read_index(), "a.zip"));
+    assert_eq!(vids.len(), 1, "索引versionsはprod版のみ: {vids:?}");
+    assert!(
+        vids.contains(&prod_ids[0]),
+        "prod版は索引へ載る: {vids:?} vs {prod_ids:?}"
+    );
+    assert!(
+        !vids.contains(&dev_ids[0]),
+        "他方bucket(dev)の版は索引へ混入しない: {vids:?} vs {dev_ids:?}"
+    );
+}
+
 /// [covers:cli.manage-jobs-reissue]
 /// manage jobs reissue <対象>(TASK-11 Phase B): 対象objectの復元jobを再発行する
 /// (tier変更可。--tier指定時は当該tier・省略時は既定Standard)。tierはStandard/Bulkの
@@ -288,5 +385,227 @@ fn manage_jobs_reissue_reissues_restore_job() {
             .any(|l| l.starts_with("s3 RestoreObject")),
         "allowlist外はRestoreObjectを発行しない: {}",
         fx.calls()
+    );
+}
+
+/// registry.jsonlのfile_upload記録のs3_bucketを空文字へ書き換える
+/// (フィールド追加前の旧形式記録の模倣。L-R3/L-R4検証用)。
+fn rewrite_file_upload_buckets_empty(fx: &StorageFixture) {
+    let mut body = String::new();
+    for r in fx.registry_values() {
+        if r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload") {
+            let mut v = r.clone();
+            v["s3_bucket"] = serde_json::json!("");
+            body.push_str(&serde_json::to_string(&v).expect("registry行serialize"));
+        } else {
+            body.push_str(&serde_json::to_string(&r).expect("registry行serialize"));
+        }
+        body.push('\n');
+    }
+    write_file(&fx.registry, body.as_bytes());
+}
+
+/// [covers:cli.profile-namespace-isolated-by-bucket]
+/// 旧形式file_upload記録(s3_bucket空文字=フィールド追加前の記録相当)は正本bucket
+/// (active_profile)相当として扱われる(L-R3/L-R4: 旧記録分岐の結合test検証)。
+/// 実効bucket=正本の再pushはskip判定に採用され(旧記録は正本bucket扱い)、
+/// 実効bucket≠正本(--profile prod)のpushではskipされずuploadされる。
+#[test]
+fn legacy_empty_bucket_upload_record_treated_as_canonical() {
+    let Some(fx) = StorageFixture::new("pb-legacybkt", StorageOpts::default()) else {
+        return;
+    };
+    fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"legacy-record-plain");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    rewrite_file_upload_buckets_empty(&fx);
+    let key = fx.file_key("unfiled", None, "a.zip");
+
+    // 実効bucket=正本(bucket-dev): 旧記録は正本bucket扱いのためskipされる
+    clear_calls(&fx);
+    let (code, stdout, stderr) = fx.push(&[&a], &[], &[]);
+    assert_eq!(code, 0, "dev再pushはexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.lines().any(|l| l.starts_with("skip")),
+        "旧記録(正本bucket扱い)でskipされる: {stdout}"
+    );
+    assert!(
+        !fx.calls()
+            .lines()
+            .any(|l| l.starts_with("s3 PutObject") && l.contains(&format!("key={key}"))),
+        "file keyへのPUTは行われない: {}",
+        fx.calls()
+    );
+
+    // 実効bucket≠正本(--profile prod): 旧記録は正本bucket扱いのため一致せずuploadされる
+    let (code, stdout, stderr) = fx.push(&[&a], &["--profile", "prod"], &[]);
+    assert_eq!(code, 0, "prod pushはexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.contains("ok    a.zip"),
+        "旧記録ではprod側はskipされない: {stdout}"
+    );
+}
+
+/// 索引file entryのpins[]のpin名一覧。
+fn index_pin_names(entry: &serde_json::Value) -> Vec<String> {
+    entry
+        .get("pins")
+        .and_then(|p| p.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|p| {
+                    p.get("pin")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// [covers:pin.pin-resolution-bucket-isolated]
+/// [covers:index.pins-bucket-isolated]
+/// 同一prefix・別bucket構成でのpinのnamespace分離(M-R1): 索引pins[]はbucket一致する
+/// pin_write/pin_remove記録のみで構築され、get --pin・pin rmの解決も当該bucketの
+/// 索引に限る(誤profileではpin名不在のexit 3・正bucket側の索引pins[]とpin objectは不変)。
+#[test]
+fn pin_namespace_isolated_by_bucket() {
+    let Some(fx) = StorageFixture::new("pb-pinbkt", StorageOpts::default()) else {
+        return;
+    };
+    fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"pin-bucket-plain");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    assert_eq!(fx.pin("add", "a.zip", &["--as", "pm1"]).0, 0);
+    assert_eq!(
+        index_pin_names(index_file_entry(&fx.read_index(), "a.zip")),
+        vec!["pm1"],
+        "dev側索引はpm1を保持"
+    );
+
+    // prod側pushで再構築された索引にdev側pinは混入しない
+    assert_eq!(fx.push(&[&a], &["--profile", "prod"], &[]).0, 0);
+    let pins = index_pin_names(index_file_entry(&fx.read_index(), "a.zip"));
+    assert!(
+        pins.is_empty(),
+        "prod側索引pins[]に他方bucketのpinは混入しない: {pins:?}"
+    );
+
+    // get --pin(誤profile): pin名不在の対象エラー3・pin objectへの取得も行わない
+    let pin_key = fx.pin_key("unfiled", None, "a.zip", "pm1");
+    let out = fx.elsewhere.join("pin-ns-out");
+    clear_calls(&fx);
+    let (code, _, stderr) = fx.get_env(
+        "a.zip",
+        &[
+            "--pin",
+            "pm1",
+            "--profile",
+            "prod",
+            "--out",
+            out.display().to_string().as_str(),
+        ],
+        &[],
+    );
+    assert_eq!(
+        code, 3,
+        "get --pin pm1 --profile prodはpin名不在の対象エラー3: {stderr}"
+    );
+    assert!(
+        stderr.contains("pm1") && stderr.contains("索引にありません"),
+        "pin名不在の表示: {stderr}"
+    );
+    assert!(
+        !fx.calls().lines().any(|l| l.contains(&pin_key)),
+        "pin objectへのS3 API呼び出し(取得)は行わない: {}",
+        fx.calls()
+    );
+
+    // pin rm(誤profile): pin名不在の対象エラー3・削除も行わない
+    clear_calls(&fx);
+    let (code, _, stderr) = fx.pin_env("rm", "a.zip", &["--pin", "pm1", "--profile", "prod"], &[]);
+    assert_eq!(
+        code, 3,
+        "pin rm --pin pm1 --profile prodはpin名不在の対象エラー3: {stderr}"
+    );
+    assert!(
+        !fx.calls()
+            .lines()
+            .any(|l| l.starts_with("s3 DeleteObjectVersion")),
+        "pin objectの削除は行わない: {}",
+        fx.calls()
+    );
+    assert!(
+        fx.object_path(&pin_key).is_file(),
+        "pin objectは不変(誤profile操作では削除されない)"
+    );
+
+    // dev側(正bucket)はpm1を保持したまま(all-skip pushでの再構築でも消えない)
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    assert_eq!(
+        index_pin_names(index_file_entry(&fx.read_index(), "a.zip")),
+        vec!["pm1"],
+        "dev側索引のpm1は誤profile操作後も保持される"
+    );
+}
+
+/// [covers:index.entries-without-bucket-versions-excluded]
+/// 当該bucketのversions[]・pins[]とも無いentry(他方bucketにしかuploadされていない
+/// file)は索引へ載らない(L-R1): prod側のlist/query/get/diffにb.zip(devのみ)は
+/// 現れず、dev側(正本bucket)の照会は従来どおり双方が現れる。
+#[test]
+fn entries_without_bucket_versions_excluded_from_query() {
+    let Some(fx) = StorageFixture::new("pb-orphan", StorageOpts::default()) else {
+        return;
+    };
+    fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));
+    let a = fx.data_root.join("a.zip");
+    let b = fx.data_root.join("b.zip");
+    write_file(&a, b"orphan-a-plain");
+    write_file(&b, b"orphan-b-plain");
+    assert_eq!(fx.push(&[&a, &b], &[], &[]).0, 0);
+    // a.zipのみprod側へもpush(prod索引が再構築される)
+    assert_eq!(fx.push(&[&a], &["--profile", "prod"], &[]).0, 0);
+
+    // prod側: a.zipのみ現れ、b.zip(devのみ)は現れない
+    let (code, stdout, stderr) = fx.list_env("files", &["--tree", "--profile", "prod"], &[]);
+    assert_eq!(code, 0, "prod側list filesはexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.contains("a.zip"),
+        "prod側にもa.zipは現れる: {stdout}"
+    );
+    assert!(
+        !stdout.contains("b.zip"),
+        "版の無いb.zipは表示されない: {stdout}"
+    );
+
+    let (code, stdout, stderr) = fx.query("b.zip", &["--profile", "prod"]);
+    assert_eq!(code, 0, "prod側queryはexit 0: {stdout}{stderr}");
+    assert!(stdout.contains("0件"), "prod側queryはb.zipに0件: {stdout}");
+
+    let (code, _, stderr) = fx.get_env("b.zip", &["--profile", "prod"], &[]);
+    assert_eq!(code, 3, "prod側get b.zipはname不在の対象エラー3: {stderr}");
+    assert!(
+        stderr.contains("索引にname=b.zip がありません"),
+        "name不在の表示: {stderr}"
+    );
+
+    let (code, stdout, stderr) = fx.diff(&["--profile", "prod"]);
+    assert_eq!(code, 0, "prod側diffはexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.contains("entries=1"),
+        "diffのentries数は当該namespaceのfileのみ: {stdout}"
+    );
+
+    // dev側(正本bucket): 従来どおり双方が現れる(all-skip pushでdev索引を再構築)
+    assert_eq!(fx.push(&[&a, &b], &[], &[]).0, 0);
+    let (code, stdout, stderr) = fx.list("files", &["--tree"]);
+    assert_eq!(code, 0, "dev側list filesはexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.contains("a.zip") && stdout.contains("b.zip"),
+        "dev側は双方が現れる: {stdout}"
     );
 }

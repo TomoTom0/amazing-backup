@@ -116,7 +116,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-011(規則は2.2-2�
 description = "sourceのsize/mtime変化時は再暗号化され、新記録がreduce後勝ちになる(backup pushのskip指紋不一致) (integration)"
 given = "過去file_write記録がある対象のsize/mtimeを変更して backup push 再実行"
 expect_return_shape = "再暗号化され、reduce後の状態で新記録が有効(age_sha256等が新値・旧記録は参照されない)"
-source_lines = "src/registry.rs:871; tests/encrypt_batch.rs:178"
+source_lines = "src/registry.rs:757; tests/encrypt_batch.rs:178"
 
 [[condition]]
 id = "encrypt.registry-append-fields"

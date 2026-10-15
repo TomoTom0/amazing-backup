@@ -1,8 +1,8 @@
-//! registry.jsonl追記・読込・reduce・pending列挙(設計5章registry.rs・4.1)。
+//! registry.jsonl追記・読込・reduce(設計5章registry.rs・4.1)。
 
 use crate::errors::{BackupError, BackupResult};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// `record_type: "encrypt"`のレコード(4.1)。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -85,8 +85,8 @@ pub struct ManifestUploadRecord {
 }
 
 /// `record_type: "file_write"`のレコード(TASK-10設計7.3・新経路のencrypt相当)。
-/// 旧`encrypt`eventとは種別分離されており、旧uploadのpending列挙
-/// (`upload_candidates`は`encrypt`のみ対象)の対象にならない=Phase A干渉防止。
+/// 旧`encrypt`eventとは種別分離されており、旧upload経路の処理対象にならない
+/// (Phase A干渉防止。旧経路はTASK-11 Phase Bで削除済み)。
 /// 索引のfile entry源(identity単位・layout情報と実keyを含む)。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -285,28 +285,6 @@ pub struct Reduced {
     pub pin_removes: HashMap<String, PinRemoveRecord>,
     /// prune実行記録(全件)
     pub prunes: Vec<PruneRecord>,
-}
-
-/// upload列挙の対象1件(2.3-2)。
-/// 通常オブジェクトは`kind: Object`、manifestは`kind: Manifest`。
-#[derive(Debug, Clone)]
-pub struct PendingUpload {
-    pub batch_id: String,
-    pub batch_date: String,
-    /// upload対象のローカルpath(.age または manifest.jsonl.age)
-    pub local_path: PathBuf,
-    /// `<batch_date>/<source_name>.age` または `<batch_date>/manifest.jsonl.age`
-    pub s3_key: String,
-    pub kind: PendingKind,
-}
-
-#[derive(Debug, Clone)]
-pub enum PendingKind {
-    /// 通常オブジェクト(bucket一致の前回成功upload記録がある対象は列挙時に除外される
-    /// ため、前回記録は保持しない)
-    Object { source_name: String },
-    /// manifest(同様にbucket一致の前回成功manifest_upload記録がある対象は列挙時に除外)
-    Manifest { manifest_path: String },
 }
 
 /// 1行JSON + `\n`を単一write、flush、fsync(親dirも初回作成)(4.1)。
@@ -561,107 +539,15 @@ pub fn find_match<'a>(
     })
 }
 
-/// upload対象の列挙(2.3-2・4.1。upload実行経路のrun_uploadが使う唯一の公開API)。
-/// 通常オブジェクトはs3_key昇順、その後にmanifest(s3_key昇順)。`date`指定時は当該
-/// batch_date分に限定する。manifestは実ファイルが存在する場合のみ列挙する
-/// (成功0件バッチはmanifestを作らないため。通常オブジェクトの実ファイル不在はここでは
-/// 除外せずrun_uploadが対象エラー3として扱う)。
-/// 「記録の`s3_bucket` == 当該実行の実効bucket」を満たすupload/manifest_upload記録のみを
-/// 成功済みとみなす(別bucketの記録しか無い分は再upload対象)。`s3_bucket`欠損
-/// (フィールド追加前の既存記録)は正本bucket相当として解釈し、実効bucketが正本bucketと
-/// 一致する実行でのみ成功済み扱いとする。
-pub fn pending_uploads_for_bucket(
-    reduced: &Reduced,
-    date: Option<&str>,
-    effective_bucket: &str,
-    canonical_bucket: &str,
-) -> Vec<PendingUpload> {
-    upload_candidates(reduced, date)
-        .into_iter()
-        .filter(|p| match &p.kind {
-            PendingKind::Object { .. } => {
-                let key = p.local_path.display().to_string();
-                match reduced.uploads.get(&key) {
-                    // 当該実効bucketへの前回成功記録がある=未成功ではない
-                    Some(u) => {
-                        !record_bucket_matched(&u.s3_bucket, effective_bucket, canonical_bucket)
-                    }
-                    None => true,
-                }
-            }
-            PendingKind::Manifest { manifest_path } => {
-                match reduced.manifest_uploads.get(manifest_path) {
-                    Some(m) => {
-                        !record_bucket_matched(&m.s3_bucket, effective_bucket, canonical_bucket)
-                    }
-                    None => true,
-                }
-            }
-        })
-        .collect()
-}
-
-/// upload列挙の候補全集(2.3-2。成功記録による除外を行わない)。
-/// 通常オブジェクトの実ファイル不在はここでは除外せずrun_uploadが対象エラー3として
-/// 扱う。manifestはローカルfileが存在するbatchのみ列挙する
-/// (成功0件バッチはmanifestを作らないため)。
-/// 並び順は「対象群(s3_key昇順) → manifest(s3_key昇順)」。
-/// `pending_uploads_for_bucket`は本候補からbucket一致の前回成功記録がある対象を
-/// 除外したもの。run_uploadは更に、除外された対象についてもS3側objectの実在を
-/// headで確認し、削除済み(404)のものを再upload対象へ戻す(記録は前回成功の事実であり
-/// S3側で削除された対象は再送が必要。TASK-9)。
-pub fn upload_candidates(reduced: &Reduced, date: Option<&str>) -> Vec<PendingUpload> {
-    let mut objects: Vec<PendingUpload> = Vec::new();
-    for e in &reduced.encrypts {
-        if let Some(d) = date {
-            if e.batch_date != d {
-                continue;
-            }
-        }
-        objects.push(PendingUpload {
-            batch_id: e.batch_id.clone(),
-            batch_date: e.batch_date.clone(),
-            local_path: PathBuf::from(&e.age_path),
-            s3_key: format!("{}/{}.age", e.batch_date, e.source_name),
-            kind: PendingKind::Object {
-                source_name: e.source_name.clone(),
-            },
-        });
-    }
-    objects.sort_by(|a, b| a.s3_key.cmp(&b.s3_key));
-
-    let mut manifests: Vec<PendingUpload> = Vec::new();
-    let mut seen_manifests = std::collections::HashSet::new();
-    for e in &reduced.encrypts {
-        if !seen_manifests.insert(e.manifest_path.clone()) {
-            continue;
-        }
-        if let Some(d) = date {
-            if e.batch_date != d {
-                continue;
-            }
-        }
-        if !Path::new(&e.manifest_path).is_file() {
-            continue; // 成功0件バッチはmanifestを作らないため列挙しない
-        }
-        manifests.push(PendingUpload {
-            batch_id: e.batch_id.clone(),
-            batch_date: e.batch_date.clone(),
-            local_path: PathBuf::from(&e.manifest_path),
-            s3_key: format!("{}/manifest.jsonl.age", e.batch_date),
-            kind: PendingKind::Manifest {
-                manifest_path: e.manifest_path.clone(),
-            },
-        });
-    }
-    manifests.sort_by(|a, b| a.s3_key.cmp(&b.s3_key));
-
-    objects.extend(manifests);
-    objects
-}
-
 /// 記録のs3_bucketと当該実行の実効bucketの一致判定(4.1)。
-fn record_bucket_matched(record_bucket: &str, effective: &str, canonical: &str) -> bool {
+/// 記録の`s3_bucket`と当該実行の実効bucketの一致判定(2.3-2・4.1)。
+/// `s3_bucket`欠損(フィールド追加前の既存記録)は正本bucket相当として解釈し、
+/// 実効bucketが正本と一致する実行でのみ一致扱いとする。
+/// H-1(TASK-11 Phase Bレビュー): backup push skip判定・索引versions構築・
+/// 未書込namespace判定でも同一規則を使う(namespace分離はbucket単位)。
+/// M-R1(TASK-11 Phase B再レビュー): 索引pins[]の構築・復元(pin_write採用・
+/// pin_remove照合)でも同一規則を使う。
+pub(crate) fn record_bucket_matched(record_bucket: &str, effective: &str, canonical: &str) -> bool {
     if record_bucket.is_empty() {
         // 欠損は正本bucket相当(4.1互換): 実効bucketが正本と一致する実行でのみ成功済み扱い
         effective == canonical
@@ -900,72 +786,11 @@ mod tests {
         assert!(reduced.manifest_uploads.contains_key("m"));
     }
 
-    /// 記録のs3_bucketと実効bucketの一致条件(2.3-2・4.1):
-    /// 一致する成功記録がある対象は列挙されず、別bucketの記録しか無い対象は再upload対象。
-    /// s3_bucket欠損の既存記録は正本bucket相当として解釈する(実効bucketが正本と一致する
-    /// 実行でのみ成功済み扱い。serde default互換)。
-    #[test]
-    fn pending_uploads_for_bucket_filters_by_recorded_bucket() {
-        let tmp = TempDir::new("reg-pendbkt");
-        // a: main-bucketへupload済み・b: alt-bucketへupload済み・c: 記録なし・
-        // d: s3_bucket欠損の旧記録あり(manifest実ファイルは作らない=manifest列挙は対象外)
-        let mut a = encrypt_rec("2026-10-01/a.zip.age", "/data/a.zip", "2026-10-01");
-        let mut b = encrypt_rec("2026-10-01/b.zip.age", "/data/b.zip", "2026-10-01");
-        let mut c = encrypt_rec("2026-10-01/c.zip.age", "/data/c.zip", "2026-10-01");
-        let mut d = encrypt_rec("2026-10-01/d.zip.age", "/data/d.zip", "2026-10-01");
-        for e in [&mut a, &mut b, &mut c, &mut d] {
-            e.manifest_path = tmp
-                .path()
-                .join("nonexistent")
-                .join("manifest.jsonl.age")
-                .display()
-                .to_string();
-        }
-        let mut up_a = upload_rec("2026-10-01/a.zip.age", "2026-10-01/a.zip.age", "ca");
-        up_a.s3_bucket = "main-bucket".into();
-        let mut up_b = upload_rec("2026-10-01/b.zip.age", "2026-10-01/b.zip.age", "cb");
-        up_b.s3_bucket = "alt-bucket".into();
-        let mut up_d = upload_rec("2026-10-01/d.zip.age", "2026-10-01/d.zip.age", "cd");
-        up_d.s3_bucket = String::new(); // 欠損(フィールド追加前の既存記録)
-
-        let records = vec![
-            Record::Encrypt(a),
-            Record::Encrypt(b),
-            Record::Encrypt(c),
-            Record::Encrypt(d),
-            Record::Upload(up_a),
-            Record::Upload(up_b),
-            Record::Upload(up_d),
-        ];
-        let reduced = reduce_records(&records);
-        let keys = |eff: &str, canon: &str| -> Vec<String> {
-            pending_uploads_for_bucket(&reduced, None, eff, canon)
-                .iter()
-                .map(|p| p.s3_key.clone())
-                .collect()
-        };
-
-        // 実効=正本=main-bucket: aは成功済み・d(欠損=正本相当)も成功済み。
-        // b(別bucket記録)とc(記録なし)は再upload対象
-        assert_eq!(
-            keys("main-bucket", "main-bucket"),
-            vec!["2026-10-01/b.zip.age", "2026-10-01/c.zip.age"]
-        );
-
-        // 実効=alt-bucket(CLI一時上書き・正本はmain-bucket): bは成功済み。
-        // a(記録main≠alt)・c・d(欠損記録は正本相当のためaltとは不一致)は再upload対象
-        assert_eq!(
-            keys("alt-bucket", "main-bucket"),
-            vec![
-                "2026-10-01/a.zip.age",
-                "2026-10-01/c.zip.age",
-                "2026-10-01/d.zip.age"
-            ]
-        );
-    }
-
     /// s3_bucket/s3_regionフィールドを持たない既存記録(追加前の記録)は
     /// `#[serde(default)]`で読み込め、s3_bucket空文字=正本bucket相当扱いとなる(4.1互換)。
+    /// (bucket一致規則自体の結合test検証はcli.profile-namespace-isolated-by-bucket:
+    /// 旧upload経路のpending_uploads_for_bucket/upload_candidatesはPhase Bで
+    /// デッドコードとして削除済み)
     #[test]
     fn upload_record_without_bucket_fields_deserializes() {
         let tmp = TempDir::new("reg-oldrec");

@@ -90,11 +90,39 @@ aws CLI(subprocess)依存のテスト構造をfake seamへ再構成:
   get/pull平文衝突保護・list jobs noncurrent版表示)は実行failを許容
   (cargo test --no-runのコンパイルは通る・verify-conditions.py PASS)
 
+2026-10-15: TASK-11(Phase B)コードレビュー指摘対応(テスト先行。H-1/M-1/M-2/L-1〜L-6の9件)。
+- 条件書へ9条件追加し対応テストを作成(実装後にcargo test全件pass・verify-conditions.py PASS):
+  cli 2件(同一prefix・別bucket複数profileでのnamespace分離=H-1・FakeS3のRestoreObject事前
+  検査=L-3)・verify 1件(掃除済みrunの検査対象外=M-1)・pin 2件(push --pinのwrite-once違反は
+  警告+当該file skip=M-2・pin rmのregistry記録失敗時のrebuild案内=L-1)・retention 2件
+  (prune部分失敗時の削除済み版記録=L-2・pruneの版順sortはepoch数値比較=L-4)・
+  restore 1件(pull平文衝突の読込失敗時保護=L-5)・index 1件(parse失敗時のrebuild案内=L-6)
+- common/mod.rsの失敗注入にFAKE_S3_FAIL_DELVER_FOR(当該keyのDeleteObjectVersionのみ失敗。
+  <key>:<N>形式は先頭N回成功後に失敗)を追加(L-2の削除loop途中失敗の注入用)
+- 条件数153
+
+2026-10-15: TASK-11(Phase B)再レビュー指摘対応(テスト先行。M-R1・L-R1〜L-R5の6件)。
+- 条件書へ3条件追加し対応テストを作成(実装後にcargo test全件pass・verify-conditions.py PASS):
+  index 2件(索引pins[]構築・復元のbucket一致=M-R1・当該bucketの版もpinも無いentryの索引
+  載せ除外=L-R1)・pin 1件(get --pin/pin rmのpin解決は当該実効bucketの索引に限る=M-R1)。
+  cli 1件を拡張(旧形式file_upload記録=s3_bucket空文字の正本bucket扱い分岐へ結合test追加=
+  L-R3/L-R4。descriptionの規則は既記載のためgiven/expectのみ追記)・restore 1件を文言改訂
+  (読込不能平文の--yes付き挙動をget/pullとも上書き続行へ統一=L-R5)・verify 1件のdescription
+  誤記修正(keep_artifacts="all"→"always"=L-R2)
+- 実装: src/index.rs(build_entriesのpins bucket照合・versions/pins空entry除外)・
+  src/storage/manage.rs(rebuildのpins復元へ同一規則)・src/storage/get.rs(平文衝突の
+  読込失敗時--yes付き続行)・src/registry.rs(旧upload経路のデッドコード
+  pending_uploads_for_bucket/upload_candidatesと単体testを削除=L-R3)
+- 併せてpins[]の並びをs3_keyでsort(採用源HashMapのiteration orderがprocess毎に不定で
+  同一registryからの再構築でも索引内容が変わる=index.rebuild-from-registry-per-runの
+  冪等(同一内容)違反。M-R1テストの多pin構成で顕在化したため修正)
+- 条件数156
+
 ## 構成
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(12ファイル・144条件・excluded 23件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)反映済み |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(12ファイル・156条件・excluded 23件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)反映済み |
 | tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(新schema組立・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
 | tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
@@ -104,11 +132,11 @@ aws CLI(subprocess)依存のテスト構造をfake seamへ再構成:
 | tests/cli_bin.rs | bin entrypoint系(--version・lib/bin parity・旧サブコマンド削除。結合) | 作成済み(旧サブコマンド削除はPhase B実装前fail許容) |
 | tests/layout.rs | TASK-10 layoutエリア(key生成・分類解決・衝突・検証。dry-run表示とfake seamで観測) | 作成済み |
 | tests/index_storage.rs | TASK-10/11 indexエリア(索引schema・registry再構築・STANDARD・recipients・version_id・manifest再構築・pin反映・version_ts供給源・未知record_type警告) | 作成済み(後半2件はPhase B実装前fail許容) |
-| tests/pin.rs | TASK-10/11 pinエリア(pin add/rm・write-once・backup時pin・skip対象への--pin) | 作成済み |
+| tests/pin.rs | TASK-10/11 pinエリア(pin add/rm・write-once・backup時pin・skip対象への--pin・pin_removeのbucket照合) | 作成済み |
 | tests/retention.rs | TASK-10/11 retentionエリア(lifecycle NCVE/MPU abort・prune dry-run/保護/削除条件・併置排他・category guard) | 作成済み |
 | tests/storage_query.rs | 照会系CLI(query/get/list/diff・版特定・復元job・--format human/json) | 作成済み(--format系・list jobs noncurrent版はPhase B実装前fail許容) |
 | tests/storage_backup.rs | 操作系CLI(backup push統合/dry-run・pull確認/範囲排他・versioning・索引不在・災害時動作)+keep_artifacts掃除+registry基準skip | 作成済み |
-| tests/phase_b_options.rs | TASK-11 Phase BのCLI option系(--profile系3件・--aws-config既定path・索引GET転送エラー・manage jobs reissue) | 作成済み(テスト先行。Phase B実装前は実行failを許容) |
+| tests/phase_b_options.rs | TASK-11 Phase BのCLI option系(--profile系3件・--aws-config既定path・索引GET転送エラー・manage jobs reissue)+再レビュー(旧記録bucket扱い・pin/entryのbucket分離) | 作成済み(テスト先行。Phase B実装前は実行failを許容) |
 | src/**/*.rs 内 #[cfg(test)] | cargo単体test(S3実行はS3Backend fake(FakeS3)差替) | 作成済み |
 
 cargo testの階層: unit=src/各モジュール内`#[cfg(test)] mod tests`、
@@ -145,8 +173,8 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | cli.toml | cli | src/cli.rs | 43 | CLI-001〜006 + TASK-9/10系 + TASK-11 Phase B(旧サブコマンド削除・--format/--profile・manage jobs reissue・pull範囲排他等) |
 | restore.toml | restore | src/storage.rs | 4 | 復元job系共通経路4件(TASK-11で旧restore固有19件廃止。get/pull/list jobs経路で検証。平文衝突保護含む) |
 | layout.toml | layout | src/layout.rs | 9 | TASK-10設計1章(key生成・分類解決・衝突・検証。9章素案+rel_path正規化) |
-| index.toml | index | src/index.rs | 11 | TASK-10設計2章 + H-1/H-3 + TASK-11(version_ts供給源・未知record_type警告) |
-| pin.toml | pin | src/cli.rs | 7 | TASK-10設計1.3・3.2 + M-4(--config早期検査) + TASK-11 M-6(skip対象への--pin) |
+| index.toml | index | src/index.rs | 13 | TASK-10設計2章 + H-1/H-3 + TASK-11(version_ts供給源・未知record_type警告) + 再レビューM-R1(pins bucket分離)・L-R1(版・pin無しentry除外) |
+| pin.toml | pin | src/cli.rs | 8 | TASK-10設計1.3・3.2 + M-4(--config早期検査) + TASK-11 M-6(skip対象への--pin) + 再レビューM-R1(pin解決のbucket分離) |
 | retention.toml | retention | src/cli.rs | 8 | TASK-10設計3.2・5.2 + TASK-11 L-8(prune併置排他)・M-2(category guard) |
 
 - 分割理由: test-structureの`[meta].source_file`(検証対象の実装ファイル・ファイル単位に1つ)が
@@ -195,8 +223,10 @@ $ uv run python scripts/design/verify-conditions.py
 - (b) 全条件が1つ以上のタグでcoverされていること(網羅検査)。
   テストファイル(tests/**/test_*.py・tests/**/*.rs・src/**/*.rs)が1つも無い段階は
   警告表示のみでfailしない。テストコード作成後はfailする。
-  2026-10-15 TASK-11 Phase Bテスト更新後: 144条件すべてcover済みで(b)もpass
-  (Phase B実装待ちの条件もテスト先行でcoversタグ付き。(a)(c)(d)(e)もpass)
+  2026-10-15 TASK-11 Phase Bテスト更新後: 144条件すべてcover済みで(b)もpass。
+  同日レビュー指摘対応後は153条件すべてcover済み
+  (Phase B実装待ちの条件もテスト先行でcoversタグ付き。(a)(c)(d)(e)もpass)。
+  同日再レビュー指摘対応後は156条件すべてcover済み((a)(c)(d)(e)もpass)
 - (c) 条件書tomlのschema検査(id形式・必須フィールド・expect_*の存在・givenの実質性)
 - (d) `source_lines`をタグ走査結果へ自動同期(自動メタデータ・手書きしない)
 - (e) `[[excluded]]`の構造検査(item/source/reasonの空欄をfail)

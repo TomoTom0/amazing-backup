@@ -16,6 +16,10 @@
 #   集約に伴い、全13条件を実行経路verify→backup verifyへ文言改訂(廃止しない。idは付与後不変のため
 #   verify.*のまま)。旧--date(batch_date絞り込み)は--date撤廃(設計3.3)により対象外。
 #   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseのまま。
+# 2026-10-15: TASK-11(Phase B)コードレビュー指摘対応(M-1)でテスト先行の更新。
+#   新規1件: verify.swept-run-artifacts-excluded(keep_artifacts="run"掃除済みrunの検査対象外)。
+# 2026-10-15: TASK-11(Phase B)再レビュー指摘対応(L-R2): verify.swept-run-artifacts-excludedの
+#   description誤記を修正(keep_artifacts="all"→"always"。src/config.rsの列挙値はrun/always)。
 
 [meta]
 feature = "verify"
@@ -34,7 +38,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-001(検査仕様は2
 description = "整合している状態で構造検査(既定段階)が全項目ok・exit 0となる (unit)"
 given = "正常なbackup push済registry・.age・manifestが揃った状態で backup verify 実行"
 expect_return = "exit code 0(全検査項目ok表示)"
-source_lines = "src/cli.rs:770"
+source_lines = "src/cli.rs:802"
 
 [[condition]]
 id = "verify.missing-or-size-mismatch-error"
@@ -43,7 +47,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-002(2.4-1・7.1のex
 description = "構造検査で .age 欠損・age_sizeと実sizeの不一致を検出し、検証エラー4(欠損も不一致と同じく4に統一)。age_sizeは実ファイルsizeと完全一致を要求し、実sizeが記録値未満(切り詰め)・超過(追記)のいずれも不一致としてexit 4となる(記録値未満を警告継続にしない) (unit)"
 given = ".age を削除したcaseと、age_size と異なる実sizeの .age のcase(実sizeが記録値を超過するcaseと未満に切り詰めるcaseの両方)の backup verify 実行"
 expect_return = "exit code 4(該当recordのsource_pathと期待/実測の詳細表示)"
-source_lines = "src/cli.rs:786"
+source_lines = "src/cli.rs:818"
 
 [[condition]]
 id = "verify.torn-write-and-bad-json-lines"
@@ -52,7 +56,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-003(規則は4.1注�
 description = "registryの不正JSON行を検出。改行終端でない最終行はtorn writeとして警告のうえ除外され処理継続する (unit)"
 given = "不正JSON行を含むregistryと、改行終端しない最終行(torn write)を含むregistry"
 expect_return_shape = "不正JSON行は行番号付きでProcessError、torn write最終行は警告のうえ除外され残り行の読込が継続する"
-source_lines = "src/registry.rs:799"
+source_lines = "src/registry.rs:685"
 
 [[condition]]
 id = "verify.checksum-detects-mutation"
@@ -61,7 +65,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-004(2.4-2)。TASK-11
 description = "--checksum で .age の改変(byte追加)をsha256再計算により検出する (unit)"
 given = ".age へ1byte追加した状態で backup verify --checksum 実行"
 expect_return = "exit code 4(期待age_sha256と実測の不一致表示)"
-source_lines = "src/cli.rs:892"
+source_lines = "src/cli.rs:924"
 
 [[condition]]
 id = "verify.roundtrip-sha256-match"
@@ -97,7 +101,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-008(2.4)。TASK-11(P
 description = "backup verify はローカル整合検査であり aws設定(aws.toml)が一切なくても完結する (unit)"
 given = "aws.toml不在の環境で backup verify 実行"
 expect_return = "exit code 0"
-source_lines = "src/cli.rs:929"
+source_lines = "src/cli.rs:961"
 
 [[condition]]
 id = "verify.unknown-record-type-skipped"
@@ -106,7 +110,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-009(規則は4.1注�
 description = "registry内の未知record_type行は警告のうえ無視され読込が継続する(将来のschema追加への前方互換。Phase A以降の既知種は旧3種(encrypt/upload/manifest_upload)+新種(file_write/file_upload/manifest/index_upload/pin_write/pin_remove/prune)等の増加を含む) (unit)"
 given = "未知record_typeの行を既知レコードに混在させたregistry"
 expect_return_shape = "未知record_typeの行は警告表示のうえ結果から除外され、残り行の読込・reduceは継続する(読込エラーとならない)"
-source_lines = "src/registry.rs:835"
+source_lines = "src/registry.rs:721"
 
 [[condition]]
 id = "verify.registry-read-error-propagates"
@@ -115,7 +119,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-010(2026-10-08レビ
 description = "registry読込のread errorは ErrorKind::NotFound のみ「空」として扱い、他のread error(directory指定によるEISDIR・権限不足等)はProcessエラーとして伝播する(初回実行以外の読込失敗を黙って空扱いにしない) (unit)"
 given = "registry pathに実fileでないpath(directory)を指定した読込"
 expect_throw = "ProcessError(exit code 4)。ファイル不在(NotFound)のみ空配列を返す"
-source_lines = "src/registry.rs:773"
+source_lines = "src/registry.rs:659"
 
 [[condition]]
 id = "verify.roundtrip-env-error-exit-2"
@@ -124,7 +128,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-011(2026-10-08レビ
 description = "backup verify --roundtrip はroundtrip開始前に秘密鍵ファイルの存在とageバイナリを事前検査し、不在なら設定・環境エラー2で即終了する(対象ファイルごとの復号失敗に紛れて検証エラー4とならない) (unit)"
 given = "秘密鍵ファイルが不在の状態、およびageバイナリがPATH上に無い状態での backup verify --roundtrip 実行"
 expect_return = "exit code 2(設定・環境エラー)"
-source_lines = "src/cli.rs:1000"
+source_lines = "src/cli.rs:1032"
 
 [[condition]]
 id = "verify.decrypt-error-includes-age-stderr"
@@ -142,4 +146,13 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-013(2.4-1・4.4。20
 description = "構造検査(既定段階)は各暗号化記録のage_pathの.age(manifestの.ageは含まない)のヘッダをparseし、ssh-ed25519 stanza識別子がregistry記録recipients指紋から導出したv1.2形式指紋prefix集合(記録指紋SHA256:<b64>のb64部をdecodeした32byteの先頭4byteをb64(paddingなし)符号化)と全単射で対応することを照合する。誤recipient鍵で作られた.age・stanza数不一致・識別子が指紋prefix形式(decode結果4byte)でない場合・記録指紋からprefixを導出できない場合(b64 decode不能・decode結果が32byte未満)・旧形式tagのみでv1.2形式stanzaを1つも持たない.ageは、いずれも検証エラー4(fail-closed。照合skipではなく) (unit)"
 given = "合成ageヘッダ(v1.2形式ssh-ed25519 stanza+`--- `終端)の.ageとrecipients記録をSHA256:<b64(32byte)>実形式の指紋で構成した、(a)正recipient(全単射一致)・(b)誤recipient指紋(stanzaは鍵Aのprefix・記録は鍵Bの指紋)・(c)stanza数不一致(ヘッダ2 stanza vs 記録1指紋)の3caseでの backup verify 実行"
 expect_return = "(a)はexit code 0、(b)(c)はexit code 4(recipient照合不一致の該当record特定表示)"
-source_lines = "src/cli.rs:835; tests/verify_roundtrip.rs:157"
+source_lines = "src/cli.rs:867; tests/verify_roundtrip.rs:157"
+
+[[condition]]
+id = "verify.swept-run-artifacts-excluded"
+target_function = "backup verify(掃除済みrunの検査対象外判定)"
+source = "TASK-11(Phase B)コードレビュー指摘M-1+tmp/tasks/tm-10/design_s3_storage.md 4.1([output].keep_artifacts=run掃除)・2.2(run末尾の索引更新)"
+description = "backup verifyはkeep_artifacts=\"run\"の既定動作で成功run直後にdata/out/<batch_id>/を掃除されたrun(file_write記録のage_path実ファイル・run manifest実ファイルが不在)を検証失敗扱いにしない: 当該batchのindex_upload成功記録(成功run末尾の索引更新が完了した事実)があり・run成果物dirが不在のbatchは「掃除済み・検査対象外」として構造検査(.age不在・manifest不在)・--checksum・--roundtripの対象から除外し、掃除済みrun件数を報告する。run成果物が残っているbatch(keep_artifacts=\"always\"・失敗run残り・掃除済み判定を満たさないbatch)は従来どおり検査対象(実ファイル欠損は検証エラー4のまま) (integration, fake seam)"
+given = "keep_artifacts=\"run\"既定でbackup push成功後(当該batchのrun成果物dirが掃除済み)の backup verify・backup verify --checksum・backup verify --roundtrip の各実行"
+expect_return_shape = "いずれも exit 0(掃除済みrunは検査対象外の報告表示あり)。.age・manifestの不在は検証エラー4として報告されない"
+source_lines = "tests/storage_backup.rs:711"

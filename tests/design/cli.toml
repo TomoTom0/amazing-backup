@@ -24,6 +24,15 @@
 #   excluded更新: manage jobs reissue詳細の除外記録を解消(条件化)。旧サブコマンドとbackup pushの
 #     併用禁止は旧サブコマンド削除で併用可能性が構造的に消滅した旨を追記。
 #   実装前のため新条件・改訂期待値のテストは実行failを許容し[meta]はverified=falseのまま。
+# 2026-10-15: TASK-11(Phase B)コードレビュー指摘対応でテスト先行の更新。
+#   新規2件: cli.profile-namespace-isolated-by-bucket(H-1: 同一prefix・別bucket複数profileでの
+#     namespace分離。registry記録のs3_bucket一致をbackup push skip判定・索引versions構築・
+#     未書込namespace例外の全経路へ適用)・cli.fake-s3-restore-validates-key-and-state(L-3: FakeS3の
+#     RestoreObjectがkey実在・archive状態を実S3同様に検証する)。
+# 2026-10-15: TASK-11(Phase B)再レビュー指摘対応(L-R3/L-R4)でテスト先行の更新。
+#   cli.profile-namespace-isolated-by-bucketへ旧記録分岐(s3_bucket空文字のfile_upload記録は
+#     正本bucket扱い)の結合test検証を追加(descriptionの規則は既記載のため文言改訂は不要。
+#     given/expect_return_shapeへ(4)を追記)。
 
 [meta]
 feature = "cli"
@@ -42,7 +51,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-001(5章cli.rs・7.1
 description = "使用法誤り(引数誤り)は exit 64(clapのusage error既定 exit 2 を BackupError::Usage へremapし、設定エラー2と区別する) (unit)"
 given = "不明オプション・サブコマンド不足等のusage誤り実行"
 expect_return = "exit code 64"
-source_lines = "src/cli.rs:610"
+source_lines = "src/cli.rs:642"
 
 [[condition]]
 id = "cli.version-flag"
@@ -60,7 +69,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-003(終了コード�
 description = "終了コード区分(0/2/3/4/5)が7.1の仕様表どおりに出る(各サブコマンドの代表case) (unit)"
 given = "成功(対象なし・全skip含む)・設定エラー・対象エラー・処理エラー・転送エラーの各区画の代表ケース"
 expect_return_shape = "0(成功)・2(設定・環境)・3(対象)・4(処理)・5(転送)が各区画の代表ケースで出る"
-source_lines = "src/cli.rs:624; src/errors.rs:56"
+source_lines = "src/cli.rs:656; src/errors.rs:56"
 
 [[condition]]
 id = "cli.module-entrypoint-parity"
@@ -78,7 +87,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-005(2026-10-08レビ
 description = "backup push のPATH位置引数0個はusage error扱いで exit 64。PATHは1個以上必須(--from-listは併用オプション)(旧plan/encryptの対象指定からbackup pushへの文言改訂・id不変) (unit)"
 given = "backup push をPATH無し(オプションのみ、または--from-listのみ)で実行するケースと、PATH 1個(+--from-list併用)のケース"
 expect_return = "PATH 0個は exit 64。PATH 1個(+--from-list併用を含む)はusage errorとならない"
-source_lines = "src/cli.rs:950"
+source_lines = "src/cli.rs:982"
 
 [[condition]]
 id = "cli.fake-s3-seam"
@@ -87,7 +96,7 @@ source = "TASK-9 SDK移行設計 4.3案1・10.3・12.4(tmp/tasks/tm-9/design_sdk
 description = "fake seam: env BACKUP_REMOTE_FAKE_S3_STATE=<dir>指定時はS3 backendをfakeへ差し替える(gateは#[cfg(debug_assertions)]でrelease build・debug_assertions無効にはseam・FakeS3ともcompileされず実S3経路になる)。fakeはstate dir配下へobjects/<key>とcalls.log相当のAPI呼び出し記録(op名・bucket・key・storage_class・checksum・days・tier等のfield)を書く。fake選択時はstderr冒頭へ「WARNING: FAKE S3 MODE」を必ず表示する(誤用防御)。fakeはcredential値が不正(検出用ダミー値)でも成功する=実network不使用 (integration, fake seam)"
 given = "BACKUP_REMOTE_FAKE_S3_STATEを設定したbackup push実行(state dirを用意・credentialファイルはダミー値)"
 expect_return_shape = "exit 0でstate dirへobjects/<key>と呼び出し記録が書かれ、stderr冒頭にWARNING: FAKE S3 MODE表示。credential値・検出用ダミーは出力に現れない"
-source_lines = "src/s3.rs:1798; src/s3.rs:1862; tests/s3_backend.rs:31"
+source_lines = "src/s3.rs:1886; src/s3.rs:1950; tests/s3_backend.rs:31"
 
 [[condition]]
 id = "cli.query-partial-match"
@@ -455,4 +464,22 @@ source = "TASK-11 body(Phase B: manage jobs reissue・tier変更可・最小実�
 description = "manage jobs reissue <対象>: 対象objectの復元jobを再発行する(tier変更可。--tier指定時は当該tier・省略時は既定Standard)。tierはStandard/Bulkのallowlist検査(allowlist外はusage error 64)。復元済み・進行中の対象にも再発行できる(保持期間延長・tier切替用途) (integration, fake seam)"
 given = "復元済みobjectと進行中objectがある状態での manage jobs reissue <対象> --tier Bulk 実行と、--tier Expedited(不可値)指定・--tier省略の各実行"
 expect_return_shape = "--tier BulkはRestoreObjectが当該対象へtier=Bulkで再発行され呼び出し記録に残る。--tier Expeditedは exit 64でRestoreObject発行なし。--tier省略はtier=Standardで発行"
-source_lines = "tests/phase_b_options.rs:221"
+source_lines = "tests/phase_b_options.rs:318"
+
+[[condition]]
+id = "cli.profile-namespace-isolated-by-bucket"
+target_function = "backup push(skip判定) / index::build_entries / storage::namespace_never_written / get(平文衝突precheck)"
+source = "TASK-11(Phase B)コードレビュー指摘H-1+tmp/tasks/tm-10/design_s3_storage.md 4.2(profile複数構成)・registry.rs record_bucket_matched(bucket一致規則)"
+description = "registry記録のs3_bucketと当該実行の実効bucketの一致によりnamespaceはbucket単位で分離される(同一prefix・別bucketの複数profile構成でprefix一致のみなら全経路が他方bucketの実績に惑わされるのを防ぐ)。対象は(a) backup pushのskip判定(他方bucket実績ではskipしない=bucket横断で1byteもuploadされないrunを作らない) (b) 索引versions構築(他方bucketのfile_upload記録をversionsへ混入させない) (c) 索引不在時の未書込namespace例外(他方bucketの書込実績では救済せず0件exit 0とする)。bucket一致規則はregistry::record_bucket_matchedと同一(記録s3_bucket欠損の旧記録は正本bucket=aws.toml active_profile相当として扱い、実効bucketが正本と一致する実行でのみ一致扱い) (integration, fake seam)"
+given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成での、(1)devでのbackup push後に同一内容を--profile prodでbackup pushする実行 (2)prod実行後の索引versionsのversion_id確認(registryのbucket別file_upload記録と突合) (3)索引objectを削除した状態での list files --profile prod(他方bucket実績のみ)と list files(正本bucket実績あり)の各実行 (4)file_upload記録のs3_bucketを空文字へ書き換えた旧形式記録での再push(dev=正本と一致する実効bucket・prod=一致しない実効bucket)の各実行"
+expect_return_shape = "(1)prod側pushはskipされずにfile uploadが行われexit 0(ok表示あり・skip表示なし) (2)索引versionsにはprod側bucketのfile_upload記録のversionのみが載る(dev側のversion_idは混入しない) (3)prod照会は未書込namespaceとして0件+exit 0(索引不在でも設定エラー2にならない)。正本bucket(書込実績あり)の照会は設定エラー2+rebuild案内 (4)dev側の再pushはskipされる(旧記録は正本bucket扱い・file keyへのPUTなし)。prod側(--profile)のpushはskipされずuploadされる"
+source_lines = "tests/phase_b_options.rs:247; tests/phase_b_options.rs:408"
+
+[[condition]]
+id = "cli.fake-s3-restore-validates-key-and-state"
+target_function = "s3::FakeS3 restore / restore_version(実S3相当の事前検査)"
+source = "TASK-11(Phase B)コードレビュー指摘L-3+cli.fake-s3-seam(fakeのAPI模倣体格)"
+description = "fakeのRestoreObjectは実S3と同様の事前検査を行う: (1)key(版指定時は当該version)がS3に存在しない場合はNoSuchKey相当の転送エラー5で失敗させる(不在keyへの復元job発行がfakeで成功扱いにならない) (2)対象objectのstorage_classがarchive系(GLACIER/DEEP_ARCHIVE/GLACIER_IR)以外の場合はInvalidObjectState相当の転送エラー5で失敗させる(STANDARD objectへの復元job発行がfakeで成功扱いにならない) (3)archive系objectへの発行は従来どおり成功する (integration, fake seam・manage jobs reissue経由)"
+given = "fake S3での、(1)存在しないkeyへの manage jobs reissue 実行 (2)STORAGE_CLASS=STANDARDでpush済みfile keyへの reissue 実行 (3)STORAGE_CLASS=DEEP_ARCHIVEでpush済みfile keyへの reissue 実行"
+expect_return_shape = "(1)(2)は exit 5でエラー表示に起因(NoSuchKey相当/InvalidObjectState相当)が含まれる。(3)は exit 0でRestoreObjectが発行される"
+source_lines = "tests/s3_backend.rs:411"

@@ -220,6 +220,7 @@ pub fn run_bin_cwd(args: &[&str], env: &[(&str, &str)], cwd: &Path) -> (i32, Str
 ///   - FAKE_S3_FAIL_CP_FOR=<key>          当該keyのput(PutObject・UploadPart)・getのみ失敗
 ///   - FAKE_S3_FAIL_RESTORE_FOR=<key>     当該keyのRestoreObjectのみ失敗
 ///   - FAKE_S3_FAIL_HEAD_FOR=<key>        当該keyのHeadObjectのみ異常失敗(404以外)
+///   - FAKE_S3_FAIL_DELVER_FOR=<key>[:N]  当該keyのDeleteObjectVersionのみ失敗(先頭N回は成功)
 ///   - FAKE_S3_HEAD_404_FOR=<key>         当該keyのHeadObjectのみ404扱い(object実体は保持)
 /// fake選択時はstderr冒頭へ「WARNING: FAKE S3 MODE」が表示される(誤用防御・設計4.3)。
 

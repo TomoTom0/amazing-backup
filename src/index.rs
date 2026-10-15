@@ -82,10 +82,21 @@ pub struct IndexPin {
 /// registry reduce結果から索引entriesを全再構築する(冪等・設計2.2)。
 /// - entryはfile_write(identity_hash単位・後勝ち)から組む
 /// - versionsはidentity_hashで突き合わせたfile_upload記録(記録順=昇順 → date降順へ反転。
-///   分類変更でs3_keyが変わったidentityも版履歴が続く)
+///   分類変更でs3_keyが変わったidentityも版履歴が続く)。当該実行の実効bucketと
+///   bucket一致するfile_upload記録のみを載せる(H-1: 同一prefix・別bucket構成で
+///   他方bucketの版が索引へ混入しない。一致規則はregistry::record_bucket_matched)
 /// - pinsはpin_writeから(pin_remove済みのpin_s3_keyは除外)。folder+category+rel_path+
-///   nameで該当entryへ接続する
-pub fn build_entries(reduced: &Reduced) -> Vec<IndexFileEntry> {
+///   nameで該当entryへ接続する。pin_writeの採用・pin_removeの削除済み判定とも
+///   bucket一致を伴う(M-R1: 他方bucketのみのpinの混入防止・誤profileでのpin rmが
+///   正bucket側の索引からpinを消さない)
+/// - 当該bucket一致のversions[]・pins[]とも無いentryは載せない(索引の意味論は
+///   「当該namespace(bucket)で管理されるfile」。L-R1: 他方bucketにしかupload
+///   されていないfileのversions空entryがlist/query/diffに混入しない)
+pub fn build_entries(
+    reduced: &Reduced,
+    effective_bucket: &str,
+    canonical_bucket: &str,
+) -> Vec<IndexFileEntry> {
     // prune --apply済みの版は索引へ載せない(H-1: 再構築で幽霊版が復活しないよう
     // 削除記録(PruneDeleted)集合で一律除外する)
     let deleted: std::collections::BTreeSet<(String, String)> = reduced
@@ -132,6 +143,11 @@ pub fn build_entries(reduced: &Reduced) -> Vec<IndexFileEntry> {
             .iter()
             .filter(|u| {
                 u.identity_hash == entry.identity_hash
+                    && registry::record_bucket_matched(
+                        &u.s3_bucket,
+                        effective_bucket,
+                        canonical_bucket,
+                    )
                     && !deleted.contains(&(u.s3_key.clone(), u.version_id.clone()))
             })
             .map(|u| {
@@ -157,10 +173,22 @@ pub fn build_entries(reduced: &Reduced) -> Vec<IndexFileEntry> {
             .collect();
         versions.reverse();
         entry.versions = versions;
-        // pins: pin_write(未削除)をfolder位置へ接続
+        // pins: pin_write(未削除)をfolder位置へ接続。採用・削除済み判定ともbucket一致
+        // (M-R1): 他方bucketのpin_writeは採用せず、pin_removeもs3_bucket一致する
+        // もののみ削除済み扱い(pin_s3_key一致のみでは照合しない)
         for pin in reduced.pin_writes.values() {
-            if reduced.pin_removes.contains_key(&pin.pin_s3_key) {
+            if !registry::record_bucket_matched(&pin.s3_bucket, effective_bucket, canonical_bucket)
+            {
                 continue;
+            }
+            if let Some(remove) = reduced.pin_removes.get(&pin.pin_s3_key) {
+                if registry::record_bucket_matched(
+                    &remove.s3_bucket,
+                    effective_bucket,
+                    canonical_bucket,
+                ) {
+                    continue;
+                }
             }
             if pin.name == entry.name
                 && pin.category == entry.category
@@ -178,6 +206,17 @@ pub fn build_entries(reduced: &Reduced) -> Vec<IndexFileEntry> {
                 });
             }
         }
+    }
+    // 索引の意味論は「当該namespace(bucket)で管理されるfile」: 当該bucket一致の
+    // versions[]もpins[]も無いentry(file_write記録のみで他方bucketにしかupload
+    // されていないfile等)はlist/query/diffの対象外として落とす(L-R1)
+    entries.retain(|e| !e.versions.is_empty() || !e.pins.is_empty());
+    // pinsの並びをs3_key(=pin_writesのkey・一意)で確定する: 採用源がHashMapの
+    // iteration order(process毎に不定)のため、sortしないと同一registryからの
+    // 再構築でも索引内容(バイト列)が変わる=index.rebuild-from-registry-per-runの
+    // 冪等(同一内容)を満たさない
+    for e in entries.iter_mut() {
+        e.pins.sort_by(|a, b| a.s3_key.cmp(&b.s3_key));
     }
     entries
 }
@@ -211,26 +250,30 @@ pub fn serialize_index(
 }
 
 /// 索引JSONL平文のparse(読込側)。未知record_type行は警告のうえ無視(前方互換)。
-/// 1行目はindex_header必須。
+/// 1行目はindex_header必須。parse失敗時のerror文には`manage index rebuild`による
+/// 索引再構築の案内を含める(L-6。終了コードは検証エラー4のまま)。
 pub fn parse_index(plain: &str) -> BackupResult<(IndexHeader, Vec<IndexFileEntry>)> {
+    let guidance = "索引の再構築は `backup-remote manage index rebuild` で行えます";
     let mut header: Option<IndexHeader> = None;
     let mut entries: Vec<IndexFileEntry> = Vec::new();
     for (idx, line) in plain.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let value: serde_json::Value = serde_json::from_str(line)
-            .map_err(|e| BackupError::Process(format!("索引の{}行目が不正JSON: {e}", idx + 1)))?;
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+            BackupError::Process(format!("索引の{}行目が不正JSON: {e}。{guidance}", idx + 1))
+        })?;
         match value.get("record_type").and_then(|v| v.as_str()) {
             Some("index_header") => {
-                let h: IndexHeader = serde_json::from_value(value)
-                    .map_err(|e| BackupError::Process(format!("索引headerがschema違反: {e}")))?;
+                let h: IndexHeader = serde_json::from_value(value).map_err(|e| {
+                    BackupError::Process(format!("索引headerがschema違反: {e}。{guidance}"))
+                })?;
                 header = Some(h);
             }
             Some("file") => {
                 let e: IndexFileEntry = serde_json::from_value(value).map_err(|e| {
                     BackupError::Process(format!(
-                        "索引の{}行目のfile entryがschema違反: {e}",
+                        "索引の{}行目のfile entryがschema違反: {e}。{guidance}",
                         idx + 1
                     ))
                 })?;
@@ -244,8 +287,8 @@ pub fn parse_index(plain: &str) -> BackupResult<(IndexHeader, Vec<IndexFileEntry
             }
         }
     }
-    let header =
-        header.ok_or_else(|| BackupError::Process("索引にindex_header行がない".to_string()))?;
+    let header = header
+        .ok_or_else(|| BackupError::Process(format!("索引にindex_header行がない。{guidance}")))?;
     Ok((header, entries))
 }
 
@@ -422,7 +465,7 @@ mod tests {
                 file_upload(&key, "v2", "2026-10-14T21:14:05"),
             ],
         );
-        let entries = build_entries(&reduced);
+        let entries = build_entries(&reduced, "b", "b");
         assert_eq!(entries.len(), 1);
         let e = &entries[0];
         assert_eq!(e.versions.len(), 2);
@@ -471,8 +514,8 @@ mod tests {
             }),
         ];
         let reduced = registry::reduce_records(&records);
-        let entries1 = build_entries(&reduced);
-        let entries2 = build_entries(&reduced);
+        let entries1 = build_entries(&reduced, "b", "b");
+        let entries2 = build_entries(&reduced, "b", "b");
         assert_eq!(entries1, entries2, "冪等");
         assert_eq!(entries1[0].pins.len(), 1);
         assert_eq!(entries1[0].pins[0].pin, "pin-1");
@@ -489,8 +532,113 @@ mod tests {
             s3_bucket: "b".into(),
         }));
         let reduced2 = registry::reduce_records(&records2);
-        let entries3 = build_entries(&reduced2);
+        let entries3 = build_entries(&reduced2, "b", "b");
         assert!(entries3[0].pins.is_empty(), "pin rm後はpinsが空");
+    }
+
+    /// [covers:index.pins-bucket-isolated]
+    /// [covers:index.entries-without-bucket-versions-excluded]
+    /// pins[]の採用・pin_removeの削除済み判定ともbucket一致規則(registry::record_bucket_matched
+    /// と同一)に従う(M-R1)。当該bucketのversions[]・pins[]とも無いentryは索引へ載らない(L-R1)。
+    #[test]
+    fn pins_and_orphan_entries_filtered_by_recorded_bucket() {
+        let wa = file_write("abcd0001", "a.zip", "unfiled", "", "a.zip");
+        let wb = file_write("abcd0002", "b.zip", "unfiled", "", "b.zip");
+        let key_a = wa.s3_key.clone();
+        let key_b = wb.s3_key.clone();
+        let mut up_b = file_upload(&key_b, "v9", "2026-10-14T10:00:00");
+        up_b.identity_hash = "abcd0002".into();
+        up_b.s3_bucket = "other".into(); // b.zipは他方bucketのみへupload
+        let pin_rec = |pin: &str, bucket: &str| PinWriteRecord {
+            schema: 1,
+            record_type: "pin_write".into(),
+            recorded_at: "2026-10-14T23:00:00+09:00".into(),
+            name: "a.zip".into(),
+            category: "unfiled".into(),
+            rel_path: "".into(),
+            folder: "a.zip".into(),
+            pin: pin.into(),
+            pin_s3_key: format!("backup-remote/unfiled/a.zip/{pin}.age"),
+            source_s3_key: key_a.clone(),
+            source_version_id: "v1".into(),
+            date: "2026-10-14".into(),
+            source_sha256: "a".repeat(64),
+            age_sha256: "b".repeat(64),
+            source_size: 100,
+            s3_bucket: bucket.into(),
+            s3_size: 140,
+            s3_checksum_sha256: "c".repeat(43),
+            uploaded_at: "2026-10-14T23:00:00+09:00".into(),
+        };
+        let pin_remove = |pin: &str, bucket: &str| PinRemoveRecord {
+            schema: 1,
+            record_type: "pin_remove".into(),
+            recorded_at: "2026-10-15T09:00:00+09:00".into(),
+            name: "a.zip".into(),
+            pin: pin.into(),
+            pin_s3_key: format!("backup-remote/unfiled/a.zip/{pin}.age"),
+            s3_bucket: bucket.into(),
+        };
+        let base = || {
+            vec![
+                registry::Record::FileWrite(wa.clone()),
+                registry::Record::FileWrite(wb.clone()),
+                registry::Record::FileUpload(file_upload(&key_a, "v1", "2026-10-14T10:00:00")),
+                registry::Record::FileUpload(up_b.clone()),
+                registry::Record::PinWrite(pin_rec("pin-1", "b")),
+                registry::Record::PinWrite(pin_rec("pin-2", "other")),
+            ]
+        };
+        let pin_names = |entries: &[IndexFileEntry], name: &str| -> Vec<String> {
+            entries
+                .iter()
+                .find(|e| e.name == name)
+                .map(|e| e.pins.iter().map(|p| p.pin.clone()).collect())
+                .unwrap_or_default()
+        };
+
+        // 実効=正本=b: a.zip(版あり+pin-1)のみ載る。b.zip(他方bucketのみの版)と
+        // pin-2(他方bucketのpin_write)は載らない
+        let reduced = registry::reduce_records(&base());
+        let entries = build_entries(&reduced, "b", "b");
+        assert_eq!(entries.len(), 1, "当該bucketの版もpinも無いentryは落とす");
+        assert_eq!(entries[0].name, "a.zip");
+        assert_eq!(pin_names(&entries, "a.zip"), vec!["pin-1"]);
+
+        // 他方bucketのpin_removeではpin-1は消えない
+        let mut records = base();
+        records.push(registry::Record::PinRemove(pin_remove("pin-1", "other")));
+        let entries = build_entries(&registry::reduce_records(&records), "b", "b");
+        assert_eq!(pin_names(&entries, "a.zip"), vec!["pin-1"]);
+
+        // 正bucket(実効と一致)のpin_removeで消える(版はあるためentryは残る)
+        let mut records = base();
+        records.push(registry::Record::PinRemove(pin_remove("pin-1", "b")));
+        let entries = build_entries(&registry::reduce_records(&records), "b", "b");
+        assert_eq!(entries.len(), 1, "版があるentryはpinsが空でも残る");
+        assert!(
+            pin_names(&entries, "a.zip").is_empty(),
+            "正bucketのpin_removeで消える"
+        );
+
+        // 実効=other(正本=b): pin-2のみ採用。a.zipは版が無いがpin-2がありentry残置、
+        // b.zipは当該bucketの版が載る。旧記録(s3_bucket空)のpin_writeは正本bucket相当:
+        // 実効=正本なら採用・実効≠正本なら不採用
+        let mut records = base();
+        records.push(registry::Record::PinWrite(pin_rec("pin-3", "")));
+        let entries = build_entries(&registry::reduce_records(&records), "other", "b");
+        assert_eq!(entries.len(), 2, "a.zip(pinsのみ)+b.zip(版あり)");
+        assert_eq!(pin_names(&entries, "a.zip"), vec!["pin-2"]);
+        assert!(
+            entries.iter().any(|e| e.name == "b.zip"),
+            "実効bucket側のb.zip版は載る"
+        );
+        let entries = build_entries(&registry::reduce_records(&records), "b", "b");
+        assert_eq!(
+            pin_names(&entries, "a.zip"),
+            vec!["pin-1", "pin-3"],
+            "s3_bucket欠損(空文字)の旧記録は正本bucket扱いで実効=正本なら採用"
+        );
     }
 
     /// [covers:index.hot-storage-class-upload]

@@ -190,6 +190,38 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
         })
         .collect();
 
+    // 掃除済みrunの除外(M-1): keep_artifacts="run"既定では成功run末尾にdata/out/<batch_id>/
+    // が掃除されるため、file_write記録のage_path実ファイル・run manifest実ファイルは
+    // 存在しない。当該batchのindex_upload成功記録(成功run末尾の索引更新が完了した事実)が
+    // あり・run成果物dirが不在のbatchは「掃除済み・検査対象外」として構造検査・
+    // --checksum・--roundtripの対象から除外する(成功run直後のverifyが必ずexit 4に
+    // ならないように。run成果物が残っているbatchは従来どおり検査対象)。
+    let index_uploaded_batches: std::collections::HashSet<&str> = records
+        .iter()
+        .filter_map(|r| match r {
+            crate::registry::Record::IndexUpload(iu) => Some(iu.run_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let (writes, swept_writes): (Vec<&crate::registry::FileWriteRecord>, Vec<_>) =
+        writes.into_iter().partition(|w| {
+            Path::new(&w.age_path)
+                .parent()
+                .is_some_and(|run_dir| run_dir.is_dir())
+                || !index_uploaded_batches.contains(w.batch_id.as_str())
+        });
+    if !swept_writes.is_empty() {
+        let mut swept_batches: Vec<&str> =
+            swept_writes.iter().map(|w| w.batch_id.as_str()).collect();
+        swept_batches.sort_unstable();
+        swept_batches.dedup();
+        println!(
+            "verify: 掃除済みrun {}件(keep_artifacts=\"run\"の成功run成果物のため構造検査対象外: {})",
+            swept_batches.len(),
+            swept_batches.join(", ")
+        );
+    }
+
     let mut failures: Vec<String> = Vec::new();
 
     // 段階1: 構造検査(2.4-1)。旧経路(encrypt)と新経路(file_write)で同一基準

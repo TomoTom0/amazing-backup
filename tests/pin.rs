@@ -423,3 +423,167 @@ fn backup_push_pin_covers_skip_targets_on_latest() {
         );
     }
 }
+
+/// [covers:pin.push-pin-write-once-violation-skips-file]
+/// backup push --pinのwrite-once違反(M-2): upload済みitemへのpin keyが既に存在する
+/// 場合はrun全体を中断せず警告+当該fileのみpin付与をskipする(skip対象へのpin付与の
+/// 既存挙動と統一)。run末尾のmanifest upload・索引再構築は必ず実行される
+/// (filesがupload+registry記録済みなのに索引staleのまま中断しない)。
+#[test]
+fn push_pin_write_once_violation_skips_file_and_completes_run() {
+    let Some(fx) = StorageFixture::new("pin-wowrite", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"write-once-v1");
+    assert_eq!(fx.push(&[&a], &["--pin", "pm1"], &[]).0, 0);
+    let key = fx.file_key("unfiled", None, "a.zip");
+
+    // 同一pin名で内容変更の再push: pin key既存=write-once違反でもrunは中断しない
+    write_file(&a, b"write-once-v2");
+    clear_calls(&fx);
+    let (code, stdout, stderr) = fx.push(&[&a], &["--pin", "pm1"], &[]);
+    assert_eq!(
+        code, 0,
+        "write-once違反でもrun全体は中断しない(exit 0): {stdout}{stderr}"
+    );
+    let out = format!("{stdout}{stderr}");
+    assert!(
+        out.contains("WARNING") && out.contains("pm1"),
+        "write-once違反の警告表示: {out}"
+    );
+
+    // fileの新version upload・manifest upload・索引更新が行われた(run末尾まで実行)
+    let ids = registry_upload_version_ids(&fx.registry_values(), &key);
+    assert_eq!(ids.len(), 2, "新versionのfile_upload記録: {ids:?}");
+    let calls = fx.calls();
+    assert!(
+        calls
+            .lines()
+            .any(|l| l.starts_with("s3 PutObject") && l.contains(&format!("key={key}"))),
+        "file keyへのPUT: {calls}"
+    );
+    assert!(
+        calls.lines().any(|l| l.contains("/sys/manifests/")),
+        "manifest upload: {calls}"
+    );
+    assert!(
+        calls.lines().any(|l| l.contains("sys/index.jsonl.age")),
+        "索引の再構築+配置: {calls}"
+    );
+    let vids = index_version_ids(index_file_entry(&fx.read_index(), "a.zip"));
+    assert_eq!(vids.len(), 2, "索引versionsに新version反映: {vids:?}");
+}
+
+/// [covers:pin.rm-registry-failure-guides-rebuild]
+/// pin rmのpin_remove記録append失敗時(L-1): error文に`manage index rebuild`による
+/// 回復案内を含める(索引pins[]由来の解決のため再実行は失敗を繰返すため。
+/// 終了コードは従来どおり処理エラー4)。
+#[test]
+fn pin_rm_registry_failure_guides_index_rebuild() {
+    let Some(fx) = StorageFixture::new("pin-rmfail", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"pin-rm-fail");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    pin_add_until_copied(&fx, "a.zip", "pm1");
+
+    // registry.jsonlを追記不能(directory)へ差し替える
+    std::fs::remove_file(&fx.registry).expect("registry.jsonlの削除");
+    std::fs::create_dir(&fx.registry).expect("registry.jsonlをdirectory化");
+
+    let (code, _, stderr) = fx.pin("rm", "a.zip", &["--pin", "pm1"]);
+    assert_eq!(
+        code, 4,
+        "registry記録失敗は処理エラー4(終了コードは従来どおり): {stderr}"
+    );
+    assert!(
+        stderr.contains("manage index rebuild"),
+        "manage index rebuildによる回復案内: {stderr}"
+    );
+}
+
+/// registry.jsonlへpin_remove記録を直接追記する(他方bucket・正bucketの
+/// s3_bucketを持つ記録の混入模倣。M-R1検証用)。
+fn append_pin_remove(fx: &StorageFixture, name: &str, pin: &str, pin_key: &str, bucket: &str) {
+    use std::io::Write as _;
+    let rec = serde_json::json!({
+        "schema": 1,
+        "record_type": "pin_remove",
+        "recorded_at": "2026-10-15T12:00:00+09:00",
+        "name": name,
+        "pin": pin,
+        "pin_s3_key": pin_key,
+        "s3_bucket": bucket,
+    });
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&fx.registry)
+        .expect("registry.jsonlへ追記");
+    writeln!(f, "{rec}").expect("pin_remove記録の追記");
+}
+
+/// 索引file entryのpins[]のpin名一覧(記録順)。
+fn pin_names_of(fx: &StorageFixture, name: &str) -> Vec<String> {
+    index_file_entry(&fx.read_index(), name)
+        .get("pins")
+        .and_then(|p| p.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|p| {
+                    p.get("pin")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// [covers:index.pins-bucket-isolated]
+/// pin_remove記録の削除済み判定はs3_bucket照合を伴う(M-R1): 他方bucketのs3_bucketを
+/// 持つpin_removeではpinは索引から消えず、正bucket(実効bucketと一致)のpin_removeでのみ
+/// 消える。manage index rebuildのpins復元も同一規則で機能する。
+#[test]
+fn pin_remove_matched_by_recorded_bucket() {
+    let Some(fx) = StorageFixture::new("pin-rmbkt", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"pin-remove-bucket");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    pin_add_until_copied(&fx, "a.zip", "pm1");
+    pin_add_until_copied(&fx, "a.zip", "pm2");
+    let key1 = pin_key_of(&fx, "a.zip", "pm1");
+    let key2 = pin_key_of(&fx, "a.zip", "pm2");
+
+    // 他方bucketのs3_bucketを持つpin_removeではpm1は消えない(all-skip pushで索引再構築)
+    append_pin_remove(&fx, "a.zip", "pm1", &key1, "other-bucket");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    assert_eq!(
+        pin_names_of(&fx, "a.zip"),
+        vec!["pm1", "pm2"],
+        "他方bucketのpin_removeではpinは索引に残る"
+    );
+
+    // 正bucket(実効bucket=it-bucketと一致)のpin_removeでpm2が消える
+    append_pin_remove(&fx, "a.zip", "pm2", &key2, "it-bucket");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    assert_eq!(
+        pin_names_of(&fx, "a.zip"),
+        vec!["pm1"],
+        "正bucketのpin_removeで除去される"
+    );
+
+    // manage index rebuildのpins復元も同一規則(索引object喪失からの再構築)
+    std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
+    let (code, stdout, stderr) = fx.manage("index", &["rebuild"]);
+    assert_eq!(code, 0, "manage index rebuildはexit 0: {stdout}{stderr}");
+    assert_eq!(
+        pin_names_of(&fx, "a.zip"),
+        vec!["pm1"],
+        "rebuildのpins復元もbucket一致規則(pm2の正bucket削除のみ反映)"
+    );
+}

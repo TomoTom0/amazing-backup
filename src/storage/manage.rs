@@ -193,8 +193,14 @@ fn cmd_manage_prune(
                 continue; // pin key等は構造的保護
             }
             // listは新しい順に揃える(実装差を吸収するため明示sort・安定)。
-            // 現行(is_latest)を除外した残り=noncurrent(新しい順)
-            vs.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+            // 現行(is_latest)を除外した残り=noncurrent(新しい順)。
+            // 順序はlast_modified_epochの数値比較(L-4: 文字列比較はRFC3339のtimezone
+            // 表記混在等で辞書順と時刻順が食い違うため)
+            vs.sort_by(|a, b| {
+                b.last_modified_epoch
+                    .cmp(&a.last_modified_epoch)
+                    .then_with(|| b.version_id.cmp(&a.version_id))
+            });
             vs.retain(|v| !v.is_latest && !v.is_delete_marker);
             for (i, v) in vs.iter().enumerate() {
                 if i >= keep as usize {
@@ -213,33 +219,36 @@ fn cmd_manage_prune(
             return Ok(0);
         }
         let registry_path = cfg.registry_path.clone();
+        let mut deleted_ok: Vec<(String, String)> = Vec::new();
         for (key, vid) in &deletions {
             session
                 .backend
                 .delete_object_version(&session.aws.bucket, key, vid)?;
             println!("delete {key} version_id={vid}");
+            // 削除成功分をその都度PruneRecordへ記録する(L-2: loop途中の失敗で中断して
+            // も削除済み版が記録に載る=以降の索引再構築で幽霊版が復活しない。
+            // 冪等な再実行で残対象の削除・記録が継続される)
+            registry::append_record(
+                &registry_path,
+                &registry::PruneRecord {
+                    schema: 1,
+                    record_type: "prune".into(),
+                    recorded_at: now_jst(),
+                    category: category.to_string(),
+                    keep,
+                    deleted: vec![registry::PruneDeleted {
+                        s3_key: key.clone(),
+                        version_id: vid.clone(),
+                    }],
+                },
+            )?;
+            deleted_ok.push((key.clone(), vid.clone()));
         }
-        registry::append_record(
-            &registry_path,
-            &registry::PruneRecord {
-                schema: 1,
-                record_type: "prune".into(),
-                recorded_at: now_jst(),
-                category: category.to_string(),
-                keep,
-                deleted: deletions
-                    .iter()
-                    .map(|(k, v)| registry::PruneDeleted {
-                        s3_key: k.clone(),
-                        version_id: v.clone(),
-                    })
-                    .collect(),
-            },
-        )?;
         // 索引の再構築・配置(削除済み版の除外はbuild_entriesがprune記録で行う)
         let records = registry::load_registry(&registry_path)?;
         let reduced = registry::reduce_records(&records);
-        let entries = crate::index::build_entries(&reduced);
+        let entries =
+            crate::index::build_entries(&reduced, &session.aws.bucket, &session.canonical_bucket);
         crate::index::upload_index(
             session.backend.as_ref(),
             &session.aws.bucket,
@@ -250,7 +259,7 @@ fn cmd_manage_prune(
             &now_jst(),
             &registry_path,
         )?;
-        println!("deleted {} version(s)", deletions.len());
+        println!("deleted {} version(s)", deleted_ok.len());
         Ok(0)
     })();
     match run {
@@ -535,15 +544,31 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             .filter_map(|id| entries.remove(&id))
             .collect();
         // pins復元(H-3・設計2.3): ローカルregistryのpin_write記録(未削除)を該当entryへ
-        // 接続する。registry喪失時(完全被災の新環境)はpin情報の補完は行われない
-        // (manifestにpin実体の記録が無いため。list_versions走査での補完はPhase B課題)
+        // 接続する。採用・削除済み判定ともbucket一致(registry::record_bucket_matched。
+        // M-R1: 他方bucketのpin_writeは採用せず・pin_removeもs3_bucket一致するもののみ
+        // 削除済み扱い。索引構築build_entriesと同一規則)。registry喪失時(完全被災の新環境)
+        // はpin情報の補完は行われない(manifestにpin実体の記録が無いため。list_versions
+        // 走査での補完はPhase B課題)
         let registry_path = cfg.registry_path.clone();
         if registry_path.is_file() {
             let records = registry::load_registry(&registry_path)?;
             let reduced_now = registry::reduce_records(&records);
             for pin in reduced_now.pin_writes.values() {
-                if reduced_now.pin_removes.contains_key(&pin.pin_s3_key) {
+                if !registry::record_bucket_matched(
+                    &pin.s3_bucket,
+                    &session.aws.bucket,
+                    &session.canonical_bucket,
+                ) {
                     continue;
+                }
+                if let Some(remove) = reduced_now.pin_removes.get(&pin.pin_s3_key) {
+                    if registry::record_bucket_matched(
+                        &remove.s3_bucket,
+                        &session.aws.bucket,
+                        &session.canonical_bucket,
+                    ) {
+                        continue;
+                    }
                 }
                 if let Some(entry) = entry_list.iter_mut().find(|e| {
                     e.name == pin.name
@@ -561,6 +586,11 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
                         source_size: pin.source_size,
                     });
                 }
+            }
+            // pinsの並びはs3_keyで確定する(採用源HashMapのiteration orderはprocess毎に
+            // 不定。build_entriesと同一の冪等担保)
+            for e in entry_list.iter_mut() {
+                e.pins.sort_by(|a, b| a.s3_key.cmp(&b.s3_key));
             }
         }
         let run_id = entry_list
