@@ -99,7 +99,11 @@ fn dry_run_get_line(bucket: &str, key: &str, dest_part: &Path) -> String {
 
 /// ListObjectsV2(paginator)で`<date>/`prefixのkey一覧を取得する(3.2・軸12)。
 /// Backend実装がkey昇順・重複除去済みを返す。
-fn list_objects(backend: &dyn S3Backend, cfg: &AwsConfig, prefix: &str) -> BackupResult<Vec<String>> {
+fn list_objects(
+    backend: &dyn S3Backend,
+    cfg: &AwsConfig,
+    prefix: &str,
+) -> BackupResult<Vec<String>> {
     backend.list_keys(&cfg.bucket, prefix)
 }
 
@@ -137,7 +141,11 @@ pub(crate) fn sha256_file(path: &Path) -> BackupResult<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// sha256計算(読込失敗・不在はNone。ローカル照合のskip判定用)。
@@ -182,9 +190,7 @@ pub fn run_restore_request(backend: &dyn S3Backend, opts: &RestoreRequestOptions
         }
     };
     if !(1..=365).contains(&days) {
-        eprintln!(
-            "error: 設定・環境エラー: --daysは1〜365の範囲外です: {days}"
-        );
+        eprintln!("error: 設定・環境エラー: --daysは1〜365の範囲外です: {days}");
         return 2;
     }
     // Deep Archiveで選択不可なExpeditedはallowlistに含めない(軸3)
@@ -223,9 +229,7 @@ pub fn run_restore_request(backend: &dyn S3Backend, opts: &RestoreRequestOptions
                 dry_run_restore_line(&opts.aws.bucket, &manifest_key, days, &opts.tier)
             );
         }
-        println!(
-            "-- summary (dry-run): RestoreObject予定(対象key一覧は未確定)"
-        );
+        println!("-- summary (dry-run): RestoreObject予定(対象key一覧は未確定)");
         return 0;
     }
 
@@ -239,7 +243,9 @@ pub fn run_restore_request(backend: &dyn S3Backend, opts: &RestoreRequestOptions
         }
     };
     if keys.is_empty() {
-        println!("WARNING: 当該prefixにobjectなし。--date・bucketを確認してください (prefix: {prefix})");
+        println!(
+            "WARNING: 当該prefixにobjectなし。--date・bucketを確認してください (prefix: {prefix})"
+        );
         return 0;
     }
     // --name突合(発行前。RES-023)
@@ -274,7 +280,9 @@ pub fn run_restore_request(backend: &dyn S3Backend, opts: &RestoreRequestOptions
                     first_err = Some(e.exit_code());
                 }
                 if !opts.keep_going {
-                    println!("-- summary: {requested} requested, {skipped} skipped (restored/ongoing), {failed} failed");
+                    println!(
+                        "-- summary: {requested} requested, {skipped} skipped (restored/ongoing), {failed} failed"
+                    );
                     return e.exit_code();
                 }
                 continue;
@@ -303,7 +311,9 @@ pub fn run_restore_request(backend: &dyn S3Backend, opts: &RestoreRequestOptions
                             first_err = Some(e.exit_code());
                         }
                         if !opts.keep_going {
-                            println!("-- summary: {requested} requested, {skipped} skipped (restored/ongoing), {failed} failed");
+                            println!(
+                                "-- summary: {requested} requested, {skipped} skipped (restored/ongoing), {failed} failed"
+                            );
                             return e.exit_code();
                         }
                     }
@@ -312,7 +322,9 @@ pub fn run_restore_request(backend: &dyn S3Backend, opts: &RestoreRequestOptions
         }
     }
     // 4. summary
-    println!("-- summary: {requested} requested, {skipped} skipped (restored/ongoing), {failed} failed");
+    println!(
+        "-- summary: {requested} requested, {skipped} skipped (restored/ongoing), {failed} failed"
+    );
     first_err.unwrap_or(0)
 }
 
@@ -380,7 +392,9 @@ pub fn run_restore_status(backend: &dyn S3Backend, opts: &RestoreStatusOptions) 
         }
     };
     if listed.is_empty() {
-        println!("WARNING: 当該prefixにobjectなし。--date・bucketを確認してください (prefix: {prefix})");
+        println!(
+            "WARNING: 当該prefixにobjectなし。--date・bucketを確認してください (prefix: {prefix})"
+        );
         return 0;
     }
     let keys = listed;
@@ -485,7 +499,10 @@ pub fn run_restore_download(backend: &dyn S3Backend, opts: &RestoreDownloadOptio
     if opts.dry_run {
         println!("[dry-run] 対象key一覧は未確定(--dateバッチ全件想定・manifestは毎回再取得)");
         let part = part_path(&manifest_age);
-        println!("{}", dry_run_get_line(&opts.aws.bucket, &manifest_key, &part));
+        println!(
+            "{}",
+            dry_run_get_line(&opts.aws.bucket, &manifest_key, &part)
+        );
         let names: Vec<String> = if opts.names.is_empty() {
             vec!["<name>".to_string()]
         } else {
@@ -606,7 +623,12 @@ fn part_path(dest: &Path) -> PathBuf {
 
 /// オブジェクト1件の取得(get→rename。3.4-5c)。失敗時は既存ファイルを保持する。
 /// destの親dirは旧`aws s3 cp`の暗黙作成に合わせて明示作成する。
-fn fetch_object(backend: &dyn S3Backend, cfg: &AwsConfig, key: &str, dest: &Path) -> BackupResult<()> {
+fn fetch_object(
+    backend: &dyn S3Backend,
+    cfg: &AwsConfig,
+    key: &str,
+    dest: &Path,
+) -> BackupResult<()> {
     let part = part_path(dest);
     if let Some(parent) = part.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -633,7 +655,10 @@ fn fetch_object(backend: &dyn S3Backend, cfg: &AwsConfig, key: &str, dest: &Path
 /// parse失敗・batchでない・レコード不在は検証エラー4。
 fn parse_manifest(path: &Path) -> BackupResult<Vec<ManifestRecord>> {
     let text = std::fs::read_to_string(path).map_err(|e| {
-        BackupError::Process(format!("manifest平文の読込に失敗 ({}): {e}", path.display()))
+        BackupError::Process(format!(
+            "manifest平文の読込に失敗 ({}): {e}",
+            path.display()
+        ))
     })?;
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     if lines.is_empty() {
@@ -653,13 +678,21 @@ fn parse_manifest(path: &Path) -> BackupResult<Vec<ManifestRecord>> {
         let name = v
             .get("source_name")
             .and_then(|x| x.as_str())
-            .ok_or_else(|| BackupError::Process("manifestレコードにsource_nameがない".to_string()))?;
-        let source_sha256 = v.get("source_sha256").and_then(|x| x.as_str()).ok_or_else(|| {
-            BackupError::Process(format!("manifestレコードにsource_sha256がない ({name})"))
-        })?;
-        let age_sha256 = v.get("age_sha256").and_then(|x| x.as_str()).ok_or_else(|| {
-            BackupError::Process(format!("manifestレコードにage_sha256がない ({name})"))
-        })?;
+            .ok_or_else(|| {
+                BackupError::Process("manifestレコードにsource_nameがない".to_string())
+            })?;
+        let source_sha256 = v
+            .get("source_sha256")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| {
+                BackupError::Process(format!("manifestレコードにsource_sha256がない ({name})"))
+            })?;
+        let age_sha256 = v
+            .get("age_sha256")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| {
+                BackupError::Process(format!("manifestレコードにage_sha256がない ({name})"))
+            })?;
         records.push(ManifestRecord {
             source_name: name.to_string(),
             source_sha256: source_sha256.to_string(),

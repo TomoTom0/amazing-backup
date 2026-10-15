@@ -4,7 +4,9 @@
 mod common;
 
 use backup_remote::crypto::{decrypt_sha256, encrypt_stream};
-use backup_remote::fingerprint::{parse_age_header, parse_ssh_pubkey, stanza_tag, verify_recipients};
+use backup_remote::fingerprint::{
+    parse_age_header, parse_ssh_pubkey, stanza_tag, verify_recipients,
+};
 use base64::Engine as _;
 use common::*;
 use sha2::{Digest, Sha256};
@@ -39,7 +41,7 @@ fn roundtrip_byte_identical() {
 #[test]
 fn source_sha256_matches_independent() {
     let Some(_dest) = (|| {
-        let age = find_age()?;
+        find_age()?;
         if !ssh_keygen_available() {
             eprintln!("skipping: ssh-keygenが利用できない");
             return None;
@@ -51,8 +53,7 @@ fn source_sha256_matches_independent() {
         let src = tmp.path().join("a.zip");
         write_file(&src, &plain);
         let dest = tmp.path().join("a.zip.age");
-        let result = encrypt_stream(&src, &dest, &[public])
-            .expect("encrypt_stream成功");
+        let result = encrypt_stream(&src, &dest, &[public]).expect("encrypt_stream成功");
         assert_eq!(result.source_sha256, expected, "1pass計算の平文sha256");
         assert_eq!(result.source_size, plain.len() as u64);
         Some(dest)
@@ -79,7 +80,11 @@ fn age_sha256_matches_file() {
         let dest = tmp.path().join("a.zip.age");
         let result = encrypt_stream(&src, &dest, &[public]).expect("encrypt_stream成功");
         let on_disk = std::fs::read(&dest).expect(".age read");
-        assert_eq!(result.age_sha256, sha256_hex(&on_disk), "書込同時計算のage_sha256");
+        assert_eq!(
+            result.age_sha256,
+            sha256_hex(&on_disk),
+            "書込同時計算のage_sha256"
+        );
         assert_eq!(result.age_size, on_disk.len() as u64);
         // recipientsは指紋列
         assert_eq!(result.recipients.len(), 1);
@@ -117,7 +122,12 @@ fn multi_recipient_1of_n() {
             .iter()
             .filter(|s| s.stanza_type == "ssh-ed25519")
             .collect();
-        assert_eq!(ssh_stanzas.len(), 2, "ssh-ed25519 stanzaが2つ: {:?}", header.stanzas);
+        assert_eq!(
+            ssh_stanzas.len(),
+            2,
+            "ssh-ed25519 stanzaが2つ: {:?}",
+            header.stanzas
+        );
 
         // いずれか1鍵で復号できる(1-of-N)
         assert_eq!(age_decrypt(&age, &dest, &sec1), plain, "鍵1で復号可");
@@ -167,24 +177,43 @@ fn header_tags_match_recipients_and_stanza_tag() {
             .iter()
             .filter(|s| s.stanza_type == "ssh-ed25519")
             .collect();
-        assert_eq!(ssh_stanzas.len(), 2, "stanza数==recipient数: {:?}", header.stanzas);
+        assert_eq!(
+            ssh_stanzas.len(),
+            2,
+            "stanza数==recipient数: {:?}",
+            header.stanzas
+        );
 
         for stanza in &ssh_stanzas {
-            assert_eq!(stanza.args.len(), 2, "v1.2形式は<指紋prefix><ephemeral鍵>の2引数");
             assert_eq!(
-                b64.decode(stanza.args[0].as_bytes()).expect("第1引数はb64").len(),
+                stanza.args.len(),
+                2,
+                "v1.2形式は<指紋prefix><ephemeral鍵>の2引数"
+            );
+            assert_eq!(
+                b64.decode(stanza.args[0].as_bytes())
+                    .expect("第1引数はb64")
+                    .len(),
                 4,
                 "第1引数はSHA-256先頭4byteの指紋prefix"
             );
             assert_eq!(
-                b64.decode(stanza.args[1].as_bytes()).expect("第2引数はb64").len(),
+                b64.decode(stanza.args[1].as_bytes())
+                    .expect("第2引数はb64")
+                    .len(),
                 32,
                 "第2引数はephemeral公開鍵32byte"
             );
         }
         let prefixes: Vec<&str> = ssh_stanzas.iter().map(|s| s.args[0].as_str()).collect();
-        assert!(prefixes.contains(&prefix1.as_str()), "鍵1の指紋prefix一致: {prefixes:?}");
-        assert!(prefixes.contains(&prefix2.as_str()), "鍵2の指紋prefix一致: {prefixes:?}");
+        assert!(
+            prefixes.contains(&prefix1.as_str()),
+            "鍵1の指紋prefix一致: {prefixes:?}"
+        );
+        assert!(
+            prefixes.contains(&prefix2.as_str()),
+            "鍵2の指紋prefix一致: {prefixes:?}"
+        );
         Some(())
     })() else {
         return;
@@ -292,7 +321,10 @@ fn large_stream_no_deadlock() {
             Ok(()) => {}
             Err(_) => panic!("暗号化が120s以内に完了しない(デッドロック/停滞疑い)"),
         }
-        let result = handle.join().expect("thread panic").expect("大きな平文も暗号化完結");
+        let result = handle
+            .join()
+            .expect("thread panic")
+            .expect("大きな平文も暗号化完結");
 
         assert_eq!(result.source_size, SIZE as u64);
         assert_eq!(result.source_sha256, expected_plain_sha, "平文sha256");
@@ -303,7 +335,11 @@ fn large_stream_no_deadlock() {
         assert_eq!(decrypted.len(), SIZE);
         let original = std::fs::read(&src).unwrap();
         assert_eq!(&decrypted[..1024], &original[..1024], "先頭一致");
-        assert_eq!(&decrypted[SIZE - 1024..], &original[SIZE - 1024..], "末尾一致");
+        assert_eq!(
+            &decrypted[SIZE - 1024..],
+            &original[SIZE - 1024..],
+            "末尾一致"
+        );
         // decrypt_sha256(lib側)も停滞せず完結する
         assert_eq!(decrypt_sha256(&dest, &secret).unwrap(), expected_plain_sha);
         Some(())

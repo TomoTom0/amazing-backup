@@ -24,10 +24,26 @@ pub enum Command {
     Encrypt(EncryptArgs),
     /// S3 Deep Archiveへの転送
     Upload(UploadArgs),
-    /// ローカル整合検証(明示オプションで復号roundtrip)
+    /// ローカル整合検査(明示オプションで復号roundtrip)
     Verify(VerifyArgs),
     /// S3 Deep Archiveからの復元(発行・状態確認・取得+検証+復号)
     Restore(RestoreArgs),
+    /// 一覧(照会のみ・正引き)
+    List(crate::storage::ListArgs),
+    /// 探索(逆引き・名前/path部分一致)
+    Query(crate::storage::QueryArgs),
+    /// 取得(単一file中心。未復元なら復元job発行を内包)
+    Get(crate::storage::GetArgs),
+    /// 完全性(索引↔S3実態の突合)
+    Diff(crate::storage::DiffArgs),
+    /// 書き込み(push)/一括復元(pull)
+    Backup(crate::storage::BackupArgs),
+    /// ピン留め版の付与/解除
+    Pin(crate::storage::PinArgs),
+    /// 保持・索引・lifecycleの管理
+    Manage(crate::storage::ManageArgs),
+    /// 設定の編集対象表示(検証付き)
+    Edit(crate::storage::EditArgs),
 }
 
 #[derive(clap::Args)]
@@ -70,11 +86,15 @@ fn parse_date_arg(s: &str) -> Result<String, String> {
     let parts: Vec<&str> = s.split('-').collect();
     let ok = parts.len() == 3
         && [parts[0].len(), parts[1].len(), parts[2].len()] == [4, 2, 2]
-        && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
     if ok {
         Ok(s.to_string())
     } else {
-        Err(format!("YYYY-MM-DD形式(半角数字4-2-2)で指定してください: {s}"))
+        Err(format!(
+            "YYYY-MM-DD形式(半角数字4-2-2)で指定してください: {s}"
+        ))
     }
 }
 
@@ -276,10 +296,7 @@ pub(crate) fn format_plan_report(
         targets.len(),
         fmt_size(total)
     ));
-    s.push_str(&format!(
-        "recipients (1-of-N, N={}):\n",
-        recipients.len()
-    ));
+    s.push_str(&format!("recipients (1-of-N, N={}):\n", recipients.len()));
     for (fp, path) in recipients {
         s.push_str(&format!("  - {fp}   {}\n", path.display()));
     }
@@ -420,11 +437,13 @@ pub fn cmd_encrypt(args: &EncryptArgs) -> i32 {
         let age_path = date_dir.join(format!("{}.age", t.source_name));
         // skip判定(2.2-1): registryに同一source(path・size・mtime一致)のencrypt記録があり、
         // その記録が指す出力.ageが存在する場合は再読込せずskip
-        if let Some(rec) =
-            crate::registry::find_match(&reduced, &t.source_path, t.size, &mtime_str)
+        if let Some(rec) = crate::registry::find_match(&reduced, &t.source_path, t.size, &mtime_str)
         {
             if Path::new(&rec.age_path).is_file() {
-                println!("skip  {} (already encrypted: registry match)", t.source_name);
+                println!(
+                    "skip  {} (already encrypted: registry match)",
+                    t.source_name
+                );
                 skipped += 1;
                 continue;
             }
@@ -546,11 +565,10 @@ pub fn cmd_encrypt(args: &EncryptArgs) -> i32 {
                         created_at: crate::targets::format_jst(&crate::targets::now_jst()),
                         recipients: current_fingerprints,
                     };
-                    let built = crate::manifest::build_manifest(&batch_records, &meta).and_then(
-                        |data| {
+                    let built =
+                        crate::manifest::build_manifest(&batch_records, &meta).and_then(|data| {
                             crate::manifest::write_manifest(&manifest_path, &data, &cfg.public_keys)
-                        },
-                    );
+                        });
                     match built {
                         Ok(_) => manifest_ok = true,
                         Err(e) => {
@@ -602,7 +620,11 @@ fn merge_aws_config(
         .clone()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_AWS_CONFIG));
     // 1. load_awsによるtoml読込
-    let aws = match crate::config::load_aws_profile(&aws_config_path, aws_profile.as_deref(), aws_purpose.as_deref()) {
+    let aws = match crate::config::load_aws_profile(
+        &aws_config_path,
+        aws_profile.as_deref(),
+        aws_purpose.as_deref(),
+    ) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: {e}");
@@ -632,7 +654,9 @@ fn merge_aws_config(
 /// 「WARNING: FAKE S3 MODE」を必ず表示する(誤用防御)。
 /// 実S3 backend(`RealS3`)はcredentialファイル(明示API key)・regionから構築する
 /// (credential chain IMDS/env/~/.awsへのfallbackなし・構築失敗は設定エラー2)。
-fn select_backend(aws: &crate::config::AwsConfig) -> BackupResult<Box<dyn crate::s3::S3Backend>> {
+pub(crate) fn select_backend(
+    aws: &crate::config::AwsConfig,
+) -> BackupResult<Box<dyn crate::s3::S3Backend>> {
     warn_endpoint_url_env();
     #[cfg(debug_assertions)]
     {
@@ -687,7 +711,12 @@ pub fn cmd_upload(args: &UploadArgs) -> i32 {
         bucket: args.bucket.clone(),
         region: args.region.clone(),
     };
-    let Some((aws, canonical_bucket)) = merge_aws_config(&args.aws_config, &args.aws_profile, &args.aws_purpose, &overrides) else {
+    let Some((aws, canonical_bucket)) = merge_aws_config(
+        &args.aws_config,
+        &args.aws_profile,
+        &args.aws_purpose,
+        &overrides,
+    ) else {
         return 2;
     };
     let Some(backend) = backend_or_exit(&aws) else {
@@ -721,7 +750,12 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
     let encrypts: Vec<&crate::registry::EncryptRecord> = reduced
         .encrypts
         .iter()
-        .filter(|e| args.date.as_deref().map(|d| e.batch_date == d).unwrap_or(true))
+        .filter(|e| {
+            args.date
+                .as_deref()
+                .map(|d| e.batch_date == d)
+                .unwrap_or(true)
+        })
         .collect();
 
     let mut failures: Vec<String> = Vec::new();
@@ -902,7 +936,9 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
                     ));
                     continue;
                 };
-                if fr.get("source_sha256").and_then(|v| v.as_str()) != Some(rec.source_sha256.as_str()) {
+                if fr.get("source_sha256").and_then(|v| v.as_str())
+                    != Some(rec.source_sha256.as_str())
+                {
                     failures.push(format!(
                         "{}: manifestのsource_sha256がregistryと不一致 ({})",
                         rec.source_path, mp
@@ -944,7 +980,12 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
 /// `--days`/`--tier`の値検証はrun_restore_request内(aws実行前)。
 pub fn cmd_restore_request(args: &RestoreRequestArgs) -> i32 {
     let overrides = restore_aws_overrides(&args.bucket, &args.region);
-    let Some((aws, _)) = merge_aws_config(&args.aws_config, &args.aws_profile, &args.aws_purpose, &overrides) else {
+    let Some((aws, _)) = merge_aws_config(
+        &args.aws_config,
+        &args.aws_profile,
+        &args.aws_purpose,
+        &overrides,
+    ) else {
         return 2;
     };
     let Some(backend) = backend_or_exit(&aws) else {
@@ -965,7 +1006,12 @@ pub fn cmd_restore_request(args: &RestoreRequestArgs) -> i32 {
 /// restore status統括(2.7・TASK-5 3.3)。戻り値はexit code。
 pub fn cmd_restore_status(args: &RestoreStatusArgs) -> i32 {
     let overrides = restore_aws_overrides(&args.bucket, &args.region);
-    let Some((aws, _)) = merge_aws_config(&args.aws_config, &args.aws_profile, &args.aws_purpose, &overrides) else {
+    let Some((aws, _)) = merge_aws_config(
+        &args.aws_config,
+        &args.aws_profile,
+        &args.aws_purpose,
+        &overrides,
+    ) else {
         return 2;
     };
     let Some(backend) = backend_or_exit(&aws) else {
@@ -984,7 +1030,12 @@ pub fn cmd_restore_status(args: &RestoreStatusArgs) -> i32 {
 /// ファイル不在・decrypt_key未設定は「--key未指定」と同扱いの設定エラー2)。
 pub fn cmd_restore_download(args: &RestoreDownloadArgs) -> i32 {
     let overrides = restore_aws_overrides(&args.bucket, &args.region);
-    let Some((aws, _)) = merge_aws_config(&args.aws_config, &args.aws_profile, &args.aws_purpose, &overrides) else {
+    let Some((aws, _)) = merge_aws_config(
+        &args.aws_config,
+        &args.aws_profile,
+        &args.aws_purpose,
+        &overrides,
+    ) else {
         return 2;
     };
     let Some(backend) = backend_or_exit(&aws) else {
@@ -1044,6 +1095,14 @@ pub fn run(argv: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
                 RestoreCommand::Status(s) => cmd_restore_status(s),
                 RestoreCommand::Download(d) => cmd_restore_download(d),
             },
+            Command::List(a) => crate::storage::cmd_list(&a),
+            Command::Query(a) => crate::storage::cmd_query(&a),
+            Command::Get(a) => crate::storage::cmd_get(&a),
+            Command::Diff(a) => crate::storage::cmd_diff(&a),
+            Command::Backup(a) => crate::storage::cmd_backup(&a),
+            Command::Pin(a) => crate::storage::cmd_pin(&a),
+            Command::Manage(a) => crate::storage::cmd_manage(&a),
+            Command::Edit(a) => crate::storage::cmd_edit(&a),
         },
         Err(e) => {
             use clap::error::ErrorKind;
@@ -1065,8 +1124,8 @@ pub fn run(argv: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
 mod tests {
     use super::*;
     use crate::testutil::{
-        path_env_lock, set_path_env, write_file, write_test_ed25519_pub, TempDir,
-        TEST_ED25519_FINGERPRINT,
+        TEST_ED25519_FINGERPRINT, TempDir, path_env_lock, set_path_env, write_file,
+        write_test_ed25519_pub,
     };
 
     fn pipeline_toml(dir: &Path) -> PathBuf {
@@ -1093,8 +1152,12 @@ mod tests {
         let dt = chrono::DateTime::parse_from_rfc3339(jst_rfc3339).expect("rfc3339");
         let t = std::time::SystemTime::UNIX_EPOCH
             + std::time::Duration::from_secs(dt.timestamp().max(0) as u64);
-        let f = std::fs::OpenOptions::new().write(true).open(path).expect("open for set_times");
-        f.set_times(std::fs::FileTimes::new().set_modified(t)).expect("set_times");
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open for set_times");
+        f.set_times(std::fs::FileTimes::new().set_modified(t))
+            .expect("set_times");
     }
 
     /// [covers:cli.usage-error-exit-64]
@@ -1153,7 +1216,10 @@ mod tests {
 
     fn sha256_hex(data: &[u8]) -> String {
         use sha2::Digest;
-        sha2::Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+        sha2::Sha256::digest(data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     /// verify用fixtureの.age内容: 合成ageヘッダ(v1.2形式ssh-ed25519 stanza+`--- `終端+
@@ -1354,10 +1420,7 @@ mod tests {
         let tmp = TempDir::new("cli-verbij-c");
         let _ = verify_fixture_with(
             tmp.path(),
-            &synthetic_age_bytes(&[
-                prefix_of_fingerprint(&right),
-                prefix_of_fingerprint(&wrong),
-            ]),
+            &synthetic_age_bytes(&[prefix_of_fingerprint(&right), prefix_of_fingerprint(&wrong)]),
             &[right.clone()],
         );
         let code = cmd_verify(&VerifyArgs {
@@ -1463,9 +1526,18 @@ mod tests {
             &tmp.path().join("out"),
             "2026-10-08",
         );
-        assert!(report.contains(TEST_ED25519_FINGERPRINT), "指紋表示: {report}");
-        assert!(report.contains(&pubkey.display().to_string()), "公開鍵path表示: {report}");
-        assert!(report.contains("recipients"), "recipient一覧セクション: {report}");
+        assert!(
+            report.contains(TEST_ED25519_FINGERPRINT),
+            "指紋表示: {report}"
+        );
+        assert!(
+            report.contains(&pubkey.display().to_string()),
+            "公開鍵path表示: {report}"
+        );
+        assert!(
+            report.contains("recipients"),
+            "recipient一覧セクション: {report}"
+        );
     }
 
     /// [covers:plan.resolves-positional-targets]
@@ -1487,11 +1559,17 @@ mod tests {
         };
         let report = format_plan_report(
             &[t1, t2],
-            &[(TEST_ED25519_FINGERPRINT.to_string(), tmp.path().join("k.pub"))],
+            &[(
+                TEST_ED25519_FINGERPRINT.to_string(),
+                tmp.path().join("k.pub"),
+            )],
             &tmp.path().join("out"),
             "2026-10-08",
         );
-        assert!(report.contains("photo.zip") && report.contains("docs.7z"), "path: {report}");
+        assert!(
+            report.contains("photo.zip") && report.contains("docs.7z"),
+            "path: {report}"
+        );
         assert!(report.contains("mtime"), "mtime表示: {report}");
         assert!(report.contains("2026-09-30"), "t1のmtime(JST): {report}");
         assert!(report.contains("total"), "合計表示: {report}");
@@ -1524,7 +1602,14 @@ mod tests {
     /// usage error 64(誤記が対象なしexit 0で静かな未upload/未検証になるのを防ぐ)。
     #[test]
     fn date_format_violation_is_usage_error() {
-        for bad in ["2026-1-1", "20260101", "2026/10/01", "2026-10-011", "2026-1-01", "x"] {
+        for bad in [
+            "2026-1-1",
+            "20260101",
+            "2026/10/01",
+            "2026-10-011",
+            "2026-1-01",
+            "x",
+        ] {
             let code = run([
                 "backup-remote".into(),
                 "upload".into(),
@@ -1550,7 +1635,10 @@ mod tests {
             "--config".into(),
             "absent.toml".into(),
         ]);
-        assert_ne!(code, 64, "形式どおりはusage errorでない(設定エラー等の別区分)");
+        assert_ne!(
+            code, 64,
+            "形式どおりはusage errorでない(設定エラー等の別区分)"
+        );
     }
 
     /// [covers:cli.paths-required-usage-error]

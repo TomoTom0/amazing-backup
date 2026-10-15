@@ -87,11 +87,77 @@ pub fn write_manifest(
     public_keys: &[std::path::PathBuf],
 ) -> BackupResult<String> {
     crate::crypto::encrypt_bytes(data, dest, public_keys).map_err(|e| {
-        BackupError::Process(format!(
-            "manifestの暗号化に失敗 ({}): {e}",
-            dest.display()
-        ))
+        BackupError::Process(format!("manifestの暗号化に失敗 ({}): {e}", dest.display()))
     })
+}
+
+// ---------------------------------------------------------------------------
+// TASK-10新経路(backup push)のmanifest V2(設計8.1・F8)
+//
+// 旧`build_manifest`(encrypt時構築・旧encrypt/upload経路が使う)とは分離されており、
+// 新経路はfile upload後に構築する(file recordに実s3_keyとversion_idを記録)。
+
+/// manifest V2のfile record 1件(backup pushのupload済み対象)。
+#[derive(Debug, Clone)]
+pub struct ManifestV2File {
+    pub name: String,
+    pub category: String,
+    pub rel_path: String,
+    pub source_path: String,
+    pub identity_hash: String,
+    pub folder: String,
+    pub s3_key: String,
+    pub version_id: String,
+    pub date: String,
+    pub version_ts: String,
+    pub batch_id: String,
+    pub source_sha256: String,
+    pub age_sha256: String,
+    pub source_size: u64,
+    pub age_size: u64,
+}
+
+/// manifest V2(JSONL平文)の構築。1行目=header・2行目以降=file record。
+/// 平文をdiskに置かず(`encrypt_bytes`へ渡す)運用は旧manifestと同じ。
+pub fn build_manifest_v2(
+    batch_id: &str,
+    created_at: &str,
+    files: &[ManifestV2File],
+) -> BackupResult<String> {
+    let header = serde_json::json!({
+        "schema": 1,
+        "record_type": "manifest_header",
+        "batch_id": batch_id,
+        "created_at": created_at,
+        "file_count": files.len(),
+    });
+    let mut out = String::new();
+    out.push_str(&header.to_string());
+    out.push('\n');
+    for f in files {
+        let rec = serde_json::json!({
+            "schema": 1,
+            "record_type": "file",
+            "name": f.name,
+            "category": f.category,
+            "rel_path": f.rel_path,
+            "source_path": f.source_path,
+            "identity_hash": f.identity_hash,
+            "folder": f.folder,
+            "s3_key": f.s3_key,
+            "version_id": f.version_id,
+            "date": f.date,
+            "version_ts": f.version_ts,
+            "batch_id": f.batch_id,
+            "source_sha256": f.source_sha256,
+            "age_sha256": f.age_sha256,
+            "source_size": f.source_size,
+            "age_size": f.age_size,
+        });
+        out.push_str(&rec.to_string());
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -150,10 +216,22 @@ mod tests {
             assert_eq!(fr["source_name"], records[i].source_name);
             assert_eq!(fr["source_sha256"], records[i].source_sha256);
             assert_eq!(fr["age_sha256"], records[i].age_sha256);
-            assert!(fr.get("batch_id").is_none(), "fileレコードにbatch_idは含めない");
-            assert!(fr.get("manifest_path").is_none(), "fileレコードにmanifest_pathは含めない");
-            assert!(fr.get("recorded_at").is_none(), "fileレコードにrecorded_atは含めない");
-            assert!(fr.get("encrypted_at").is_some(), "fileレコードはencrypted_atを持つ");
+            assert!(
+                fr.get("batch_id").is_none(),
+                "fileレコードにbatch_idは含めない"
+            );
+            assert!(
+                fr.get("manifest_path").is_none(),
+                "fileレコードにmanifest_pathは含めない"
+            );
+            assert!(
+                fr.get("recorded_at").is_none(),
+                "fileレコードにrecorded_atは含めない"
+            );
+            assert!(
+                fr.get("encrypted_at").is_some(),
+                "fileレコードはencrypted_atを持つ"
+            );
         }
     }
 }

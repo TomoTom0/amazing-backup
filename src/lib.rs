@@ -5,10 +5,13 @@ pub mod config;
 pub mod crypto;
 pub mod errors;
 pub mod fingerprint;
+pub mod index;
+pub mod layout;
 pub mod manifest;
 pub mod registry;
 pub mod restore;
 pub mod s3;
+pub mod storage;
 pub mod targets;
 pub mod uploader;
 
@@ -32,8 +35,10 @@ pub(crate) mod testutil {
     impl TempDir {
         pub(crate) fn new(tag: &str) -> TempDir {
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir()
-                .join(format!("backup-remote-unit-{tag}-{}-{n}", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "backup-remote-unit-{tag}-{}-{n}",
+                std::process::id()
+            ));
             std::fs::create_dir_all(&path).expect("unit test temp dir create");
             TempDir(path)
         }

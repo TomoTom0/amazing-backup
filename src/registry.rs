@@ -84,16 +84,185 @@ pub struct ManifestUploadRecord {
     pub uploaded_at: String,
 }
 
+/// `record_type: "file_write"`のレコード(TASK-10設計7.3・新経路のencrypt相当)。
+/// 旧`encrypt`eventとは種別分離されており、旧uploadのpending列挙
+/// (`upload_candidates`は`encrypt`のみ対象)の対象にならない=Phase A干渉防止。
+/// 索引のfile entry源(identity単位・layout情報と実keyを含む)。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileWriteRecord {
+    pub schema: i64,
+    pub record_type: String,
+    pub recorded_at: String,
+    pub batch_id: String,
+    /// `YYYY-MM-DD`(JST暦日・runの日付)
+    pub batch_date: String,
+    pub source_path: String,
+    pub source_name: String,
+    pub source_size: u64,
+    pub source_mtime: String,
+    pub source_sha256: String,
+    pub age_path: String,
+    pub age_size: u64,
+    pub age_sha256: String,
+    pub recipients: Vec<String>,
+    /// TASK-10 layout: 分類解決結果と衝突hash・実key(規約導出でなく記録値が正本)
+    pub category: String,
+    /// 正規化済みrel_path(空=なし)
+    pub rel_path: String,
+    /// sha256(realpath)先頭8hex(identity)
+    pub identity_hash: String,
+    /// folder名(nameまたはname--hash8)
+    pub folder: String,
+    pub s3_key: String,
+}
+
+/// `record_type: "file_upload"`のレコード(TASK-10設計7.3・8.1)。
+/// 索引versions[]の供給源(version_idはS3Backend::put応答)。自足的な版情報を持つ。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileUploadRecord {
+    pub schema: i64,
+    pub record_type: String,
+    pub recorded_at: String,
+    pub batch_id: String,
+    /// 版の暗号化時刻(ISO8601 JST。索引versions[].version_ts)
+    pub version_ts: String,
+    pub name: String,
+    pub category: String,
+    pub rel_path: String,
+    pub identity_hash: String,
+    pub s3_key: String,
+    pub s3_bucket: String,
+    pub s3_region: String,
+    /// S3応答のVersionId(versioning前提)
+    pub version_id: String,
+    pub s3_size: i64,
+    pub s3_checksum_sha256: String,
+    pub s3_checksum_type: String,
+    pub source_sha256: String,
+    pub age_sha256: String,
+    pub source_size: u64,
+    pub age_size: u64,
+    pub uploaded_at: String,
+}
+
+/// `record_type: "manifest"`のレコード(TASK-10設計7.3・新配置のrun manifest upload)。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestV2Record {
+    pub schema: i64,
+    pub record_type: String,
+    pub recorded_at: String,
+    pub batch_id: String,
+    pub s3_key: String,
+    pub s3_bucket: String,
+    pub s3_region: String,
+    pub version_id: String,
+    pub s3_size: i64,
+    pub s3_checksum_sha256: String,
+    pub s3_checksum_type: String,
+    pub uploaded_at: String,
+}
+
+/// `record_type: "index_upload"`のレコード(TASK-10設計2.2・完全性突合と冪等skip用)。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndexUploadRecord {
+    pub schema: i64,
+    pub record_type: String,
+    pub recorded_at: String,
+    pub run_id: String,
+    pub s3_key: String,
+    pub s3_bucket: String,
+    pub version_id: String,
+    pub s3_size: i64,
+    pub s3_checksum_sha256: String,
+    pub s3_checksum_type: String,
+    pub uploaded_at: String,
+}
+
+/// `record_type: "pin_write"`のレコード(TASK-10設計1.3・3.2。索引pins[]の供給源)。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinWriteRecord {
+    pub schema: i64,
+    pub record_type: String,
+    pub recorded_at: String,
+    pub name: String,
+    pub category: String,
+    pub rel_path: String,
+    pub folder: String,
+    pub pin: String,
+    /// pin objectの実key
+    pub pin_s3_key: String,
+    /// 写し元のfile object keyと版
+    pub source_s3_key: String,
+    pub source_version_id: String,
+    /// 写し元版の日付(YYYY-MM-DD)
+    pub date: String,
+    pub source_sha256: String,
+    pub age_sha256: String,
+    pub source_size: u64,
+    pub s3_bucket: String,
+    pub s3_size: i64,
+    pub s3_checksum_sha256: String,
+    pub uploaded_at: String,
+}
+
+/// `record_type: "pin_remove"`のレコード(TASK-10設計3.2。pin rmの実行記録)。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinRemoveRecord {
+    pub schema: i64,
+    pub record_type: String,
+    pub recorded_at: String,
+    pub name: String,
+    pub pin: String,
+    pub pin_s3_key: String,
+    pub s3_bucket: String,
+}
+
+/// `record_type: "prune"`のレコード(TASK-10設計3.2。manage prune --applyの実行記録)。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PruneRecord {
+    pub schema: i64,
+    pub record_type: String,
+    pub recorded_at: String,
+    pub category: String,
+    pub keep: u32,
+    /// 削除した版(対象計算の正本記録)
+    pub deleted: Vec<PruneDeleted>,
+}
+
+/// prune実行の削除対象1件。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PruneDeleted {
+    pub s3_key: String,
+    pub version_id: String,
+}
+
 /// 読込後の既知レコード(未知`record_type`は警告のうえ無視される)。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Record {
     Encrypt(EncryptRecord),
     Upload(UploadRecord),
     ManifestUpload(ManifestUploadRecord),
+    FileWrite(FileWriteRecord),
+    FileUpload(FileUploadRecord),
+    ManifestV2(ManifestV2Record),
+    IndexUpload(IndexUploadRecord),
+    PinWrite(PinWriteRecord),
+    PinRemove(PinRemoveRecord),
+    Prune(PruneRecord),
 }
 
-/// reduce後のregistry状態(4.1 reduce規則)。
+/// reduce後のregistry状態(4.1 reduce規則 + TASK-10新event)。
 /// encryptは`age_path`キーの後勝ち(挿入順保持)・upload状態は`age_path`/`manifest_path`ごとの最新。
+/// TASK-10新event: file_writeはidentity_hashキーの後勝ち・file_uploadは全件保持
+/// (各記録が1版に対応)・pin_write/pin_removeはpin_s3_keyキーの後勝ち。
 #[derive(Debug, Clone, Default)]
 pub struct Reduced {
     /// reduce後のencrypt記録(age_path後勝ち・挿入順保持)
@@ -102,6 +271,20 @@ pub struct Reduced {
     pub uploads: HashMap<String, UploadRecord>,
     /// manifest_pathごとの最新manifest_upload記録
     pub manifest_uploads: HashMap<String, ManifestUploadRecord>,
+    /// identity_hashごとの最新file_write記録(挿入順保持)
+    pub file_writes: Vec<FileWriteRecord>,
+    /// file_upload記録の全件(記録順=時系列。索引versions[]の源)
+    pub file_uploads: Vec<FileUploadRecord>,
+    /// s3_keyごとの最新manifest記録(新配置)
+    pub manifest_v2: HashMap<String, ManifestV2Record>,
+    /// 最新のindex_upload記録
+    pub index_upload: Option<IndexUploadRecord>,
+    /// pin_s3_keyごとの最新pin_write記録
+    pub pin_writes: HashMap<String, PinWriteRecord>,
+    /// pin_s3_keyごとの最新pin_remove記録(存在すればpinは削除済み)
+    pub pin_removes: HashMap<String, PinRemoveRecord>,
+    /// prune実行記録(全件)
+    pub prunes: Vec<PruneRecord>,
 }
 
 /// upload列挙の対象1件(2.3-2)。
@@ -169,7 +352,7 @@ pub fn load_registry(path: &Path) -> BackupResult<Vec<Record>> {
             return Err(BackupError::Process(format!(
                 "registryを読めない ({}) : {e}",
                 path.display()
-            )))
+            )));
         }
     };
     if bytes.is_empty() {
@@ -206,7 +389,10 @@ pub fn load_registry(path: &Path) -> BackupResult<Vec<Record>> {
                 path.display()
             ))
         })?;
-        let record_type = value.get("record_type").and_then(|v| v.as_str()).unwrap_or("");
+        let record_type = value
+            .get("record_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         match record_type {
             "encrypt" => {
                 let rec: EncryptRecord = serde_json::from_value(value).map_err(|e| {
@@ -235,6 +421,69 @@ pub fn load_registry(path: &Path) -> BackupResult<Vec<Record>> {
                 })?;
                 records.push(Record::ManifestUpload(rec));
             }
+            "file_write" => {
+                let rec: FileWriteRecord = serde_json::from_value(value).map_err(|e| {
+                    BackupError::Process(format!(
+                        "registryの{lineno}行目のfile_write記録がschema違反 ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                records.push(Record::FileWrite(rec));
+            }
+            "file_upload" => {
+                let rec: FileUploadRecord = serde_json::from_value(value).map_err(|e| {
+                    BackupError::Process(format!(
+                        "registryの{lineno}行目のfile_upload記録がschema違反 ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                records.push(Record::FileUpload(rec));
+            }
+            "manifest" => {
+                let rec: ManifestV2Record = serde_json::from_value(value).map_err(|e| {
+                    BackupError::Process(format!(
+                        "registryの{lineno}行目のmanifest記録がschema違反 ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                records.push(Record::ManifestV2(rec));
+            }
+            "index_upload" => {
+                let rec: IndexUploadRecord = serde_json::from_value(value).map_err(|e| {
+                    BackupError::Process(format!(
+                        "registryの{lineno}行目のindex_upload記録がschema違反 ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                records.push(Record::IndexUpload(rec));
+            }
+            "pin_write" => {
+                let rec: PinWriteRecord = serde_json::from_value(value).map_err(|e| {
+                    BackupError::Process(format!(
+                        "registryの{lineno}行目のpin_write記録がschema違反 ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                records.push(Record::PinWrite(rec));
+            }
+            "pin_remove" => {
+                let rec: PinRemoveRecord = serde_json::from_value(value).map_err(|e| {
+                    BackupError::Process(format!(
+                        "registryの{lineno}行目のpin_remove記録がschema違反 ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                records.push(Record::PinRemove(rec));
+            }
+            "prune" => {
+                let rec: PruneRecord = serde_json::from_value(value).map_err(|e| {
+                    BackupError::Process(format!(
+                        "registryの{lineno}行目のprune記録がschema違反 ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                records.push(Record::Prune(rec));
+            }
             other => {
                 eprintln!(
                     "WARNING: registryの{lineno}行目は未知のrecord_type({other})のため無視します ({})",
@@ -246,10 +495,11 @@ pub fn load_registry(path: &Path) -> BackupResult<Vec<Record>> {
     Ok(records)
 }
 
-/// reduce規則の適用(4.1)。
+/// reduce規則の適用(4.1 + TASK-10新eventのreduce規則)。
 pub fn reduce_records(records: &[Record]) -> Reduced {
     let mut reduced = Reduced::default();
     let mut encrypt_index: HashMap<String, usize> = HashMap::new();
+    let mut file_write_index: HashMap<String, usize> = HashMap::new();
     for record in records {
         match record {
             Record::Encrypt(e) => match encrypt_index.get(&e.age_path) {
@@ -263,7 +513,34 @@ pub fn reduce_records(records: &[Record]) -> Reduced {
                 reduced.uploads.insert(u.age_path.clone(), u.clone());
             }
             Record::ManifestUpload(m) => {
-                reduced.manifest_uploads.insert(m.manifest_path.clone(), m.clone());
+                reduced
+                    .manifest_uploads
+                    .insert(m.manifest_path.clone(), m.clone());
+            }
+            Record::FileWrite(w) => match file_write_index.get(&w.identity_hash) {
+                Some(&i) => reduced.file_writes[i] = w.clone(),
+                None => {
+                    file_write_index.insert(w.identity_hash.clone(), reduced.file_writes.len());
+                    reduced.file_writes.push(w.clone());
+                }
+            },
+            Record::FileUpload(u) => {
+                reduced.file_uploads.push(u.clone());
+            }
+            Record::ManifestV2(m) => {
+                reduced.manifest_v2.insert(m.s3_key.clone(), m.clone());
+            }
+            Record::IndexUpload(i) => {
+                reduced.index_upload = Some(i.clone());
+            }
+            Record::PinWrite(w) => {
+                reduced.pin_writes.insert(w.pin_s3_key.clone(), w.clone());
+            }
+            Record::PinRemove(r) => {
+                reduced.pin_removes.insert(r.pin_s3_key.clone(), r.clone());
+            }
+            Record::Prune(p) => {
+                reduced.prunes.push(p.clone());
             }
         }
     }
@@ -306,13 +583,17 @@ pub fn pending_uploads_for_bucket(
                 let key = p.local_path.display().to_string();
                 match reduced.uploads.get(&key) {
                     // 当該実効bucketへの前回成功記録がある=未成功ではない
-                    Some(u) => !record_bucket_matched(&u.s3_bucket, effective_bucket, canonical_bucket),
+                    Some(u) => {
+                        !record_bucket_matched(&u.s3_bucket, effective_bucket, canonical_bucket)
+                    }
                     None => true,
                 }
             }
             PendingKind::Manifest { manifest_path } => {
                 match reduced.manifest_uploads.get(manifest_path) {
-                    Some(m) => !record_bucket_matched(&m.s3_bucket, effective_bucket, canonical_bucket),
+                    Some(m) => {
+                        !record_bucket_matched(&m.s3_bucket, effective_bucket, canonical_bucket)
+                    }
                     None => true,
                 }
             }
@@ -393,7 +674,7 @@ fn record_bucket_matched(record_bucket: &str, effective: &str, canonical: &str) 
 mod tests {
     use super::*;
     use crate::errors::BackupError;
-    use crate::testutil::{write_file, TempDir};
+    use crate::testutil::{TempDir, write_file};
 
     fn encrypt_rec(age_path: &str, source_path: &str, batch_date: &str) -> EncryptRecord {
         EncryptRecord {
@@ -463,18 +744,29 @@ mod tests {
         // ファイル不在は空として読める(初回encrypt実行のため)
         assert!(load_registry(&reg).expect("不在registryは空").is_empty());
 
-        append_record(&reg, &encrypt_rec("2026-10-01/a.zip.age", "/data/a.zip", "2026-10-01"))
-            .expect("append 1");
         append_record(
             &reg,
-            &upload_rec("2026-10-01/a.zip.age", "2026-10-01/a.zip.age", "checksumvalue"),
+            &encrypt_rec("2026-10-01/a.zip.age", "/data/a.zip", "2026-10-01"),
+        )
+        .expect("append 1");
+        append_record(
+            &reg,
+            &upload_rec(
+                "2026-10-01/a.zip.age",
+                "2026-10-01/a.zip.age",
+                "checksumvalue",
+            ),
         )
         .expect("append 2");
         let records = load_registry(&reg).expect("読込");
         assert_eq!(records.len(), 2);
         assert_eq!(
             records[0],
-            Record::Encrypt(encrypt_rec("2026-10-01/a.zip.age", "/data/a.zip", "2026-10-01"))
+            Record::Encrypt(encrypt_rec(
+                "2026-10-01/a.zip.age",
+                "/data/a.zip",
+                "2026-10-01"
+            ))
         );
     }
 
@@ -510,7 +802,12 @@ mod tests {
     #[test]
     fn torn_write_excluded_and_bad_json_detected() {
         let tmp = TempDir::new("reg-torn");
-        let good = serde_json::to_string(&encrypt_rec("2026-10-01/a.zip.age", "/data/a.zip", "2026-10-01")).unwrap();
+        let good = serde_json::to_string(&encrypt_rec(
+            "2026-10-01/a.zip.age",
+            "/data/a.zip",
+            "2026-10-01",
+        ))
+        .unwrap();
 
         // 1. 改行終端しない最終行(torn write)は除外され、前行は読み込まれる
         let torn = tmp.path().join("torn.jsonl");
@@ -521,7 +818,10 @@ mod tests {
 
         // 2. 中途の不正JSON行(改行終端あり)は行番号付きProcessError
         let bad = tmp.path().join("bad.jsonl");
-        write_file(&bad, format!("{good}\nnot-json-at-all\n{good}\n").as_bytes());
+        write_file(
+            &bad,
+            format!("{good}\nnot-json-at-all\n{good}\n").as_bytes(),
+        );
         let e = load_registry(&bad).unwrap_err();
         match &e {
             BackupError::Process(msg) => {
@@ -538,11 +838,24 @@ mod tests {
     fn unknown_record_type_is_ignored() {
         let tmp = TempDir::new("reg-unknown");
         let reg = tmp.path().join("registry.jsonl");
-        let e1 = serde_json::to_string(&encrypt_rec("2026-10-01/a.zip.age", "/data/a.zip", "2026-10-01")).unwrap();
-        let u1 = serde_json::to_string(&upload_rec("2026-10-01/a.zip.age", "2026-10-01/a.zip.age", "checksumvalue")).unwrap();
+        let e1 = serde_json::to_string(&encrypt_rec(
+            "2026-10-01/a.zip.age",
+            "/data/a.zip",
+            "2026-10-01",
+        ))
+        .unwrap();
+        let u1 = serde_json::to_string(&upload_rec(
+            "2026-10-01/a.zip.age",
+            "2026-10-01/a.zip.age",
+            "checksumvalue",
+        ))
+        .unwrap();
         write_file(
             &reg,
-            format!("{e1}\n{{\"schema\":2,\"record_type\":\"future_event\",\"detail\":\"x\"}}\n{u1}\n").as_bytes(),
+            format!(
+                "{e1}\n{{\"schema\":2,\"record_type\":\"future_event\",\"detail\":\"x\"}}\n{u1}\n"
+            )
+            .as_bytes(),
         );
 
         let records = load_registry(&reg).expect("未知record_typeは読込errorにしない");
@@ -594,21 +907,41 @@ mod tests {
         let rec = encrypt_rec("2026-10-01/a.zip.age", "/data/a.zip", "2026-10-01");
         let reduced = reduce_records(&[Record::Encrypt(rec.clone())]);
 
-        let hit = find_match(&reduced, Path::new("/data/a.zip"), 100, "2026-10-01T09:00:00+09:00");
+        let hit = find_match(
+            &reduced,
+            Path::new("/data/a.zip"),
+            100,
+            "2026-10-01T09:00:00+09:00",
+        );
         assert_eq!(hit, Some(&rec), "path・size・mtime一致でhit");
 
         assert_eq!(
-            find_match(&reduced, Path::new("/data/a.zip"), 101, "2026-10-01T09:00:00+09:00"),
+            find_match(
+                &reduced,
+                Path::new("/data/a.zip"),
+                101,
+                "2026-10-01T09:00:00+09:00"
+            ),
             None,
             "size変化でmiss"
         );
         assert_eq!(
-            find_match(&reduced, Path::new("/data/a.zip"), 100, "2026-10-01T09:00:01+09:00"),
+            find_match(
+                &reduced,
+                Path::new("/data/a.zip"),
+                100,
+                "2026-10-01T09:00:01+09:00"
+            ),
             None,
             "mtime変化でmiss"
         );
         assert_eq!(
-            find_match(&reduced, Path::new("/data/other.zip"), 100, "2026-10-01T09:00:00+09:00"),
+            find_match(
+                &reduced,
+                Path::new("/data/other.zip"),
+                100,
+                "2026-10-01T09:00:00+09:00"
+            ),
             None,
             "path不一致でmiss"
         );
@@ -632,7 +965,11 @@ mod tests {
             Record::Encrypt(b1a.clone()),
             Record::Encrypt(b1b.clone()),
             Record::Encrypt(b2.clone()),
-            Record::Upload(upload_rec("2026-10-01/b.zip.age", "2026-10-01/b.zip.age", "c1")),
+            Record::Upload(upload_rec(
+                "2026-10-01/b.zip.age",
+                "2026-10-01/b.zip.age",
+                "c1",
+            )),
         ];
         let reduced = reduce_records(&records);
 
@@ -648,7 +985,9 @@ mod tests {
             ],
             "upload済みb.zip.ageは除外・残りはs3_key昇順でmanifestが最後"
         );
-        assert!(matches!(&pending[0].kind, PendingKind::Object { source_name, .. } if source_name == "a.zip"));
+        assert!(
+            matches!(&pending[0].kind, PendingKind::Object { source_name, .. } if source_name == "a.zip")
+        );
         assert!(matches!(&pending[2].kind, PendingKind::Manifest { .. }));
         assert_eq!(pending[0].local_path, PathBuf::from("2026-10-01/a.zip.age"));
 
@@ -656,18 +995,28 @@ mod tests {
         let filtered =
             pending_uploads_for_bucket(&reduced, Some("2026-10-02"), "test-bucket", "test-bucket");
         let keys: Vec<&str> = filtered.iter().map(|p| p.s3_key.as_str()).collect();
-        assert_eq!(keys, vec!["2026-10-02/c.zip.age", "2026-10-02/manifest.jsonl.age"]);
+        assert_eq!(
+            keys,
+            vec!["2026-10-02/c.zip.age", "2026-10-02/manifest.jsonl.age"]
+        );
 
         // 実ファイルの無いmanifestは列挙しない(成功0件バッチ)
         let mut b3 = encrypt_rec("2026-10-03/d.zip.age", "/data/d.zip", "2026-10-03");
-        b3.manifest_path = tmp.path().join("2026-10-03").join("manifest.jsonl.age").display().to_string();
+        b3.manifest_path = tmp
+            .path()
+            .join("2026-10-03")
+            .join("manifest.jsonl.age")
+            .display()
+            .to_string();
         let mut records3 = records.clone();
         records3.push(Record::Encrypt(b3));
         let reduced3 = reduce_records(&records3);
         let pending =
             pending_uploads_for_bucket(&reduced3, Some("2026-10-03"), "test-bucket", "test-bucket");
         assert!(
-            !pending.iter().any(|p| p.s3_key.ends_with("manifest.jsonl.age")),
+            !pending
+                .iter()
+                .any(|p| p.s3_key.ends_with("manifest.jsonl.age")),
             "実ファイルの無いmanifestは列挙されない"
         );
         // 通常オブジェクトは実ファイル不在でも列挙される(run_uploadが対象エラー3とする)
@@ -721,13 +1070,20 @@ mod tests {
 
         // 実効=正本=main-bucket: aは成功済み・d(欠損=正本相当)も成功済み。
         // b(別bucket記録)とc(記録なし)は再upload対象
-        assert_eq!(keys("main-bucket", "main-bucket"), vec!["2026-10-01/b.zip.age", "2026-10-01/c.zip.age"]);
+        assert_eq!(
+            keys("main-bucket", "main-bucket"),
+            vec!["2026-10-01/b.zip.age", "2026-10-01/c.zip.age"]
+        );
 
         // 実効=alt-bucket(CLI一時上書き・正本はmain-bucket): bは成功済み。
         // a(記録main≠alt)・c・d(欠損記録は正本相当のためaltとは不一致)は再upload対象
         assert_eq!(
             keys("alt-bucket", "main-bucket"),
-            vec!["2026-10-01/a.zip.age", "2026-10-01/c.zip.age", "2026-10-01/d.zip.age"]
+            vec![
+                "2026-10-01/a.zip.age",
+                "2026-10-01/c.zip.age",
+                "2026-10-01/d.zip.age"
+            ]
         );
     }
 
@@ -748,7 +1104,10 @@ mod tests {
         let Record::Upload(u) = &records[0] else {
             panic!("upload記録: {records:?}");
         };
-        assert_eq!(u.s3_bucket, "", "欠損はdefault空文字(正本bucket相当として解釈)");
+        assert_eq!(
+            u.s3_bucket, "",
+            "欠損はdefault空文字(正本bucket相当として解釈)"
+        );
         assert_eq!(u.s3_region, "");
     }
 }

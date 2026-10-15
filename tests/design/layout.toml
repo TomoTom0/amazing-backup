@@ -1,0 +1,100 @@
+# backup-remote テスト設計条件書(layout エリア)
+# 出典: tmp/tasks/tm-10/design_s3_storage.md 1章(1.1〜1.4)・4.2・9章素案(TASK-10 S3ストレージ設計)
+# 2026-10-14: TASK-10実装(Phase A)に先立つテスト先行の条件書(新設feature)。
+#   src/layout.rs は設計8.1で新設されるmodule(key生成・分類解決・衝突検出の純関数群・unit test主対象)。
+#   実装前のため条件に対応するテストコードは未作成(網羅検査は警告のみの段階)。
+
+[meta]
+feature = "layout"
+source_file = "src/layout.rs"
+verified = false
+test_command = "cargo test"
+note = "TASK-10(9章素案+設計1章本文)の条件化。key生成は入力(source絶対path・files写像・layout設定)から出力(category・rel_path・衝突検出)を返す純関数で、prefixの連結・1024byte検証もこの層。prefix・category・pin名の検証はconfig.rs(起動時設定検証)からも呼ばれる(検証関数の実体はlayout.rs)"
+
+[[condition]]
+id = "layout.key-generation-manual-mapping"
+target_function = "layout::resolve(key生成)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 1.2(files写像。優先順位1)"
+description = "files写像が最優先: [files.<name>]のcategoryとpathをそのまま用い、key <prefix>/<category>[/<rel_path>]/<name>/default.age が生成される(auto_path_roots相対化・unfiled fallbackより優先) (unit)"
+given = "files写像に category=\"photos\" path=\"2020-2023/travel\" と定義された travel.zip(source_pathはauto_path_rootsにも一致する状態)"
+expect_return = "category=photos・rel_path=2020-2023/travel・key = <prefix>/photos/2020-2023/travel/travel.zip/default.age"
+source_lines = "src/layout.rs:302; tests/layout.rs:11"
+
+[[condition]]
+id = "layout.key-generation-auto-relativize"
+target_function = "layout::resolve(key生成)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 1.2(auto_path_roots相対化。優先順位2)"
+description = "source_pathがいずれかのauto_path_roots配下なら、最初に一致したrootからの相対pathをrel_pathとし、categoryはunfiled_category(既定\"unfiled\")(rootsは順序優先) (unit)"
+given = "auto_path_roots = [\"/home/tomo/data\", \"/home/tomo/data/2020-2023\"](順序優先)かつ source_path = /home/tomo/data/2020-2023/travel/travel.zip"
+expect_return = "category=unfiled_category設定値・rel_path=2020-2023/travel(最初に一致したrootからの相対)・key = <prefix>/<unfiled>/2020-2023/travel/travel.zip/default.age"
+source_lines = "src/layout.rs:327; tests/layout.rs:53"
+
+[[condition]]
+id = "layout.key-generation-fallback-category-only"
+target_function = "layout::resolve(key生成)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 1.2(fallback。優先順位3)"
+description = "いずれのrootにも一致しないsource_pathはrel_pathなし・category=unfiled_category(category直下へ配置) (unit)"
+given = "auto_path_roots配下に無い source_path = /tmp/elsewhere/x.zip"
+expect_return = "category=unfiled_category設定値・rel_pathなし・key = <prefix>/<unfiled>/x.zip/default.age"
+source_lines = "tests/layout.rs:98"
+
+[[condition]]
+id = "layout.key-generation-collision-hash-suffix"
+target_function = "layout::(衝突検出)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 1.2(衝突hash・無hash名帰属)・11章F10-a"
+description = "同一category+rel_path+nameに異なるrealpathが衝突する場合、folder名へ機械識別子 <name>--<hash8>(hash8=sha256(realpath)先頭8hex・決定論的・安定)を付与。無hash名の帰属は決定論的: (a)registry・索引に既存の無hash保持者があればそれが維持され新規参加側にhash付与 (b)同一run内で同時新規の衝突はrealpath辞書順最小の1つのみ無hashを得て残りはhash付き。同一run内・別run間の両方でregistry・索引の既存identityと突合して検出(targets解決時点+uploader事前検査の2段) (unit)"
+given = "別realpath(/a/dup.zip と /b/dup.zip)が同一category+rel_path+nameへ解決される3ケース: 別run(索引に既存無hashあり)・同一run内同時新規・同一run内3件以上"
+expect_return_shape = "hash8はsha256(realpath)先頭8hexで決定論的(同一realpathは常に同一hash)。既存無hash保持者は無hashのままで新規側のみ <name>--<hash8>。同時新規はrealpath辞書順最小のみ無hashで残りはhash付き。衝突検出はregistry・索引の既存identityとの突合で行われる"
+source_lines = "src/layout.rs:359; tests/layout.rs:117"
+
+[[condition]]
+id = "layout.rel-path-normalization"
+target_function = "layout::(rel_path正規化)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 1.2(rel_pathの正規化)"
+description = "rel_path正規化: `.`/`..`要素の排除・空要素除去・path末尾`/`禁止・深さ制限なし(正規化後のrel_pathからkeyを生成) (unit)"
+given = "files写像のpathに \"a/./b/\"・末尾スラッシュ付き \"a/b/\"・空要素を含む \"a//b\" を指定したケース"
+expect_return_shape = "いずれも正規化された rel_path(a/b)からkeyが生成され、生成されるkeyのrel_path部に `.`・`..`要素・空要素・末尾`/`は含まれない"
+source_lines = "tests/layout.rs:186"
+
+[[condition]]
+id = "layout.category-name-validation"
+target_function = "layout::(category名規則検証) / config::load_pipeline"
+source = "tmp/tasks/tm-10/design_s3_storage.md 1.1(sys予約・旧表記_sysも拒否)・4.2(検証規則)"
+description = "category名規則違反(unfiled_category・[categories]・files.categoryの値として不正な名前)と予約語sys(_sys旧表記含む。category名としての使用・files写像のpath先頭での衝突)は設定エラー2。文字規則の具体は設計書に未詳記のため実装taskで確定する(確定値は本条件の期待値へ反映) (unit)"
+given = "category名 _sys・files写像のpath先頭が _sys/ へ衝突する設定・名前規則違反のcategory"
+expect_throw = "ConfigError(exit code 2)"
+source_lines = "src/layout.rs:398; tests/layout.rs:227"
+
+[[condition]]
+id = "layout.pin-name-validation-and-default-reserved"
+target_function = "layout::(pin名規則検証)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 1.3(pin名規則)"
+description = "pin名は ^[a-z0-9][a-z0-9-]{0,62}$(全体63文字上限。日付版名 2026-10-14 も可)。`default`は予約(pin名として不許可)。違反は拒否される(CLI引数の形式検証としてusage error 64。tm-1設計7章の終了コード体系を踏襲) (unit)"
+given = "pin名 default・大文字開始(Abc)・64文字(境界外)・先頭ハイフン(-x)の各ケースと、適正な pre-migration・2026-10-14・63文字のケース"
+expect_return_shape = "規則違反・default予約はusage error(exit 64)で拒否され、適正名は受理される"
+source_lines = "src/layout.rs:422; tests/layout.rs:281"
+
+[[condition]]
+id = "layout.prefix-format-validation"
+target_function = "layout::(prefix形式検証) / config::load_aws"
+source = "tmp/tasks/tm-10/design_s3_storage.md 1.1(prefix規則)・4.2(検証規則)"
+description = "prefix形式: 空でない・`/`終端・先頭`/`禁止・使用文字は`[a-z0-9-]`区切り`/`。違反は設定エラー2 (unit)"
+given = "aws.tomlの[aws.profiles.X].prefixに \"\"(空)・\"backup-remote\"(末尾スラッシュなし)・\"/backup-remote/\"(先頭スラッシュ)・\"Backup_Remote/\"(使用文字違反)を指定した各ケース"
+expect_throw = "ConfigError(exit code 2)"
+source_lines = "src/layout.rs:434; tests/layout.rs:308"
+
+[[condition]]
+id = "layout.key-length-limit-1024"
+target_function = "layout::(key長検証)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 1.2(key長)・11章S3-1"
+description = "key長は生成後に検証し、S3のobject key上限1024 byteを超える場合は対象エラー3(keyとsource_pathを表示・files写像のpath縮約またはauto_path_roots変更を案内) (unit)"
+given = "長いrel_path/files写像pathにより生成keyが1025 byteになるケースと、1024 byteちょうどのケース"
+expect_return_shape = "1025 byteは TargetError(exit code 3)+key・source_path表示+設定変更案内。1024 byteちょうどは受理される"
+source_lines = "src/layout.rs:451; tests/layout.rs:345"
+
+[[excluded]]
+item = "object tagによる保持除外・分類(1.4「tagは使わない」)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 1.4・6章(ピン留め機構の根拠)"
+reason = "不採用の設計判断であり実装・検証対象コードが存在しない(保持の除外は5.2のper-category prefix ruleで構造的に達成。tag filter×versioningの評価セマンティクスの複雑さを回避)。将来要件変更時に再検討"
+decided_at = "2026-10-14"
+decided_by = "claude"

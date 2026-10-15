@@ -42,7 +42,9 @@ fn registry_append_fields() {
         make_archive(&src, 4096);
 
         let (code, stdout, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
             &src.display().to_string(),
         ]);
         assert_eq!(code, 0, "encrypt成功: {stdout}{stderr}");
@@ -53,23 +55,50 @@ fn registry_append_fields() {
         assert_eq!(rec["schema"], 1);
         assert_eq!(rec["record_type"], "encrypt");
         assert_eq!(rec["batch_date"], serde_json::json!(jst_today()), "JST暦日");
-        assert!(rec["recorded_at"].as_str().unwrap().ends_with("+09:00"), "JST ISO8601");
+        assert!(
+            rec["recorded_at"].as_str().unwrap().ends_with("+09:00"),
+            "JST ISO8601"
+        );
         assert_eq!(rec["source_name"], "photo.zip");
         assert_eq!(rec["source_size"], serde_json::json!(4096));
         assert!(rec["source_mtime"].as_str().unwrap().ends_with("+09:00"));
-        assert_eq!(rec["source_sha256"], serde_json::json!(sha256_hex(&std::fs::read(tmp.path().join("photo.zip")).unwrap())));
+        assert_eq!(
+            rec["source_sha256"],
+            serde_json::json!(sha256_hex(
+                &std::fs::read(tmp.path().join("photo.zip")).unwrap()
+            ))
+        );
         let age_file = out.join(jst_today()).join("photo.zip.age");
-        assert_eq!(rec["age_path"], serde_json::json!(age_file.display().to_string()));
-        assert_eq!(rec["age_size"], serde_json::json!(std::fs::metadata(&age_file).unwrap().len()));
-        assert_eq!(rec["age_sha256"], serde_json::json!(sha256_hex(&std::fs::read(&age_file).unwrap())));
+        assert_eq!(
+            rec["age_path"],
+            serde_json::json!(age_file.display().to_string())
+        );
+        assert_eq!(
+            rec["age_size"],
+            serde_json::json!(std::fs::metadata(&age_file).unwrap().len())
+        );
+        assert_eq!(
+            rec["age_sha256"],
+            serde_json::json!(sha256_hex(&std::fs::read(&age_file).unwrap()))
+        );
         let fps = rec["recipients"].as_array().unwrap();
         assert_eq!(fps.len(), 1);
         assert!(fps[0].as_str().unwrap().starts_with("SHA256:"));
         assert_eq!(
             rec["manifest_path"],
-            serde_json::json!(out.join(jst_today()).join("manifest.jsonl.age").display().to_string())
+            serde_json::json!(
+                out.join(jst_today())
+                    .join("manifest.jsonl.age")
+                    .display()
+                    .to_string()
+            )
         );
-        assert!(rec["batch_id"].as_str().unwrap().starts_with(&jst_today().replace('-', "")));
+        assert!(
+            rec["batch_id"]
+                .as_str()
+                .unwrap()
+                .starts_with(&jst_today().replace('-', ""))
+        );
         Some(())
     })() else {
         return;
@@ -100,14 +129,20 @@ fn reencrypt_without_registry_record() {
         assert!(!reg.exists(), "registryはまだ無い");
 
         let (code, stdout, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
             &src.display().to_string(),
         ]);
         assert_eq!(code, 0, "上書き再暗号化でexit 0: {stdout}{stderr}");
 
         let on_disk = std::fs::read(&age_file).unwrap();
         assert_ne!(on_disk, b"TORN-PARTIAL-CONTENT".to_vec(), "上書きされる");
-        assert_eq!(age_decrypt(&age, &age_file, &secret), plain, "新.ageは復号可能");
+        assert_eq!(
+            age_decrypt(&age, &age_file, &secret),
+            plain,
+            "新.ageは復号可能"
+        );
         assert_eq!(read_registry_lines(&reg).len(), 1, "registryへ新記録append");
         Some(())
     })() else {
@@ -133,7 +168,12 @@ fn reencrypt_on_source_change() {
         let src = tmp.path().join("a.zip");
         write_file(&src, b"v1-content");
 
-        let (code, _, stderr) = run_bin(&["encrypt", "--config", &cfg.display().to_string(), &src.display().to_string()]);
+        let (code, _, stderr) = run_bin(&[
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
+            &src.display().to_string(),
+        ]);
         assert_eq!(code, 0, "1回目: {stderr}");
         let first_age = std::fs::read(out.join(jst_today()).join("a.zip.age")).unwrap();
 
@@ -141,7 +181,12 @@ fn reencrypt_on_source_change() {
         std::thread::sleep(std::time::Duration::from_millis(1100));
         write_file(&src, b"v2-content-changed-longer");
 
-        let (code, _, stderr) = run_bin(&["encrypt", "--config", &cfg.display().to_string(), &src.display().to_string()]);
+        let (code, _, stderr) = run_bin(&[
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
+            &src.display().to_string(),
+        ]);
         assert_eq!(code, 0, "2回目: {stderr}");
         let second_age = std::fs::read(out.join(jst_today()).join("a.zip.age")).unwrap();
         assert_ne!(first_age, second_age, "再暗号化される");
@@ -194,8 +239,11 @@ fn manifest_content_roundtrip() {
         write_file(&b, b"manifest-content-BB");
 
         let (code, _, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
-            &a.display().to_string(), &b.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
+            &a.display().to_string(),
+            &b.display().to_string(),
         ]);
         assert_eq!(code, 0, "2件暗号化: {stderr}");
 
@@ -210,14 +258,25 @@ fn manifest_content_roundtrip() {
         assert_eq!(header["record_type"], "batch");
         assert_eq!(header["file_count"], 2);
         assert_eq!(header["total_source_size"], serde_json::json!(19 + 18));
-        assert!(header["recipients"].as_array().unwrap()[0].as_str().unwrap().starts_with("SHA256:"));
+        assert!(
+            header["recipients"].as_array().unwrap()[0]
+                .as_str()
+                .unwrap()
+                .starts_with("SHA256:")
+        );
 
         let recs = read_registry_lines(&reg);
         for (i, line) in lines[1..].iter().enumerate() {
             let fr: serde_json::Value = serde_json::from_str(line).unwrap();
             assert_eq!(fr["record_type"], "file");
-            assert_eq!(fr["source_sha256"], recs[i]["source_sha256"], "registry記録と一致");
-            assert_eq!(fr["age_sha256"], recs[i]["age_sha256"], "registry記録と一致");
+            assert_eq!(
+                fr["source_sha256"], recs[i]["source_sha256"],
+                "registry記録と一致"
+            );
+            assert_eq!(
+                fr["age_sha256"], recs[i]["age_sha256"],
+                "registry記録と一致"
+            );
         }
         Some(())
     })() else {
@@ -255,8 +314,12 @@ fn keep_going_partial_success() {
         }
 
         let (code, stdout, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(), "--keep-going",
-            &ok_src.display().to_string(), &ng_src.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
+            "--keep-going",
+            &ok_src.display().to_string(),
+            &ng_src.display().to_string(),
         ]);
         assert_eq!(code, 4, "最初のエラー区分(処理エラー): {stdout}{stderr}");
 
@@ -297,15 +360,26 @@ fn encrypt_runs_without_aws() {
         let cfg = write_pipeline_toml(tmp.path(), &[public], &out, &reg, None);
         let src = tmp.path().join("a.zip");
         write_file(&src, b"no-aws-encrypt-plain");
-        assert!(!tmp.path().join("aws.toml").exists(), "aws.tomlは配置しない");
+        assert!(
+            !tmp.path().join("aws.toml").exists(),
+            "aws.tomlは配置しない"
+        );
 
         let envs = bin_env_age_only(tmp.path(), "enc");
         let (code, stdout, stderr) = run_bin_env(
-            &["encrypt", "--config", &cfg.display().to_string(), &src.display().to_string()],
+            &[
+                "encrypt",
+                "--config",
+                &cfg.display().to_string(),
+                &src.display().to_string(),
+            ],
             &envs_to_ref(&envs),
         );
         assert_eq!(code, 0, "aws不在でも暗号化完結: {stdout}{stderr}");
-        assert!(out.join(jst_today()).join("a.zip.age").exists(), "成果物あり");
+        assert!(
+            out.join(jst_today()).join("a.zip.age").exists(),
+            "成果物あり"
+        );
         Some(())
     })() else {
         return;
@@ -345,15 +419,21 @@ fn name_override_paths() {
         );
 
         let (code, stdout, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
-            "--from-list", &list.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
+            "--from-list",
+            &list.display().to_string(),
             &other.display().to_string(),
         ]);
         assert_eq!(code, 0, "name overrideで暗号化: {stdout}{stderr}");
 
         let age_file = out.join(jst_today()).join("docs-2025.7z.age");
         assert!(age_file.exists(), "<out>/<date>/<name>.ageに出力");
-        assert!(out.join(jst_today()).join("other.zip.age").exists(), "和集合の位置引数側も出力");
+        assert!(
+            out.join(jst_today()).join("other.zip.age").exists(),
+            "和集合の位置引数側も出力"
+        );
         let lines = read_registry_lines(&reg);
         let override_rec = lines
             .iter()
@@ -370,9 +450,17 @@ fn name_override_paths() {
             })
             .collect();
         let reduced = backup_remote::registry::reduce_records(&records);
-        let pending =
-            backup_remote::registry::pending_uploads_for_bucket(&reduced, None, "it-bucket", "it-bucket");
-        assert!(pending.iter().any(|p| p.s3_key == format!("{}/docs-2025.7z.age", jst_today())));
+        let pending = backup_remote::registry::pending_uploads_for_bucket(
+            &reduced,
+            None,
+            "it-bucket",
+            "it-bucket",
+        );
+        assert!(
+            pending
+                .iter()
+                .any(|p| p.s3_key == format!("{}/docs-2025.7z.age", jst_today()))
+        );
         let _ = override_rec;
         Some(())
     })() else {
@@ -398,12 +486,22 @@ fn rerun_shows_skip() {
         let src = tmp.path().join("a.zip");
         write_file(&src, b"skip-check-plain");
 
-        let (code, _, stderr) = run_bin(&["encrypt", "--config", &cfg.display().to_string(), &src.display().to_string()]);
+        let (code, _, stderr) = run_bin(&[
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
+            &src.display().to_string(),
+        ]);
         assert_eq!(code, 0, "1回目: {stderr}");
         let age_file = out.join(jst_today()).join("a.zip.age");
         let before = std::fs::read(&age_file).unwrap();
 
-        let (code, stdout, stderr) = run_bin(&["encrypt", "--config", &cfg.display().to_string(), &src.display().to_string()]);
+        let (code, stdout, stderr) = run_bin(&[
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
+            &src.display().to_string(),
+        ]);
         assert_eq!(code, 0, "再実行もexit 0: {stderr}");
         assert!(stdout.to_lowercase().contains("skip"), "skip表示: {stdout}");
         assert_eq!(read_registry_lines(&reg).len(), 1, "registry追記なし");
@@ -443,7 +541,9 @@ fn manifest_rebuilt_from_reduced_records() {
 
         // 1回目: aのみ暗号化
         let (code, _, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
             &a.display().to_string(),
         ]);
         assert_eq!(code, 0, "1回目: {stderr}");
@@ -451,8 +551,11 @@ fn manifest_rebuilt_from_reduced_records() {
 
         // 2回目(同日): a skip + b 新規成功
         let (code, stdout, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
-            &a.display().to_string(), &b.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
+            &a.display().to_string(),
+            &b.display().to_string(),
         ]);
         assert_eq!(code, 0, "2回目: {stderr}");
         assert!(stdout.contains("skip"), "aはskip表示: {stdout}");
@@ -463,7 +566,11 @@ fn manifest_rebuilt_from_reduced_records() {
         let plain = age_decrypt(&age, &manifest, &secret);
         let text = String::from_utf8(plain).expect("manifest UTF-8");
         let mlines: Vec<&str> = text.trim_end_matches('\n').split('\n').collect();
-        assert_eq!(mlines.len(), 3, "ヘッダ1 + ファイルレコード2(skip済み含む): {text}");
+        assert_eq!(
+            mlines.len(),
+            3,
+            "ヘッダ1 + ファイルレコード2(skip済み含む): {text}"
+        );
         let header: serde_json::Value = serde_json::from_str(mlines[0]).unwrap();
         assert_eq!(header["file_count"], 2, "skip済みも含むfile_count: {text}");
         let names: Vec<String> = mlines[1..]
@@ -482,8 +589,12 @@ fn manifest_rebuilt_from_reduced_records() {
 
         // verify --roundtripのmanifest突合(reduce後記録との一致)が通る
         let (code, stdout, stderr) = run_bin(&[
-            "verify", "--config", &cfg.display().to_string(),
-            "--roundtrip", "--key", &secret.display().to_string(),
+            "verify",
+            "--config",
+            &cfg.display().to_string(),
+            "--roundtrip",
+            "--key",
+            &secret.display().to_string(),
         ]);
         assert_eq!(code, 0, "manifest突合を含むroundtrip検証: {stdout}{stderr}");
         Some(())
@@ -511,7 +622,9 @@ fn manifest_recovered_when_missing_on_all_skip() {
         let a = tmp.path().join("a.zip");
         write_file(&a, b"manifest-recovery-plain");
         let (code, _, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
             &a.display().to_string(),
         ]);
         assert_eq!(code, 0, "1回目: {stderr}");
@@ -523,13 +636,19 @@ fn manifest_recovered_when_missing_on_all_skip() {
 
         // 全skipの再実行 → manifestが再構築される
         let (code, stdout, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
             &a.display().to_string(),
         ]);
         assert_eq!(code, 0, "全skip再実行: {stdout}{stderr}");
         assert!(stdout.contains("skip"), "skip表示: {stdout}");
         assert!(manifest.exists(), "manifestが再構築されている");
-        assert_eq!(read_registry_lines(&reg).len(), reg_lines_before, "registry追記なし");
+        assert_eq!(
+            read_registry_lines(&reg).len(),
+            reg_lines_before,
+            "registry追記なし"
+        );
 
         let plain = age_decrypt(&age, &manifest, &secret);
         let text = String::from_utf8(plain).expect("manifest UTF-8");
@@ -540,8 +659,12 @@ fn manifest_recovered_when_missing_on_all_skip() {
 
         // verifyのmanifest存在検査・roundtrip突合が通る
         let (code, stdout, stderr) = run_bin(&[
-            "verify", "--config", &cfg.display().to_string(),
-            "--roundtrip", "--key", &secret.display().to_string(),
+            "verify",
+            "--config",
+            &cfg.display().to_string(),
+            "--roundtrip",
+            "--key",
+            &secret.display().to_string(),
         ]);
         assert_eq!(code, 0, "復旧後のverify: {stdout}{stderr}");
         Some(())
@@ -569,7 +692,9 @@ fn dry_run_notes_missing_file_targets() {
         let a = tmp.path().join("a.zip");
         write_file(&a, b"dry-run-missing-plain");
         let (code, _, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
             &a.display().to_string(),
         ]);
         assert_eq!(code, 0, "encrypt: {stderr}");
@@ -590,7 +715,14 @@ fn dry_run_notes_missing_file_targets() {
         let envs: Vec<(&str, &str)> = vec![("BACKUP_REMOTE_FAKE_S3_STATE", state_dir.as_str())];
 
         let (code, stdout, stderr) = run_bin_env(
-            &["upload", "--config", &cfg.display().to_string(), "--aws-config", &aws_toml.display().to_string(), "--dry-run"],
+            &[
+                "upload",
+                "--config",
+                &cfg.display().to_string(),
+                "--aws-config",
+                &aws_toml.display().to_string(),
+                "--dry-run",
+            ],
             &envs,
         );
         assert_eq!(code, 0, "dry-runはexit 0: {stdout}{stderr}");
@@ -599,11 +731,15 @@ fn dry_run_notes_missing_file_targets() {
             "不在対象の注記表示: {stdout}"
         );
         assert!(
-            !stdout.lines().any(|l| l.contains("[dry-run] s3 PutObject") && l.contains("a.zip.age")),
+            !stdout
+                .lines()
+                .any(|l| l.contains("[dry-run] s3 PutObject") && l.contains("a.zip.age")),
             "不在対象のPutObject予定行は表示しない: {stdout}"
         );
         assert!(
-            stdout.lines().any(|l| l.contains("[dry-run]") && l.contains("manifest.jsonl.age")),
+            stdout
+                .lines()
+                .any(|l| l.contains("[dry-run]") && l.contains("manifest.jsonl.age")),
             "在る対象のPutObject予定は表示: {stdout}"
         );
         // S3 API呼び出し(HeadObject/PutObject)は一切起きない
@@ -640,8 +776,11 @@ fn upload_via_fake_aws_stateful_simulator() {
         write_file(&a, b"fake-aws-plain-A");
         write_file(&b, b"fake-aws-plain-B");
         let (code, _, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
-            &a.display().to_string(), &b.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
+            &a.display().to_string(),
+            &b.display().to_string(),
         ]);
         assert_eq!(code, 0, "encrypt: {stderr}");
 
@@ -659,7 +798,13 @@ fn upload_via_fake_aws_stateful_simulator() {
         let envs: Vec<(&str, &str)> = vec![("BACKUP_REMOTE_FAKE_S3_STATE", state_dir.as_str())];
 
         let (code, stdout, stderr) = run_bin_env(
-            &["upload", "--config", &cfg.display().to_string(), "--aws-config", &aws_toml.display().to_string()],
+            &[
+                "upload",
+                "--config",
+                &cfg.display().to_string(),
+                "--aws-config",
+                &aws_toml.display().to_string(),
+            ],
             &envs,
         );
         assert_eq!(code, 0, "upload成功: {stdout}{stderr}");
@@ -668,9 +813,18 @@ fn upload_via_fake_aws_stateful_simulator() {
         let age_a = std::fs::read(out.join(&date).join("a.zip.age")).unwrap();
         let age_b = std::fs::read(out.join(&date).join("b.7z.age")).unwrap();
         let age_m = std::fs::read(out.join(&date).join("manifest.jsonl.age")).unwrap();
-        assert_eq!(std::fs::read(state.join("objects").join(&date).join("a.zip.age")).unwrap(), age_a);
-        assert_eq!(std::fs::read(state.join("objects").join(&date).join("b.7z.age")).unwrap(), age_b);
-        assert_eq!(std::fs::read(state.join("objects").join(&date).join("manifest.jsonl.age")).unwrap(), age_m);
+        assert_eq!(
+            std::fs::read(state.join("objects").join(&date).join("a.zip.age")).unwrap(),
+            age_a
+        );
+        assert_eq!(
+            std::fs::read(state.join("objects").join(&date).join("b.7z.age")).unwrap(),
+            age_b
+        );
+        assert_eq!(
+            std::fs::read(state.join("objects").join(&date).join("manifest.jsonl.age")).unwrap(),
+            age_m
+        );
 
         // PutObject呼び出し参数とmanifest最後(README配置(2.3-7)のPutObject行はUPL-020系testで検証するため除外)
         let calls = read_calls(&state);
@@ -679,23 +833,61 @@ fn upload_via_fake_aws_stateful_simulator() {
             .filter(|l| l.starts_with("s3 PutObject") && !l.contains("RESTORE_README.txt"))
             .collect();
         assert_eq!(put_lines.len(), 3, "PutObject 3回: {calls}");
-        assert!(put_lines.iter().all(|l| l.contains("storage_class=DEEP_ARCHIVE")), "storage_class: {calls}");
-        assert!(put_lines.iter().all(|l| l.contains("checksum=SHA256")), "checksum_algorithm SHA256: {calls}");
-        assert!(put_lines.iter().all(|l| l.contains("bucket=it-bucket")), "bucket参数: {calls}");
-        assert!(put_lines.iter().all(|l| l.contains(&format!("key={date}/"))), "key参数: {calls}");
-        assert!(put_lines[2].contains("manifest.jsonl.age"), "manifestが最後: {calls}");
+        assert!(
+            put_lines
+                .iter()
+                .all(|l| l.contains("storage_class=DEEP_ARCHIVE")),
+            "storage_class: {calls}"
+        );
+        assert!(
+            put_lines.iter().all(|l| l.contains("checksum=SHA256")),
+            "checksum_algorithm SHA256: {calls}"
+        );
+        assert!(
+            put_lines.iter().all(|l| l.contains("bucket=it-bucket")),
+            "bucket参数: {calls}"
+        );
+        assert!(
+            put_lines
+                .iter()
+                .all(|l| l.contains(&format!("key={date}/"))),
+            "key参数: {calls}"
+        );
+        assert!(
+            put_lines[2].contains("manifest.jsonl.age"),
+            "manifestが最後: {calls}"
+        );
 
         // registry記録(S3側実測値 = sha256 base64)
         let lines = read_registry_lines(&reg);
-        let uploads: Vec<&serde_json::Value> = lines.iter().filter(|l| l["record_type"] == "upload").collect();
-        let mus: Vec<&serde_json::Value> = lines.iter().filter(|l| l["record_type"] == "manifest_upload").collect();
+        let uploads: Vec<&serde_json::Value> = lines
+            .iter()
+            .filter(|l| l["record_type"] == "upload")
+            .collect();
+        let mus: Vec<&serde_json::Value> = lines
+            .iter()
+            .filter(|l| l["record_type"] == "manifest_upload")
+            .collect();
         assert_eq!(uploads.len(), 2);
         assert_eq!(mus.len(), 1);
-        let keys: Vec<&str> = uploads.iter().map(|r| r["s3_key"].as_str().unwrap()).collect();
-        assert!(keys.contains(&format!("{date}/a.zip.age").as_str()), "キー配置: {keys:?}");
-        assert!(keys.contains(&format!("{date}/b.7z.age").as_str()), "キー配置: {keys:?}");
+        let keys: Vec<&str> = uploads
+            .iter()
+            .map(|r| r["s3_key"].as_str().unwrap())
+            .collect();
+        assert!(
+            keys.contains(&format!("{date}/a.zip.age").as_str()),
+            "キー配置: {keys:?}"
+        );
+        assert!(
+            keys.contains(&format!("{date}/b.7z.age").as_str()),
+            "キー配置: {keys:?}"
+        );
         for rec in &uploads {
-            let bytes = if rec["s3_key"].as_str().unwrap().ends_with("a.zip.age") { &age_a } else { &age_b };
+            let bytes = if rec["s3_key"].as_str().unwrap().ends_with("a.zip.age") {
+                &age_a
+            } else {
+                &age_b
+            };
             assert_eq!(rec["s3_size"].as_i64(), Some(bytes.len() as i64));
             let want = sha256_b64(bytes);
             assert_eq!(rec["s3_checksum_sha256"].as_str(), Some(want.as_str()));
@@ -704,14 +896,31 @@ fn upload_via_fake_aws_stateful_simulator() {
             assert_eq!(rec["s3_bucket"], "it-bucket", "実効bucket記録: {rec}");
             assert_eq!(rec["s3_region"], "ap-northeast-1", "実効region記録: {rec}");
         }
-        assert_eq!(mus[0]["s3_key"], serde_json::json!(format!("{date}/manifest.jsonl.age")));
-        assert_eq!(mus[0]["s3_bucket"], "it-bucket", "manifest_upload記録の実効bucket: {}", mus[0]);
-        assert_eq!(mus[0]["s3_region"], "ap-northeast-1", "manifest_upload記録の実効region: {}", mus[0]);
+        assert_eq!(
+            mus[0]["s3_key"],
+            serde_json::json!(format!("{date}/manifest.jsonl.age"))
+        );
+        assert_eq!(
+            mus[0]["s3_bucket"], "it-bucket",
+            "manifest_upload記録の実効bucket: {}",
+            mus[0]
+        );
+        assert_eq!(
+            mus[0]["s3_region"], "ap-northeast-1",
+            "manifest_upload記録の実効region: {}",
+            mus[0]
+        );
 
         // 再実行: 全対象upload済み → exit 0・PutObjectは増えない(対象なし。READMEのskipはUPL-021系testで検証)
         let put_count_before = put_lines.len();
         let (code, stdout, stderr) = run_bin_env(
-            &["upload", "--config", &cfg.display().to_string(), "--aws-config", &aws_toml.display().to_string()],
+            &[
+                "upload",
+                "--config",
+                &cfg.display().to_string(),
+                "--aws-config",
+                &aws_toml.display().to_string(),
+            ],
             &envs,
         );
         assert_eq!(code, 0, "再実行exit 0: {stdout}{stderr}");
@@ -720,7 +929,10 @@ fn upload_via_fake_aws_stateful_simulator() {
             .lines()
             .filter(|l| l.starts_with("s3 PutObject") && !l.contains("RESTORE_README.txt"))
             .count();
-        assert_eq!(put_count_after, put_count_before, "skip判定でPutObjectは再実行されない");
+        assert_eq!(
+            put_count_after, put_count_before,
+            "skip判定でPutObjectは再実行されない"
+        );
         Some(())
     })() else {
         return;
@@ -777,7 +989,9 @@ impl UploadOverrideFixture {
         let a = tmp.path().join("a.zip");
         write_file(&a, b"cli-override-plain");
         let (code, _, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
             &a.display().to_string(),
         ]);
         assert_eq!(code, 0, "encrypt: {stderr}");
@@ -790,7 +1004,13 @@ impl UploadOverrideFixture {
             &aws_toml,
             aws_toml_body("it-bucket", "ap-northeast-1", &creds, storage_class).as_bytes(),
         );
-        Some(Self { tmp, cfg, aws_toml, registry, state })
+        Some(Self {
+            tmp,
+            cfg,
+            aws_toml,
+            registry,
+            state,
+        })
     }
 
     /// fake S3 backend seam環境でuploadを実行し(exit code, stdout, stderr)を返す。
@@ -799,11 +1019,7 @@ impl UploadOverrideFixture {
     }
 
     /// 追加の環境変数(FAKE_S3_FAIL_CP_FOR等)も渡してuploadを実行する(UPL-022の失敗注入)。
-    fn upload_env(
-        &self,
-        cli_args: &[&str],
-        extra_env: &[(&str, &str)],
-    ) -> (i32, String, String) {
+    fn upload_env(&self, cli_args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
         upload_with_fake_aws(&self.cfg, &self.aws_toml, &self.state, cli_args, extra_env)
     }
 
@@ -830,15 +1046,20 @@ fn cli_override_reflected_in_aws_argv_and_help_text() {
         return;
     };
     let (code, stdout, stderr) = fx.upload(&[
-        "--storage-class", "GLACIER",
-        "--bucket", "alt-bucket",
-        "--region", "us-east-1",
+        "--storage-class",
+        "GLACIER",
+        "--bucket",
+        "alt-bucket",
+        "--region",
+        "us-east-1",
     ]);
     assert_eq!(code, 0, "上書き付きupload成功: {stdout}{stderr}");
 
     let calls = fx.calls();
-    let head_lines: Vec<&str> =
-        calls.lines().filter(|l| l.starts_with("s3 HeadObject")).collect();
+    let head_lines: Vec<&str> = calls
+        .lines()
+        .filter(|l| l.starts_with("s3 HeadObject"))
+        .collect();
     // README配置(2.3-7)のPutObject行(storage_class=STANDARD固定)はUPL-020系testで検証するため除外
     let put_lines: Vec<&str> = calls
         .lines()
@@ -850,10 +1071,15 @@ fn cli_override_reflected_in_aws_argv_and_help_text() {
     );
     // bucketはHeadObject/PutObject呼び出しのbucket参数で検証(SDKはURIでなくbucket/key参数)
     for l in head_lines.iter().chain(put_lines.iter()) {
-        assert!(l.contains("bucket=alt-bucket"), "HeadObject/PutObjectのbucketへ反映: {calls}");
+        assert!(
+            l.contains("bucket=alt-bucket"),
+            "HeadObject/PutObjectのbucketへ反映: {calls}"
+        );
     }
     assert!(
-        put_lines.iter().all(|l| l.contains("storage_class=GLACIER")),
+        put_lines
+            .iter()
+            .all(|l| l.contains("storage_class=GLACIER")),
         "PutObjectのstorage_classへ反映: {calls}"
     );
     assert!(
@@ -885,7 +1111,10 @@ fn cli_override_reflected_in_aws_argv_and_help_text() {
         stdout.contains("CLI指定値 > aws.toml値"),
         "help説明文(優先順位): {stdout}"
     );
-    assert!(stdout.contains("aws.tomlが正本"), "help説明文(正本): {stdout}");
+    assert!(
+        stdout.contains("aws.tomlが正本"),
+        "help説明文(正本): {stdout}"
+    );
 }
 
 /// [covers:upload.cli-override-unspecified-keeps-toml-values]
@@ -901,8 +1130,10 @@ fn cli_override_unspecified_keeps_toml_values() {
     assert_eq!(code, 0, "部分上書きupload成功: {stdout}{stderr}");
 
     let calls = fx.calls();
-    let head_lines: Vec<&str> =
-        calls.lines().filter(|l| l.starts_with("s3 HeadObject")).collect();
+    let head_lines: Vec<&str> = calls
+        .lines()
+        .filter(|l| l.starts_with("s3 HeadObject"))
+        .collect();
     // README配置(2.3-7)のPutObject行(storage_class=STANDARD固定)はUPL-020系testで検証するため除外
     let put_lines: Vec<&str> = calls
         .lines()
@@ -914,7 +1145,9 @@ fn cli_override_unspecified_keeps_toml_values() {
     );
     // 指定したstorage-classのみ上書きされる
     assert!(
-        put_lines.iter().all(|l| l.contains("storage_class=STANDARD")),
+        put_lines
+            .iter()
+            .all(|l| l.contains("storage_class=STANDARD")),
         "上書き項目はCLI値: {calls}"
     );
     // 未指定項目はaws.toml値(bucket: HeadObject/PutObjectのbucket参数で検証。
@@ -961,7 +1194,9 @@ fn cli_storage_class_override_allowlist() {
         .collect();
     assert!(!put_lines.is_empty(), "PutObject実行: {calls}");
     assert!(
-        put_lines.iter().all(|l| l.contains("storage_class=DEEP_ARCHIVE")),
+        put_lines
+            .iter()
+            .all(|l| l.contains("storage_class=DEEP_ARCHIVE")),
         "aws.tomlのstorage_class値を採用: {calls}"
     );
 
@@ -978,7 +1213,8 @@ fn cli_storage_class_override_allowlist() {
         .collect();
     assert!(!put2.is_empty(), "PutObject実行: {calls2}");
     assert!(
-        put2.iter().all(|l| l.contains("storage_class=DEEP_ARCHIVE")),
+        put2.iter()
+            .all(|l| l.contains("storage_class=DEEP_ARCHIVE")),
         "aws.tomlのstorage_class値を採用: {calls2}"
     );
 }
@@ -994,7 +1230,10 @@ fn cli_bucket_region_blank_override_rejected() {
     for arg in ["--bucket", "--region"] {
         for invalid in ["", " ", " padded-value "] {
             let (code, stdout, stderr) = fx.upload(&[arg, invalid]);
-            assert_eq!(code, 2, "{arg}の不正値({invalid:?})はexit 2: {stdout}{stderr}");
+            assert_eq!(
+                code, 2,
+                "{arg}の不正値({invalid:?})はexit 2: {stdout}{stderr}"
+            );
         }
     }
     assert_eq!(fx.calls(), "", "S3 API呼び出しは一切行われない");
@@ -1011,23 +1250,37 @@ fn cli_override_with_dry_run_shows_planned_command() {
     };
     let (code, stdout, stderr) = fx.upload(&[
         "--dry-run",
-        "--storage-class", "GLACIER",
-        "--bucket", "alt-bucket",
-        "--region", "us-east-1",
+        "--storage-class",
+        "GLACIER",
+        "--bucket",
+        "alt-bucket",
+        "--region",
+        "us-east-1",
     ]);
     assert_eq!(code, 0, "dry-run併用はexit 0: {stdout}{stderr}");
     // README配置予定行(storage_class=STANDARD固定。2.3-7)はUPL-020系testで検証するため除外
     let planned: Vec<&str> = stdout
         .lines()
         .filter(|l| {
-            l.contains("[dry-run]") && l.contains("s3 PutObject") && !l.contains("RESTORE_README.txt")
+            l.contains("[dry-run]")
+                && l.contains("s3 PutObject")
+                && !l.contains("RESTORE_README.txt")
         })
         .collect();
     assert!(!planned.is_empty(), "実行予定のPutObject行表示: {stdout}");
     for l in &planned {
-        assert!(l.contains("storage_class=GLACIER"), "予定行へstorage_class反映: {stdout}");
-        assert!(l.contains("bucket=alt-bucket"), "予定行へbucket反映: {stdout}");
-        assert!(l.contains("checksum=SHA256"), "予定行へchecksum指定: {stdout}");
+        assert!(
+            l.contains("storage_class=GLACIER"),
+            "予定行へstorage_class反映: {stdout}"
+        );
+        assert!(
+            l.contains("bucket=alt-bucket"),
+            "予定行へbucket反映: {stdout}"
+        );
+        assert!(
+            l.contains("checksum=SHA256"),
+            "予定行へchecksum指定: {stdout}"
+        );
     }
     assert_eq!(fx.calls(), "", "S3 APIは呼ばれない");
 }

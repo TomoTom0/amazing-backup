@@ -23,7 +23,9 @@ fn encrypted_env(tag: &str, plain: &[u8]) -> Option<(PathBuf, PathBuf, PathBuf, 
     let src = tmp.path().join("a.zip");
     write_file(&src, plain);
     let (code, _, stderr) = run_bin(&[
-        "encrypt", "--config", &cfg.display().to_string(),
+        "encrypt",
+        "--config",
+        &cfg.display().to_string(),
         &src.display().to_string(),
     ]);
     assert_eq!(code, 0, "下準備の暗号化: {stderr}");
@@ -39,8 +41,12 @@ fn roundtrip_sha256_match() {
             encrypted_env("vr-match", b"verify-roundtrip-plaintext")?;
 
         let (code, stdout, stderr) = run_bin(&[
-            "verify", "--config", &cfg.display().to_string(),
-            "--roundtrip", "--key", &secret.display().to_string(),
+            "verify",
+            "--config",
+            &cfg.display().to_string(),
+            "--roundtrip",
+            "--key",
+            &secret.display().to_string(),
         ]);
         assert_eq!(code, 0, "roundtrip検証成功: {stdout}{stderr}");
         Some(())
@@ -68,15 +74,21 @@ fn roundtrip_wrong_key_is_process_error() {
         let src = tmp.path().join("a.zip");
         write_file(&src, b"wrong-key-plaintext");
         let (code, _, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
             &src.display().to_string(),
         ]);
         assert_eq!(code, 0, "下準備: {stderr}");
         let _ = wrong_pub;
 
         let (code, stdout, stderr) = run_bin(&[
-            "verify", "--config", &cfg.display().to_string(),
-            "--roundtrip", "--key", &wrong_secret.display().to_string(),
+            "verify",
+            "--config",
+            &cfg.display().to_string(),
+            "--roundtrip",
+            "--key",
+            &wrong_secret.display().to_string(),
         ]);
         assert_eq!(code, 4, "誤鍵は処理エラー4: {stdout}{stderr}");
         Some(())
@@ -103,7 +115,9 @@ fn roundtrip_manifest_crosscheck_detects_mismatch() {
         let src = tmp.path().join("a.zip");
         write_file(&src, b"manifest-crosscheck-plain");
         let (code, _, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
             &src.display().to_string(),
         ]);
         assert_eq!(code, 0, "下準備: {stderr}");
@@ -125,8 +139,12 @@ fn roundtrip_manifest_crosscheck_detects_mismatch() {
         age_encrypt_bytes(&age, &[public], text.as_bytes(), &manifest);
 
         let (code, stdout, stderr) = run_bin(&[
-            "verify", "--config", &cfg.display().to_string(),
-            "--roundtrip", "--key", &secret.display().to_string(),
+            "verify",
+            "--config",
+            &cfg.display().to_string(),
+            "--roundtrip",
+            "--key",
+            &secret.display().to_string(),
         ]);
         assert_eq!(code, 4, "manifest突合不一致を検出: {stdout}{stderr}");
         Some(())
@@ -155,7 +173,9 @@ fn decrypt_error_includes_age_stderr() {
         let src = tmp.path().join("a.zip");
         write_file(&src, b"decrypt-stderr-plain");
         let (code, _, stderr) = run_bin(&[
-            "encrypt", "--config", &cfg.display().to_string(),
+            "encrypt",
+            "--config",
+            &cfg.display().to_string(),
             &src.display().to_string(),
         ]);
         assert_eq!(code, 0, "下準備: {stderr}");
@@ -190,14 +210,12 @@ fn structure_check_recipient_bijection_with_real_age() {
             encrypted_env("vr-bijection", b"recipient-bijection-plain")?;
 
         // 正recipient: 実ageが生成したヘッダと記録指紋が対応 → 構造検査はexit 0
-        let (code, stdout, stderr) =
-            run_bin(&["verify", "--config", &cfg.display().to_string()]);
+        let (code, stdout, stderr) = run_bin(&["verify", "--config", &cfg.display().to_string()]);
         assert_eq!(code, 0, "正recipientは構造検査通過: {stdout}{stderr}");
 
         // 誤recipient: registry記録のrecipients指紋を別鍵の実形式指紋へ書換え(.ageは不変)
         let (other_pub, _other_secret) = generate_ed25519_keypair(tmp.path(), "other");
-        let other = backup_remote::fingerprint::parse_ssh_pubkey(&other_pub)
-            .expect("別鍵のparse");
+        let other = backup_remote::fingerprint::parse_ssh_pubkey(&other_pub).expect("別鍵のparse");
         let wrong_fp = backup_remote::fingerprint::fingerprint(&other);
         let recs = read_registry_lines(&reg);
         let right_fp = recs[0]["recipients"][0]
@@ -210,8 +228,7 @@ fn structure_check_recipient_bijection_with_real_age() {
         assert_ne!(tampered, text, "指紋の書換えが反映されている");
         write_file(&reg, tampered.as_bytes());
 
-        let (code, stdout, stderr) =
-            run_bin(&["verify", "--config", &cfg.display().to_string()]);
+        let (code, stdout, stderr) = run_bin(&["verify", "--config", &cfg.display().to_string()]);
         assert_eq!(code, 4, "誤recipient指紋は検証エラー4: {stdout}{stderr}");
         Some(())
     })() else {

@@ -52,7 +52,11 @@ pub struct EncryptResult {
 /// 1pass stream暗号化の中核(6章)。`.part`書込→`std::fs::rename`。
 /// 平文sha256・暗号文sha256を同時計算する。age異常終了時は`BackupError::Process`
 /// (`.part`削除・既存`.age`は保持)。
-pub fn encrypt_stream(src: &Path, dest: &Path, public_keys: &[PathBuf]) -> BackupResult<EncryptResult> {
+pub fn encrypt_stream(
+    src: &Path,
+    dest: &Path,
+    public_keys: &[PathBuf],
+) -> BackupResult<EncryptResult> {
     encrypt_impl(&EncryptInput::File(src), dest, public_keys)
 }
 
@@ -210,7 +214,12 @@ fn encrypt_impl_inner(
                 "ageが異常終了した(status={status}); age stderr: {stderr_text}"
             )));
         }
-        Ok((source_size, source_sha256, age_total, hex(&age_hasher.finalize())))
+        Ok((
+            source_size,
+            source_sha256,
+            age_total,
+            hex(&age_hasher.finalize()),
+        ))
     });
     let (source_size, source_sha256, age_size, age_sha256) = run?;
 
@@ -316,10 +325,7 @@ fn decrypt_impl(
             if let Some(parent) = p.parent() {
                 if !parent.as_os_str().is_empty() {
                     std::fs::create_dir_all(parent).map_err(|e| {
-                        BackupError::Process(format!(
-                            "出力dir作成失敗 ({}): {e}",
-                            parent.display()
-                        ))
+                        BackupError::Process(format!("出力dir作成失敗 ({}): {e}", parent.display()))
                     })?;
                 }
             }
@@ -342,89 +348,87 @@ fn decrypt_impl(
     let mut stdout = proc.stdout.take().expect("age stdout");
     let stderr = proc.stderr.take().expect("age stderr");
 
-    let (collected, total, sha) = std::thread::scope(|scope| -> BackupResult<(
-        Option<Vec<u8>>,
-        u64,
-        Option<String>,
-    )> {
-        let stderr_handle = scope.spawn(move || {
-            let mut drained: Vec<u8> = Vec::new();
-            let _ = std::io::BufReader::new(stderr).read_to_end(&mut drained);
-            drained
-        });
-        // stdin投入thread: .ageをageへ流す(平文hashはしない)
-        let stdin_handle = scope.spawn(move || -> std::io::Result<()> {
-            let mut reader = std::io::BufReader::with_capacity(CHUNK, file);
+    let (collected, total, sha) = std::thread::scope(
+        |scope| -> BackupResult<(Option<Vec<u8>>, u64, Option<String>)> {
+            let stderr_handle = scope.spawn(move || {
+                let mut drained: Vec<u8> = Vec::new();
+                let _ = std::io::BufReader::new(stderr).read_to_end(&mut drained);
+                drained
+            });
+            // stdin投入thread: .ageをageへ流す(平文hashはしない)
+            let stdin_handle = scope.spawn(move || -> std::io::Result<()> {
+                let mut reader = std::io::BufReader::with_capacity(CHUNK, file);
+                let mut buf = vec![0u8; CHUNK];
+                loop {
+                    let n = reader.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    stdin.write_all(&buf[..n])?;
+                }
+                stdin.flush()?;
+                drop(stdin);
+                Ok(())
+            });
+
+            // main thread: 復号平文のsha256更新(と必要なら集積・part書き出し)
+            let mut hasher = Sha256::new();
+            let mut total: u64 = 0;
+            let mut collected: Option<Vec<u8>> = if collect { Some(Vec::new()) } else { None };
+            let mut read_err: Option<std::io::Error> = None;
             let mut buf = vec![0u8; CHUNK];
             loop {
-                let n = reader.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                stdin.write_all(&buf[..n])?;
-            }
-            stdin.flush()?;
-            drop(stdin);
-            Ok(())
-        });
-
-        // main thread: 復号平文のsha256更新(と必要なら集積・part書き出し)
-        let mut hasher = Sha256::new();
-        let mut total: u64 = 0;
-        let mut collected: Option<Vec<u8>> = if collect { Some(Vec::new()) } else { None };
-        let mut read_err: Option<std::io::Error> = None;
-        let mut buf = vec![0u8; CHUNK];
-        loop {
-            match stdout.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    hasher.update(&buf[..n]);
-                    total += n as u64;
-                    if let Some(v) = collected.as_mut() {
-                        v.extend_from_slice(&buf[..n]);
-                    }
-                    if let Some(w) = part_writer.as_mut() {
-                        if let Err(e) = w.write_all(&buf[..n]) {
-                            read_err = Some(e);
-                            break;
+                match stdout.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        hasher.update(&buf[..n]);
+                        total += n as u64;
+                        if let Some(v) = collected.as_mut() {
+                            v.extend_from_slice(&buf[..n]);
+                        }
+                        if let Some(w) = part_writer.as_mut() {
+                            if let Err(e) = w.write_all(&buf[..n]) {
+                                read_err = Some(e);
+                                break;
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    read_err = Some(e);
-                    break;
+                    Err(e) => {
+                        read_err = Some(e);
+                        break;
+                    }
                 }
             }
-        }
-        // 読込loop中断時もstdoutの読込端を閉じてからwaitする(encrypt側と同じ理由。
-        // 読込端が生存するとage -dのstdout書込がblockしwaitが返らない)
-        drop(stdout);
-        let status = proc
-            .wait()
-            .map_err(|e| BackupError::Process(format!("ageのwaitに失敗: {e}")))?;
-        let stdin_res = stdin_handle
-            .join()
-            .unwrap_or_else(|_| Err(std::io::Error::other("stdin投入threadがpanicした")));
-        let stderr_bytes = stderr_handle.join().unwrap_or_default();
-        let stderr_text = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
-        // stdin投入threadエラーにもage stderrを添える(encrypt側と対称の形式)
-        stdin_res.map_err(|e| {
-            BackupError::Process(format!(
-                ".ageのage stdin書込に失敗: {e}; age stderr: {stderr_text}"
-            ))
-        })?;
-        if let Some(e) = read_err {
-            return Err(BackupError::Process(format!(
-                "復号平文の書込に失敗: {e}; age stderr: {stderr_text}"
-            )));
-        }
-        if !status.success() {
-            return Err(BackupError::Process(format!(
-                "age -dが異常終了した(status={status}); age stderr: {stderr_text}"
-            )));
-        }
-        Ok((collected, total, Some(hex(&hasher.finalize()))))
-    })?;
+            // 読込loop中断時もstdoutの読込端を閉じてからwaitする(encrypt側と同じ理由。
+            // 読込端が生存するとage -dのstdout書込がblockしwaitが返らない)
+            drop(stdout);
+            let status = proc
+                .wait()
+                .map_err(|e| BackupError::Process(format!("ageのwaitに失敗: {e}")))?;
+            let stdin_res = stdin_handle
+                .join()
+                .unwrap_or_else(|_| Err(std::io::Error::other("stdin投入threadがpanicした")));
+            let stderr_bytes = stderr_handle.join().unwrap_or_default();
+            let stderr_text = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+            // stdin投入threadエラーにもage stderrを添える(encrypt側と対称の形式)
+            stdin_res.map_err(|e| {
+                BackupError::Process(format!(
+                    ".ageのage stdin書込に失敗: {e}; age stderr: {stderr_text}"
+                ))
+            })?;
+            if let Some(e) = read_err {
+                return Err(BackupError::Process(format!(
+                    "復号平文の書込に失敗: {e}; age stderr: {stderr_text}"
+                )));
+            }
+            if !status.success() {
+                return Err(BackupError::Process(format!(
+                    "age -dが異常終了した(status={status}); age stderr: {stderr_text}"
+                )));
+            }
+            Ok((collected, total, Some(hex(&hasher.finalize()))))
+        },
+    )?;
     // 正常終了時のみ: flush+sync → rename(part書き出し経路。以降の失敗経路の
     // .part削除はdecrypt_to_fileの統一入口が担う)
     if let Some(w) = part_writer.as_mut() {
@@ -451,7 +455,7 @@ fn decrypt_impl(
 mod tests {
     use super::*;
     use crate::errors::BackupError;
-    use crate::testutil::{path_env_lock, set_path_env, TempDir};
+    use crate::testutil::{TempDir, path_env_lock, set_path_env};
 
     /// [covers:encrypt.age-binary-missing-config-error]
     /// PATH上にageが無い状態では設定エラー2。

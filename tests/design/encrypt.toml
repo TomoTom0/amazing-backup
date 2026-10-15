@@ -1,6 +1,11 @@
 # backup-remote テスト設計条件書(encrypt エリア)
 # 出典: tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-001〜ENC-018(詳細は2.2・2.5・4.1・4.3・6章・7章)
 # 2026-10-09: テスト全件PASS・verify-conditions.py PASSを確認し[meta]へ検証記録を書いた(レビュー指摘12件対応で条件追加・更新した際)。
+# 2026-10-14: TASK-10(S3ストレージ設計)対応でテスト先行の更新(tmp/tasks/tm-10/design_s3_storage.md
+#   8.1 registry.rs行・9章素案)。新規1件追加: registry基準skip(file_write成功記録+指紋一致で
+#   .age不在でもskip)。encrypt.name-override-pathsはTASK-10のname override撤廃(1.2)により
+#   Phase B廃止予定(9章棚卸し表に未記載の補足。Phase Aは旧encrypt凍結で無変更のためsource追記のみ)。
+#   実装前のため新条件のテストは実行failを許容し[meta]はverified=falseのまま。
 
 [meta]
 feature = "encrypt"
@@ -19,7 +24,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-001(方式は6章)"
 description = "暗号化成果物は実 age -d で復号でき、平文が元ファイルとbyte一致する (integration)"
 given = "小サイズの .zip を1件暗号化し、生成 .age を実 age -d で復号"
 expect_return_shape = "復号平文が元ファイルとbyte一致"
-source_lines = "tests/age_roundtrip.rs:12"
+source_lines = "tests/age_roundtrip.rs:14"
 
 [[condition]]
 id = "encrypt.source-sha256-matches-independent"
@@ -28,7 +33,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-002(1pass計算は6.
 description = "平文sha256計算値(1pass)がsha256sum等の独立計算と一致する (integration)"
 given = "既知内容のファイルを暗号化し EncryptResult.source_sha256 を取得"
 expect_return = "独立計算(sha256sum・sha2 crate直接等)と一致する source_sha256(hex 64桁)"
-source_lines = "tests/age_roundtrip.rs:37"
+source_lines = "tests/age_roundtrip.rs:39"
 
 [[condition]]
 id = "encrypt.age-sha256-matches-file"
@@ -37,7 +42,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-003(書込同時計�
 description = "age_sha256(書込同時計算)が暗号化ファイルの実sha256と一致する (integration)"
 given = "暗号化実行後の .age ファイルと EncryptResult.age_sha256"
 expect_return = ".age ファイルを独立に計算したsha256と一致する age_sha256"
-source_lines = "tests/age_roundtrip.rs:64"
+source_lines = "tests/age_roundtrip.rs:65"
 
 [[condition]]
 id = "encrypt.multi-recipient-1of-n"
@@ -46,7 +51,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-004(stanza仕様は4
 description = "複数recipient(2鍵)で暗号化するとヘッダに ssh-ed25519 stanza が2つ並び、いずれか1鍵で復号できる(1-of-N) (integration)"
 given = "ed25519公開鍵2本をrecipientに暗号化し、各秘密鍵で復号"
 expect_return_shape = "ヘッダに ssh-ed25519 stanza 2つ。鍵1・鍵2のいずれでも復号でき平文が元ファイルと一致"
-source_lines = "tests/age_roundtrip.rs:93"
+source_lines = "tests/age_roundtrip.rs:98"
 
 [[condition]]
 id = "encrypt.header-tags-match-recipients"
@@ -55,7 +60,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-005(照合仕様は4
 description = "暗号化直後のヘッダ照合: ssh-ed25519 stanza数がrecipient数と一致し、各stanza第1引数が対応recipientの指紋prefix(b64(SHA-256(blob)先頭4byte))と完全一致する(実age v1.2.1形式)。実装の自己検証(6.3)は旧32byte tag形式とv1.2形式の両方を受け付ける (integration)"
 given = "公開鍵2本で暗号化した .age のヘッダ(実age v1.2.1の -> ssh-ed25519 <指紋prefix> <ephemeral鍵> 形式)と、同一鍵群から計算した指紋prefix"
 expect_no_throw = "encrypt_stream は自己検証(旧/v1.2両形式対応)を通過し Err を返さない。かつparseしたヘッダは stanza数==recipient数・各第1引数==b64(SHA-256(blob)[:4])・第2引数(ephemeral 32byte)を伴う"
-source_lines = "tests/age_roundtrip.rs:131"
+source_lines = "tests/age_roundtrip.rs:141"
 
 [[condition]]
 id = "encrypt.header-mismatch-process-error"
@@ -64,7 +69,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-006(6.3・7.1)"
 description = "ヘッダ照合不一致(誤ったrecipient鍵で作られた .age)は処理エラー4で失敗する (integration)"
 given = "別鍵で暗号化した .age を、設定recipientの期待tag集合と照合"
 expect_throw = "ProcessError(exit code 4)"
-source_lines = "tests/age_roundtrip.rs:194"
+source_lines = "tests/age_roundtrip.rs:223"
 
 [[condition]]
 id = "encrypt.atomic-rename-on-age-failure"
@@ -73,7 +78,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-007(part/rename仕�
 description = "出力は .part 経由で std::fs::rename される: age異常終了時 .age は作られず旧 .age は保持される (integration)"
 given = "既存の正常 .age がある状態で、ageが異常終了する条件(存在しないrecipient鍵等)で再暗号化"
 expect_throw = "ProcessError(exit code 4)。.part は削除され、既存 .age は旧内容のまま新 .age は作られない"
-source_lines = "tests/age_roundtrip.rs:223"
+source_lines = "tests/age_roundtrip.rs:252"
 
 [[condition]]
 id = "encrypt.age-binary-missing-config-error"
@@ -82,7 +87,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-008(5章crypto.rs・
 description = "ageバイナリ不在は設定エラー2 (unit)"
 given = "PATH上に age が無い状態での暗号化実行"
 expect_throw = "ConfigError(exit code 2)"
-source_lines = "src/crypto.rs:456"
+source_lines = "src/crypto.rs:460"
 
 [[condition]]
 id = "encrypt.skip-on-registry-match"
@@ -91,7 +96,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-009(skip規則は2.2
 description = "再実行skip: .age存在+registry記録一致(path・size・mtime)なら再読込せずskip表示される (unit)"
 given = "過去のencrypt記録(path・size・mtime一致)・.age・manifestが存在する状態で再実行(ENC-020: 全skipかつmanifest既存はmanifestも書き換えない)"
 expect_return_shape = "当該対象はskip表示され、平文read・age実行・registry追記なしで exit code 0"
-source_lines = "src/cli.rs:1638; src/registry.rs:590; tests/encrypt_batch.rs:383"
+source_lines = "src/cli.rs:1726; src/registry.rs:903; tests/encrypt_batch.rs:471"
 
 [[condition]]
 id = "encrypt.manifest-rebuilt-from-reduced-records"
@@ -100,7 +105,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-019(2026-10-08レビ
 description = "同日再実行で一部対象がskipした場合、manifestは当該実行の成功分のみでなく manifest_path単位のreduce後全encrypt記録(成功+skip済み)から再構築される。verify突合・manifest_upload列挙と一貫する内容となる (integration)"
 given = "同一日付の既存encrypt記録(=.age存在によりskip)1件がある状態で、別対象1件を新規に暗号化する再実行"
 expect_return_shape = "再生成されたmanifestのfile_count・ファイルレコードはskip済み1件+新規成功1件の計2件分でregistryのreduce後記録と一致し、verify --roundtrip のmanifest突合が通る"
-source_lines = "tests/encrypt_batch.rs:422"
+source_lines = "tests/encrypt_batch.rs:520"
 
 [[condition]]
 id = "encrypt.manifest-not-rewritten-on-all-skip"
@@ -109,7 +114,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-020(2026-10-08レビ
 description = "全対象skipかつmanifestファイルが既存の再実行はmanifestを書き換えない(skip実行のageバイナリ不要を維持。ENC-009との整合) (unit)"
 given = "過去のencrypt記録・.age・manifestが存在する状態で全対象がskipになる再実行(PATH上にageが無い環境でもexit 0)"
 expect_return_shape = "manifestファイルは不変・registry追記なし・exit code 0(年age不在でもmanifest再構築は起こらない)"
-source_lines = "src/cli.rs:1639"
+source_lines = "src/cli.rs:1727"
 
 [[condition]]
 id = "encrypt.manifest-recovery-when-missing"
@@ -118,7 +123,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-019・ENC-020(2.2-6�
 description = "reduce後encrypt記録が存在するのにmanifestファイルが不在(前回実行でのmanifest生成失敗)の場合、全skipでもmanifestを再構築して復旧する (integration)"
 given = "過去のencrypt記録と .age が存在し manifest.jsonl.age が不在の状態で全対象skipの再実行"
 expect_return_shape = "manifest.jsonl.age がreduce後全encrypt記録の内容で再生成され、verifyのmanifest存在検査が通る"
-source_lines = "tests/encrypt_batch.rs:495"
+source_lines = "tests/encrypt_batch.rs:606"
 
 [[condition]]
 id = "encrypt.reencrypt-without-registry-record"
@@ -127,7 +132,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-010(規則は2.2-2)"
 description = ".age存在でもregistry記録がない(書込途中crash等)場合は上書き再暗号化される (integration)"
 given = ".age ファイルのみ存在し registry に記録がない状態で encrypt 実行"
 expect_return_shape = "上書き再暗号化され registry へ新記録がappend・exit code 0"
-source_lines = "tests/encrypt_batch.rs:79"
+source_lines = "tests/encrypt_batch.rs:108"
 
 [[condition]]
 id = "encrypt.reencrypt-on-source-change"
@@ -136,7 +141,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-011(規則は2.2-2�
 description = "sourceのsize/mtime変化時は再暗号化され、新記録がreduce後勝ちになる (integration)"
 given = "過去encrypt記録がある対象のsize/mtimeを変更して再実行"
 expect_return_shape = "再暗号化され、reduce後の状態で新記録が有効(age_sha256等が新値・旧記録は参照されない)"
-source_lines = "src/registry.rs:558; tests/encrypt_batch.rs:118"
+source_lines = "src/registry.rs:871; tests/encrypt_batch.rs:153"
 
 [[condition]]
 id = "encrypt.registry-append-fields"
@@ -154,7 +159,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-013(manifest仕様�
 description = "バッチmanifestが暗号化生成され、復号するとバッチヘッダ+ファイルレコードが正しい(内容はmanifest_path単位のreduce後全encrypt記録から再構築。4.3) (integration)"
 given = "2件の暗号化成功を含むバッチ実行後、manifest.jsonl.age を復号"
 expect_return_shape = "batchヘッダ(record_type=batch・file_count=2・total_source_size・recipients)とfileレコード2行がregistry記録と一致"
-source_lines = "tests/encrypt_batch.rs:176"
+source_lines = "tests/encrypt_batch.rs:221"
 
 [[condition]]
 id = "encrypt.keep-going-partial-success"
@@ -163,7 +168,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-014(規則は2.2・7
 description = "--keep-going で一部失敗しても成功分のregistry/manifestが作られ、exitは最初のエラー区分になる (integration)"
 given = "成功1件+失敗1件(読込不能な対象等)を --keep-going で実行"
 expect_return_shape = "成功分のregistry記録・manifestが作成され、exit codeは最初に発生したエラーの区分"
-source_lines = "tests/encrypt_batch.rs:228"
+source_lines = "tests/encrypt_batch.rs:287"
 
 [[condition]]
 id = "encrypt.keep-going-manifest-success-only"
@@ -172,7 +177,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-015(規則は2.2-6)"
 description = "--keep-going 時のmanifestには成功分のみ含まれる (integration)"
 given = "成功1件+失敗1件の --keep-going 実行後の manifest を復号"
 expect_return_shape = "manifestのfileレコードは成功1件のみ(失敗対象を含まない)"
-source_lines = "tests/encrypt_batch.rs:230"
+source_lines = "tests/encrypt_batch.rs:289"
 
 [[condition]]
 id = "encrypt.runs-without-aws"
@@ -181,7 +186,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-016(2.2終了コー�
 description = "encrypt は aws CLI不在・aws.toml不在でも完結する (integration)"
 given = "aws CLI不在・aws.toml不在の環境で暗号化実行"
 expect_return = "exit code 0"
-source_lines = "tests/encrypt_batch.rs:283"
+source_lines = "tests/encrypt_batch.rs:346"
 
 [[condition]]
 id = "encrypt.large-stream-no-deadlock"
@@ -190,16 +195,25 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-017(編成は6.2)"
 description = "並行pipe構成の回帰: チャンク4MiBの16倍超(64MiB超)の平文でデッドロック・停滞せずに暗号化が完結する (integration)"
 given = "64MiB超の既知内容ファイルの暗号化"
 expect_return_shape = "完了して source_sha256・age_sha256 が独立計算と一致(停滞検出はテスト側timeoutで担保)"
-source_lines = "tests/age_roundtrip.rs:263"
+source_lines = "tests/age_roundtrip.rs:292"
 
 [[condition]]
 id = "encrypt.name-override-paths"
 target_function = "targets::parse_from_list / cli::cmd_encrypt"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-018(name仕様は2.5)"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-018(name仕様は2.5)。TASK-10(tmp/tasks/tm-10/design_s3_storage.md 1.2 name override廃止・9章棚卸し表): Phase A無変更(旧encrypt凍結)・Phase Bで廃止→layout.key-generation-*が引継ぎ"
 description = "name override正常系: 成果物が <out>/<date>/<name>.age に出力され、registryのsource_nameがoverride名、upload時のS3キーが <batch_date>/<name>.age となる (integration)"
 given = "name override付き from-list で暗号化"
 expect_return_shape = "<out>/<date>/<name>.age が出力され registry.source_name がoverride名・S3キー生成もoverride名"
-source_lines = "tests/encrypt_batch.rs:315"
+source_lines = "tests/encrypt_batch.rs:389"
+
+[[condition]]
+id = "encrypt.skip-by-registry-record"
+target_function = "registry基準skip判定(backup pushのencrypt段階)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 8.1(registry.rs行)・8.3・9章素案"
+description = "encrypt skip判定のregistry基準化: file_write成功記録+source指紋(size/mtime)一致で .age 不在でもskipされる(旧: .age存在+registry記録一致でskip)。data/out掃除(keep_artifacts=\"run\")後の再実行で重複暗号化が起きない (unit)"
+given = "file_write成功記録(新record_type)がありdata/outの当該.ageが削除済みの状態でのbackup push再実行"
+expect_return_shape = "当該対象はskip表示され、平文read・age実行・registry追記なし"
+source_lines = "tests/storage_backup.rs:557"
 
 [[excluded]]
 item = "8章末尾注記: integrationはage実バイナリ前提(実行環境に無ければ当該testをskip扱い)"

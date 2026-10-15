@@ -1,0 +1,661 @@
+//! index エリアの結合test(TASK-10 S3ストレージ設計・tmp/tasks/tm-10/design_s3_storage.md 2章)。
+//! src/index.rsは実装前(Phase Aで新設)のため、索引の構築・直列化はfake seam経由の
+//! backup push/pin add/rm・manage index rebuildの観測(stateの索引objectを復号して検証)で
+//! 行う(テスト先行のため実装前の実行failは許容・cargo test --no-runは通る)。
+
+mod common;
+
+use common::*;
+use std::path::PathBuf;
+
+/// multipart閾値(64 MiB・index.version-id-recordedのmultipart側で使用)。
+const THRESHOLD: usize = 64 * 1024 * 1024;
+
+/// 索引のheader行を取り出す。
+fn index_header(lines: &[serde_json::Value]) -> &serde_json::Value {
+    lines
+        .iter()
+        .find(|v| v.get("record_type").and_then(|r| r.as_str()) == Some("index_header"))
+        .expect("索引にindex_header行がある")
+}
+
+/// entryのversions配列を取り出す。
+fn entry_versions(entry: &serde_json::Value) -> &Vec<serde_json::Value> {
+    entry
+        .get("versions")
+        .and_then(|v| v.as_array())
+        .expect("versions配列")
+}
+
+/// dir配下のfileを再帰的に列挙する(manifest一覧の発見用)。
+fn walk_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk_files(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// state内のmanifest object一覧(sys/manifests/配下)。
+fn manifest_objects(fx: &StorageFixture) -> Vec<PathBuf> {
+    let prefix_dir = fx.prefix.trim_end_matches('/');
+    walk_files(
+        &fx.state
+            .join("objects")
+            .join(prefix_dir)
+            .join("sys")
+            .join("manifests"),
+    )
+}
+
+/// calls.logを空にする(以降の呼び出しのみを観測する)。
+fn clear_calls(fx: &StorageFixture) {
+    let _ = std::fs::remove_file(fx.state.join("calls.log"));
+}
+
+/// [covers:index.schema-and-serialization]
+/// 索引JSONL schema(設計2.1): index_header(schema=1・updated_at・run_id・tool_version・
+/// entries=N)+file entry(name・category・rel_path・source_path・identity_hash・versions[]・
+/// pins[])。versionsはdate降順(先頭=最新)で各versionはdate・version_ts・batch_id・s3_key・
+/// version_id・source_sha256・age_sha256・source_size・age_sizeを持ち、pins[]はpin・s3_key・
+/// created_at・date・source_sha256・age_sha256・source_sizeを持つ。
+/// identity_hash=sha256(realpath)先頭8hex。次コマンドでの索引parseが全fieldを保つ。
+#[test]
+fn index_jsonl_schema_and_field_roundtrip() {
+    let Some(fx) = StorageFixture::new("idx-schema", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx
+        .data_root
+        .join("2020-2023")
+        .join("travel")
+        .join("travel.zip");
+    write_file(&a, b"index-schema-v1");
+    let b = fx.elsewhere.join("x.zip");
+    write_file(&b, b"index-schema-b");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    write_file(&a, b"index-schema-v2");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    assert_eq!(fx.push(&[&b], &[], &[]).0, 0);
+    assert_eq!(
+        fx.pin("add", "travel.zip", &["--latest", "--as", "pre-migration"])
+            .0,
+        0
+    );
+
+    let lines = fx.read_index();
+    let header = index_header(&lines);
+    assert_eq!(
+        header.get("schema").and_then(|v| v.as_i64()),
+        Some(1),
+        "schema=1: {header}"
+    );
+    for field in ["updated_at", "run_id", "tool_version"] {
+        assert!(
+            header.get(field).is_some(),
+            "headerに{field}がある: {header}"
+        );
+    }
+    let file_entries = lines
+        .iter()
+        .filter(|v| v.get("record_type").and_then(|r| r.as_str()) == Some("file"))
+        .count();
+    assert_eq!(
+        header.get("entries").and_then(|v| v.as_i64()),
+        Some(file_entries as i64),
+        "entries=Nはfile entry数と一致"
+    );
+
+    let entry = index_file_entry(&lines, "travel.zip");
+    for field in [
+        "name",
+        "category",
+        "rel_path",
+        "source_path",
+        "identity_hash",
+        "versions",
+        "pins",
+    ] {
+        assert!(
+            entry.get(field).is_some(),
+            "file entryに{field}がある: {entry}"
+        );
+    }
+    assert_eq!(
+        entry.get("rel_path").and_then(|v| v.as_str()),
+        Some("2020-2023/travel"),
+        "rel_pathはauto相対化値"
+    );
+    assert_eq!(
+        entry.get("identity_hash").and_then(|v| v.as_str()),
+        Some(hash8_of_path(&a).as_str()),
+        "identity_hash=sha256(realpath)先頭8hex"
+    );
+
+    let versions = entry_versions(entry);
+    assert_eq!(versions.len(), 2, "travel.zipは2版: {versions:?}");
+    let reg_ids = registry_upload_version_ids(
+        &fx.registry_values(),
+        &fx.file_key("unfiled", Some("2020-2023/travel"), "travel.zip"),
+    );
+    assert_eq!(reg_ids.len(), 2, "registryのfile_upload記録は2件");
+    // versionsは新しい順(先頭=最新=最後のpush)
+    assert_eq!(
+        index_version_ids(entry),
+        reg_ids.iter().rev().cloned().collect::<Vec<_>>(),
+        "versionsはdate降順(先頭=最新)"
+    );
+    for v in versions {
+        for field in [
+            "date",
+            "version_ts",
+            "batch_id",
+            "s3_key",
+            "version_id",
+            "source_sha256",
+            "age_sha256",
+            "source_size",
+            "age_size",
+        ] {
+            assert!(v.get(field).is_some(), "versionに{field}がある: {v}");
+        }
+    }
+
+    let pins = entry
+        .get("pins")
+        .and_then(|p| p.as_array())
+        .expect("pins配列");
+    assert_eq!(pins.len(), 1, "pin add後のpinsは1件: {pins:?}");
+    for field in [
+        "pin",
+        "s3_key",
+        "created_at",
+        "date",
+        "source_sha256",
+        "age_sha256",
+        "source_size",
+    ] {
+        assert!(
+            pins[0].get(field).is_some(),
+            "pin entryに{field}がある: {pins:?}"
+        );
+    }
+
+    // 直列化→parseの往復: 次のコマンド(list versions)が当該索引をparseして
+    // 2版とも表示できる=fieldが失われていない
+    let (code, stdout, stderr) = fx.list("versions", &["--name", "travel.zip"]);
+    assert_eq!(code, 0, "list versionsはexit 0: {stdout}{stderr}");
+    for vid in index_version_ids(entry) {
+        assert!(
+            stdout.contains(&vid),
+            "parse後もversion_id({vid})が参照できる: {stdout}"
+        );
+    }
+}
+
+/// [covers:index.rebuild-from-registry-per-run]
+/// 索引の更新単位はrun毎+索引に影響する操作後(設計2.2): ローカルregistry(reduce後)から
+/// 全entryを再構築し、versions[].version_id・s3_keyはregistryのfile_upload記録値。
+/// 再構築は冪等(影響操作を挟んでもregistryから再構築された内容は同一)。
+#[test]
+fn index_rebuilt_from_registry_each_run() {
+    let Some(fx) = StorageFixture::new("idx-rebuild", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    let b = fx.elsewhere.join("b.zip");
+    let a_key = fx.file_key("unfiled", None, "a.zip");
+    write_file(&a, b"rebuild-a-v1");
+    write_file(&b, b"rebuild-b");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    write_file(&a, b"rebuild-a-v2");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    assert_eq!(fx.push(&[&b], &[], &[]).0, 0);
+
+    let lines = fx.read_index();
+    let entry = index_file_entry(&lines, "a.zip");
+    let reg_ids = registry_upload_version_ids(&fx.registry_values(), &a_key);
+    assert_eq!(reg_ids.len(), 2, "a.zipのfile_upload記録は2件");
+    let versions = entry_versions(entry);
+    assert_eq!(versions.len(), 2, "run毎の再構築で2版が載る: {versions:?}");
+    // versions[].version_id・s3_keyはregistryのfile_upload記録値
+    for (v, reg_id) in versions.iter().zip(reg_ids.iter().rev()) {
+        assert_eq!(
+            v.get("version_id").and_then(|i| i.as_str()),
+            Some(reg_id.as_str()),
+            "version_idはregistry記録値: {v}"
+        );
+        assert_eq!(
+            v.get("s3_key").and_then(|k| k.as_str()),
+            Some(a_key.as_str()),
+            "s3_keyはregistry記録値: {v}"
+        );
+    }
+    assert!(
+        index_file_entry(&lines, "b.zip").get("versions").is_some(),
+        "b.zip entryも再構築される"
+    );
+
+    // 冪等: pin add→pin rm(索引に影響する操作)で再構築・再PUTされても
+    // registry由来のversions内容は同一(pinsは空へ戻る)
+    let versions_before = entry_versions(entry).clone();
+    assert_eq!(
+        fx.pin("add", "a.zip", &["--latest", "--as=keep-check"]).0,
+        0
+    );
+    assert_eq!(fx.pin("rm", "a.zip", &["--pin", "keep-check"]).0, 0);
+    let lines2 = fx.read_index();
+    let entry2 = index_file_entry(&lines2, "a.zip");
+    assert_eq!(
+        entry_versions(entry2),
+        &versions_before,
+        "再構築後のversionsは1回目と同一内容(冪等)"
+    );
+    let pins2 = entry2
+        .get("pins")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(pins2.is_empty(), "pin rm後はpinsが空: {pins2:?}");
+}
+
+/// [covers:index.hot-storage-class-upload]
+/// 索引 sys/index.jsonl.age のPUTはstorage class STANDARD固定(設計1.4・2.2。
+/// per-object指定)。profileのstorage_classがDEEP_ARCHIVEでもSTANDARDで置かれる。
+#[test]
+fn index_put_uses_standard_storage_class() {
+    let Some(fx) = StorageFixture::new(
+        "idx-hot",
+        StorageOpts {
+            storage_class: "DEEP_ARCHIVE",
+            ..StorageOpts::default()
+        },
+    ) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"index-hot");
+    let (code, stdout, stderr) = fx.push(&[&a], &[], &[]);
+    assert_eq!(code, 0, "DEEP_ARCHIVE profileでのpush: {stdout}{stderr}");
+    let calls = fx.calls();
+    let index_key = fx.index_key();
+    let index_put = calls
+        .lines()
+        .find(|l| l.starts_with("s3 PutObject") && l.contains(&format!("key={index_key}")))
+        .unwrap_or_else(|| panic!("索引PUT行: {calls}"));
+    assert!(
+        index_put.contains("storage_class=STANDARD"),
+        "索引PUTはSTORAGE CLASS STANDARD固定: {index_put}"
+    );
+    // file objectはprofile値(DEEP_ARCHIVE)のまま
+    let file_key = fx.file_key("unfiled", None, "a.zip");
+    let file_put = calls
+        .lines()
+        .find(|l| l.starts_with("s3 PutObject") && l.contains(&format!("key={file_key}")))
+        .unwrap_or_else(|| panic!("file PUT行: {calls}"));
+    assert!(
+        file_put.contains("storage_class=DEEP_ARCHIVE"),
+        "file objectはprofileのstorage_class: {file_put}"
+    );
+}
+
+/// [covers:index.encrypted-with-configured-recipients]
+/// 索引はpipeline.tomlの現在のrecipients構成でage暗号化され(設計2.2)、
+/// 各recipientの秘密鍵で復号できる(1-of-N)。平文は索引JSONLとしてparseできる。
+#[test]
+fn index_encrypted_with_all_configured_recipients() {
+    let Some(fx) = StorageFixture::new("idx-recip", StorageOpts::default()) else {
+        return;
+    };
+    // 第2recipientを追加(2鍵構成)
+    let (pub2, secret2) = generate_ed25519_keypair(&fx.elsewhere, "k2");
+    let pub1 = fx.public.display().to_string();
+    fx.rewrite_pipeline_toml(&fx.pipeline_body().replace(
+        &format!("public_keys = [\"{pub1}\"]"),
+        &format!("public_keys = [\"{pub1}\", \"{}\"]", pub2.display()),
+    ));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"index-recipients");
+    let (code, stdout, stderr) = fx.push(&[&a], &[], &[]);
+    assert_eq!(code, 0, "2鍵構成でのpush: {stdout}{stderr}");
+
+    let index_obj = fx.object_path(&fx.index_key());
+    for (tag, secret) in [("第1鍵", fx.secret.clone()), ("第2鍵", secret2)] {
+        let plain = age_decrypt(&fx.age, &index_obj, &secret);
+        let text =
+            String::from_utf8(plain).unwrap_or_else(|e| panic!("{tag}で復号した平文はUTF-8: {e}"));
+        let first = text
+            .lines()
+            .next()
+            .unwrap_or_else(|| panic!("{tag}で復号した索引は空でない"));
+        let v: serde_json::Value = serde_json::from_str(first)
+            .unwrap_or_else(|e| panic!("{tag}の平文は索引JSONLとしてparseできる: {e}"));
+        assert_eq!(
+            v.get("record_type").and_then(|r| r.as_str()),
+            Some("index_header"),
+            "{tag}で復号した平文は索引JSONL: {text}"
+        );
+    }
+}
+
+/// [covers:index.version-id-recorded]
+/// 索引versions[].version_idの供給源はregistryのfile_upload記録(設計2.1・8.1・11章F3):
+/// S3Backend::putはversion_idを返し(単発PUTはPutObject応答・multipartは
+/// CompleteMultipartUpload応答)、UploadRecordへversion_idと実s3_keyが記録される。
+#[test]
+fn index_version_ids_come_from_put_responses_via_registry() {
+    let Some(fx) = StorageFixture::new("idx-vid", StorageOpts::default()) else {
+        return;
+    };
+    let small = fx.data_root.join("small.zip");
+    write_file(&small, b"index-version-id-small");
+    let big = fx.data_root.join("big.zip");
+    make_archive(&big, THRESHOLD + 1024 * 1024);
+    let (code, stdout, stderr) = fx.push(&[&small, &big], &[], &[]);
+    assert_eq!(code, 0, "単発+multipartのpush: {stdout}{stderr}");
+
+    let calls = fx.calls();
+    let big_key = fx.file_key("unfiled", None, "big.zip");
+    assert!(
+        calls
+            .lines()
+            .any(|l| l.starts_with("s3 CreateMultipartUpload")
+                && l.contains(&format!("key={big_key}"))),
+        "big.zipはmultipart: {calls}"
+    );
+    assert!(
+        calls
+            .lines()
+            .any(|l| l.starts_with("s3 CompleteMultipartUpload")
+                && l.contains(&format!("key={big_key}"))),
+        "big.zipのCompleteMultipartUpload: {calls}"
+    );
+
+    let lines = fx.read_index();
+    let registry = fx.registry_values();
+    for (name, key) in [
+        ("small.zip", fx.file_key("unfiled", None, "small.zip")),
+        ("big.zip", big_key),
+    ] {
+        let entry = index_file_entry(&lines, name);
+        let vids = index_version_ids(entry);
+        assert_eq!(vids.len(), 1, "{name}は1版: {vids:?}");
+        assert!(!vids[0].is_empty(), "{name}のversion_idは空でない");
+        let reg_ids = registry_upload_version_ids(&registry, &key);
+        assert_eq!(
+            reg_ids, vids,
+            "{name}の索引version_idはregistryのfile_upload記録値(PUT応答由来)"
+        );
+        let s3_keys: Vec<&str> = entry_versions(entry)
+            .iter()
+            .filter_map(|v| v.get("s3_key").and_then(|k| k.as_str()))
+            .collect();
+        assert_eq!(
+            s3_keys,
+            vec![key.as_str()],
+            "{name}のs3_keyはregistry記録の実key"
+        );
+    }
+}
+
+/// [covers:index.rebuild-from-manifests]
+/// manage index rebuild(設計2.3): (1)ListObjectsV2でmanifest一覧 (2)未復元のmanifestへ
+/// 復元job発行(Bulk既定・進行中は再実行で継続) (3)取得・復号・parse→file recordから
+/// entry再構築 (4)version_id欠損manifestはListObjectVersionsでkey+LastModifiedから補完
+/// (5)sys/index.jsonl.ageへPUT。開始時にtier別単価で区別した費用・所要の概算を表示。
+#[test]
+fn manage_index_rebuild_rebuilds_entries_from_manifests() {
+    let Some(fx) = StorageFixture::new(
+        "idx-mreb",
+        StorageOpts {
+            storage_class: "DEEP_ARCHIVE",
+            ..StorageOpts::default()
+        },
+    ) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"rebuild-manifests-v1");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    write_file(&a, b"rebuild-manifests-v2");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let reg_ids = registry_upload_version_ids(
+        &fx.registry_values(),
+        &fx.file_key("unfiled", None, "a.zip"),
+    );
+    assert_eq!(reg_ids.len(), 2, "2 run分のfile_upload記録");
+
+    // 1件のmanifestを旧式(version_id欠損)へ書き換える
+    let manifests = manifest_objects(&fx);
+    assert_eq!(manifests.len(), 2, "manifestは2件: {manifests:?}");
+    let old_manifest = manifests[0].clone();
+    let plain = age_decrypt(&fx.age, &old_manifest, &fx.secret);
+    let text = String::from_utf8(plain).expect("manifest平文はUTF-8");
+    let mut rewritten = String::new();
+    for line in text.lines() {
+        let mut v: serde_json::Value = serde_json::from_str(line).expect("manifest行はJSON");
+        if v.get("version_id").is_some() {
+            v.as_object_mut()
+                .expect("manifest file recordはobject")
+                .remove("version_id");
+        }
+        rewritten.push_str(&serde_json::to_string(&v).expect("manifest行serialize"));
+        rewritten.push('\n');
+    }
+    age_encrypt_bytes(
+        &fx.age,
+        &[fx.public.clone()],
+        rewritten.as_bytes(),
+        &old_manifest,
+    );
+
+    // 索引objectを喪失させる
+    std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
+    clear_calls(&fx);
+
+    // 再構築(未復元manifestへBulk復元job発行。fakeは発行でrestored状態へ遷移するため
+    // 1実行で完結する実装と進行中案内で再実行を要する実装の両方に対応する)
+    let mut all_stdout = String::new();
+    let mut code = 0;
+    for _ in 0..2 {
+        let (c, stdout, stderr) = fx.manage("index", &["rebuild"]);
+        code = c;
+        all_stdout.push_str(&stdout);
+        all_stdout.push_str(&stderr);
+        if fx.object_path(&fx.index_key()).is_file() {
+            break;
+        }
+    }
+    assert_eq!(code, 0, "manage index rebuildはexit 0: {all_stdout}");
+    assert!(
+        fx.object_path(&fx.index_key()).is_file(),
+        "索引objectが再PUTされる: {all_stdout}"
+    );
+
+    // 未復元manifestへBulkの復元jobが発行される
+    let calls = fx.calls();
+    let restore_lines: Vec<&str> = calls
+        .lines()
+        .filter(|l| l.starts_with("s3 RestoreObject") && l.contains("/sys/manifests/"))
+        .collect();
+    assert!(
+        !restore_lines.is_empty(),
+        "manifestへのRestoreObject発行: {calls}"
+    );
+    assert!(
+        restore_lines.iter().all(|l| l.contains("tier=Bulk")),
+        "復元jobはBulk既定: {calls}"
+    );
+    assert!(
+        calls
+            .lines()
+            .any(|l| l.starts_with("s3 ListObjectsV2") && l.contains("sys/manifests/")),
+        "ListObjectsV2でのmanifest一覧: {calls}"
+    );
+    assert!(
+        calls
+            .lines()
+            .any(|l| l.starts_with("s3 ListObjectVersions")),
+        "version_id欠損manifestの補完にListObjectVersions: {calls}"
+    );
+    // 開始時のtier別費用・所要の概算表示
+    assert!(
+        all_stdout.contains("Bulk") && all_stdout.contains("Standard"),
+        "tier別(Standard/Bulk)の費用・所要概算表示: {all_stdout}"
+    );
+
+    // 再構築された索引: 2版ともversion_idが入る(欠損分はListObjectVersionsで補完)
+    let lines = fx.read_index();
+    let entry = index_file_entry(&lines, "a.zip");
+    let mut vids = index_version_ids(entry);
+    vids.sort();
+    let mut expected = reg_ids.clone();
+    expected.sort();
+    assert_eq!(
+        vids, expected,
+        "再構築されたversion_idはmanifest記録値+補完値: {entry}"
+    );
+}
+
+/// [covers:index.pin-entries]
+/// pin add/rmの索引反映(設計2.1・2.2): pin addは当該file entryのpins[]へ
+/// (pin・s3_key・created_at・date・source_sha256・age_sha256・source_size)、
+/// pin rmは該当pin entryを除去する。
+#[test]
+fn index_pin_entries_reflect_pin_add_and_rm() {
+    let Some(fx) = StorageFixture::new("idx-pins", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    let plain = b"index-pin-entries";
+    write_file(&a, plain);
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    assert_eq!(
+        fx.pin("add", "a.zip", &["--latest", "--as", "pre-migration"])
+            .0,
+        0
+    );
+
+    let lines = fx.read_index();
+    let entry = index_file_entry(&lines, "a.zip");
+    let pins = entry
+        .get("pins")
+        .and_then(|p| p.as_array())
+        .expect("pins配列");
+    assert_eq!(pins.len(), 1, "pin add後のpinsは1件: {pins:?}");
+    let p = &pins[0];
+    assert_eq!(p.get("pin").and_then(|v| v.as_str()), Some("pre-migration"));
+    let pin_key = fx.pin_key("unfiled", None, "a.zip", "pre-migration");
+    assert_eq!(
+        p.get("s3_key").and_then(|v| v.as_str()),
+        Some(pin_key.as_str())
+    );
+    assert_eq!(
+        p.get("source_sha256").and_then(|v| v.as_str()),
+        Some(sha256_hex(plain).as_str()),
+        "pin記録のsource_sha256"
+    );
+    let pin_obj = std::fs::read(fx.object_path(&pin_key)).expect("pin object実体");
+    assert_eq!(
+        p.get("age_sha256").and_then(|v| v.as_str()),
+        Some(sha256_hex(&pin_obj).as_str()),
+        "pin記録のage_sha256はpin objectの実測"
+    );
+    assert_eq!(
+        p.get("source_size").and_then(|v| v.as_i64()),
+        Some(plain.len() as i64)
+    );
+    assert_eq!(
+        p.get("date").and_then(|v| v.as_str()),
+        Some(jst_today().as_str())
+    );
+    assert!(p.get("created_at").is_some(), "created_atがある: {p}");
+
+    let registry = fx.registry_values();
+    assert_eq!(
+        registry_count(&registry, "pin_write"),
+        1,
+        "registryのpin_write記録"
+    );
+
+    // pin rmで該当pin entryが除去される
+    assert_eq!(fx.pin("rm", "a.zip", &["--pin", "pre-migration"]).0, 0);
+    let lines2 = fx.read_index();
+    let entry2 = index_file_entry(&lines2, "a.zip");
+    let pins2 = entry2
+        .get("pins")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(pins2.is_empty(), "pin rm後はpinsが空: {pins2:?}");
+    assert_eq!(
+        registry_count(&fx.registry_values(), "pin_remove"),
+        1,
+        "registryのpin_remove記録"
+    );
+}
+
+/// [covers:index.rebuild-preserves-folder-and-pins]
+/// manage index rebuildはfolderを落とさず(H-3: manifest V2のfolder記録を使用)、
+/// registryのpin記録からpins[]を復元する。rebuild後のpin addが正しいpin keyへ写る。
+#[test]
+fn rebuild_preserves_folder_and_restores_pins() {
+    let Some(fx) = StorageFixture::new("idx-rebfolder", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"rebuild-folder");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    assert_eq!(fx.pin("add", "a.zip", &["--latest", "--as", "pm1"]).0, 0);
+
+    // 索引objectを喪失させて再構築
+    std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
+    let _ = std::fs::remove_file(fx.state.join("calls.log"));
+    let mut last = String::new();
+    let mut code = 0;
+    for _ in 0..2 {
+        let (c, stdout, stderr) = fx.manage("index", &["rebuild"]);
+        code = c;
+        last = format!("{stdout}{stderr}");
+        if fx.object_path(&fx.index_key()).is_file() {
+            break;
+        }
+    }
+    assert_eq!(code, 0, "manage index rebuildはexit 0: {last}");
+
+    // pins[]が復元されている(registryのpin_write由来)
+    let lines = fx.read_index();
+    let entry = index_file_entry(&lines, "a.zip");
+    let pins = entry
+        .get("pins")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(pins.len(), 1, "pm1が復元される: {pins:?}");
+    assert_eq!(pins[0].get("pin").and_then(|v| v.as_str()), Some("pm1"));
+
+    // rebuild後のpin addがfolder付きの正しいpin keyへ写る(二重/なし)
+    assert_eq!(fx.pin("add", "a.zip", &["--latest", "--as", "pm2"]).0, 0);
+    let pm2_key = fx.pin_key("unfiled", None, "a.zip", "pm2");
+    assert!(
+        fx.object_path(&pm2_key).is_file(),
+        "rebuild後のpin addが正しいkeyへ写る: {pm2_key}"
+    );
+    let lines2 = fx.read_index();
+    let entry2 = index_file_entry(&lines2, "a.zip");
+    let pins2 = entry2
+        .get("pins")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(pins2.len(), 2, "pm1・pm2の2件: {pins2:?}");
+}

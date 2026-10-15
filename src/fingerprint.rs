@@ -36,7 +36,10 @@ pub fn stanza_tag(pub_key: &PubKey) -> [u8; 32] {
 /// algoが`ssh-ed25519`以外は設定エラー。
 pub fn parse_ssh_pubkey(path: &Path) -> BackupResult<PubKey> {
     let text = std::fs::read_to_string(path).map_err(|e| {
-        BackupError::Config(format!("公開鍵ファイルを読めない ({}): {e}", path.display()))
+        BackupError::Config(format!(
+            "公開鍵ファイルを読めない ({}): {e}",
+            path.display()
+        ))
     })?;
     let line = text
         .lines()
@@ -159,8 +162,9 @@ fn read_bounded_line(
 /// いずれも`Process` error(parse失敗=検証エラー4経路。改行なし巨大データでメモリを
 /// 使い切らない)。
 pub fn parse_age_header(path: &Path) -> BackupResult<AgeHeader> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| BackupError::Process(format!(".ageヘッダを開けない ({}): {e}", path.display())))?;
+    let file = std::fs::File::open(path).map_err(|e| {
+        BackupError::Process(format!(".ageヘッダを開けない ({}): {e}", path.display()))
+    })?;
     let mut reader = std::io::BufReader::new(file);
     let mut stanzas = Vec::new();
     let mut line = Vec::new();
@@ -233,7 +237,12 @@ pub fn verify_recipients(header: &AgeHeader, expected_tags: &[[u8; 32]]) -> Back
     }
     let mut actual: Vec<Vec<u8>> = ssh_stanzas
         .iter()
-        .map(|s| s.args.first().and_then(|a| decode_arg(a)).unwrap_or_default())
+        .map(|s| {
+            s.args
+                .first()
+                .and_then(|a| decode_arg(a))
+                .unwrap_or_default()
+        })
         .collect();
     let mut expected: Vec<Vec<u8>> = expected_tags.iter().map(|t| t.to_vec()).collect();
     actual.sort();
@@ -253,10 +262,7 @@ pub fn verify_recipients(header: &AgeHeader, expected_tags: &[[u8; 32]]) -> Back
 /// 照合は全単射(bijective)でなければならない(4.4): 各stanzaの識別子が
 /// 重複しない別々のrecipient鍵と1対1で対応することを保証し、
 /// 期待recipientの一部しか対応しない重複stanza(any-matchで全体が通るケース)は拒否する。
-pub(crate) fn verify_recipients_for_keys(
-    header: &AgeHeader,
-    keys: &[PubKey],
-) -> BackupResult<()> {
+pub(crate) fn verify_recipients_for_keys(header: &AgeHeader, keys: &[PubKey]) -> BackupResult<()> {
     let ssh_stanzas: Vec<&Stanza> = header
         .stanzas
         .iter()
@@ -431,12 +437,8 @@ mod chacha20 {
         state[2] = 0x7962_2d32;
         state[3] = 0x6b20_6574;
         for i in 0..8 {
-            state[4 + i] = u32::from_le_bytes([
-                key[i * 4],
-                key[i * 4 + 1],
-                key[i * 4 + 2],
-                key[i * 4 + 3],
-            ]);
+            state[4 + i] =
+                u32::from_le_bytes([key[i * 4], key[i * 4 + 1], key[i * 4 + 2], key[i * 4 + 3]]);
         }
         state[12] = counter;
         for i in 0..3 {
@@ -480,8 +482,9 @@ mod chacha20 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{path_env_lock, write_file, write_test_ed25519_pub, TempDir,
-                          TEST_ED25519_FINGERPRINT};
+    use crate::testutil::{
+        TEST_ED25519_FINGERPRINT, TempDir, path_env_lock, write_file, write_test_ed25519_pub,
+    };
 
     /// [covers:fingerprint.matches-ssh-keygen]
     /// fingerprintが`ssh-keygen -lf`の表示と一致する(独立oracleとの照合)。
@@ -523,7 +526,9 @@ mod tests {
         // 複数stanza(X25519 1つ + ssh-ed25519 2つ)と --- 終端行。
         // 終端行より後はbinary本体として読まない(不正UTF-8が含まれていてもparseは成功する)。
         let mut data = b"age-encryption.org/v1\n".to_vec();
-        data.extend_from_slice(b"-> X25519 SJtilzFHmYMJUyrclM4ptthDPBIi81fitQYQRYkA\nHRRsZw4D8OWQiqcN\n");
+        data.extend_from_slice(
+            b"-> X25519 SJtilzFHmYMJUyrclM4ptthDPBIi81fitQYQRYkA\nHRRsZw4D8OWQiqcN\n",
+        );
         data.extend_from_slice(b"-> ssh-ed25519 AAAAtesttag1\n");
         data.extend_from_slice(b"-> ssh-ed25519 AAAAtesttag2\n");
         data.extend_from_slice(b"--- MacLine123\n");
@@ -579,11 +584,18 @@ mod tests {
         data.extend_from_slice(b"-> ssh-ed25519 AAAAtesttag1\n--- MAC\n");
         write_file(&exact, &data);
         let header = parse_age_header(&exact).expect("上限ちょうどの行はparse成功");
-        assert_eq!(header.stanzas.len(), 1, "継続行読み飛ばし後のstanza列挙も不変");
+        assert_eq!(
+            header.stanzas.len(),
+            1,
+            "継続行読み飛ばし後のstanza列挙も不変"
+        );
 
         // (4) 終端行なしでEOF(行長上限には達しないデータ): 終端なしのエラー
         let no_term = tmp.path().join("no-term.age");
-        write_file(&no_term, b"age-encryption.org/v1\n-> ssh-ed25519 AAAAtesttag1\n");
+        write_file(
+            &no_term,
+            b"age-encryption.org/v1\n-> ssh-ed25519 AAAAtesttag1\n",
+        );
         let e = parse_age_header(&no_term).unwrap_err();
         assert_eq!(e.exit_code(), 4, "終端行なしEOFはProcess error: {e}");
         assert!(
@@ -609,7 +621,9 @@ mod tests {
         let zero_key = [0u8; 32];
         let zero_nonce = [0u8; 12];
         let block0 = chacha20::chacha20_block(&zero_key, 0, &zero_nonce);
-        let expected0 = hex("76b8e0ada0f13d90405d6ae55386bd28bdd219b8a08ded1aa836efcc8b770dc7da41597c5157488d7724e03fb8d84a376a43b8f41518a11cc387b669b2ee6586");
+        let expected0 = hex(
+            "76b8e0ada0f13d90405d6ae55386bd28bdd219b8a08ded1aa836efcc8b770dc7da41597c5157488d7724e03fb8d84a376a43b8f41518a11cc387b669b2ee6586",
+        );
         assert_eq!(&block0[..], &expected0[..], "A.1 #1 block");
 
         // RFC 8439 2.4.2: key=00..1f, nonce=000000000000004a00000000, counter=1
@@ -617,7 +631,9 @@ mod tests {
         for (i, b) in key.iter_mut().enumerate() {
             *b = i as u8;
         }
-        let nonce = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4a, 0x00, 0x00, 0x00, 0x00];
+        let nonce = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4a, 0x00, 0x00, 0x00, 0x00,
+        ];
         let plaintext = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
         let mut buf = plaintext.to_vec();
         chacha20::keystream_xor(&key, 1, &nonce, &mut buf);
@@ -631,7 +647,9 @@ mod tests {
 
         // 同一入力から生成したkeystreamのblock単位の検証(2.3.2 block counter=1)
         let block1 = chacha20::chacha20_block(&key, 1, &nonce);
-        let expected1 = hex("224f51f3401bd9e12fde276fb8631ded8c131f823d2c06e27e4fcaec9ef3cf788a3b0aa372600a92b57974cded2b9334794cba40c63e34cdea212c4cf07d41b7");
+        let expected1 = hex(
+            "224f51f3401bd9e12fde276fb8631ded8c131f823d2c06e27e4fcaec9ef3cf788a3b0aa372600a92b57974cded2b9334794cba40c63e34cdea212c4cf07d41b7",
+        );
         assert_eq!(&block1[..], &expected1[..], "2.3.2 block counter=1");
     }
 

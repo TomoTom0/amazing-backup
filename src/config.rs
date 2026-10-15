@@ -3,7 +3,7 @@
 use crate::errors::{BackupError, BackupResult};
 use std::path::Path;
 
-/// `configs/pipeline.toml`相当(3.2)。
+/// `configs/pipeline.toml`相当(3.2・TASK-10設計4.1)。
 #[derive(Debug)]
 pub struct PipelineConfig {
     /// SSH ed25519公開鍵path列挙(1-of-N recipient)
@@ -16,9 +16,59 @@ pub struct PipelineConfig {
     pub keep_going: bool,
     /// --roundtrip検証で使う秘密鍵path
     pub decrypt_key: Option<std::path::PathBuf>,
+    /// data/out配下の.age保持policy(TASK-10設計4.1・8.3)。既定Run(成功run後に掃除)
+    pub keep_artifacts: KeepArtifacts,
+    /// 物理配置の設定(TASK-10設計4.1)
+    pub layout: LayoutConfig,
+    /// 管理区分(名前→保持数)。常にunfiled_category分を含む
+    pub categories: std::collections::BTreeMap<String, CategoryConfig>,
+    /// 手動写像(basename → category/path)。省略時はauto_path_roots相対化へ
+    pub files: std::collections::BTreeMap<String, FileMapping>,
 }
 
-/// `configs/aws.toml`相当(3.3・TASK-9 9.2)。credential値は含まない
+/// data/out配下の.age保持policy(TASK-10設計4.1)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepArtifacts {
+    /// run成功後に当該run分の.ageを掃除(既定)
+    Run,
+    /// 従来挙動(全保持)
+    Always,
+}
+
+impl KeepArtifacts {
+    fn parse(value: &str) -> Option<KeepArtifacts> {
+        match value {
+            "run" => Some(KeepArtifacts::Run),
+            "always" => Some(KeepArtifacts::Always),
+            _ => None,
+        }
+    }
+}
+
+/// `[layout]`相当(TASK-10設計4.1)。
+#[derive(Debug, Clone)]
+pub struct LayoutConfig {
+    /// 写像/roots不一致時のcategory(既定"unfiled")
+    pub unfiled_category: String,
+    /// source_path相対化のroot列挙(順序優先・絶対path)
+    pub auto_path_roots: Vec<std::path::PathBuf>,
+}
+
+/// `[categories.<name>]`相当。keepはNewerNoncurrentVersions適用値(1..=100)。
+#[derive(Debug, Clone)]
+pub struct CategoryConfig {
+    pub keep: u32,
+}
+
+/// `[files."<name>"]`手動写像相当(TASK-10設計4.1)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileMapping {
+    pub category: String,
+    /// rel_path(空文字列=category直下)
+    pub path: String,
+}
+
+/// `configs/aws.toml`相当(3.3・TASK-9 9.2・TASK-10設計4.2)。credential値は含まない
 /// (credentialは`credentials_file`が指す外部ファイル明示参照のみ)。
 #[derive(Debug)]
 pub struct AwsConfig {
@@ -29,6 +79,8 @@ pub struct AwsConfig {
     pub credentials_file: std::path::PathBuf,
     /// 既定DEEP_ARCHIVE
     pub storage_class: String,
+    /// 名前空間root prefix(TASK-10設計1.1・4.2)。`/`終端。既定"backup-remote/"
+    pub prefix: String,
 }
 
 /// credentialファイルの内容(TASK-9設計3章)。`RealS3`構築(明示API key)へ渡す。
@@ -44,15 +96,14 @@ impl std::fmt::Debug for AwsCredentials {
         f.debug_struct("AwsCredentials")
             .field("access_key_id", &"***")
             .field("secret_access_key", &"***")
-            .field(
-                "session_token",
-                &self.session_token.as_ref().map(|_| "***"),
-            )
+            .field("session_token", &self.session_token.as_ref().map(|_| "***"))
             .finish()
     }
 }
 
-/// pipeline.tomlのschema(3.2。未知キー・型不一致拒否の厳格検証)。
+/// pipeline.tomlのschema(3.2・TASK-10設計4.1。未知キー・型不一致拒否の厳格検証)。
+/// TASK-10追加分([output].keep_artifacts・[layout]・[categories]・[files])は
+/// すべて省略可能(旧config・旧サブコマンドとの併存。Phase A案a)。
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PipelineFile {
@@ -62,6 +113,12 @@ struct PipelineFile {
     behavior: BehaviorFile,
     #[serde(default)]
     verify: VerifyFile,
+    #[serde(default)]
+    layout: LayoutFile,
+    #[serde(default)]
+    categories: std::collections::BTreeMap<String, CategoryFile>,
+    #[serde(default)]
+    files: std::collections::BTreeMap<String, FileMappingFile>,
 }
 
 #[derive(serde::Deserialize)]
@@ -75,6 +132,35 @@ struct RecipientsFile {
 struct OutputFile {
     dir: String,
     registry: String,
+    /// "run"|"always"(省略時run)
+    #[serde(default)]
+    keep_artifacts: Option<String>,
+}
+
+/// `[layout]`のschema(TASK-10設計4.1)。
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct LayoutFile {
+    #[serde(default)]
+    unfiled_category: String,
+    #[serde(default)]
+    auto_path_roots: Vec<String>,
+}
+
+/// `[categories.<name>]`のschema(keep必須)。
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CategoryFile {
+    keep: u32,
+}
+
+/// `[files."<name>"]`のschema(category必須・path省略可=category直下)。
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileMappingFile {
+    category: String,
+    #[serde(default)]
+    path: String,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -112,6 +198,10 @@ struct AwsProfile {
     credentials_file: String,
     #[serde(default)]
     storage_class: String,
+    /// 名前空間root prefix(TASK-10設計4.2。None=省略時の既定"backup-remote/"。
+    /// 明示空文字は形式違反として拒否)
+    #[serde(default)]
+    prefix: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -156,7 +246,8 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
 
     if parsed.recipients.public_keys.is_empty() {
         return Err(BackupError::Config(
-            "[recipients].public_keysが空です(1つ以上のSSH ed25519公開鍵を指定してください)".to_string(),
+            "[recipients].public_keysが空です(1つ以上のSSH ed25519公開鍵を指定してください)"
+                .to_string(),
         ));
     }
     if parsed.output.dir.trim().is_empty() || parsed.output.registry.trim().is_empty() {
@@ -193,12 +284,103 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
         Some(std::path::PathBuf::from(parsed.verify.decrypt_key))
     };
 
+    // TASK-10設計4.1・4.2: keep_artifacts列挙値
+    let keep_artifacts = match parsed.output.keep_artifacts.as_deref() {
+        None => KeepArtifacts::Run,
+        Some(v) => KeepArtifacts::parse(v).ok_or_else(|| {
+            BackupError::Config(format!(
+                "[output].keep_artifactsが不正です: {v:?}(許容値: run/always)"
+            ))
+        })?,
+    };
+
+    // TASK-10設計4.2: layout・categories・filesの検証
+    let unfiled_category = match parsed.layout.unfiled_category.trim() {
+        "" => "unfiled".to_string(),
+        t => t.to_string(),
+    };
+    crate::layout::validate_category_name(&unfiled_category)
+        .map_err(|e| BackupError::Config(format!("[layout].unfiled_categoryが不正です: {e}")))?;
+
+    let mut auto_path_roots = Vec::with_capacity(parsed.layout.auto_path_roots.len());
+    for root in &parsed.layout.auto_path_roots {
+        let p = std::path::PathBuf::from(root);
+        if !p.is_absolute() {
+            return Err(BackupError::Config(format!(
+                "[layout].auto_path_rootsは絶対pathで指定してください: {root:?}"
+            )));
+        }
+        auto_path_roots.push(p);
+    }
+
+    let mut categories = std::collections::BTreeMap::new();
+    if parsed.categories.is_empty() {
+        // 旧config(セクションなし)との併存のため、未指定時は既定{unfiled: keep 5}を
+        // 束ねる(TASK-10設計4.1。旧サブコマンドはこの値を使用しない)
+        categories.insert(unfiled_category.clone(), CategoryConfig { keep: 5 });
+    } else {
+        for (name, cat) in &parsed.categories {
+            crate::layout::validate_category_name(name).map_err(|e| {
+                BackupError::Config(format!("[categories.{name}]の名前が不正です: {e}"))
+            })?;
+            if !(1..=100).contains(&cat.keep) {
+                return Err(BackupError::Config(format!(
+                    "[categories.{name}].keepは1以上100以下で指定してください: {}",
+                    cat.keep
+                )));
+            }
+            categories.insert(name.clone(), CategoryConfig { keep: cat.keep });
+        }
+        if !categories.contains_key(&unfiled_category) {
+            return Err(BackupError::Config(format!(
+                "[categories.{unfiled_category}]が必須です(fallback先のcategory。定義してください)"
+            )));
+        }
+    }
+
+    let mut files = std::collections::BTreeMap::new();
+    for (name, mapping) in &parsed.files {
+        if name.is_empty() || name.contains('/') {
+            return Err(BackupError::Config(format!(
+                "[files]のkeyはbasename(拡張子付き・/を含まない)を指定してください: {name:?}"
+            )));
+        }
+        if !categories.contains_key(&mapping.category) {
+            return Err(BackupError::Config(format!(
+                "[files.{name}].category({})は[categories]に定義されていません",
+                mapping.category
+            )));
+        }
+        let rel = crate::layout::normalize_rel_path(&mapping.path)
+            .map_err(|e| BackupError::Config(format!("[files.{name}].pathが不正です: {e}")))?;
+        if crate::layout::path_collides_reserve(&mapping.path) {
+            return Err(BackupError::Config(format!(
+                "[files.{name}].pathの第1階層は予約領域(sys)と衝突するため使えません: {}",
+                mapping.path
+            )));
+        }
+        files.insert(
+            name.clone(),
+            FileMapping {
+                category: mapping.category.clone(),
+                path: rel,
+            },
+        );
+    }
+
     Ok(PipelineConfig {
         public_keys,
         output_dir: std::path::PathBuf::from(parsed.output.dir),
         registry_path: std::path::PathBuf::from(parsed.output.registry),
         keep_going: parsed.behavior.keep_going,
         decrypt_key,
+        keep_artifacts,
+        layout: LayoutConfig {
+            unfiled_category,
+            auto_path_roots,
+        },
+        categories,
+        files,
     })
 }
 
@@ -225,11 +407,17 @@ pub fn load_aws(path: &Path) -> BackupResult<AwsConfig> {
     load_aws_profile(path, None, None)
 }
 
-pub fn load_aws_profile(path: &Path, profile_name: Option<&str>, purpose: Option<&str>) -> BackupResult<AwsConfig> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| BackupError::Config(format!("aws.tomlを読めない ({}): {e}", path.display())))?;
-    let parsed: AwsFile = toml::from_str(&text)
-        .map_err(|e| BackupError::Config(format!("aws.tomlのparseに失敗 ({}): {e}", path.display())))?;
+pub fn load_aws_profile(
+    path: &Path,
+    profile_name: Option<&str>,
+    purpose: Option<&str>,
+) -> BackupResult<AwsConfig> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        BackupError::Config(format!("aws.tomlを読めない ({}): {e}", path.display()))
+    })?;
+    let parsed: AwsFile = toml::from_str(&text).map_err(|e| {
+        BackupError::Config(format!("aws.tomlのparseに失敗 ({}): {e}", path.display()))
+    })?;
 
     if parsed.aws.profiles.is_empty() {
         return Err(BackupError::Config(format!(
@@ -238,49 +426,92 @@ pub fn load_aws_profile(path: &Path, profile_name: Option<&str>, purpose: Option
         )));
     }
 
-    let env_profile = std::env::var("BACKUP_REMOTE_AWS_PROFILE").ok().filter(|v| !v.trim().is_empty());
-    let env_purpose = std::env::var("BACKUP_REMOTE_AWS_PURPOSE").ok().filter(|v| !v.trim().is_empty());
-    // fake seam中(=テスト環境)は test目的のprofileへ自動解決(手動切替・環境変数設定不要)。
-    let test_env = std::env::var("BACKUP_REMOTE_FAKE_S3_STATE").ok().filter(|v| !v.trim().is_empty());
+    let env_profile = std::env::var("BACKUP_REMOTE_AWS_PROFILE")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let env_purpose = std::env::var("BACKUP_REMOTE_AWS_PURPOSE")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    // fake seam中(=テスト環境)は dev目的のprofileへ自動解決(手動切替・環境変数設定不要)。
+    // TASK-10設計4.2: test profile廃止に伴い自動解決先をdevへ変更。
+    let test_env = std::env::var("BACKUP_REMOTE_FAKE_S3_STATE")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
 
-    let explicit_profile = profile_name.map(str::to_string).filter(|s| !s.trim().is_empty());
-    let requested_purpose = purpose.map(str::to_string).filter(|s| !s.trim().is_empty()).or(env_purpose);
+    let explicit_profile = profile_name
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty());
+    let requested_purpose = purpose
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .or(env_purpose);
 
-    let auto_test_purpose = test_env.map(|_| "test".to_string());
+    let auto_test_purpose = test_env.map(|_| "dev".to_string());
 
     let selected_name = if let Some(n) = explicit_profile.or(env_profile) {
         n
     } else if let Some(pur) = requested_purpose.or(auto_test_purpose) {
-        parsed.aws.profiles.iter().find_map(|(name, prof)| {
-            if prof.purpose == pur { Some(name.clone()) } else { None }
-        }).unwrap_or_else(|| {
-            if !parsed.aws.active_profile.trim().is_empty() {
-                parsed.aws.active_profile.clone()
-            } else if parsed.aws.profiles.contains_key("default") {
-                "default".to_string()
-            } else {
-                parsed.aws.profiles.keys().cloned().next().unwrap_or_default()
-            }
-        })
+        parsed
+            .aws
+            .profiles
+            .iter()
+            .find_map(|(name, prof)| {
+                if prof.purpose == pur {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                if !parsed.aws.active_profile.trim().is_empty() {
+                    parsed.aws.active_profile.clone()
+                } else if parsed.aws.profiles.contains_key("default") {
+                    "default".to_string()
+                } else {
+                    parsed
+                        .aws
+                        .profiles
+                        .keys()
+                        .cloned()
+                        .next()
+                        .unwrap_or_default()
+                }
+            })
     } else if !parsed.aws.active_profile.trim().is_empty() {
         parsed.aws.active_profile.clone()
     } else if parsed.aws.profiles.contains_key("default") {
         "default".to_string()
     } else {
-        parsed.aws.profiles.keys().cloned().next().unwrap_or_default()
+        parsed
+            .aws
+            .profiles
+            .keys()
+            .cloned()
+            .next()
+            .unwrap_or_default()
     };
 
     let prof = parsed.aws.profiles.get(&selected_name).ok_or_else(|| {
         BackupError::Config(format!(
             "指定profileが見つからない: {selected_name} ({}。利用可能: {})",
             path.display(),
-            parsed.aws.profiles.keys().cloned().collect::<Vec<_>>().join("/")
+            parsed
+                .aws
+                .profiles
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("/")
         ))
     })?;
 
     let credentials_file = &prof.credentials_file;
     // whitespace + non-empty checks
-    for (name, value) in [("bucket", &prof.bucket), ("region", &prof.region), ("credentials_file", credentials_file)] {
+    for (name, value) in [
+        ("bucket", &prof.bucket),
+        ("region", &prof.region),
+        ("credentials_file", credentials_file),
+    ] {
         if value.trim() != value {
             return Err(BackupError::Config(format!(
                 "[aws.profiles.{selected_name}].{name}の値に前後の空白が含まれる: {value:?}"
@@ -310,13 +541,24 @@ pub fn load_aws_profile(path: &Path, profile_name: Option<&str>, purpose: Option
             KNOWN_STORAGE_CLASSES.join("/")
         )));
     }
+    // TASK-10設計1.1・4.2: root prefix(None=省略時の既定値。明示値は形式検証)
+    let prefix = match &prof.prefix {
+        None => DEFAULT_ROOT_PREFIX.to_string(),
+        Some(v) => v.clone(),
+    };
+    crate::layout::validate_prefix(&prefix)
+        .map_err(|e| BackupError::Config(format!("[aws.profiles.{selected_name}].prefix: {e}")))?;
     Ok(AwsConfig {
         bucket: prof.bucket.clone(),
         region: prof.region.clone(),
         credentials_file: std::path::PathBuf::from(credentials_file.clone()),
         storage_class,
+        prefix,
     })
 }
+
+/// root prefixの既定値(TASK-10設計4.2)。
+pub const DEFAULT_ROOT_PREFIX: &str = "backup-remote/";
 
 /// credentialファイルを読み、厳格schema検証を行う(TASK-9設計3.1〜3.5)。
 /// 不在・TOML parse失敗・`[credentials]`テーブル不在・必須キー欠落・空値・
@@ -338,7 +580,10 @@ pub fn load_credentials(path: &Path) -> BackupResult<AwsCredentials> {
         ))
     })?;
     let c = parsed.credentials;
-    for (name, value) in [("access_key_id", &c.access_key_id), ("secret_access_key", &c.secret_access_key)] {
+    for (name, value) in [
+        ("access_key_id", &c.access_key_id),
+        ("secret_access_key", &c.secret_access_key),
+    ] {
         if value.trim().is_empty() {
             return Err(BackupError::Config(format!(
                 "credentialファイルの[credentials].{name}が空です ({})",
@@ -373,7 +618,8 @@ pub fn load_credentials(path: &Path) -> BackupResult<AwsCredentials> {
 pub fn require_ready(cfg: &AwsConfig) -> BackupResult<()> {
     if cfg.bucket.trim().is_empty() || cfg.region.trim().is_empty() {
         return Err(BackupError::Config(
-            "aws.toml未設定(bucket/regionが空)です。plan/encrypt/verifyはawsなしで実行可能".to_string(),
+            "aws.toml未設定(bucket/regionが空)です。plan/encrypt/verifyはawsなしで実行可能"
+                .to_string(),
         ));
     }
     load_credentials(&cfg.credentials_file)?;
@@ -420,7 +666,8 @@ pub fn apply_cli_overrides(base: AwsConfig, ovr: &AwsOverrides) -> BackupResult<
         }
         if b.trim() != b {
             return Err(BackupError::Config(
-                "--bucketの値に前後の空白が含まれる(空白付き値はtrimせず設定エラーとする)".to_string(),
+                "--bucketの値に前後の空白が含まれる(空白付き値はtrimせず設定エラーとする)"
+                    .to_string(),
             ));
         }
         cfg.bucket = b.to_string();
@@ -434,7 +681,8 @@ pub fn apply_cli_overrides(base: AwsConfig, ovr: &AwsOverrides) -> BackupResult<
         }
         if r.trim() != r {
             return Err(BackupError::Config(
-                "--regionの値に前後の空白が含まれる(空白付き値はtrimせず設定エラーとする)".to_string(),
+                "--regionの値に前後の空白が含まれる(空白付き値はtrimせず設定エラーとする)"
+                    .to_string(),
             ));
         }
         cfg.region = r.to_string();
@@ -446,7 +694,7 @@ pub fn apply_cli_overrides(base: AwsConfig, ovr: &AwsOverrides) -> BackupResult<
 mod tests {
     use super::*;
     use crate::errors::BackupError;
-    use crate::testutil::{write_file, write_test_ed25519_pub, TempDir};
+    use crate::testutil::{TempDir, write_file, write_test_ed25519_pub};
 
     fn config_error(e: &BackupError) -> &str {
         match e {
@@ -472,7 +720,10 @@ mod tests {
         let tmp = TempDir::new("conf-valid");
         let pubkey = write_test_ed25519_pub(tmp.path());
         let cfg_path = tmp.path().join("pipeline.toml");
-        write_file(&cfg_path, valid_pipeline_toml(tmp.path(), &pubkey.display().to_string()).as_bytes());
+        write_file(
+            &cfg_path,
+            valid_pipeline_toml(tmp.path(), &pubkey.display().to_string()).as_bytes(),
+        );
 
         let cfg = load_pipeline(&cfg_path).expect("有効なpipeline.tomlは読み込める");
         assert_eq!(cfg.public_keys, vec![pubkey]);
@@ -498,7 +749,10 @@ mod tests {
         write_file(&bad, b"[recipients\npublic_keys = [\n");
         let e = load_pipeline(&bad).unwrap_err();
         let msg = config_error(&e);
-        assert!(msg.contains("bad.toml") || !msg.is_empty(), "parseエラーの詳細: {msg}");
+        assert!(
+            msg.contains("bad.toml") || !msg.is_empty(),
+            "parseエラーの詳細: {msg}"
+        );
 
         // 3. 未知キー
         let pubkey = write_test_ed25519_pub(tmp.path());
@@ -511,8 +765,10 @@ mod tests {
 
         // 4. 型不一致(public_keysに文字列)
         let typebad = tmp.path().join("typebad.toml");
-        let body = valid_pipeline_toml(tmp.path(), &pubkey.display().to_string())
-            .replace(&format!("public_keys = [\"{}\"]", pubkey.display()), "public_keys = \"not-an-array\"");
+        let body = valid_pipeline_toml(tmp.path(), &pubkey.display().to_string()).replace(
+            &format!("public_keys = [\"{}\"]", pubkey.display()),
+            "public_keys = \"not-an-array\"",
+        );
         write_file(&typebad, body.as_bytes());
         let e = load_pipeline(&typebad).unwrap_err();
         config_error(&e);
@@ -527,8 +783,10 @@ mod tests {
 
         // 1. 空配列
         let empty = tmp.path().join("empty.toml");
-        let body = valid_pipeline_toml(tmp.path(), &pubkey.display().to_string())
-            .replace(&format!("public_keys = [\"{}\"]", pubkey.display()), "public_keys = []");
+        let body = valid_pipeline_toml(tmp.path(), &pubkey.display().to_string()).replace(
+            &format!("public_keys = [\"{}\"]", pubkey.display()),
+            "public_keys = []",
+        );
         write_file(&empty, body.as_bytes());
         let e = load_pipeline(&empty).unwrap_err();
         config_error(&e);
@@ -540,11 +798,17 @@ mod tests {
         write_file(&missing, body.as_bytes());
         let e = load_pipeline(&missing).unwrap_err();
         let msg = config_error(&e);
-        assert!(msg.contains("absent.pub"), "不在鍵pathがmessageに含まれる: {msg}");
+        assert!(
+            msg.contains("absent.pub"),
+            "不在鍵pathがmessageに含まれる: {msg}"
+        );
 
         // 3. ssh-rsa形式(対象外)
         let rsa_path = tmp.path().join("rsa.pub");
-        write_file(&rsa_path, format!("{}\n", crate::testutil::TEST_RSA_PUB).as_bytes());
+        write_file(
+            &rsa_path,
+            format!("{}\n", crate::testutil::TEST_RSA_PUB).as_bytes(),
+        );
         let body = valid_pipeline_toml(tmp.path(), &rsa_path.display().to_string());
         let rsa_cfg = tmp.path().join("rsakey.toml");
         write_file(&rsa_cfg, body.as_bytes());
@@ -561,8 +825,10 @@ mod tests {
 
         // 1. 同一pathを2回列挙
         let same = tmp.path().join("same.toml");
-        let body = valid_pipeline_toml(tmp.path(), &pubkey.display().to_string())
-            .replace(&format!("public_keys = [\"{}\"]", pubkey.display()), &format!("public_keys = [\"{0}\", \"{0}\"]", pubkey.display()));
+        let body = valid_pipeline_toml(tmp.path(), &pubkey.display().to_string()).replace(
+            &format!("public_keys = [\"{}\"]", pubkey.display()),
+            &format!("public_keys = [\"{0}\", \"{0}\"]", pubkey.display()),
+        );
         write_file(&same, body.as_bytes());
         let e = load_pipeline(&same).unwrap_err();
         config_error(&e);
@@ -571,8 +837,14 @@ mod tests {
         let copy = tmp.path().join("copy.pub");
         std::fs::copy(&pubkey, &copy).expect("鍵copy");
         let diff = tmp.path().join("diffpath.toml");
-        let body = valid_pipeline_toml(tmp.path(), &pubkey.display().to_string())
-            .replace(&format!("public_keys = [\"{}\"]", pubkey.display()), &format!("public_keys = [\"{0}\", \"{1}\"]", pubkey.display(), copy.display()));
+        let body = valid_pipeline_toml(tmp.path(), &pubkey.display().to_string()).replace(
+            &format!("public_keys = [\"{}\"]", pubkey.display()),
+            &format!(
+                "public_keys = [\"{0}\", \"{1}\"]",
+                pubkey.display(),
+                copy.display()
+            ),
+        );
         write_file(&diff, body.as_bytes());
         let e = load_pipeline(&diff).unwrap_err();
         config_error(&e);
@@ -591,7 +863,10 @@ mod tests {
         );
         let e = load_aws(&p).unwrap_err();
         let msg = config_error(&e);
-        assert!(msg.contains("aws_access_key_id"), "未知キー名がmessageに含まれる: {msg}");
+        assert!(
+            msg.contains("aws_access_key_id"),
+            "未知キー名がmessageに含まれる: {msg}"
+        );
     }
 
     #[test]
@@ -640,12 +915,20 @@ mod tests {
         let e = load_aws(&typo).unwrap_err();
         let msg = config_error(&e);
         assert_eq!(e.exit_code(), 2);
-        assert!(msg.contains("DEEP_ARCHIV"), "対象値がmessageに含まれる: {msg}");
-        assert!(msg.contains("STANDARD"), "許容値一覧がmessageに含まれる: {msg}");
+        assert!(
+            msg.contains("DEEP_ARCHIV"),
+            "対象値がmessageに含まれる: {msg}"
+        );
+        assert!(
+            msg.contains("STANDARD"),
+            "許容値一覧がmessageに含まれる: {msg}"
+        );
 
         // 2. 許容値(代表: GLACIER・GLACIER_IR)は読み込める
         for ok_value in ["GLACIER", "GLACIER_IR", "STANDARD"] {
-            let p = tmp.path().join(format!("ok-{}.toml", ok_value.to_lowercase()));
+            let p = tmp
+                .path()
+                .join(format!("ok-{}.toml", ok_value.to_lowercase()));
             write_file(
                 &p,
                 format!("[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"{ok_value}\"\n").as_bytes(),
@@ -684,6 +967,7 @@ mod tests {
             region: String::new(),
             credentials_file: creds.clone(),
             storage_class: "DEEP_ARCHIVE".into(),
+            prefix: "backup-remote/".into(),
         };
         let e = require_ready(&empty_both).unwrap_err();
         let msg = config_error(&e);
@@ -692,7 +976,10 @@ mod tests {
             "plan/encrypt/verify案内文が含まれる: {msg}"
         );
 
-        let empty_region = AwsConfig { region: String::new(), ..empty_both };
+        let empty_region = AwsConfig {
+            region: String::new(),
+            ..empty_both
+        };
         require_ready(&empty_region).unwrap_err();
 
         let ready = AwsConfig {
@@ -700,6 +987,7 @@ mod tests {
             region: "r".into(),
             credentials_file: creds,
             storage_class: "DEEP_ARCHIVE".into(),
+            prefix: "backup-remote/".into(),
         };
         require_ready(&ready).expect("bucket/region・credentialファイルがあれば準備完了");
     }
@@ -724,13 +1012,41 @@ mod tests {
                 true,
             ),
             ("不正TOML", "[credentials\nbroken", false),
-            ("[credentials]テーブル不在", "[other]\naccess_key_id = \"V-AKID\"\n", false),
-            ("access_key_id欠落", "[credentials]\nsecret_access_key = \"V-SECR\"\n", false),
-            ("secret_access_key欠落", "[credentials]\naccess_key_id = \"V-AKID\"\n", false),
-            ("access_key_id空値", "[credentials]\naccess_key_id = \"\"\nsecret_access_key = \"V-SECR\"\n", false),
-            ("secret_access_key空値", "[credentials]\naccess_key_id = \"V-AKID\"\nsecret_access_key = \"\"\n", false),
-            ("前後空白付き値", "[credentials]\naccess_key_id = \" V-AKID \"\nsecret_access_key = \"V-SECR\"\n", false),
-            ("未知キー", "[credentials]\naccess_key_id = \"V-AKID\"\nsecret_access_key = \"V-SECR\"\ntoken = \"V-TOKN\"\n", false),
+            (
+                "[credentials]テーブル不在",
+                "[other]\naccess_key_id = \"V-AKID\"\n",
+                false,
+            ),
+            (
+                "access_key_id欠落",
+                "[credentials]\nsecret_access_key = \"V-SECR\"\n",
+                false,
+            ),
+            (
+                "secret_access_key欠落",
+                "[credentials]\naccess_key_id = \"V-AKID\"\n",
+                false,
+            ),
+            (
+                "access_key_id空値",
+                "[credentials]\naccess_key_id = \"\"\nsecret_access_key = \"V-SECR\"\n",
+                false,
+            ),
+            (
+                "secret_access_key空値",
+                "[credentials]\naccess_key_id = \"V-AKID\"\nsecret_access_key = \"\"\n",
+                false,
+            ),
+            (
+                "前後空白付き値",
+                "[credentials]\naccess_key_id = \" V-AKID \"\nsecret_access_key = \"V-SECR\"\n",
+                false,
+            ),
+            (
+                "未知キー",
+                "[credentials]\naccess_key_id = \"V-AKID\"\nsecret_access_key = \"V-SECR\"\ntoken = \"V-TOKN\"\n",
+                false,
+            ),
         ];
         for (i, (tag, body, ok)) in cases.iter().enumerate() {
             let p = tmp.path().join(format!("cred-{i}.toml"));
@@ -745,7 +1061,10 @@ mod tests {
                 // error文はcredential値を含まない(値の検出markerで検証)
                 let msg = format!("{e}");
                 for marker in ["V-AKID", "V-SECR", "V-TOKN"] {
-                    assert!(!msg.contains(marker), "{tag}: 値({marker})を含まない: {msg}");
+                    assert!(
+                        !msg.contains(marker),
+                        "{tag}: 値({marker})を含まない: {msg}"
+                    );
                 }
             }
         }
@@ -758,7 +1077,10 @@ mod tests {
         let tmp = TempDir::new("conf-credno");
         let e = load_credentials(&tmp.path().join("absent-credentials.toml")).unwrap_err();
         let msg = config_error(&e);
-        assert!(msg.contains("absent-credentials.toml"), "pathがmessageに含まれる: {msg}");
+        assert!(
+            msg.contains("absent-credentials.toml"),
+            "pathがmessageに含まれる: {msg}"
+        );
         assert_eq!(e.exit_code(), 2);
     }
 
@@ -768,6 +1090,7 @@ mod tests {
             region: "ap-northeast-1".into(),
             credentials_file: std::path::PathBuf::from("configs/secret/aws-credentials.toml"),
             storage_class: "DEEP_ARCHIVE".into(),
+            prefix: "backup-remote/".into(),
         }
     }
 
@@ -789,11 +1112,13 @@ mod tests {
     #[test]
     fn apply_cli_overrides_validates_storage_class() {
         // allowlist外(打ち間違い)は設定エラー2
-        let e = apply_cli_overrides(base_aws(), &ovr(Some("DEEP_ARCIVE"), None, None))
-            .unwrap_err();
+        let e = apply_cli_overrides(base_aws(), &ovr(Some("DEEP_ARCIVE"), None, None)).unwrap_err();
         let msg = config_error(&e);
         assert_eq!(e.exit_code(), 2);
-        assert!(msg.contains("DEEP_ARCIVE"), "対象値がmessageに含まれる: {msg}");
+        assert!(
+            msg.contains("DEEP_ARCIVE"),
+            "対象値がmessageに含まれる: {msg}"
+        );
 
         // 許容値は上書きされる(優先順位: CLI指定値 > aws.toml値)
         let cfg = apply_cli_overrides(base_aws(), &ovr(Some("GLACIER"), None, None))
@@ -817,8 +1142,14 @@ mod tests {
 
         // 1. 前後空白付きbucket/regionは設定エラー
         for (name, body) in [
-            ("bucket", "[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \" my-bucket \"\nregion = \"ap-northeast-1\"\ncredentials_file = \"c.toml\"\n"),
-            ("region", "[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"my-bucket\"\nregion = \" ap-northeast-1\"\ncredentials_file = \"c.toml\"\n"),
+            (
+                "bucket",
+                "[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \" my-bucket \"\nregion = \"ap-northeast-1\"\ncredentials_file = \"c.toml\"\n",
+            ),
+            (
+                "region",
+                "[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"my-bucket\"\nregion = \" ap-northeast-1\"\ncredentials_file = \"c.toml\"\n",
+            ),
         ] {
             let p = tmp.path().join(format!("ws-{}.toml", name));
             write_file(&p, body.as_bytes());
@@ -883,5 +1214,210 @@ mod tests {
         assert_eq!(cfg.storage_class, "GLACIER");
         assert_eq!(cfg.bucket, "alt-bucket");
         assert_eq!(cfg.region, "us-east-1");
+    }
+
+    /// TASK-10設計4.1の拡張schema([layout]/[categories]/[files]/keep_artifacts)を
+    /// 含むpipeline.toml本文。[output]配下へkeep_artifactsを置き、以降に[layout]・
+    /// [categories.unfiled]と追加断片(extra)を繋ぐ。
+    fn task10_pipeline_toml(
+        dir: &std::path::Path,
+        pub1: &str,
+        keep_artifacts: &str,
+        extra: &str,
+    ) -> String {
+        let keep_line = if keep_artifacts.is_empty() {
+            String::new()
+        } else {
+            format!("keep_artifacts = \"{keep_artifacts}\"\n")
+        };
+        format!(
+            "[recipients]\npublic_keys = [\"{pub1}\"]\n\
+             [output]\ndir = \"{}\"\nregistry = \"{}\"\n{keep_line}\
+             [behavior]\nkeep_going = false\n\
+             [verify]\ndecrypt_key = \"{}\"\n\
+             [layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [\"/home/tomo/data\"]\n\
+             [categories.unfiled]\nkeep = 5\n{extra}",
+            dir.join("out").display(),
+            dir.join("registry.jsonl").display(),
+            dir.join("nokey").display(),
+        )
+    }
+
+    /// [covers:config.layout-and-categories-validation]
+    /// [layout]/[categories]/[files]の検証(設計4.2): keepは1以上100以下・
+    /// [categories.unfiled]必須・files.categoryはcategoriesに存在するもの・
+    /// auto_path_rootsは絶対path・filesのpath先頭の_sys衝突・category名規則は設定エラー2。
+    /// 適正な拡張schemaは読み込める(未知キー扱いにならない)。
+    #[test]
+    fn load_pipeline_validates_layout_and_categories() {
+        let tmp = TempDir::new("conf-t10-layout");
+        let pubkey = write_test_ed25519_pub(tmp.path());
+        let pub_s = pubkey.display().to_string();
+        let write_cfg = |name: &str, body: String| {
+            let p = tmp.path().join(name);
+            write_file(&p, body.as_bytes());
+            p
+        };
+
+        // 適正: 拡張schema([files]写像・複数category込み)は読み込める
+        let valid = write_cfg(
+            "t10-valid.toml",
+            task10_pipeline_toml(
+                tmp.path(),
+                &pub_s,
+                "run",
+                "[categories.photos]\nkeep = 3\n\n[files.\"travel.zip\"]\ncategory = \"photos\"\npath = \"2020-2023/travel\"\n",
+            ),
+        );
+        load_pipeline(&valid).expect("適正な拡張schemaは読み込める");
+
+        // keep=0 / keep=101(1以上100以下の境界外)
+        for (name, keep) in [("keep0", "0"), ("keep101", "101")] {
+            let p = write_cfg(
+                &format!("t10-{name}.toml"),
+                task10_pipeline_toml(
+                    tmp.path(),
+                    &pub_s,
+                    "run",
+                    &format!("[categories.main]\nkeep = {keep}\n"),
+                ),
+            );
+            let e = load_pipeline(&p).unwrap_err();
+            config_error(&e);
+            assert_eq!(e.exit_code(), 2, "{name}は設定エラー2");
+        }
+
+        // [categories.unfiled]欠落(unfiledのみ削除・mainはある)
+        let body = format!(
+            "[recipients]\npublic_keys = [\"{pub_s}\"]\n\
+             [output]\ndir = \"{}\"\nregistry = \"{}\"\nkeep_artifacts = \"run\"\n\
+             [behavior]\nkeep_going = false\n\
+             [verify]\ndecrypt_key = \"{}\"\n\
+             [layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [\"/home/tomo/data\"]\n\
+             [categories.main]\nkeep = 5\n",
+            tmp.path().join("out").display(),
+            tmp.path().join("registry.jsonl").display(),
+            tmp.path().join("nokey").display(),
+        );
+        let p = write_cfg("t10-nounfiled.toml", body);
+        let e = load_pipeline(&p).unwrap_err();
+        config_error(&e);
+        assert_eq!(e.exit_code(), 2, "[categories.unfiled]欠落は設定エラー2");
+
+        // files.categoryに未定義category
+        let p = write_cfg(
+            "t10-undefined.toml",
+            task10_pipeline_toml(
+                tmp.path(),
+                &pub_s,
+                "run",
+                "[files.\"x.zip\"]\ncategory = \"ghost\"\npath = \"a\"\n",
+            ),
+        );
+        let e = load_pipeline(&p).unwrap_err();
+        config_error(&e);
+        assert_eq!(e.exit_code(), 2, "files.category未定義は設定エラー2");
+
+        // auto_path_rootsに相対path
+        let body = task10_pipeline_toml(tmp.path(), &pub_s, "run", "").replace(
+            "auto_path_roots = [\"/home/tomo/data\"]",
+            "auto_path_roots = [\"relative/path\"]",
+        ) + "";
+        let p = write_cfg("t10-relroot.toml", body);
+        let e = load_pipeline(&p).unwrap_err();
+        config_error(&e);
+        assert_eq!(e.exit_code(), 2, "auto_path_roots相対pathは設定エラー2");
+
+        // category名規則違反(大文字開始)と_sys予約
+        for (name, extra) in [
+            ("category-uppercase", "[categories.\"BadName\"]\nkeep = 5\n"),
+            ("category-sys", "[categories._sys]\nkeep = 5\n"),
+        ] {
+            let p = write_cfg(
+                &format!("t10-{name}.toml"),
+                task10_pipeline_toml(tmp.path(), &pub_s, "run", extra),
+            );
+            let e = load_pipeline(&p).unwrap_err();
+            config_error(&e);
+            assert_eq!(e.exit_code(), 2, "category名違反({name})は設定エラー2");
+        }
+
+        // filesのpath先頭が_sys/へ衝突(予約領域)
+        let p = write_cfg(
+            "t10-sysprefix.toml",
+            task10_pipeline_toml(
+                tmp.path(),
+                &pub_s,
+                "run",
+                "[files.\"x.zip\"]\ncategory = \"unfiled\"\npath = \"_sys/x\"\n",
+            ),
+        );
+        let e = load_pipeline(&p).unwrap_err();
+        config_error(&e);
+        assert_eq!(e.exit_code(), 2, "files写像pathの_sys衝突は設定エラー2");
+    }
+
+    /// [covers:config.aws-profile-prefix]
+    /// aws.tomlのprofile毎prefix(設計4.2・1.1): 形式違反(空・末尾スラッシュなし・
+    /// 先頭スラッシュ・使用文字違反)は設定エラー2。適正値は読み込める。
+    #[test]
+    fn load_aws_validates_profile_prefix() {
+        let tmp = TempDir::new("conf-t10-prefix");
+        let base = "[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\nbucket = \"b\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"c.toml\"\n";
+
+        // 適正なprefixは読み込める
+        let p = tmp.path().join("prefix-ok.toml");
+        write_file(
+            &p,
+            (base.to_string() + "prefix = \"backup-remote/\"\n").as_bytes(),
+        );
+        load_aws(&p).expect("適正なprefixは読み込める");
+
+        for (name, prefix) in [
+            ("空", ""),
+            ("末尾スラッシュなし", "backup-remote"),
+            ("先頭スラッシュ", "/backup-remote/"),
+            ("使用文字違反", "Backup_Remote/"),
+        ] {
+            let p = tmp.path().join(format!("prefix-{}.toml", name.len()));
+            write_file(
+                &p,
+                (base.to_string() + &format!("prefix = \"{prefix}\"\n")).as_bytes(),
+            );
+            let e = load_aws(&p).unwrap_err();
+            config_error(&e);
+            assert_eq!(e.exit_code(), 2, "prefix形式違反({name})は設定エラー2");
+        }
+    }
+
+    /// [covers:config.keep-artifacts-enum]
+    /// [output].keep_artifactsは列挙値 "run"|"always"(省略時はrun既定)。
+    /// その他の値は設定エラー2。
+    #[test]
+    fn load_pipeline_validates_keep_artifacts_enum() {
+        let tmp = TempDir::new("conf-t10-keepart");
+        let pubkey = write_test_ed25519_pub(tmp.path());
+        let pub_s = pubkey.display().to_string();
+        let write_cfg = |name: &str, keep_artifacts: &str| {
+            let body = task10_pipeline_toml(tmp.path(), &pub_s, keep_artifacts, "");
+            let p = tmp.path().join(name);
+            write_file(&p, body.as_bytes());
+            p
+        };
+
+        for value in ["run", "always"] {
+            let p = write_cfg(&format!("keepart-{value}.toml"), value);
+            load_pipeline(&p)
+                .unwrap_or_else(|e| panic!("keep_artifacts={value}は読み込めるべき: {e}"));
+        }
+        // キー省略は既定run扱いで読み込める
+        let p = write_cfg("keepart-default.toml", "");
+        load_pipeline(&p).expect("keep_artifacts省略は既定値扱い");
+
+        // 不正値
+        let p = write_cfg("keepart-monthly.toml", "monthly");
+        let e = load_pipeline(&p).unwrap_err();
+        config_error(&e);
+        assert_eq!(e.exit_code(), 2, "keep_artifacts不正値は設定エラー2");
     }
 }

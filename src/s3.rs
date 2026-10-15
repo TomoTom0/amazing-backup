@@ -17,26 +17,130 @@ pub struct HeadInfo {
     /// `Restore`ヘッダのraw文字列(復元job状態。ヘッダなし=None)。
     /// parseはrestore.rs側で行う(3.8)。upload/README配置の既存呼び出しはこの値を見ない。
     pub restore: Option<String>,
+    /// 対象object(版)のstorage class(TASK-10: DA系は復元job要否の判定に使う。
+    /// fakeはPUT時に記録した値・seed由来など不明はNone=非archive扱い)
+    pub storage_class: Option<String>,
 }
 
-/// S3操作の抽象(設計4章)。region・credentialはBackend構築時に固定。
-/// bucket/storage_classは「CLI一時上書きで実効値が変わり得る」ため呼び出し引数。
+/// versioning有効bucketでの版情報(ListObjectVersions応答のrepo中立型)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionInfo {
+    pub key: String,
+    pub version_id: String,
+    /// ISO8601相当の文字列(実装由来の表現をそのまま)
+    pub last_modified: String,
+    /// last_modifiedのepoch秒(版順序のsortはこの数値で行う。文字列sortは
+    /// 実装表記差で崩れ得るためL-2)
+    pub last_modified_epoch: i64,
+    pub size: i64,
+    /// 現行versionか
+    pub is_latest: bool,
+    /// delete markerか
+    pub is_delete_marker: bool,
+}
+
+/// lifecycle ruleのrepo中立表現(TASK-10設計5.2。`manage lifecycle apply`が構成)。
+/// 削除条件はNCVEとpruneの単一定義(設計5.2)。Expiration(現行版削除)と
+/// STANDARD→DA移行ruleは構成しない。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LifecycleSpec {
+    /// category毎のNoncurrentVersionExpiration(prefix `<prefix>/<category>/`。
+    /// 予約領域(sys)はprefix filterで構造的に対象外)
+    Noncurrent {
+        prefix: String,
+        /// noncurrent版が削除可能になるまでの日数(180=Deep Archive最小保存期間)
+        noncurrent_days: i32,
+        /// 残すnoncurrent版数(NewerNoncurrentVersions・category keep値)
+        newer_noncurrent_versions: i32,
+    },
+    /// AbortIncompleteMultipartUpload(不完全MPU掃除・prefix `<prefix>/`)
+    MpuAbort {
+        prefix: String,
+        days_after_initiation: i32,
+    },
+}
+
+/// S3操作の抽象(設計4章・TASK-10 8.1拡張)。region・credentialはBackend構築時に固定。
+/// bucket/storage_classは「CLI一時上載せで実効値が変わり得る」ため呼び出し引数。
 pub trait S3Backend {
     /// HeadObject。`Ok(None)`=404(Key不在)。
     fn head(&self, bucket: &str, key: &str) -> BackupResult<Option<HeadInfo>>;
     /// upload方向。storage_classはrepo側allowlist検査済みString。multipart判定は実装側。
+    /// 戻り値は当該uploadのVersionId(versioning有効bucket前提。TASK-10 8.1)。
     fn put(&self, bucket: &str, key: &str, src: &Path, storage_class: &str)
-        -> BackupResult<()>;
+    -> BackupResult<String>;
     /// download方向。dest(`.part`)へstream書込(呼び出し側が`.part`→rename規則を維持)。
     fn get_to_file(&self, bucket: &str, key: &str, dest: &Path) -> BackupResult<()>;
     /// ListObjectsV2(paginator内包)。key昇順・重複除去済みを返す。
     fn list_keys(&self, bucket: &str, prefix: &str) -> BackupResult<Vec<String>>;
     /// RestoreObject。days/tierはrepo側allowlist検査済み文字列。
     fn restore(&self, bucket: &str, key: &str, days: u32, tier: &str) -> BackupResult<()>;
+    /// HeadObjectのversion指定版(現行版はversion_idに現行vidを渡す)。
+    fn head_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> BackupResult<Option<HeadInfo>>;
+    /// GetObjectのversion指定版。
+    fn get_version_to_file(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        dest: &Path,
+    ) -> BackupResult<()>;
+    /// ListObjectVersions(paginator内包。key昇順・同じkey内では新しい版が先)。
+    fn list_versions(&self, bucket: &str, prefix: &str) -> BackupResult<Vec<VersionInfo>>;
+    /// RestoreObjectのversion指定版。
+    fn restore_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        days: u32,
+        tier: &str,
+    ) -> BackupResult<()>;
+    /// CopyObject(後付けpin写し)。5GiB超は実装側でUploadPartCopyへ分岐する。
+    fn copy_object(
+        &self,
+        bucket: &str,
+        src_key: &str,
+        src_version_id: Option<&str>,
+        dest_key: &str,
+        storage_class: &str,
+    ) -> BackupResult<()>;
+    /// DeleteObject(versioning bucketではdelete markerを作る)。
+    fn delete_object(&self, bucket: &str, key: &str) -> BackupResult<()>;
+    /// DeleteObjectVersion(当該版を削除。manage pruneが使う)。
+    fn delete_object_version(&self, bucket: &str, key: &str, version_id: &str) -> BackupResult<()>;
+    /// GetBucketVersioning(Enabled=true。backup pushの事前確認)。
+    fn get_bucket_versioning(&self, bucket: &str) -> BackupResult<bool>;
+    /// PutBucketLifecycleConfiguration(rule一式の置換・manage lifecycle apply)。
+    fn put_lifecycle(&self, bucket: &str, rules: &[LifecycleSpec]) -> BackupResult<()>;
+    /// GetBucketLifecycleConfiguration(未設定None)。
+    fn get_lifecycle(&self, bucket: &str) -> BackupResult<Option<Vec<LifecycleSpec>>>;
 }
 
 /// multipart開始閾値(設計5.3)。この閾値を超える対象はmultipart upload。
 pub const MULTIPART_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
+/// CopyObjectの1回上限(S3仕様。超過はUploadPartCopyで分割・設計1.3)
+pub const COPY_OBJECT_MAX_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+
+/// S3 keyのpath部をcopy_source用にpercent-encodeする('/'は区切りとして保持し、
+/// unreserved文字[A-Za-z0-9-._~]以外を%XXへ)
+fn encode_s3_path(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    for byte in key.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
 /// multipart part size(設計5.3。64MiB×10,000parts上限=640GiB)。
 pub const PART_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 /// S3 multipartのpart数上限(S3仕様)。
@@ -134,7 +238,7 @@ impl RealS3 {
         src: &Path,
         storage_class: &str,
         size: u64,
-    ) -> BackupResult<()> {
+    ) -> BackupResult<String> {
         let create = self
             .client
             .create_multipart_upload()
@@ -185,7 +289,8 @@ impl RealS3 {
                     );
                 }
                 Err(err) => {
-                    self.abort_multipart_best_effort(bucket, key, &upload_id).await;
+                    self.abort_multipart_best_effort(bucket, key, &upload_id)
+                        .await;
                     return Err(map_sdk_error("UploadPart", bucket, key, err));
                 }
             }
@@ -196,7 +301,8 @@ impl RealS3 {
         let completed = aws_sdk_s3::types::CompletedMultipartUpload::builder()
             .set_parts(Some(parts))
             .build();
-        self.client
+        let resp = self
+            .client
             .complete_multipart_upload()
             .bucket(bucket)
             .key(key)
@@ -205,7 +311,8 @@ impl RealS3 {
             .send()
             .await
             .map_err(|err| map_sdk_error("CompleteMultipartUpload", bucket, key, err))?;
-        Ok(())
+        // Complete応答のVersionId(versioning有効bucket。無い場合は空文字)
+        Ok(resp.version_id().map(str::to_string).unwrap_or_default())
     }
 
     /// part失敗時のbest-effort abort(失敗してもwarn表示のみ。設計5.7)。
@@ -241,16 +348,15 @@ impl S3Backend for RealS3 {
                 Ok(out) => Ok(Some(HeadInfo {
                     size: out.content_length().unwrap_or(-1),
                     checksum_sha256: out.checksum_sha256().map(str::to_string),
-                    checksum_type: out
-                        .checksum_type()
-                        .map(|t| t.as_str().to_string()),
+                    checksum_type: out.checksum_type().map(|t| t.as_str().to_string()),
                     restore: out.restore().map(str::to_string),
+                    storage_class: out.storage_class().map(|s| s.as_str().to_string()),
                 })),
                 Err(err) => {
                     // 404(NotFound)=Key不在はOk(None)(現行規則の維持・設計1章・8章)
-                    let not_found = err
-                        .as_service_error()
-                        .is_some_and(aws_sdk_s3::operation::head_object::HeadObjectError::is_not_found);
+                    let not_found = err.as_service_error().is_some_and(
+                        aws_sdk_s3::operation::head_object::HeadObjectError::is_not_found,
+                    );
                     if not_found {
                         Ok(None)
                     } else {
@@ -267,7 +373,7 @@ impl S3Backend for RealS3 {
         key: &str,
         src: &Path,
         storage_class: &str,
-    ) -> BackupResult<()> {
+    ) -> BackupResult<String> {
         let size = std::fs::metadata(src)
             .map_err(|e| src_read_error("PutObject", key, src, e))?
             .len();
@@ -281,7 +387,8 @@ impl S3Backend for RealS3 {
                     .build()
                     .await
                     .map_err(|e| src_read_error("PutObject", key, src, e))?;
-                self.client
+                let resp = self
+                    .client
                     .put_object()
                     .bucket(bucket)
                     .key(key)
@@ -291,7 +398,8 @@ impl S3Backend for RealS3 {
                     .send()
                     .await
                     .map_err(|err| map_sdk_error("PutObject", bucket, key, err))?;
-                Ok(())
+                // PutObject応答のVersionId(versioning有効bucket。無い場合は空文字)
+                Ok(resp.version_id().map(str::to_string).unwrap_or_default())
             }
         })
     }
@@ -310,9 +418,9 @@ impl S3Backend for RealS3 {
                 Ok(out) => out,
                 Err(err) => {
                     // GetObjectのkey不在はdownload側のkey不在案内を維持(設計8章)
-                    let no_such_key = err
-                        .as_service_error()
-                        .is_some_and(aws_sdk_s3::operation::get_object::GetObjectError::is_no_such_key);
+                    let no_such_key = err.as_service_error().is_some_and(
+                        aws_sdk_s3::operation::get_object::GetObjectError::is_no_such_key,
+                    );
                     if no_such_key {
                         return Err(BackupError::Transfer(format!(
                             "対象keyがS3に存在しない(key={key})"
@@ -359,8 +467,8 @@ impl S3Backend for RealS3 {
                 .into_paginator()
                 .send();
             while let Some(page) = paginator.next().await {
-                let page = page
-                    .map_err(|err| map_sdk_error("ListObjectsV2", bucket, prefix, err))?;
+                let page =
+                    page.map_err(|err| map_sdk_error("ListObjectsV2", bucket, prefix, err))?;
                 for obj in page.contents() {
                     if let Some(k) = obj.key() {
                         keys.push(k.to_string());
@@ -397,6 +505,457 @@ impl S3Backend for RealS3 {
             Ok(())
         })
     }
+
+    fn head_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> BackupResult<Option<HeadInfo>> {
+        self.rt.block_on(async {
+            match self
+                .client
+                .head_object()
+                .bucket(bucket)
+                .key(key)
+                .version_id(version_id)
+                .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
+                .send()
+                .await
+            {
+                Ok(out) => Ok(Some(HeadInfo {
+                    size: out.content_length().unwrap_or(-1),
+                    checksum_sha256: out.checksum_sha256().map(str::to_string),
+                    checksum_type: out.checksum_type().map(|t| t.as_str().to_string()),
+                    restore: out.restore().map(str::to_string),
+                    storage_class: out.storage_class().map(|s| s.as_str().to_string()),
+                })),
+                Err(err) => {
+                    let not_found = err.as_service_error().is_some_and(
+                        aws_sdk_s3::operation::head_object::HeadObjectError::is_not_found,
+                    );
+                    if not_found {
+                        Ok(None)
+                    } else {
+                        Err(map_sdk_error("HeadObject", bucket, key, err))
+                    }
+                }
+            }
+        })
+    }
+
+    fn get_version_to_file(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        dest: &Path,
+    ) -> BackupResult<()> {
+        self.rt.block_on(async {
+            let output = match self
+                .client
+                .get_object()
+                .bucket(bucket)
+                .key(key)
+                .version_id(version_id)
+                .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
+                .send()
+                .await
+            {
+                Ok(out) => out,
+                Err(err) => {
+                    let no_such_key = err.as_service_error().is_some_and(
+                        aws_sdk_s3::operation::get_object::GetObjectError::is_no_such_key,
+                    );
+                    if no_such_key {
+                        return Err(BackupError::Transfer(format!(
+                            "対象keyがS3に存在しない(key={key}, version_id={version_id})"
+                        )));
+                    }
+                    return Err(map_sdk_error("GetObject", bucket, key, err));
+                }
+            };
+            let mut reader = output.body.into_async_read();
+            let mut writer = match tokio::fs::File::create(dest).await {
+                Ok(w) => w,
+                Err(e) => {
+                    return Err(BackupError::Transfer(format!(
+                        "S3 GetObject失敗(key={key}, dest={}): 取得先fileの作成に失敗: {e}",
+                        dest.display()
+                    )));
+                }
+            };
+            if let Err(e) = tokio::io::copy(&mut reader, &mut writer).await {
+                return Err(BackupError::Transfer(format!(
+                    "S3 GetObject失敗(key={key}): 応答bodyの読込・書込に失敗: {e}"
+                )));
+            }
+            if let Err(e) = tokio::io::AsyncWriteExt::flush(&mut writer).await {
+                return Err(BackupError::Transfer(format!(
+                    "S3 GetObject失敗(key={key}): 取得先fileへの書込完了に失敗: {e}"
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    fn list_versions(&self, bucket: &str, prefix: &str) -> BackupResult<Vec<VersionInfo>> {
+        self.rt.block_on(async {
+            let mut versions: Vec<VersionInfo> = Vec::new();
+            // このSDK版のlist_object_versionsにはpaginatorがないためmarker手動loop
+            let mut key_marker: Option<String> = None;
+            let mut version_id_marker: Option<String> = None;
+            loop {
+                let mut req = self
+                    .client
+                    .list_object_versions()
+                    .bucket(bucket)
+                    .prefix(prefix);
+                if let Some(km) = &key_marker {
+                    req = req.key_marker(km);
+                }
+                if let Some(vm) = &version_id_marker {
+                    req = req.version_id_marker(vm);
+                }
+                let page = req
+                    .send()
+                    .await
+                    .map_err(|err| map_sdk_error("ListObjectVersions", bucket, prefix, err))?;
+                for v in page.versions() {
+                    versions.push(VersionInfo {
+                        key: v.key().map(str::to_string).unwrap_or_default(),
+                        version_id: v.version_id().map(str::to_string).unwrap_or_default(),
+                        last_modified: v.last_modified().map(|t| t.to_string()).unwrap_or_default(),
+                        last_modified_epoch: v.last_modified().map(|t| t.secs()).unwrap_or(0),
+                        size: v.size().unwrap_or(-1),
+                        is_latest: v.is_latest().unwrap_or(false),
+                        is_delete_marker: false,
+                    });
+                }
+                for m in page.delete_markers() {
+                    versions.push(VersionInfo {
+                        key: m.key().map(str::to_string).unwrap_or_default(),
+                        version_id: m.version_id().map(str::to_string).unwrap_or_default(),
+                        last_modified: m.last_modified().map(|t| t.to_string()).unwrap_or_default(),
+                        last_modified_epoch: m.last_modified().map(|t| t.secs()).unwrap_or(0),
+                        size: 0,
+                        is_latest: m.is_latest().unwrap_or(false),
+                        is_delete_marker: true,
+                    });
+                }
+                if page.is_truncated().unwrap_or(false) {
+                    key_marker = page.next_key_marker().map(str::to_string);
+                    version_id_marker = page.next_version_id_marker().map(str::to_string);
+                    if key_marker.is_none() {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            // key昇順・同じkey内では新しい版が先(epoch秒降順)
+            versions.sort_by(|a, b| {
+                a.key
+                    .cmp(&b.key)
+                    .then(b.last_modified_epoch.cmp(&a.last_modified_epoch))
+                    .then(b.version_id.cmp(&a.version_id))
+            });
+            Ok(versions)
+        })
+    }
+
+    fn restore_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        days: u32,
+        tier: &str,
+    ) -> BackupResult<()> {
+        self.rt.block_on(async {
+            let glacier = aws_sdk_s3::types::GlacierJobParameters::builder()
+                .tier(aws_sdk_s3::types::Tier::from(tier))
+                .build()
+                .map_err(|e| {
+                    BackupError::Config(format!("RestoreRequestの組立に失敗(tier={tier}): {e}"))
+                })?;
+            let request = aws_sdk_s3::types::RestoreRequest::builder()
+                .days(days as i32)
+                .glacier_job_parameters(glacier)
+                .build();
+            self.client
+                .restore_object()
+                .bucket(bucket)
+                .key(key)
+                .version_id(version_id)
+                .restore_request(request)
+                .send()
+                .await
+                .map_err(|err| map_sdk_error("RestoreObject", bucket, key, err))?;
+            Ok(())
+        })
+    }
+
+    fn copy_object(
+        &self,
+        bucket: &str,
+        src_key: &str,
+        src_version_id: Option<&str>,
+        dest_key: &str,
+        storage_class: &str,
+    ) -> BackupResult<()> {
+        // 写し元のsizeでCopyObject(5GiB上限)かUploadPartCopyかを分岐(設計1.3)
+        let head = match src_version_id {
+            Some(vid) => self.head_version(bucket, src_key, vid)?,
+            None => self.head(bucket, src_key)?,
+        };
+        let Some(head) = head else {
+            return Err(BackupError::Transfer(format!(
+                "CopyObjectの写し元がS3に存在しない(key={src_key})"
+            )));
+        };
+        let size = head.size.max(0) as u64;
+        // copy_sourceはURL形式のためkey部をpercent-encodeする(M-5: 日本語・空白等の
+        // 非unreserved文字を含むkeyで実S3のCopyObjectが失敗するのを防ぐ)
+        let encoded_key = encode_s3_path(src_key);
+        let copy_source = match src_version_id {
+            Some(vid) => format!("{bucket}/{encoded_key}?versionId={vid}"),
+            None => format!("{bucket}/{encoded_key}"),
+        };
+        self.rt.block_on(async move {
+            if size <= COPY_OBJECT_MAX_BYTES {
+                self.client
+                    .copy_object()
+                    .bucket(bucket)
+                    .key(dest_key)
+                    .copy_source(&copy_source)
+                    .storage_class(aws_sdk_s3::types::StorageClass::from(storage_class))
+                    .send()
+                    .await
+                    .map_err(|err| map_sdk_error("CopyObject", bucket, dest_key, err))?;
+                return Ok(());
+            }
+            // 5GiB超: UploadPartCopyで分割写し(part sizeは既存規則に従う)
+            let create = self
+                .client
+                .create_multipart_upload()
+                .bucket(bucket)
+                .key(dest_key)
+                .storage_class(aws_sdk_s3::types::StorageClass::from(storage_class))
+                .send()
+                .await
+                .map_err(|err| map_sdk_error("CreateMultipartUpload", bucket, dest_key, err))?;
+            let Some(upload_id) = create.upload_id().map(str::to_string) else {
+                return Err(BackupError::Transfer(format!(
+                    "CreateMultipartUpload応答にupload_idがない(bucket={bucket}, key={dest_key})"
+                )));
+            };
+            let part_size = part_size_for(size);
+            let mut parts: Vec<aws_sdk_s3::types::CompletedPart> = Vec::new();
+            let mut offset: u64 = 0;
+            let mut part_number: i32 = 0;
+            while offset < size {
+                part_number += 1;
+                let length = part_size.min(size - offset).min(COPY_OBJECT_MAX_BYTES);
+                let range = format!("bytes={offset}-{}", offset + length.saturating_sub(1));
+                let resp = self
+                    .client
+                    .upload_part_copy()
+                    .bucket(bucket)
+                    .key(dest_key)
+                    .upload_id(&upload_id)
+                    .part_number(part_number)
+                    .copy_source(&copy_source)
+                    .copy_source_range(&range)
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) => {
+                        let e_tag = r
+                            .copy_part_result()
+                            .and_then(|c| c.e_tag().map(str::to_string))
+                            .unwrap_or_default();
+                        parts.push(
+                            aws_sdk_s3::types::CompletedPart::builder()
+                                .part_number(part_number)
+                                .e_tag(e_tag)
+                                .build(),
+                        );
+                    }
+                    Err(err) => {
+                        let _ = self
+                            .client
+                            .abort_multipart_upload()
+                            .bucket(bucket)
+                            .key(dest_key)
+                            .upload_id(&upload_id)
+                            .send()
+                            .await;
+                        return Err(map_sdk_error("UploadPartCopy", bucket, dest_key, err));
+                    }
+                }
+                offset += length;
+            }
+            parts.sort_by_key(|p| p.part_number().unwrap_or(0));
+            let completed = aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                .set_parts(Some(parts))
+                .build();
+            self.client
+                .complete_multipart_upload()
+                .bucket(bucket)
+                .key(dest_key)
+                .upload_id(&upload_id)
+                .multipart_upload(completed)
+                .send()
+                .await
+                .map_err(|err| map_sdk_error("CompleteMultipartUpload", bucket, dest_key, err))?;
+            Ok(())
+        })
+    }
+
+    fn delete_object(&self, bucket: &str, key: &str) -> BackupResult<()> {
+        self.rt.block_on(async {
+            self.client
+                .delete_object()
+                .bucket(bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(|err| map_sdk_error("DeleteObject", bucket, key, err))?;
+            Ok(())
+        })
+    }
+
+    fn delete_object_version(&self, bucket: &str, key: &str, version_id: &str) -> BackupResult<()> {
+        self.rt.block_on(async {
+            self.client
+                .delete_object()
+                .bucket(bucket)
+                .key(key)
+                .version_id(version_id)
+                .send()
+                .await
+                .map_err(|err| map_sdk_error("DeleteObjectVersion", bucket, key, err))?;
+            Ok(())
+        })
+    }
+
+    fn get_bucket_versioning(&self, bucket: &str) -> BackupResult<bool> {
+        self.rt.block_on(async {
+            let out = self
+                .client
+                .get_bucket_versioning()
+                .bucket(bucket)
+                .send()
+                .await
+                .map_err(|err| map_sdk_error("GetBucketVersioning", bucket, "", err))?;
+            Ok(out.status().is_some_and(|s| s.as_str() == "Enabled"))
+        })
+    }
+
+    fn put_lifecycle(&self, bucket: &str, rules: &[LifecycleSpec]) -> BackupResult<()> {
+        self.rt.block_on(async {
+            let mut builders = Vec::new();
+            for spec in rules {
+                let mut rule = aws_sdk_s3::types::LifecycleRule::builder()
+                    .status(aws_sdk_s3::types::ExpirationStatus::Enabled);
+                rule = match spec {
+                    LifecycleSpec::Noncurrent {
+                        prefix,
+                        noncurrent_days,
+                        newer_noncurrent_versions,
+                    } => rule
+                        .filter(
+                            aws_sdk_s3::types::builders::LifecycleRuleFilterBuilder::default()
+                                .prefix(prefix.clone())
+                                .build(),
+                        )
+                        .noncurrent_version_expiration(
+                            aws_sdk_s3::types::NoncurrentVersionExpiration::builder()
+                                .noncurrent_days(*noncurrent_days)
+                                .newer_noncurrent_versions(*newer_noncurrent_versions)
+                                .build(),
+                        ),
+                    LifecycleSpec::MpuAbort {
+                        prefix,
+                        days_after_initiation,
+                    } => rule
+                        .filter(
+                            aws_sdk_s3::types::builders::LifecycleRuleFilterBuilder::default()
+                                .prefix(prefix.clone())
+                                .build(),
+                        )
+                        .abort_incomplete_multipart_upload(
+                            aws_sdk_s3::types::AbortIncompleteMultipartUpload::builder()
+                                .days_after_initiation(*days_after_initiation)
+                                .build(),
+                        ),
+                };
+                let rule = rule
+                    .build()
+                    .map_err(|e| BackupError::Config(format!("lifecycle ruleの組立に失敗: {e}")))?;
+                builders.push(rule);
+            }
+            let config = aws_sdk_s3::types::BucketLifecycleConfiguration::builder()
+                .set_rules(Some(builders))
+                .build()
+                .map_err(|e| BackupError::Config(format!("lifecycle設定の組立に失敗: {e}")))?;
+            self.client
+                .put_bucket_lifecycle_configuration()
+                .bucket(bucket)
+                .lifecycle_configuration(config)
+                .send()
+                .await
+                .map_err(|err| map_sdk_error("PutBucketLifecycleConfiguration", bucket, "", err))?;
+            Ok(())
+        })
+    }
+
+    fn get_lifecycle(&self, bucket: &str) -> BackupResult<Option<Vec<LifecycleSpec>>> {
+        self.rt.block_on(async {
+            let out = match self
+                .client
+                .get_bucket_lifecycle_configuration()
+                .bucket(bucket)
+                .send()
+                .await
+            {
+                Ok(out) => out,
+                Err(err) => {
+                    // 未設定(NoSuchLifecycleConfiguration)はNone
+                    if err.to_string().contains("NoSuchLifecycleConfiguration") {
+                        return Ok(None);
+                    }
+                    return Err(map_sdk_error(
+                        "GetBucketLifecycleConfiguration",
+                        bucket,
+                        "",
+                        err,
+                    ));
+                }
+            };
+            let mut specs = Vec::new();
+            for rule in out.rules() {
+                let prefix = rule
+                    .filter()
+                    .and_then(|f| f.prefix().map(str::to_string))
+                    .unwrap_or_default();
+                if let Some(ncve) = rule.noncurrent_version_expiration() {
+                    specs.push(LifecycleSpec::Noncurrent {
+                        prefix,
+                        noncurrent_days: ncve.noncurrent_days().unwrap_or(0),
+                        newer_noncurrent_versions: ncve.newer_noncurrent_versions().unwrap_or(0),
+                    });
+                } else if let Some(mpu) = rule.abort_incomplete_multipart_upload() {
+                    specs.push(LifecycleSpec::MpuAbort {
+                        prefix,
+                        days_after_initiation: mpu.days_after_initiation().unwrap_or(0),
+                    });
+                }
+            }
+            Ok(Some(specs))
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +982,24 @@ pub struct FakeS3 {
     fail_head: Option<String>,
     head_404: Option<String>,
     omit_checksum: bool,
+    /// GetBucketVersioning応答を無効化(FAKE_S3_VERSIONING_DISABLED・cli.versioning-disabled-error用)
+    versioning_disabled: bool,
+    /// 当該keyのHeadObject応答size上書き(FAKE_S3_OBJECT_SIZE_FOR=<key>:<bytes>。
+    /// CopyObject 5GiB分岐の駆動用。object実体の長さは変えない)
+    object_size_for: Option<(String, u64)>,
+}
+
+/// fake内部の版情報1行(`versions/<key>`の1行)。
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FakeVersionLine {
+    version_id: String,
+    size: u64,
+    last_modified: String,
+    /// put=実体のある版・marker=delete marker
+    kind: &'static str,
+    /// PUT時のstorage class(HeadInfo.storage_classの供給源)
+    storage_class: String,
 }
 
 #[cfg(debug_assertions)]
@@ -436,16 +1013,22 @@ impl FakeS3 {
             fail_head: None,
             head_404: None,
             omit_checksum: false,
+            versioning_disabled: false,
+            object_size_for: None,
         }
     }
 
-    /// 結合seam用: env `BACKUP_REMOTE_FAKE_S3_STATE`選択時に失敗注入env 4種を解釈する。
+    /// 結合seam用: env `BACKUP_REMOTE_FAKE_S3_STATE`選択時に失敗注入env 4種+TASK-10
+    /// のversioning系env 2種を解釈する。
     pub fn from_env(state_dir: impl Into<PathBuf>) -> FakeS3 {
-        let env_key = |name: &str| {
-            std::env::var(name)
-                .ok()
-                .filter(|v| !v.is_empty())
-        };
+        let env_key = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        // FAKE_S3_OBJECT_SIZE_FOR=<key>:<bytes>(カンマ区切りで複数可)
+        let object_size_for = env_key("FAKE_S3_OBJECT_SIZE_FOR").and_then(|spec| {
+            spec.split(',')
+                .filter_map(|entry| entry.split_once(':'))
+                .filter_map(|(k, v)| v.parse::<u64>().ok().map(|b| (k.to_string(), b)))
+                .next()
+        });
         FakeS3 {
             state_dir: state_dir.into(),
             fail_cp: env_key("FAKE_S3_FAIL_CP_FOR"),
@@ -453,7 +1036,21 @@ impl FakeS3 {
             fail_head: env_key("FAKE_S3_FAIL_HEAD_FOR"),
             head_404: env_key("FAKE_S3_HEAD_404_FOR"),
             omit_checksum: false,
+            versioning_disabled: env_key("FAKE_S3_VERSIONING_DISABLED").is_some(),
+            object_size_for,
         }
+    }
+
+    /// GetBucketVersioning応答を無効化(FAKE_S3_VERSIONING_DISABLED相当)。
+    pub fn versioning_disabled(mut self) -> FakeS3 {
+        self.versioning_disabled = true;
+        self
+    }
+
+    /// 当該keyのHeadObject応答sizeを上書き(FAKE_S3_OBJECT_SIZE_FOR相当)。
+    pub fn object_size_for(mut self, key: &str, bytes: u64) -> FakeS3 {
+        self.object_size_for = Some((key.to_string(), bytes));
+        self
     }
 
     /// 当該keyのput・getを失敗させる(FAKE_S3_FAIL_CP_FOR相当)。
@@ -528,6 +1125,130 @@ impl FakeS3 {
         let _ = std::fs::write(path, data);
     }
 
+    // ---- versioning模擬(TASK-10設計8.2) ----
+    // 状態: `versions/<key>` に行 `vid\tsize\tlast_modified\tkind` を時系列順に追記
+    // (最終行=現行version。kind: put|marker)。現行の実体は objects/<key>・
+    // 過去の実体は object-versions/<key>/<vid> に置く(既存の objects/<key> 互換を維持)。
+
+    fn versions_file(&self, key: &str) -> PathBuf {
+        self.state_dir.join("versions").join(key)
+    }
+
+    fn object_version_path(&self, key: &str, vid: &str) -> PathBuf {
+        self.state_dir.join("object-versions").join(key).join(vid)
+    }
+
+    fn version_lines(&self, key: &str) -> Vec<FakeVersionLine> {
+        let text = std::fs::read_to_string(self.versions_file(key)).unwrap_or_default();
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| {
+                let mut parts = l.split('\t');
+                Some(FakeVersionLine {
+                    version_id: parts.next()?.to_string(),
+                    size: parts.next()?.parse().ok()?,
+                    last_modified: parts.next()?.to_string(),
+                    kind: match parts.next()? {
+                        "marker" => "marker",
+                        _ => "put",
+                    },
+                    // 5列目はPUT時のstorage class(旧state file由来で無い場合は空)
+                    storage_class: parts.next().unwrap_or_default().to_string(),
+                })
+            })
+            .collect()
+    }
+
+    fn append_version_line(&self, key: &str, line: &FakeVersionLine) {
+        let path = self.versions_file(key);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(
+                f,
+                "{}\t{}\t{}\t{}\t{}",
+                line.version_id, line.size, line.last_modified, line.kind, line.storage_class
+            );
+        }
+    }
+
+    /// 現行versionの(vid, 実体bytes)。
+    fn current_version(&self, key: &str) -> Option<(String, Vec<u8>)> {
+        let lines = self.version_lines(key);
+        let last = lines.last()?;
+        if last.kind == "marker" {
+            return None; // delete markerが現行=objectsから見えない
+        }
+        let bytes = std::fs::read(self.object_path(key)).ok()?;
+        Some((last.version_id.clone(), bytes))
+    }
+
+    /// 新版の格納(旧現行をobject-versionsへ退避→objectsへ最新を置き→行追記)。
+    /// 戻り値は新しいversion_id("v{N}"・N=通算版数)。
+    fn store_new_version(&self, key: &str, data: &[u8], kind: &'static str, sc: &str) -> String {
+        let lines = self.version_lines(key);
+        if let Some(last) = lines.last() {
+            if last.kind == "put" {
+                if let Ok(bytes) = std::fs::read(self.object_path(key)) {
+                    let path = self.object_version_path(key, &last.version_id);
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(path, &bytes);
+                }
+            }
+        }
+        let vid = format!("v{}", lines.len() + 1);
+        self.append_version_line(
+            key,
+            &FakeVersionLine {
+                version_id: vid.clone(),
+                size: if kind == "marker" {
+                    0
+                } else {
+                    data.len() as u64
+                },
+                last_modified: chrono::Local::now().to_rfc3339(),
+                kind,
+                storage_class: sc.to_string(),
+            },
+        );
+        if kind == "put" {
+            self.write_object(key, data);
+        } else {
+            let _ = std::fs::remove_file(self.object_path(key));
+        }
+        vid
+    }
+
+    /// 指定versionの実体bytes(markerはNone)。
+    fn version_bytes(&self, key: &str, vid: &str) -> Option<Vec<u8>> {
+        let lines = self.version_lines(key);
+        let last = lines.last()?;
+        if last.kind == "marker" {
+            return None;
+        }
+        if last.version_id == vid {
+            std::fs::read(self.object_path(key)).ok()
+        } else {
+            std::fs::read(self.object_version_path(key, vid)).ok()
+        }
+    }
+
+    /// HeadObject応答size(env FAKE_S3_OBJECT_SIZE_FORの上書きを適用)。
+    fn head_size(&self, key: &str, actual: u64) -> u64 {
+        match &self.object_size_for {
+            Some((k, bytes)) if k == key => *bytes,
+            _ => actual,
+        }
+    }
+
     /// HeadObject応答の`Restore`ヘッダraw文字列(restore/<key>の状態から)。
     fn restore_header(&self, key: &str) -> Option<String> {
         let meta = std::fs::read_to_string(self.state_dir.join("restore").join(key)).ok()?;
@@ -566,7 +1287,7 @@ impl S3Backend for FakeS3 {
             Err(_) => return Ok(None), // 404 = Key不在
         };
         Ok(Some(HeadInfo {
-            size: bytes.len() as i64,
+            size: self.head_size(key, bytes.len() as u64) as i64,
             checksum_sha256: if self.omit_checksum {
                 None
             } else {
@@ -574,6 +1295,12 @@ impl S3Backend for FakeS3 {
             },
             checksum_type: Some("FULL_OBJECT".to_string()),
             restore: self.restore_header(key),
+            storage_class: self
+                .version_lines(key)
+                .last()
+                .filter(|l| l.kind == "put")
+                .map(|l| l.storage_class.clone())
+                .filter(|sc| !sc.is_empty()),
         }))
     }
 
@@ -583,7 +1310,7 @@ impl S3Backend for FakeS3 {
         key: &str,
         src: &Path,
         storage_class: &str,
-    ) -> BackupResult<()> {
+    ) -> BackupResult<String> {
         let fail = || {
             BackupError::Transfer(format!(
                 "S3 PutObject失敗(bucket={bucket}, key={key}): FAKE_S3_FAIL_CP_FOR による失敗注入"
@@ -597,21 +1324,23 @@ impl S3Backend for FakeS3 {
             self.record(&format!(
                 "s3 CreateMultipartUpload bucket={bucket} key={key} storage_class={storage_class} checksum=SHA256"
             ));
-            let data = std::fs::read(src)
-                .map_err(|e| src_read_error("UploadPart", key, src, e))?;
+            let data = std::fs::read(src).map_err(|e| src_read_error("UploadPart", key, src, e))?;
             for part_number in 1..=multipart_part_count(size) {
                 self.record(&format!(
                     "s3 UploadPart bucket={bucket} key={key} part_number={part_number} checksum=SHA256"
                 ));
                 if self.fail_cp.as_deref() == Some(key) {
                     // part失敗 → Abort発火(Completeは実行しない)
-                    self.record(&format!("s3 AbortMultipartUpload bucket={bucket} key={key}"));
+                    self.record(&format!(
+                        "s3 AbortMultipartUpload bucket={bucket} key={key}"
+                    ));
                     return Err(fail());
                 }
             }
-            self.record(&format!("s3 CompleteMultipartUpload bucket={bucket} key={key}"));
-            self.write_object(key, &data);
-            Ok(())
+            self.record(&format!(
+                "s3 CompleteMultipartUpload bucket={bucket} key={key}"
+            ));
+            Ok(self.store_new_version(key, &data, "put", storage_class))
         } else {
             self.record(&format!(
                 "s3 PutObject bucket={bucket} key={key} src={} storage_class={storage_class} checksum=SHA256",
@@ -620,10 +1349,8 @@ impl S3Backend for FakeS3 {
             if self.fail_cp.as_deref() == Some(key) {
                 return Err(fail());
             }
-            let data = std::fs::read(src)
-                .map_err(|e| src_read_error("PutObject", key, src, e))?;
-            self.write_object(key, &data);
-            Ok(())
+            let data = std::fs::read(src).map_err(|e| src_read_error("PutObject", key, src, e))?;
+            Ok(self.store_new_version(key, &data, "put", storage_class))
         }
     }
 
@@ -657,9 +1384,7 @@ impl S3Backend for FakeS3 {
     }
 
     fn list_keys(&self, bucket: &str, prefix: &str) -> BackupResult<Vec<String>> {
-        self.record(&format!(
-            "s3 ListObjectsV2 bucket={bucket} prefix={prefix}"
-        ));
+        self.record(&format!("s3 ListObjectsV2 bucket={bucket} prefix={prefix}"));
         let mut keys = Vec::new();
         let objects = self.objects_dir();
         fn walk(dir: &Path, base: &Path, keys: &mut Vec<String>) {
@@ -702,12 +1427,348 @@ impl S3Backend for FakeS3 {
             ))
         })
     }
+
+    fn head_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> BackupResult<Option<HeadInfo>> {
+        self.record(&format!(
+            "s3 HeadObject bucket={bucket} key={key} version_id={version_id}"
+        ));
+        if self.fail_head.as_deref() == Some(key) {
+            return Err(BackupError::Transfer(format!(
+                "S3 HeadObject失敗(bucket={bucket}, key={key}): FAKE_S3_FAIL_HEAD_FOR による失敗注入"
+            )));
+        }
+        let Some(bytes) = self.version_bytes(key, version_id) else {
+            return Ok(None); // 404
+        };
+        Ok(Some(HeadInfo {
+            size: self.head_size(key, bytes.len() as u64) as i64,
+            checksum_sha256: if self.omit_checksum {
+                None
+            } else {
+                Some(Self::sha256_b64(&bytes))
+            },
+            checksum_type: Some("FULL_OBJECT".to_string()),
+            restore: self.restore_header(key),
+            storage_class: self
+                .version_lines(key)
+                .iter()
+                .find(|l| l.version_id == version_id)
+                .map(|l| l.storage_class.clone())
+                .filter(|sc| !sc.is_empty()),
+        }))
+    }
+
+    fn get_version_to_file(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        dest: &Path,
+    ) -> BackupResult<()> {
+        self.record(&format!(
+            "s3 GetObject bucket={bucket} key={key} dest={} version_id={version_id} checksum_mode=ENABLED",
+            dest.display()
+        ));
+        if self.fail_cp.as_deref() == Some(key) {
+            return Err(BackupError::Transfer(format!(
+                "S3 GetObject失敗(bucket={bucket}, key={key}): FAKE_S3_FAIL_CP_FOR による失敗注入"
+            )));
+        }
+        let Some(bytes) = self.version_bytes(key, version_id) else {
+            return Err(BackupError::Transfer(format!(
+                "対象keyがS3に存在しない(key={key}, version_id={version_id})"
+            )));
+        };
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(dest, &bytes).map_err(|e| {
+            BackupError::Transfer(format!(
+                "S3 GetObject失敗(key={key}, dest={}): 取得先fileの書込に失敗: {e}",
+                dest.display()
+            ))
+        })
+    }
+
+    fn list_versions(&self, bucket: &str, prefix: &str) -> BackupResult<Vec<VersionInfo>> {
+        self.record(&format!(
+            "s3 ListObjectVersions bucket={bucket} prefix={prefix}"
+        ));
+        let mut versions = Vec::new();
+        let base = self.state_dir.join("versions");
+        fn walk(dir: &Path, base: &Path, keys: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, base, keys);
+                } else if let Ok(rel) = path.strip_prefix(base) {
+                    keys.push(rel.to_string_lossy().into_owned());
+                }
+            }
+        }
+        let mut keys = Vec::new();
+        walk(&base, &base, &mut keys);
+        // objects配下にのみ存在するkey(seed_object等・版stateなし)も現行版として列挙
+        let mut objects_keys = Vec::new();
+        let objects = self.objects_dir();
+        walk(&objects, &objects, &mut objects_keys);
+        for k in objects_keys {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        for key in keys {
+            if !key.starts_with(prefix) {
+                continue;
+            }
+            let lines = self.version_lines(&key);
+            if lines.is_empty() {
+                // 版stateなし: objectsの実体を単一現行版として列挙する
+                if let Ok(meta) = std::fs::metadata(self.object_path(&key)) {
+                    let epoch = meta
+                        .modified()
+                        .ok()
+                        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    versions.push(VersionInfo {
+                        key: key.clone(),
+                        version_id: String::new(),
+                        last_modified: String::new(),
+                        last_modified_epoch: epoch,
+                        size: self.head_size(&key, meta.len()) as i64,
+                        is_latest: true,
+                        is_delete_marker: false,
+                    });
+                }
+                continue;
+            }
+            // 現行版(最終行)がputなのにobjects/<key>実体が無い(外部から実体のみ削除された)
+            // 場合は、その版は存在しない扱いとする(現行版以外はobject-versionsに実体がある)
+            let mut lines = lines;
+            if lines
+                .last()
+                .is_some_and(|l| l.kind == "put" && !self.object_path(&key).is_file())
+            {
+                lines.pop();
+            }
+            if lines.is_empty() {
+                continue;
+            }
+            // 同じkey内では新しい版が先(epoch秒降順・実装間で同一順序)。
+            // 現行version=先頭要素
+            lines.sort_by(|a, b| {
+                let ea = chrono::DateTime::parse_from_rfc3339(&a.last_modified)
+                    .map(|d| d.timestamp())
+                    .unwrap_or(0);
+                let eb = chrono::DateTime::parse_from_rfc3339(&b.last_modified)
+                    .map(|d| d.timestamp())
+                    .unwrap_or(0);
+                eb.cmp(&ea).then_with(|| b.version_id.cmp(&a.version_id))
+            });
+            for (i, line) in lines.iter().enumerate() {
+                versions.push(VersionInfo {
+                    key: key.clone(),
+                    version_id: line.version_id.clone(),
+                    last_modified: line.last_modified.clone(),
+                    last_modified_epoch: chrono::DateTime::parse_from_rfc3339(&line.last_modified)
+                        .map(|d| d.timestamp())
+                        .unwrap_or(0),
+                    size: if line.kind == "marker" {
+                        0
+                    } else {
+                        self.head_size(&key, line.size) as i64
+                    },
+                    is_latest: i == 0,
+                    is_delete_marker: line.kind == "marker",
+                });
+            }
+        }
+        Ok(versions)
+    }
+
+    fn restore_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        days: u32,
+        tier: &str,
+    ) -> BackupResult<()> {
+        self.record(&format!(
+            "s3 RestoreObject bucket={bucket} key={key} version_id={version_id} days={days} tier={tier}"
+        ));
+        if self.fail_restore.as_deref() == Some(key) {
+            return Err(BackupError::Transfer(format!(
+                "S3 RestoreObject失敗(bucket={bucket}, key={key}): FAKE_S3_FAIL_RESTORE_FOR による失敗注入"
+            )));
+        }
+        // 版単位の復元状態はkey単位のmetaに記録する(fakeの簡略化・HEAD系は同じ値を返す)
+        let path = self.state_dir.join("restore").join(key);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(path, b"restored").map_err(|e| {
+            BackupError::Transfer(format!(
+                "S3 RestoreObject失敗(bucket={bucket}, key={key}): 復元状態の記録に失敗: {e}"
+            ))
+        })
+    }
+
+    fn copy_object(
+        &self,
+        bucket: &str,
+        src_key: &str,
+        src_version_id: Option<&str>,
+        dest_key: &str,
+        _storage_class: &str,
+    ) -> BackupResult<()> {
+        let src_vid = src_version_id
+            .map(str::to_string)
+            .or_else(|| self.current_version(src_key).map(|(vid, _)| vid));
+        let Some(src_vid) = src_vid else {
+            return Err(BackupError::Transfer(format!(
+                "CopyObjectの写し元がS3に存在しない(key={src_key})"
+            )));
+        };
+        let Some(bytes) = self.version_bytes(src_key, &src_vid) else {
+            return Err(BackupError::Transfer(format!(
+                "CopyObjectの写し元版がS3に存在しない(key={src_key}, version_id={src_vid})"
+            )));
+        };
+        let size = self.head_size(src_key, bytes.len() as u64);
+        if size > COPY_OBJECT_MAX_BYTES {
+            // 5GiB超: UploadPartCopyで分割写し(設計1.3。sizeはFAKE_S3_OBJECT_SIZE_FORで駆動)
+            let parts = size.div_ceil(COPY_OBJECT_MAX_BYTES);
+            self.record(&format!(
+                "s3 CreateMultipartUpload bucket={bucket} key={dest_key} storage_class={_storage_class} checksum=SHA256"
+            ));
+            for part_number in 1..=parts {
+                self.record(&format!(
+                    "s3 UploadPartCopy bucket={bucket} key={dest_key} part_number={part_number}"
+                ));
+            }
+            self.record(&format!(
+                "s3 CompleteMultipartUpload bucket={bucket} key={dest_key}"
+            ));
+        } else {
+            self.record(&format!(
+                "s3 CopyObject bucket={bucket} key={dest_key} src={src_key} src_version_id={src_vid} storage_class={_storage_class}"
+            ));
+        }
+        self.store_new_version(dest_key, &bytes, "put", _storage_class);
+        Ok(())
+    }
+
+    fn delete_object(&self, bucket: &str, key: &str) -> BackupResult<()> {
+        self.record(&format!("s3 DeleteObject bucket={bucket} key={key}"));
+        // versioning bucket相当: 現行版の実体を退避しdelete markerを現行にする
+        self.store_new_version(key, &[], "marker", "");
+        Ok(())
+    }
+
+    fn delete_object_version(&self, bucket: &str, key: &str, version_id: &str) -> BackupResult<()> {
+        self.record(&format!(
+            "s3 DeleteObjectVersion bucket={bucket} key={key} version_id={version_id}"
+        ));
+        let mut lines = self.version_lines(key);
+        let Some(pos) = lines.iter().position(|l| l.version_id == version_id) else {
+            return Ok(()); // 対象版なしは黙って成功(S3相当の寛容さ)
+        };
+        let is_current = pos == lines.len() - 1;
+        lines.remove(pos);
+        // 行の書換(追記fileの再構成)
+        let path = self.versions_file(key);
+        if lines.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::File::create(&path) {
+                for line in &lines {
+                    // 5列構造(vid/size/mtime/kind/storage_class)を保持して書戻す(L-11)
+                    let _ = writeln!(
+                        f,
+                        "{}\t{}\t{}\t{}\t{}",
+                        line.version_id,
+                        line.size,
+                        line.last_modified,
+                        line.kind,
+                        line.storage_class
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_file(self.object_version_path(key, version_id));
+        if is_current {
+            // 削除したのが現行版: 直前の残版を昇格させる
+            if let Some(prev) = lines.last() {
+                if prev.kind == "put" {
+                    if let Some(bytes) =
+                        std::fs::read(self.object_version_path(key, &prev.version_id)).ok()
+                    {
+                        self.write_object(key, &bytes);
+                        let _ =
+                            std::fs::remove_file(self.object_version_path(key, &prev.version_id));
+                    }
+                } else {
+                    let _ = std::fs::remove_file(self.object_path(key));
+                }
+            } else {
+                let _ = std::fs::remove_file(self.object_path(key));
+            }
+        }
+        Ok(())
+    }
+
+    fn get_bucket_versioning(&self, bucket: &str) -> BackupResult<bool> {
+        self.record(&format!("s3 GetBucketVersioning bucket={bucket}"));
+        Ok(!self.versioning_disabled)
+    }
+
+    fn put_lifecycle(&self, bucket: &str, rules: &[LifecycleSpec]) -> BackupResult<()> {
+        self.record(&format!(
+            "s3 PutBucketLifecycleConfiguration bucket={bucket}"
+        ));
+        let path = self.state_dir.join("lifecycle.json");
+        let body = serde_json::to_string(rules)
+            .map_err(|e| BackupError::Internal(format!("lifecycle設定のserializeに失敗: {e}")))?;
+        std::fs::write(path, body).map_err(|e| {
+            BackupError::Transfer(format!(
+                "S3 PutBucketLifecycleConfiguration失敗(bucket={bucket}): 記録に失敗: {e}"
+            ))
+        })
+    }
+
+    fn get_lifecycle(&self, bucket: &str) -> BackupResult<Option<Vec<LifecycleSpec>>> {
+        self.record(&format!(
+            "s3 GetBucketLifecycleConfiguration bucket={bucket}"
+        ));
+        match std::fs::read_to_string(self.state_dir.join("lifecycle.json")) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(BackupError::Transfer(format!(
+                "S3 GetBucketLifecycleConfiguration失敗(bucket={bucket}): 記録の読込に失敗: {e}"
+            ))),
+            Ok(t) => serde_json::from_str(&t)
+                .map(Some)
+                .map_err(|e| BackupError::Internal(format!("lifecycle設定のparseに失敗: {e}"))),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{write_file, TempDir};
+    use crate::testutil::{TempDir, write_file};
 
     fn sha256_b64(data: &[u8]) -> String {
         use base64::Engine as _;
@@ -726,10 +1787,7 @@ mod tests {
         assert_eq!(part_size_for(MULTIPART_THRESHOLD_BYTES), PART_SIZE_BYTES);
         // 閾値超はmultipart(part数=ceil(size/64MiB))
         assert_eq!(multipart_part_count(MULTIPART_THRESHOLD_BYTES + 1), 2);
-        assert_eq!(
-            multipart_part_count(MULTIPART_THRESHOLD_BYTES * 3),
-            3
-        );
+        assert_eq!(multipart_part_count(MULTIPART_THRESHOLD_BYTES * 3), 3);
         // 640GiB超ではceil(size/10000)へ切り上げ(10,000 parts上限の防御)
         let huge = MAX_PARTS * PART_SIZE_BYTES + 1;
         let ps = part_size_for(huge);
@@ -748,19 +1806,31 @@ mod tests {
         let local = tmp.path().join("a.zip.age");
         write_file(&local, b"age-bytes");
 
-        assert_eq!(fake.head("b", "2026-10-01/a.zip.age").expect("head"), None, "未配置は404");
+        assert_eq!(
+            fake.head("b", "2026-10-01/a.zip.age").expect("head"),
+            None,
+            "未配置は404"
+        );
         fake.put("b", "2026-10-01/a.zip.age", &local, "DEEP_ARCHIVE")
             .expect("put");
-        let head = fake.head("b", "2026-10-01/a.zip.age")
+        let head = fake
+            .head("b", "2026-10-01/a.zip.age")
             .expect("head")
             .expect("配置済み");
         assert_eq!(head.size, b"age-bytes".len() as i64);
-        assert_eq!(head.checksum_sha256.as_deref(), Some(sha256_b64(b"age-bytes").as_str()));
+        assert_eq!(
+            head.checksum_sha256.as_deref(),
+            Some(sha256_b64(b"age-bytes").as_str())
+        );
         assert_eq!(head.checksum_type.as_deref(), Some("FULL_OBJECT"));
         assert_eq!(head.restore, None, "復元job未発行");
 
-        fake.restore("b", "2026-10-01/a.zip.age", 3, "Bulk").expect("restore");
-        let head = fake.head("b", "2026-10-01/a.zip.age").expect("head").expect("配置済み");
+        fake.restore("b", "2026-10-01/a.zip.age", 3, "Bulk")
+            .expect("restore");
+        let head = fake
+            .head("b", "2026-10-01/a.zip.age")
+            .expect("head")
+            .expect("配置済み");
         assert_eq!(
             head.restore.as_deref(),
             Some(r#"ongoing-request="false", expiry-date="Wed, 14 Oct 2026 00:00:00 GMT""#),
@@ -771,10 +1841,22 @@ mod tests {
         assert_eq!(keys, vec!["2026-10-01/a.zip.age".to_string()]);
 
         let calls = fake.calls();
-        assert!(calls.contains("s3 PutObject bucket=b key=2026-10-01/a.zip.age"), "{calls}");
-        assert!(calls.contains("s3 RestoreObject bucket=b key=2026-10-01/a.zip.age days=3 tier=Bulk"), "{calls}");
-        assert!(calls.contains("s3 ListObjectsV2 bucket=b prefix=2026-10-01/"), "{calls}");
-        assert!(calls.contains("s3 HeadObject bucket=b key=2026-10-01/a.zip.age"), "{calls}");
+        assert!(
+            calls.contains("s3 PutObject bucket=b key=2026-10-01/a.zip.age"),
+            "{calls}"
+        );
+        assert!(
+            calls.contains("s3 RestoreObject bucket=b key=2026-10-01/a.zip.age days=3 tier=Bulk"),
+            "{calls}"
+        );
+        assert!(
+            calls.contains("s3 ListObjectsV2 bucket=b prefix=2026-10-01/"),
+            "{calls}"
+        );
+        assert!(
+            calls.contains("s3 HeadObject bucket=b key=2026-10-01/a.zip.age"),
+            "{calls}"
+        );
     }
 
     /// [covers:cli.fake-s3-seam]
@@ -790,12 +1872,19 @@ mod tests {
         // put失敗注入(転送エラー5)
         let fake = FakeS3::new(&state).fail_cp(key);
         assert_eq!(
-            fake.put("b", key, &local, "DEEP_ARCHIVE").unwrap_err().exit_code(),
+            fake.put("b", key, &local, "DEEP_ARCHIVE")
+                .unwrap_err()
+                .exit_code(),
             5
         );
         // restore失敗注入
         let fake = FakeS3::new(&state).fail_restore(key);
-        assert_eq!(fake.restore("b", key, 7, "Standard").unwrap_err().exit_code(), 5);
+        assert_eq!(
+            fake.restore("b", key, 7, "Standard")
+                .unwrap_err()
+                .exit_code(),
+            5
+        );
         // head異常失敗注入(404以外)
         let fake = FakeS3::new(&state).fail_head(key);
         assert_eq!(fake.head("b", key).unwrap_err().exit_code(), 5);
@@ -811,7 +1900,9 @@ mod tests {
         let dest = tmp.path().join("dl").join("a.zip.age.part");
         fake.get_to_file("b", key, &dest).expect("get");
         assert_eq!(std::fs::read(&dest).unwrap(), b"age-bytes".to_vec());
-        let e = fake.get_to_file("b", "2026-10-01/missing.age", &dest).unwrap_err();
+        let e = fake
+            .get_to_file("b", "2026-10-01/missing.age", &dest)
+            .unwrap_err();
         assert_eq!(e.exit_code(), 5, "key不在は転送エラー5: {e}");
         // list_keysはprefix外を除外
         let keys = fake.list_keys("b", "2099-01-01/").expect("list");

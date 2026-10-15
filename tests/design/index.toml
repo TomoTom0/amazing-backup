@@ -1,0 +1,115 @@
+# backup-remote テスト設計条件書(index エリア)
+# 出典: tmp/tasks/tm-10/design_s3_storage.md 2章(2.1〜2.4)・1.4・8.1・9章素案(TASK-10 S3ストレージ設計)
+# 2026-10-14: TASK-10実装(Phase A)に先立つテスト先行の条件書(新設feature)。
+#   src/index.rs は設計8.1で新設されるmodule(索引構築(registry reduceから)・直列化・検索・
+#   完全性突合の中核=query/list/diffのmodel層)。
+#   実装前のため条件に対応するテストコードは未作成(網羅検査は警告のみの段階)。
+
+[meta]
+feature = "index"
+source_file = "src/index.rs"
+verified = false
+test_command = "cargo test"
+note = "TASK-10(9章素案+設計2章本文)の条件化。索引は sys/index.jsonl.age(単一累積・run毎書換・versioning対象・STORAGE CLASS STANDARD)。索引PUTの実体はsrc/uploader.rs、災害時運用の前提は設計2.4。rebuild-from-registry-per-run等のrun経由条件はbackup push(7.3の新record_type経路)で検証する"
+
+[[condition]]
+id = "index.schema-and-serialization"
+target_function = "index::(直列化/parse)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 2.1(schema)"
+description = "索引JSONL(暗号化前の平文)schema: index_header(schema=1・record_type=index_header・updated_at ISO8601 JST・run_id・tool_version・entries=N)+file entry(record_type=file・name・category・rel_path・source_path・identity_hash・versions[]・pins[])。versionsはdate降順(先頭=最新)で各versionはdate(表示・--version日付filter用)・version_ts(同一日内複数版の一意化)・batch_id・s3_key(実keyをそのまま記録・規約から導出しない・衝突hash付きkeyもそのまま)・version_id・source_sha256・age_sha256・source_size・age_size。pins[]はpin・s3_key・created_at・date・source_sha256・age_sha256・source_size。identity_hash=sha256(realpath)先頭8hex(衝突folder名と同一・source_pathが変わればidentityも変わる)。直列化→parseの往復で全fieldが保たれる (unit)"
+given = "2 file entry(うち1 fileにversion 2件・pin 1件)を含む索引構造の直列化→parse"
+expect_return_shape = "headerのentries=Nがfile entry数と一致し、versionsはdate降順に保たれ、全fieldが往復で失われずparse結果が構築時と等価"
+source_lines = "src/index.rs:384; tests/index_storage.rs:65"
+
+[[condition]]
+id = "index.rebuild-from-registry-per-run"
+target_function = "index::rebuild(registry reduceから全entry再構築)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 2.2(更新単位)"
+description = "索引の更新単位はrun毎(backup push完了時)+索引に影響する操作後(pin add/rm・manage prune)。ローカルregistry(reduce後)から全entryを再構築し、冪等(再構築・再PUTで同一内容) (integration, fake seam)"
+given = "file_upload記録(version_id・実s3_key付き)・pin_write/pin_remove記録を含むregistryからの索引再構築と、同一registryからの2回目の再構築"
+expect_return_shape = "全entryがregistry記録から再構築され(versions[].version_id・s3_keyはregistryのfile_upload記録値)、2回目の再構築結果は1回目と同一内容(冪等)"
+source_lines = "src/index.rs:413; tests/index_storage.rs:205"
+
+[[condition]]
+id = "index.hot-storage-class-upload"
+target_function = "uploader(index PUT)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 1.4(storage class表)・2.2"
+description = "索引 sys/index.jsonl.age のPUTはstorage class STANDARD固定(per-object指定。bucket default・lifecycle移行に依存しない)。profileのstorage_classがDEEP_ARCHIVEでもSTANDARDで置かれる (integration, fake seam)"
+given = "storage_class=DEEP_ARCHIVEのprofileでのbackup push実行(または索引更新を伴う操作)"
+expect_return_shape = "sys/index.jsonl.age のPutObject呼び出しが storage_class=STANDARD で行われる"
+source_lines = "src/index.rs:468; tests/index_storage.rs:271"
+
+[[condition]]
+id = "index.encrypted-with-configured-recipients"
+target_function = "index(暗号化)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 2.2(recipients構成)"
+description = "索引はpipeline.tomlの現在のrecipients構成でage暗号化され、recipient秘密鍵で復号できる (integration, 実age)"
+given = "recipients 2鍵構成での索引PUT後、sys/index.jsonl.age を各秘密鍵で復号"
+expect_return_shape = "いずれの鍵でも復号でき、平文が索引JSONLとしてparseできる"
+source_lines = "tests/index_storage.rs:311"
+
+[[condition]]
+id = "index.version-id-recorded"
+target_function = "index構築(供給源=registry file_upload記録) / S3Backend::put"
+source = "tmp/tasks/tm-10/design_s3_storage.md 2.1・8.1(uploader.rs行。11章F3)"
+description = "索引versions[].version_idの供給源はregistryのfile_upload記録に固定: S3Backend::putはversion_idを返す(単一PUTはPutObjectOutputのVersionId・multipartはCompleteMultipartUploadOutputのVersionId)ように変更し、UploadRecordへversion_idと実s3_keyを記録する (integration, fake seam)"
+given = "FakeS3のversioning模擬下でのbackup push(file 1件を単発PUTとmultipart閾値超の両方で実行)"
+expect_return_shape = "索引のversions[].version_idがPutObject応答(単発)・CompleteMultipartUpload応答(multipart)のVersionIdと一致し、registryのfile_upload記録(version_id・実s3_key)とも一致する"
+source_lines = "tests/index_storage.rs:350"
+
+[[condition]]
+id = "index.rebuild-from-manifests"
+target_function = "manage index rebuild"
+source = "tmp/tasks/tm-10/design_s3_storage.md 2.3(喪失時再構築)・2.2(index_upload記録)"
+description = "manage index rebuild: (1)ListObjectsV2 <prefix>/sys/manifests/ でmanifest一覧 (2)未復元のmanifestへ復元job発行(Bulk既定。進行中は再実行で継続) (3)取得・復号・parse→file recordからentry再構築(s3_key・version_idはmanifest記録値を使用。manifestのfile recordは実s3_key+version_idを記録する拡張schema) (4)version_id欠損(旧manifest等)はListObjectVersionsでkey+LastModifiedから補完 (5)sys/index.jsonl.ageへPUT・完了報告。開始時にtier別単価で区別した費用・所要の概算を表示(Deep Archive復元: Standard≈$0.10/GB級・最大12時間 / Bulk≈$0.02/GB級・最大48時間) (integration, fake seam)"
+given = "manifestがN件(DEEP_ARCHIVE未復元)で索引objectが不在のfake S3での manage index rebuild 実行・再実行(進行中)、およびversion_id欠損manifestを混ぜた実行"
+expect_return_shape = "未復元manifestへBulkの復元jobが発行され(再実行で継続)、全manifestからentryが再構築されs3_key・version_idはmanifest記録値(欠損分はListObjectVersionsで補完)で、sys/index.jsonl.ageへPUTされ、開始時にtier別の費用・所要概算表示が出る"
+source_lines = "src/index.rs:513; tests/index_storage.rs:410"
+
+[[condition]]
+id = "index.pin-entries"
+target_function = "index構築(pin反映)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 2.1(pins[])・2.2(索引に影響する操作後の更新)"
+description = "pin add/rmが索引へ反映される: pin addは当該file entryのpins[]へ(pin名・s3_key・created_at・date・source_sha256・age_sha256・source_size)、pin rmは該当pin entryを除去 (integration, fake seam)"
+given = "pin add実行後の索引と、pin rm実行後の索引"
+expect_return_shape = "add後は当該file entryのpins[]にpin記録が現れ、rm後は該当pin記録が除去される"
+source_lines = "tests/index_storage.rs:529"
+
+[[excluded]]
+item = "第2recipient(秘密鍵の地理的第二保管場所)の登録・保管(2.2 recipient構成の運用要件・10章項目9)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 2.2・10章"
+reason = "運用要件(鍵管理手順)であり検証対象コードの振る舞い条件ではない。複数recipientでの暗号化・復号の振る舞い自体は既存条件(encrypt.multi-recipient-1of-n)とindex.encrypted-with-configured-recipientsで担保"
+decided_at = "2026-10-14"
+decided_by = "claude"
+
+[[excluded]]
+item = "書き込み系(backup push・pin add/rm・manage系)の並列実行禁止(2.2)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 2.2・11章F7"
+reason = "docs運用規則への明記事項(lock file等の自動直列化は個人運用に過剰として不採用)。実装による強制を行わないため検証対象コードの振る舞い条件が存在しない"
+decided_at = "2026-10-14"
+decided_by = "claude"
+
+[[excluded]]
+item = "Deep Archive保管・復元(Standard/Bulk別)・request単価の確定値確認とdocs記載(2.3)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 2.3・10章項目10"
+reason = "実装時にaws pricingで確認する作業(10章)であり条件書時点で期待値が定まらない。tier別単価で区別して表示する振る舞いはindex.rebuild-from-manifestsに条件化済み"
+decided_at = "2026-10-14"
+decided_by = "claude"
+
+[[condition]]
+id = "index.prune-versions-not-revived-on-rebuild"
+target_function = "index::build_entries"
+source = "tmp/tasks/tm-10/design_s3_storage.md 2.2(索引の再構築)・レビューH-1"
+description = "manage prune --apply済みの版(s3_key+version_id)は、その後のbackup push等での索引再構築で復活しない(削除記録PruneDeleted集合で除外)。get --version-idで削除済み版は選べない(対象エラー3) (integration, fake seam)"
+given = "3版push→prune --apply --keep 1(最古版削除)→内容変更の再push"
+expect_return_shape = "再push後の索引versionsに削除済みversion_idが含まれず、get --version-id <削除版>はexit 3"
+source_lines = "tests/retention.rs:288"
+
+[[condition]]
+id = "index.rebuild-preserves-folder-and-pins"
+target_function = "manage index rebuild"
+source = "tmp/tasks/tm-10/design_s3_storage.md 2.3(manifestからの再構築)・レビューH-3"
+description = "manage index rebuildはmanifest V2のfolder記録を使用し(entry.folderを落とさない)、ローカルregistryのpin_write記録(未削除)からpins[]を復元する。rebuild後のpin addは正しいpin key(<category>/<rel_path>/<folder>/<pin>.age)へ写る (integration, fake seam)"
+given = "push+pin add(pm1)→索引object削除→manage index rebuild→pin add(pm2)"
+expect_return_shape = "rebuild後の索引entryはfolder保持かつpinsにpm1を含み、pm2のpin addが正規pin keyへ成功しpinsは2件"
+source_lines = "tests/index_storage.rs:607"

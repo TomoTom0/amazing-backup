@@ -70,7 +70,38 @@ struct FromListFile {
 
 /// 3.1規則の全体(plan/encrypt共用)。位置引数とfrom-listの和集合を解決する。
 /// エラーは集約して1度に全件表示する(fail-fastは「解決段階で全部見せる」意味)。
-pub fn resolve_targets(positionals: &[PathBuf], from_list: Option<&Path>) -> BackupResult<Vec<Target>> {
+pub fn resolve_targets(
+    positionals: &[PathBuf],
+    from_list: Option<&Path>,
+) -> BackupResult<Vec<Target>> {
+    resolve_targets_opts(positionals, from_list, true)
+}
+
+/// TASK-10新経路(backup push)用の対象解決: 同名basenameを許容する
+/// (出力名一意性検査を省く。同名はlayoutの衝突folderで分離する)。
+/// name override(from-listのname)は新経路では撤廃(設計1.2)のため拒否する。
+pub fn resolve_targets_storage(
+    positionals: &[PathBuf],
+    from_list: Option<&Path>,
+) -> BackupResult<Vec<Target>> {
+    if let Some(list_path) = from_list {
+        for entry in parse_from_list(list_path)? {
+            if entry.name.is_some() {
+                return Err(BackupError::Target(format!(
+                    "新経路(backup push)ではfrom-listのname指定(name override)は使えません(basenameは常に元ファイル名。{} )",
+                    entry.path.display()
+                )));
+            }
+        }
+    }
+    resolve_targets_opts(positionals, from_list, false)
+}
+
+fn resolve_targets_opts(
+    positionals: &[PathBuf],
+    from_list: Option<&Path>,
+    enforce_unique_names: bool,
+) -> BackupResult<Vec<Target>> {
     // 和集合の構築(位置引数 → from-listの順)
     let mut candidates: Vec<(PathBuf, Option<String>)> = Vec::new();
     for p in positionals {
@@ -96,12 +127,18 @@ pub fn resolve_targets(positionals: &[PathBuf], from_list: Option<&Path>) -> Bac
         let meta = match std::fs::metadata(&abs) {
             Ok(m) => m,
             Err(_) => {
-                errors.push(format!("対象ファイルのmetadata取得に失敗: {}", abs.display()));
+                errors.push(format!(
+                    "対象ファイルのmetadata取得に失敗: {}",
+                    abs.display()
+                ));
                 continue;
             }
         };
         if !meta.is_file() {
-            errors.push(format!("対象は通常fileでない(directory等): {}", abs.display()));
+            errors.push(format!(
+                "対象は通常fileでない(directory等): {}",
+                abs.display()
+            ));
             continue;
         }
         let ext_ok = ["zip", "7z"].iter().any(|e| {
@@ -142,11 +179,14 @@ pub fn resolve_targets(positionals: &[PathBuf], from_list: Option<&Path>) -> Bac
             errors.push(format!("realpathが重複している: {}", abs.display()));
         }
     }
-    // 3.1-4: 出力名の一意性検査
-    let mut seen_names = std::collections::HashSet::new();
-    for (abs, name) in &resolved {
-        if !seen_names.insert(name.clone()) {
-            errors.push(format!("出力名が重複している: {name} ({})", abs.display()));
+    // 3.1-4: 出力名の一意性検査(旧経路のみ。TASK-10新経路は同名を許容し
+    // layoutの衝突folder(name--hash8)で分離するためこの検査をスキップする)
+    if enforce_unique_names {
+        let mut seen_names = std::collections::HashSet::new();
+        for (abs, name) in &resolved {
+            if !seen_names.insert(name.clone()) {
+                errors.push(format!("出力名が重複している: {name} ({})", abs.display()));
+            }
         }
     }
 
@@ -159,8 +199,7 @@ pub fn resolve_targets(positionals: &[PathBuf], from_list: Option<&Path>) -> Bac
         let meta = std::fs::metadata(&abs).map_err(|e| {
             BackupError::Target(format!("対象のmetadata取得に失敗 ({}): {e}", abs.display()))
         })?;
-        let mtime =
-            systemtime_to_jst(meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH));
+        let mtime = systemtime_to_jst(meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH));
         targets.push(Target {
             size: meta.len(),
             source_path: abs,
@@ -183,10 +222,16 @@ fn is_valid_basename(name: &str) -> bool {
 /// from-list tomlの読込とschema検査(path必須・name任意・未知キー拒否)(2.5)。
 pub fn parse_from_list(path: &Path) -> BackupResult<Vec<FromListEntry>> {
     let text = std::fs::read_to_string(path).map_err(|e| {
-        BackupError::Config(format!("from-listファイルを読めない ({}): {e}", path.display()))
+        BackupError::Config(format!(
+            "from-listファイルを読めない ({}): {e}",
+            path.display()
+        ))
     })?;
     let parsed: FromListFile = toml::from_str(&text).map_err(|e| {
-        BackupError::Config(format!("from-list tomlのparseに失敗 ({}): {e}", path.display()))
+        BackupError::Config(format!(
+            "from-list tomlのparseに失敗 ({}): {e}",
+            path.display()
+        ))
     })?;
     Ok(parsed
         .targets
@@ -202,7 +247,7 @@ pub fn parse_from_list(path: &Path) -> BackupResult<Vec<FromListEntry>> {
 mod tests {
     use super::*;
     use crate::errors::BackupError;
-    use crate::testutil::{write_file, TempDir};
+    use crate::testutil::{TempDir, write_file};
 
     fn target_error(e: &BackupError) -> &str {
         match e {
@@ -243,7 +288,10 @@ mod tests {
         for t in &targets {
             let s = t.mtime.to_rfc3339();
             assert!(s.ends_with("+09:00"), "JST固定: {s}");
-            assert_eq!(t.mtime.to_rfc3339_opts(chrono::SecondsFormat::Secs, false), s);
+            assert_eq!(
+                t.mtime.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+                s
+            );
         }
     }
 
@@ -300,7 +348,10 @@ mod tests {
         let e = resolve_targets(&[tar_gz.clone(), split], None).unwrap_err();
         let msg = target_error(&e);
         assert_eq!(e.exit_code(), 3);
-        assert!(msg.contains("x.tar.gz") && msg.contains("y.7z.001"), "対象外2件が列挙: {msg}");
+        assert!(
+            msg.contains("x.tar.gz") && msg.contains("y.7z.001"),
+            "対象外2件が列挙: {msg}"
+        );
     }
 
     /// [covers:plan.realpath-duplicate-error]
@@ -359,10 +410,16 @@ mod tests {
 
         // 2. 未知キー
         let unknown = tmp.path().join("unknown.toml");
-        write_file(&unknown, b"[[targets]]\npath = \"/tmp/a.zip\"\nextra_key = 1\n");
+        write_file(
+            &unknown,
+            b"[[targets]]\npath = \"/tmp/a.zip\"\nextra_key = 1\n",
+        );
         let e = parse_from_list(&unknown).unwrap_err();
         let msg = config_error(&e);
-        assert!(msg.contains("extra_key"), "未知キー名がmessageに含まれる: {msg}");
+        assert!(
+            msg.contains("extra_key"),
+            "未知キー名がmessageに含まれる: {msg}"
+        );
 
         // 正常系: path必須・name任意
         let ok = tmp.path().join("ok.toml");
@@ -393,7 +450,11 @@ mod tests {
             let list = tmp.path().join("targets.toml");
             write_file(
                 &list,
-                format!("[[targets]]\npath = \"{}\"\nname = \"{bad}\"\n", src.display()).as_bytes(),
+                format!(
+                    "[[targets]]\npath = \"{}\"\nname = \"{bad}\"\n",
+                    src.display()
+                )
+                .as_bytes(),
             );
             let e = resolve_targets(&[], Some(&list)).unwrap_err();
             let msg = target_error(&e);

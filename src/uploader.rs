@@ -57,6 +57,7 @@ pub fn upload_object(
     local_path: &Path,
     key: &str,
 ) -> BackupResult<UploadedInfo> {
+    // 旧経路はversion_idを使わない(Phase A凍結。TASK-10設計8.1: putはversion_idを返す)
     backend.put(&cfg.bucket, key, local_path, &cfg.storage_class)?;
     // 成功後HeadObjectでS3側実測値を取得(7.4。multipartのCOMPOSITE対応)
     let head = backend.head(&cfg.bucket, key)?.ok_or_else(|| {
@@ -320,7 +321,10 @@ fn upload_pending(
 fn dry_run_put_line(bucket: &str, key: &str, src: &Path, storage_class: &str) -> String {
     let multipart_note = match std::fs::metadata(src) {
         Ok(m) if m.len() > crate::s3::MULTIPART_THRESHOLD_BYTES => {
-            format!(" [multipart: 64MiB x {}]", crate::s3::multipart_part_count(m.len()))
+            format!(
+                " [multipart: 64MiB x {}]",
+                crate::s3::multipart_part_count(m.len())
+            )
         }
         _ => String::new(),
     };
@@ -347,7 +351,12 @@ fn dry_run_display_lines(
             ));
             continue;
         }
-        lines.push(dry_run_put_line(&cfg.bucket, &p.s3_key, &p.local_path, &cfg.storage_class));
+        lines.push(dry_run_put_line(
+            &cfg.bucket,
+            &p.s3_key,
+            &p.local_path,
+            &cfg.storage_class,
+        ));
     }
     lines
 }
@@ -355,9 +364,9 @@ fn dry_run_display_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{EncryptRecord, ManifestUploadRecord};
+    use crate::registry::EncryptRecord;
     use crate::s3::FakeS3;
-    use crate::testutil::{write_file, TempDir};
+    use crate::testutil::{TempDir, write_file};
     use base64::Engine as _;
 
     fn sha256_b64(data: &[u8]) -> String {
@@ -372,6 +381,7 @@ mod tests {
             checksum_sha256: checksum.map(|s| s.to_string()),
             checksum_type: Some("FULL_OBJECT".into()),
             restore: None,
+            storage_class: None,
         }
     }
 
@@ -389,7 +399,10 @@ mod tests {
     #[test]
     fn head_size_match_skips() {
         let h = head(140, Some("checksumAAA"));
-        assert_eq!(decide_skip(140, Some(&h)), SkipDecision::SkipWithSizeOnlyWarn);
+        assert_eq!(
+            decide_skip(140, Some(&h)),
+            SkipDecision::SkipWithSizeOnlyWarn
+        );
     }
 
     /// [covers:upload.skip-decision-matrix]
@@ -402,7 +415,10 @@ mod tests {
 
         // 行2: Size一致 → skip + sizeのみ検証警告
         let h = head(140, Some("irrelevant"));
-        assert_eq!(decide_skip(140, Some(&h)), SkipDecision::SkipWithSizeOnlyWarn);
+        assert_eq!(
+            decide_skip(140, Some(&h)),
+            SkipDecision::SkipWithSizeOnlyWarn
+        );
 
         // 行3: Size不一致 → 再upload
         let h = head(139, Some("irrelevant"));
@@ -415,6 +431,7 @@ mod tests {
             region: "ap-northeast-1".into(),
             credentials_file: "configs/secret/aws-credentials.toml".into(),
             storage_class: "DEEP_ARCHIVE".into(),
+            prefix: "backup-remote/".into(),
         }
     }
 
@@ -438,15 +455,26 @@ mod tests {
         let local = tmp.path().join("a.zip.age");
         write_file(&local, b"age-bytes");
 
-        let info = upload_object(&fake, &aws_cfg(), &local, "2026-10-01/a.zip.age")
-            .expect("upload成功");
+        let info =
+            upload_object(&fake, &aws_cfg(), &local, "2026-10-01/a.zip.age").expect("upload成功");
         let puts = put_calls(&fake);
-        assert_eq!(puts.len(), 1, "PutObject 1回(成功後HeadObject 1回): {}", fake.calls());
+        assert_eq!(
+            puts.len(),
+            1,
+            "PutObject 1回(成功後HeadObject 1回): {}",
+            fake.calls()
+        );
         let put = &puts[0];
         assert!(put.contains("bucket=test-bucket"), "bucket参数: {put}");
         assert!(put.contains("key=2026-10-01/a.zip.age"), "key参数: {put}");
-        assert!(put.contains("storage_class=DEEP_ARCHIVE"), "storage_class指定: {put}");
-        assert!(put.contains("checksum=SHA256"), "checksum_algorithm SHA256: {put}");
+        assert!(
+            put.contains("storage_class=DEEP_ARCHIVE"),
+            "storage_class指定: {put}"
+        );
+        assert!(
+            put.contains("checksum=SHA256"),
+            "checksum_algorithm SHA256: {put}"
+        );
         assert!(
             fake.calls()
                 .lines()
@@ -537,13 +565,36 @@ mod tests {
         let code = run_upload(&fake, &opts(&registry));
         assert_eq!(code, 0, "全upload成功");
         let puts = put_calls(&fake);
-        assert_eq!(puts.len(), 3, "オブジェクト2 + manifest 1: {}", fake.calls());
-        assert!(puts[0].contains("key=2026-10-01/a.7z.age"), "s3_key昇順: {}", puts[0]);
-        assert!(puts[1].contains("key=2026-10-01/b.zip.age"), "s3_key昇順: {}", puts[1]);
-        assert!(puts[2].contains("key=2026-10-01/manifest.jsonl.age"), "manifestはオブジェクトより後: {}", puts[2]);
+        assert_eq!(
+            puts.len(),
+            3,
+            "オブジェクト2 + manifest 1: {}",
+            fake.calls()
+        );
+        assert!(
+            puts[0].contains("key=2026-10-01/a.7z.age"),
+            "s3_key昇順: {}",
+            puts[0]
+        );
+        assert!(
+            puts[1].contains("key=2026-10-01/b.zip.age"),
+            "s3_key昇順: {}",
+            puts[1]
+        );
+        assert!(
+            puts[2].contains("key=2026-10-01/manifest.jsonl.age"),
+            "manifestはオブジェクトより後: {}",
+            puts[2]
+        );
         // simulator上のobject配置も確認
-        assert_eq!(fake.object("2026-10-01/a.7z.age").unwrap(), b"age-of-a.7z".to_vec());
-        assert_eq!(fake.object("2026-10-01/manifest.jsonl.age").unwrap(), b"manifest-age-bytes".to_vec());
+        assert_eq!(
+            fake.object("2026-10-01/a.7z.age").unwrap(),
+            b"age-of-a.7z".to_vec()
+        );
+        assert_eq!(
+            fake.object("2026-10-01/manifest.jsonl.age").unwrap(),
+            b"manifest-age-bytes".to_vec()
+        );
     }
 
     /// [covers:upload.success-record-append]
@@ -598,7 +649,12 @@ mod tests {
         o.dry_run = true;
         let code = run_upload(&fake, &o);
         assert_eq!(code, 0, "dry-runはexit 0");
-        assert_eq!(fake.calls(), "", "S3 API呼び出しは一切起きない: {}", fake.calls());
+        assert_eq!(
+            fake.calls(),
+            "",
+            "S3 API呼び出しは一切起きない: {}",
+            fake.calls()
+        );
         assert_eq!(registry_lines(&registry).len(), 1, "registryへの追記も無い");
 
         // dry-run表示行: PutObject予定(対象+manifest)とREADME配置予定を含む(2.3-7・UPL-008)
@@ -608,8 +664,10 @@ mod tests {
         let pending =
             crate::registry::pending_uploads_for_bucket(&reduced, None, &aws.bucket, &aws.bucket);
         let lines = dry_run_display_lines(&aws, &pending);
-        let put_planned: Vec<&String> =
-            lines.iter().filter(|l| l.contains("s3 PutObject")).collect();
+        let put_planned: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("s3 PutObject"))
+            .collect();
         assert_eq!(put_planned.len(), 2, "対象1 + manifest 1: {lines:?}");
     }
 
@@ -651,8 +709,10 @@ mod tests {
         let code = run_upload(&fake, &opts(&registry));
         assert_eq!(code, 0, "upload自体は成功");
         let lines = registry_lines(&registry);
-        let uploads: Vec<&serde_json::Value> =
-            lines.iter().filter(|l| l["record_type"] == "upload").collect();
+        let uploads: Vec<&serde_json::Value> = lines
+            .iter()
+            .filter(|l| l["record_type"] == "upload")
+            .collect();
         assert_eq!(uploads.len(), 1);
         assert_eq!(
             uploads[0]["s3_checksum_sha256"],
@@ -660,8 +720,10 @@ mod tests {
             "ChecksumSHA256無し応答はUNKNOWNマーカー記録(空文字でない): {:?}",
             uploads[0]
         );
-        let mus: Vec<&serde_json::Value> =
-            lines.iter().filter(|l| l["record_type"] == "manifest_upload").collect();
+        let mus: Vec<&serde_json::Value> = lines
+            .iter()
+            .filter(|l| l["record_type"] == "manifest_upload")
+            .collect();
         assert_eq!(mus.len(), 1);
         assert_eq!(mus[0]["s3_checksum_sha256"], serde_json::json!("UNKNOWN"));
     }
@@ -681,7 +743,12 @@ mod tests {
 
         let code = run_upload(&fake, &opts(&registry));
         assert_eq!(code, 3, "対象エラー");
-        assert_eq!(put_calls(&fake).len(), 0, "在らない対象はputしない: {}", fake.calls());
+        assert_eq!(
+            put_calls(&fake).len(),
+            0,
+            "在らない対象はputしない: {}",
+            fake.calls()
+        );
     }
 
     /// [covers:upload.no-pending-exit-zero]
@@ -715,8 +782,9 @@ mod tests {
             "対象/manifestのputは再実行しない: {calls}"
         );
         assert!(
-            calls.lines().any(|c| c.starts_with("s3 HeadObject")
-                && c.contains("key=2026-10-01/a.zip.age")),
+            calls
+                .lines()
+                .any(|c| c.starts_with("s3 HeadObject") && c.contains("key=2026-10-01/a.zip.age")),
             "前回成功記録のある対象もS3側実在確認のheadは実行: {calls}"
         );
         assert_eq!(
@@ -752,8 +820,9 @@ mod tests {
         );
         let calls = fake.calls();
         assert!(
-            calls.lines().any(|c| c.starts_with("s3 PutObject")
-                && c.contains("key=2026-10-01/a.zip.age")),
+            calls
+                .lines()
+                .any(|c| c.starts_with("s3 PutObject") && c.contains("key=2026-10-01/a.zip.age")),
             "削除済み対象へのput再実行: {calls}"
         );
     }
@@ -776,9 +845,14 @@ mod tests {
         assert_eq!(code, 5, "最初のエラー区分は転送エラー");
 
         let lines = registry_lines(&registry);
-        let uploads: Vec<&serde_json::Value> = lines.iter().filter(|l| l["record_type"] == "upload").collect();
-        let manifests: Vec<&serde_json::Value> =
-            lines.iter().filter(|l| l["record_type"] == "manifest_upload").collect();
+        let uploads: Vec<&serde_json::Value> = lines
+            .iter()
+            .filter(|l| l["record_type"] == "upload")
+            .collect();
+        let manifests: Vec<&serde_json::Value> = lines
+            .iter()
+            .filter(|l| l["record_type"] == "manifest_upload")
+            .collect();
         assert_eq!(uploads.len(), 1, "成功分b.7zのみupload記録");
         assert_eq!(uploads[0]["s3_key"], "2026-10-01/b.7z.age");
         assert_eq!(manifests.len(), 1, "manifestは成功扱いで記録");
@@ -812,22 +886,27 @@ mod tests {
             &creds,
             b"[credentials]\naccess_key_id = \"AKITEST0000000000000A\"\nsecret_access_key = \"unit-test-not-a-real-secret\"\n",
         );
-        let args = |aws_cfg_path: std::path::PathBuf, bucket: Option<&str>| crate::cli::UploadArgs {
-            config: Some(pipeline.clone()),
-            aws_config: Some(aws_cfg_path),
-            date: None,
-            dry_run: false,
-            keep_going: false,
-            storage_class: None,
-            bucket: bucket.map(|s| s.to_string()),
-            region: None,
-            aws_profile: None,
-            aws_purpose: None,
-        };
+        let args =
+            |aws_cfg_path: std::path::PathBuf, bucket: Option<&str>| crate::cli::UploadArgs {
+                config: Some(pipeline.clone()),
+                aws_config: Some(aws_cfg_path),
+                date: None,
+                dry_run: false,
+                keep_going: false,
+                storage_class: None,
+                bucket: bucket.map(|s| s.to_string()),
+                region: None,
+                aws_profile: None,
+                aws_purpose: None,
+            };
 
         // 1. aws.toml不在
         let absent = tmp.path().join("absent-aws.toml");
-        assert_eq!(crate::cli::cmd_upload(&args(absent, None)), 2, "aws.toml不在は設定エラー2");
+        assert_eq!(
+            crate::cli::cmd_upload(&args(absent, None)),
+            2,
+            "aws.toml不在は設定エラー2"
+        );
 
         // 2. bucket/region空(CLIの--bucket指定の有無にかかわらず設定エラー2)
         let empty = tmp.path().join("empty-aws.toml");
@@ -835,7 +914,11 @@ mod tests {
             &empty,
             format!("[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"\"\nregion = \"\"\ncredentials_file = \"{}\"\n", creds.display()).as_bytes(),
         );
-        assert_eq!(crate::cli::cmd_upload(&args(empty.clone(), None)), 2, "bucket/region空は設定エラー2");
+        assert_eq!(
+            crate::cli::cmd_upload(&args(empty.clone(), None)),
+            2,
+            "bucket/region空は設定エラー2"
+        );
         assert_eq!(
             crate::cli::cmd_upload(&args(empty, Some("cli-bucket"))),
             2,
@@ -862,6 +945,7 @@ mod tests {
             region: "us-east-1".into(),
             credentials_file: "configs/secret/aws-credentials.toml".into(),
             storage_class: "GLACIER".into(),
+            prefix: "backup-remote/".into(),
         };
         let o = UploadOptions {
             canonical_bucket: "test-bucket".into(), // 正本(aws.toml)のbucket
@@ -874,12 +958,18 @@ mod tests {
         let calls = fake.calls();
         for l in calls.lines() {
             if l.starts_with("s3 HeadObject") || l.starts_with("s3 PutObject") {
-                assert!(l.contains("bucket=alt-bucket"), "HeadObject/PutObjectのbucketへ反映: {l}");
+                assert!(
+                    l.contains("bucket=alt-bucket"),
+                    "HeadObject/PutObjectのbucketへ反映: {l}"
+                );
             }
         }
         let puts = put_calls(&fake);
         assert!(!puts.is_empty(), "対象/manifestのput実行: {puts:?}");
-        assert!(puts.iter().all(|l| l.contains("storage_class=GLACIER")), "putのstorage_class: {puts:?}");
+        assert!(
+            puts.iter().all(|l| l.contains("storage_class=GLACIER")),
+            "putのstorage_class: {puts:?}"
+        );
 
         // registry記録のs3_bucket/s3_regionは当該実行の実効値
         let lines = registry_lines(&registry);

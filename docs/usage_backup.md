@@ -210,6 +210,8 @@ name = "docs-2025.7z"   # 任意: 出力名・S3キー名のoverride(basename衝
 
 ## 4. サブコマンドリファレンス
 
+> **2026-10-15 TASK-10 Phase A注記**: 新コマンド群(`list` / `query` / `get` / `diff` / `edit` / `backup push|pull|verify` / `pin` / `manage`)を追加した(S3 versioning・索引ベースの新ストレージ構成。設計の正本は`tmp/tasks/tm-10/design_s3_storage.md`)。本章の記載は旧サブコマンド(plan/encrypt/upload/verify・現行挙動のまま凍結)に対するもので、**新旧コマンドの同一bucketへの併用は禁止**する(混在書込みの恐れ。旧サブコマンドの書込先は旧key構造のまま)。新コマンドが使用する設定項目(3章のpipeline.tomlへ`[layout]`/`[categories]`/`[files]`/`[output].keep_artifacts`追加・aws.toml profileへ`prefix`追加)も本書未記載であり、新コマンドの詳細な使用手順・設定項目・本書の全面改訂はTASK-11(Phase B)で行う。
+
 ### 4.1 plan — 対象解決と事前検査
 
 暗号化・uploadを行わない事前検査。設定(recipient公開鍵)の検証、対象の存在・拡張子(`.zip`/`.7z`のみ・大文字小文字無視)・重複・出力名一意性を確認し、対象一覧・サイズ・recipient指紋・出力先を表示する。aws不要。

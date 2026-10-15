@@ -12,5 +12,6 @@
 ## 参照(docs外の正本)
 
 - 設計書: `tmp/tasks/tm-1/design_backup_pipeline.md`(TASK-1紐付き。Rust構成・registry schema・終了コード設計の正本)
+- S3ストレージ設計書: `tmp/tasks/tm-10/design_s3_storage.md`(TASK-10紐付き。versioning・索引・新CLI体系(list/query/get/diff/edit/backup/pin/manage)・保持policy・bucket運用の正本)
 - テスト構成: `tests/README.md`(条件書tests/design/・cargo test階層・verify script)
 - 開発ルール: `../CLAUDE.md`

@@ -51,10 +51,21 @@ impl S3BackendFixture {
         let aws_toml = tmp.path().join("aws.toml");
         write_file(
             &aws_toml,
-            aws_toml_body("it-bucket", "ap-northeast-1", &credentials, Some("DEEP_ARCHIVE"))
-                .as_bytes(),
+            aws_toml_body(
+                "it-bucket",
+                "ap-northeast-1",
+                &credentials,
+                Some("DEEP_ARCHIVE"),
+            )
+            .as_bytes(),
         );
-        Some(Self { tmp, cfg, aws_toml, credentials, state })
+        Some(Self {
+            tmp,
+            cfg,
+            aws_toml,
+            credentials,
+            state,
+        })
     }
 
     /// credentialファイルの内容を書き換える(schema検証・非露出検証用)。
@@ -69,11 +80,7 @@ impl S3BackendFixture {
 
     /// fake seam環境(BACKUP_REMOTE_FAKE_S3_STATE・追加env)でuploadを実行し
     /// (exit code, stdout, stderr)を返す。
-    fn upload_env(
-        &self,
-        cli_args: &[&str],
-        extra_env: &[(&str, &str)],
-    ) -> (i32, String, String) {
+    fn upload_env(&self, cli_args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
         let cfg_s = self.cfg.display().to_string();
         let aws_s = self.aws_toml.display().to_string();
         let state_dir = self.state.display().to_string();
@@ -109,7 +116,10 @@ fn fake_seam_uses_fake_backend_with_warning() {
         return;
     };
     let (code, stdout, stderr) = fx.upload(&[]);
-    assert_eq!(code, 0, "fake seamでupload成功(ダミーcredentialでも=実network不使用): {stdout}{stderr}");
+    assert_eq!(
+        code, 0,
+        "fake seamでupload成功(ダミーcredentialでも=実network不使用): {stdout}{stderr}"
+    );
     assert!(
         stderr.contains("WARNING: FAKE S3 MODE"),
         "fake選択時のWARNING表示: {stderr}"
@@ -119,7 +129,9 @@ fn fake_seam_uses_fake_backend_with_warning() {
     assert!(obj.is_file(), "state dirへobject配置: {}", obj.display());
     let calls = fx.calls();
     assert!(
-        calls.lines().any(|l| l.starts_with("s3 PutObject") && l.contains("key=") && l.contains("bucket=it-bucket")),
+        calls.lines().any(|l| l.starts_with("s3 PutObject")
+            && l.contains("key=")
+            && l.contains("bucket=it-bucket")),
         "API呼び出し記録(calls.log)の生成: {calls}"
     );
 }
@@ -139,15 +151,30 @@ fn profile_option_is_usage_error() {
     let aws_s = fx.aws_toml.display().to_string();
     let date = jst_today();
     let (code, _, _) = run_bin_env(
-        &["restore", "request", "--date", &date, "--aws-config", &aws_s, "--profile", "x"],
+        &[
+            "restore",
+            "request",
+            "--date",
+            &date,
+            "--aws-config",
+            &aws_s,
+            "--profile",
+            "x",
+        ],
         &[("BACKUP_REMOTE_FAKE_S3_STATE", state_dir.as_str())],
     );
-    assert_eq!(code, 64, "restore request --profileは未知オプションでusage error 64");
+    assert_eq!(
+        code, 64,
+        "restore request --profileは未知オプションでusage error 64"
+    );
 
     // --help文言: --profile無し・--region/--bucketあり
     let (code, stdout, stderr) = run_bin(&["upload", "--help"]);
     assert_eq!(code, 0, "upload --helpはexit 0: {stderr}");
-    assert!(!stdout.contains("--profile"), "--profileはhelp文言に現れない: {stdout}");
+    assert!(
+        !stdout.contains("--profile"),
+        "--profileはhelp文言に現れない: {stdout}"
+    );
     assert!(stdout.contains("--region"), "--regionは維持: {stdout}");
     assert!(stdout.contains("--bucket"), "--bucketは維持: {stdout}");
 
@@ -203,13 +230,34 @@ fn credentials_file_schema_validation() {
     // 設定検査(require_ready)がdry-runより先に行われることを利用しdry-runで検査する。
     for (tag, body) in [
         ("不正TOML", "[credentials\nbroken"),
-        ("[credentials]テーブル不在", "[other]\naccess_key_id = \"x\"\n"),
-        ("access_key_id欠落", "[credentials]\nsecret_access_key = \"s\"\n"),
-        ("secret_access_key欠落", "[credentials]\naccess_key_id = \"a\"\n"),
-        ("access_key_id空値", "[credentials]\naccess_key_id = \"\"\nsecret_access_key = \"s\"\n"),
-        ("secret_access_key空値", "[credentials]\naccess_key_id = \"a\"\nsecret_access_key = \"\"\n"),
-        ("前後空白付き値", "[credentials]\naccess_key_id = \" AKI1 \"\nsecret_access_key = \"s\"\n"),
-        ("未知キー", "[credentials]\naccess_key_id = \"a\"\nsecret_access_key = \"s\"\ntoken = \"x\"\n"),
+        (
+            "[credentials]テーブル不在",
+            "[other]\naccess_key_id = \"x\"\n",
+        ),
+        (
+            "access_key_id欠落",
+            "[credentials]\nsecret_access_key = \"s\"\n",
+        ),
+        (
+            "secret_access_key欠落",
+            "[credentials]\naccess_key_id = \"a\"\n",
+        ),
+        (
+            "access_key_id空値",
+            "[credentials]\naccess_key_id = \"\"\nsecret_access_key = \"s\"\n",
+        ),
+        (
+            "secret_access_key空値",
+            "[credentials]\naccess_key_id = \"a\"\nsecret_access_key = \"\"\n",
+        ),
+        (
+            "前後空白付き値",
+            "[credentials]\naccess_key_id = \" AKI1 \"\nsecret_access_key = \"s\"\n",
+        ),
+        (
+            "未知キー",
+            "[credentials]\naccess_key_id = \"a\"\nsecret_access_key = \"s\"\ntoken = \"x\"\n",
+        ),
     ] {
         fx.rewrite_credentials(body);
         let (code, _, stderr) = fx.upload(&["--dry-run"]);
@@ -231,7 +279,10 @@ fn credentials_fail_closed_no_fallback() {
         "[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"/nonexistent/aws-credentials.toml\"\n",
     );
     let (code, _, stderr) = fx.upload(&[]);
-    assert_eq!(code, 2, "credentialファイル不在は設定エラー2(fallbackしない): {stderr}");
+    assert_eq!(
+        code, 2,
+        "credentialファイル不在は設定エラー2(fallbackしない): {stderr}"
+    );
     assert_eq!(fx.calls(), "", "S3 API呼び出しは行われない");
 }
 
@@ -254,7 +305,10 @@ fn credentials_values_never_leaked_in_output() {
     );
     let (code, _, stderr) = fx.upload(&[]);
     assert_eq!(code, 2, "未知キーで設定エラー2: {stderr}");
-    assert!(!stderr.contains("LEAKMARK"), "設定エラー時のstderrへcredential値を出さない: {stderr}");
+    assert!(
+        !stderr.contains("LEAKMARK"),
+        "設定エラー時のstderrへcredential値を出さない: {stderr}"
+    );
 
     // (b) 正常完了経路(fake seam): 値が出力に現れない
     fx.rewrite_credentials(
@@ -279,7 +333,10 @@ fn credentials_values_never_leaked_in_output() {
     let _ = std::fs::remove_file(fx.state.join("objects").join(&date).join("a.zip.age"));
     let (code, _, stderr) = fx.upload_env(&[], &[("FAKE_S3_FAIL_CP_FOR", fail_key.as_str())]);
     assert_eq!(code, 5, "失敗注入で転送エラー5: {stderr}");
-    assert!(!stderr.contains("LEAKMARK"), "転送エラー時のstderrへcredential値を出さない: {stderr}");
+    assert!(
+        !stderr.contains("LEAKMARK"),
+        "転送エラー時のstderrへcredential値を出さない: {stderr}"
+    );
 }
 
 /// [covers:upload.multipart-threshold]
@@ -338,10 +395,13 @@ fn multipart_upload_above_threshold() {
         // 閾値超keyはmultipart(Create→UploadPart×N→Complete)で・単発PutObjectは無し
         let create_line = calls
             .lines()
-            .find(|l| l.starts_with("s3 CreateMultipartUpload") && l.contains(&format!("key={key}")))
+            .find(|l| {
+                l.starts_with("s3 CreateMultipartUpload") && l.contains(&format!("key={key}"))
+            })
             .unwrap_or_else(|| panic!("CreateMultipartUpload行: {calls}"));
         assert!(
-            create_line.contains("storage_class=DEEP_ARCHIVE") && create_line.contains("checksum=SHA256"),
+            create_line.contains("storage_class=DEEP_ARCHIVE")
+                && create_line.contains("checksum=SHA256"),
             "CreateMultipartUploadのstorage_class・checksum指定: {create_line}"
         );
         let parts: Vec<&str> = calls
@@ -350,12 +410,16 @@ fn multipart_upload_above_threshold() {
             .collect();
         assert!(parts.len() >= 2, "UploadPartは2回以上: {calls}");
         for p in &parts {
-            assert!(p.contains("checksum=SHA256"), "各UploadPartのchecksum指定: {p}");
+            assert!(
+                p.contains("checksum=SHA256"),
+                "各UploadPartのchecksum指定: {p}"
+            );
         }
         assert!(
             calls
                 .lines()
-                .any(|l| l.starts_with("s3 CompleteMultipartUpload") && l.contains(&format!("key={key}"))),
+                .any(|l| l.starts_with("s3 CompleteMultipartUpload")
+                    && l.contains(&format!("key={key}"))),
             "CompleteMultipartUpload行: {calls}"
         );
         assert!(
@@ -383,7 +447,8 @@ fn multipart_upload_above_threshold() {
         assert!(
             !calls
                 .lines()
-                .any(|l| l.starts_with("s3 CreateMultipartUpload") && l.contains(&format!("key={mkey}"))),
+                .any(|l| l.starts_with("s3 CreateMultipartUpload")
+                    && l.contains(&format!("key={mkey}"))),
             "manifestへCreateMultipartUploadは無い: {calls}"
         );
         Some(())
@@ -440,13 +505,15 @@ fn multipart_abort_on_part_failure() {
         assert!(
             calls
                 .lines()
-                .any(|l| l.starts_with("s3 AbortMultipartUpload") && l.contains(&format!("key={key}"))),
+                .any(|l| l.starts_with("s3 AbortMultipartUpload")
+                    && l.contains(&format!("key={key}"))),
             "part失敗でAbortMultipartUpload発火: {calls}"
         );
         assert!(
             !calls
                 .lines()
-                .any(|l| l.starts_with("s3 CompleteMultipartUpload") && l.contains(&format!("key={key}"))),
+                .any(|l| l.starts_with("s3 CompleteMultipartUpload")
+                    && l.contains(&format!("key={key}"))),
             "CompleteMultipartUploadは実行されない: {calls}"
         );
         Some(())
@@ -465,9 +532,11 @@ fn endpoint_url_env_warns_on_stderr() {
         let Some(fx) = S3BackendFixture::new("sb-endpoint") else {
             return;
         };
-        let (code, stdout, stderr) =
-            fx.upload_env(&[], &[(env_name, "http://127.0.0.1:19000")]);
-        assert_eq!(code, 0, "{env_name}設定時も処理継続(exit 0): {stdout}{stderr}");
+        let (code, stdout, stderr) = fx.upload_env(&[], &[(env_name, "http://127.0.0.1:19000")]);
+        assert_eq!(
+            code, 0,
+            "{env_name}設定時も処理継続(exit 0): {stdout}{stderr}"
+        );
         assert!(
             stderr.contains("AWS_ENDPOINT_URL"),
             "{env_name}検出の警告表示: {stderr}"

@@ -1,0 +1,80 @@
+# backup-remote テスト設計条件書(retention エリア)
+# 出典: tmp/tasks/tm-10/design_s3_storage.md 3.2(manage prune/lifecycle)・5.2・9章素案(TASK-10 S3ストレージ設計)
+# 2026-10-14: TASK-10実装(Phase A)に先立つテスト先行の条件書(新設feature)。
+#   manage系実装はcli.rs+lifecycle構成生成(s3.rs put_lifecycle)+索引/ListObjectVersions(prune対象計算)に跨る。
+#   実装前のため条件に対応するテストコードは未作成(網羅検査は警告のみの段階)。
+
+[meta]
+feature = "retention"
+source_file = "src/cli.rs"
+verified = false
+test_command = "cargo test"
+note = "TASK-10(9章素案+設計3.2/5.2本文)の条件化。区分別保持数はbucketのlifecycle(NCVE)で自動化し、manage pruneは即時適用としてNCVEと同一の削除条件式を使用(5.2)。source_fileはエリア主対象としてcli.rs(manage系コマンド)を指し、lifecycle構成のS3 API実体(src/s3.rs)と対象計算(src/index.rs)はtarget_functionで特定(config.tomlのCONF-005と同一運用)"
+
+[[condition]]
+id = "retention.lifecycle-rules-per-category"
+target_function = "manage lifecycle apply(lifecycle構成生成) / s3 put_lifecycle"
+source = "tmp/tasks/tm-10/design_s3_storage.md 5.2(lifecycle)"
+description = "category毎rule(prefix <prefix>/<category>/): NoncurrentVersionExpiration {NoncurrentDays: 180, NewerNoncurrentVersions: <category.keep>} で区分別保持数がbucket設定のみで自動化される。sys(索引・manifestの予約領域)はprefix filterで構造的に対象外。Expiration(現行version削除)とSTANDARD→DA移行ruleは設定しない(唯一の版保護・直接DA投入)。applyはput-bucket-lifecycle-configurationでrule一式を置換(冪等) (integration, fake seam)"
+given = "categories(main keep=5・volatile keep=2・unfiled keep=5)での manage lifecycle apply 実行と、同コマンドの再実行"
+expect_return_shape = "PutBucketLifecycleConfigurationのrule一式に各categoryのNCVE rule(prefix=<prefix>/<category>/・NoncurrentDays=180・NewerNoncurrentVersions=keep値)が含まれ、sys prefixのrule・Expiration・移行ruleは含まれず、再実行は同一構成を置換する(冪等)"
+source_lines = "tests/retention.rs:337; tests/retention.rs:34"
+
+[[condition]]
+id = "retention.mpu-abort-rule"
+target_function = "manage lifecycle apply(lifecycle構成生成)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 5.2(MPU abort rule)"
+description = "MPU abort rule(prefix <prefix>/): AbortIncompleteMultipartUpload 7日(本ツールが設定管理) (integration, fake seam)"
+given = "manage lifecycle apply 実行"
+expect_return_shape = "lifecycle構成に AbortIncompleteMultipartUpload(日数=7)・prefix=<prefix>/ のruleが含まれる"
+source_lines = "tests/retention.rs:99"
+
+[[condition]]
+id = "retention.prune-category-required"
+target_function = "cli::cmd_manage_prune(引数検査)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(manage prune・--category必須)"
+description = "manage pruneは--categoryが必須。未指定はusage error 64 (unit)"
+given = "--categoryなしの manage prune 実行"
+expect_return = "exit 64(usage error)"
+source_lines = "tests/retention.rs:119"
+
+[[condition]]
+id = "retention.prune-dry-run-default"
+target_function = "cli::cmd_manage_prune"
+source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(manage prune)"
+description = "pruneは--dry-runが既定: --applyなき実行は削除を行わず、索引+ListObjectVersionsから計算した削除対象を報告して exit 0 (integration, fake seam)"
+given = "削除対象が存在する状態での、--dry-run明示とオプション省略の manage prune 実行"
+expect_return_shape = "いずれもDeleteObjectVersionは呼ばれず、削除対象の報告表示が出て exit 0"
+source_lines = "tests/retention.rs:138"
+
+[[condition]]
+id = "retention.prune-protects-current-and-pins"
+target_function = "cli::cmd_manage_prune(対象計算)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(manage prune)"
+description = "pruneの対象計算では現行version・pin key(<pin名>.age)は対象外(構造的保護) (integration, fake seam)"
+given = "現行versionとpin objectが存在するkeyを含む状態での manage prune --apply 実行"
+expect_return_shape = "現行versionとpin keyへの削除は行われず、default.ageのnoncurrent版のみが削除対象となる"
+source_lines = "tests/retention.rs:182"
+
+[[condition]]
+id = "retention.prune-apply-deletes-versions"
+target_function = "cli::cmd_manage_prune(削除条件式)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 3.2・5.2(削除条件の単一定義・11章S3-4)"
+description = "削除条件(NCVEとprune共通の単一定義): 削除対象=同一keyのnoncurrent版を新しい順に並べたとき、newer noncurrent版の数がkeep以上となった版(境界=ちょうどkeep番目に新しいnoncurrent版は残す)。--apply時はDeleteObjectVersion。--keep N は当該実行のみ[categories].keepを上書きし、未指定時は設定値 (integration, fake seam)"
+given = "同一keyにnoncurrent版6件ある状態で、keep=5(設定値)での--apply・--keep 2での--apply・--keep未指定での--apply"
+expect_return_shape = "keep=5では最古の1件のみ(newer noncurrent数5以上)削除され境界(5番目に新しいnoncurrent版)は残る。--keep 2ではnewer noncurrent数2以上の版(古い4件)が削除され、以降の実行でも[categories].keep設定値は不変。削除はDeleteObjectVersionで行われる"
+source_lines = "tests/retention.rs:222"
+
+[[excluded]]
+item = "IAM policy案(principal A: 全操作 / principal B: 復元専用最小権限)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 5.3"
+reason = "aws側(IAM)の設定案でありdocsへ記載する運用資材(本ツールにIAM policy生成機能は無い)。検証対象コードの振る舞い条件ではない"
+decided_at = "2026-10-14"
+decided_by = "claude"
+
+[[excluded]]
+item = "Object Lockの採用(5.4)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 5.4"
+reason = "不採用の設計判断(versioning+IAM分離で十分・compliance modeの誤設定復旧不能リスク等の根拠は5.4)。実装・検証対象が存在しない。将来要件が出た場合の拡張点としてのみ記録"
+decided_at = "2026-10-14"
+decided_by = "claude"

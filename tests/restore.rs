@@ -45,8 +45,7 @@ impl RestoreFixture {
         let (public, secret) = generate_ed25519_keypair(tmp.path(), "k1");
         let enc_out = tmp.path().join("enc-out");
         let registry = tmp.path().join("registry.jsonl");
-        let cfg =
-            write_pipeline_toml(tmp.path(), &[public.clone()], &enc_out, &registry, None);
+        let cfg = write_pipeline_toml(tmp.path(), &[public.clone()], &enc_out, &registry, None);
         let plain_a = b"restore-it-plain-A-0123456789abcdef".to_vec();
         let plain_b = b"restore-it-plain-B-zyxwvutsrqponmlk".to_vec();
         let a = tmp.path().join("a.zip");
@@ -98,14 +97,9 @@ impl RestoreFixture {
     /// restore系サブコマンドをfake S3 backend seam環境(BACKUP_REMOTE_FAKE_S3_STATE)で実行し
     /// (exit code, stdout, stderr)を返す。subにはサブコマンド動詞以降を渡す
     /// (--aws-configは末尾に自動付与)。
-    fn run_env(
-        &self,
-        sub: &[&str],
-        extra_env: &[(&str, &str)],
-    ) -> (i32, String, String) {
+    fn run_env(&self, sub: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
         let state_dir = self.state.display().to_string();
-        let mut envs: Vec<(&str, &str)> =
-            vec![("BACKUP_REMOTE_FAKE_S3_STATE", state_dir.as_str())];
+        let mut envs: Vec<(&str, &str)> = vec![("BACKUP_REMOTE_FAKE_S3_STATE", state_dir.as_str())];
         envs.extend_from_slice(extra_env);
         let aws_s = self.aws_toml.display().to_string();
         let mut args: Vec<&str> = vec!["restore"];
@@ -146,8 +140,7 @@ impl RestoreFixture {
         let d = self.date.clone();
         let k = self.secret.display().to_string();
         let o = out.display().to_string();
-        let mut args: Vec<&str> =
-            vec!["download", "--date", &d, "--out", &o, "--key", &k];
+        let mut args: Vec<&str> = vec!["download", "--date", &d, "--out", &o, "--key", &k];
         args.extend_from_slice(extra);
         self.run_env(&args, env)
     }
@@ -218,7 +211,8 @@ fn request_issues_restore_object_for_all_batch_keys() {
         );
     }
     assert!(
-        ro.iter().all(|l| l.contains("days=3") && l.contains("tier=Bulk")),
+        ro.iter()
+            .all(|l| l.contains("days=3") && l.contains("tier=Bulk")),
         "RestoreRequest参数(days・glacier_job_parameters.tier): {calls}"
     );
     assert!(
@@ -227,8 +221,7 @@ fn request_issues_restore_object_for_all_batch_keys() {
     );
     assert!(
         calls.lines().any(|l| {
-            l.starts_with("s3 ListObjectsV2")
-                && l.contains(&format!("prefix={}/", fx.date))
+            l.starts_with("s3 ListObjectsV2") && l.contains(&format!("prefix={}/", fx.date))
         }),
         "ListObjectsV2のprefix指定: {calls}"
     );
@@ -283,7 +276,10 @@ fn request_skips_restored_and_ongoing_keys() {
         .collect();
     assert_eq!(ro.len(), 1, "発行は未発行keyのみ: {calls}");
     let kb = fx.key("b.7z.age");
-    assert!(ro[0].contains(&format!("key={kb}")), "発行先はb.7z.age: {calls}");
+    assert!(
+        ro[0].contains(&format!("key={kb}")),
+        "発行先はb.7z.age: {calls}"
+    );
     assert!(stdout.contains("skip"), "skip表示: {stdout}");
     // 事前HeadObjectは全keyに対して実行される
     for name in ["a.zip.age", "b.7z.age", "manifest.jsonl.age"] {
@@ -309,9 +305,16 @@ fn request_dry_run_no_aws_execution() {
     let before = fx.calls_count();
     let (code, stdout, stderr) = fx.request(&["--dry-run"]);
     assert_eq!(code, 0, "dry-runはexit 0: {stdout}{stderr}");
-    assert_eq!(fx.calls_count(), before, "S3 API呼び出しなし(list/head/RestoreObject)");
+    assert_eq!(
+        fx.calls_count(),
+        before,
+        "S3 API呼び出しなし(list/head/RestoreObject)"
+    );
     assert!(stdout.contains("[dry-run]"), "dry-run表示: {stdout}");
-    assert!(stdout.contains("RestoreObject"), "RestoreObject予定表示: {stdout}");
+    assert!(
+        stdout.contains("RestoreObject"),
+        "RestoreObject予定表示: {stdout}"
+    );
 
     // --name指定時: 当該name+manifestの予定行のみ(未指定name・placeholderは出さない)
     let before = fx.calls_count();
@@ -330,7 +333,10 @@ fn request_dry_run_no_aws_execution() {
         !stdout.contains(&fx.key("b.7z.age")),
         "未指定nameの予定行は出さない: {stdout}"
     );
-    assert!(!stdout.contains("<name>.age"), "placeholder表示は使わない: {stdout}");
+    assert!(
+        !stdout.contains("<name>.age"),
+        "placeholder表示は使わない: {stdout}"
+    );
 
     // --name manifest.jsonl単独: name行とmanifest自動追加行が同一keyのため1行のみ
     let (code, stdout, stderr) = fx.request(&["--name", "manifest.jsonl", "--dry-run"]);
@@ -360,12 +366,15 @@ fn request_tier_days_validation() {
     ] {
         let (code, stdout, stderr) = fx.request(&extra);
         assert_eq!(
-            code,
-            2,
+            code, 2,
             "--tier/--days検証不正は設定エラー2({extra:?}): {stdout}{stderr}"
         );
     }
-    assert_eq!(fx.calls_count(), before, "S3 API呼び出しなし(ListObjectsV2含め)");
+    assert_eq!(
+        fx.calls_count(),
+        before,
+        "S3 API呼び出しなし(ListObjectsV2含め)"
+    );
 }
 
 /// [covers:restore.status-three-states]
@@ -384,7 +393,10 @@ fn status_lists_three_restore_states() {
     assert_eq!(code, 0, "status成功: {stdout}{stderr}");
     assert!(stdout.contains("restored"), "restored表示: {stdout}");
     assert!(stdout.contains("ongoing"), "ongoing表示: {stdout}");
-    assert!(stdout.contains("not-requested"), "not-requested表示: {stdout}");
+    assert!(
+        stdout.contains("not-requested"),
+        "not-requested表示: {stdout}"
+    );
     let ka = fx.key("a.zip.age");
     assert!(stdout.contains(&ka), "key表示: {stdout}");
     // 空prefixの--dateは警告+exit 0(空一覧)
@@ -415,13 +427,22 @@ fn restore_header_raw_expiry_date_retained() {
     assert!(!stdout.contains("+09:00"), "JST変換しない: {stdout}");
     // 3状態の分類(per-line)
     let ka = fx.key("a.zip.age");
-    let la = stdout.lines().find(|l| l.contains(&ka)).expect("a.zip.age行");
+    let la = stdout
+        .lines()
+        .find(|l| l.contains(&ka))
+        .expect("a.zip.age行");
     assert!(la.contains("restored"), "restored分類: {la}");
     let kb = fx.key("b.7z.age");
-    let lb = stdout.lines().find(|l| l.contains(&kb)).expect("b.7z.age行");
+    let lb = stdout
+        .lines()
+        .find(|l| l.contains(&kb))
+        .expect("b.7z.age行");
     assert!(lb.contains("ongoing"), "ongoing分類: {lb}");
     let km = fx.key("manifest.jsonl.age");
-    let lm = stdout.lines().find(|l| l.contains(&km)).expect("manifest行");
+    let lm = stdout
+        .lines()
+        .find(|l| l.contains(&km))
+        .expect("manifest行");
     assert!(lm.contains("not-requested"), "not-requested分類: {lm}");
 }
 
@@ -455,8 +476,16 @@ fn download_full_roundtrip_with_real_age() {
         assert!(dir.join(name).is_file(), "成果物 {name}: {}", dir.display());
     }
     // 復号平文はオリジナルとbyte一致(実age・実鍵でのroundtrip)
-    assert_eq!(std::fs::read(dir.join("a.zip")).unwrap(), fx.plain_a, "a.zip平文");
-    assert_eq!(std::fs::read(dir.join("b.7z")).unwrap(), fx.plain_b, "b.7z平文");
+    assert_eq!(
+        std::fs::read(dir.join("a.zip")).unwrap(),
+        fx.plain_a,
+        "a.zip平文"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("b.7z")).unwrap(),
+        fx.plain_b,
+        "b.7z平文"
+    );
     // 取得.ageはS3側objectとbyte一致
     for name in ["a.zip.age", "b.7z.age", "manifest.jsonl.age"] {
         assert_eq!(
@@ -476,7 +505,11 @@ fn download_full_roundtrip_with_real_age() {
     // GetObject呼び出し: checksum_mode=ENABLED付き・checksum_algorithm(作成用)なし
     let calls = fx.calls();
     let dl_get: Vec<&str> = calls.lines().filter(|l| is_download_get(l)).collect();
-    assert_eq!(dl_get.len(), 3, "download GetObjectは3件(a/b/manifest): {calls}");
+    assert_eq!(
+        dl_get.len(),
+        3,
+        "download GetObjectは3件(a/b/manifest): {calls}"
+    );
     assert!(
         dl_get.iter().all(|l| l.contains("checksum_mode=ENABLED")),
         "checksum_mode ENABLED: {calls}"
@@ -508,7 +541,11 @@ fn download_name_filter_and_missing() {
     }
     assert!(!dir1.join("b.7z.age").exists(), "b.7z.ageは未処理");
     assert!(!dir1.join("b.7z").exists(), "b.7zは未処理");
-    assert_eq!(std::fs::read(dir1.join("a.zip")).unwrap(), fx.plain_a, "平文一致");
+    assert_eq!(
+        std::fs::read(dir1.join("a.zip")).unwrap(),
+        fx.plain_a,
+        "平文一致"
+    );
 
     // 不在nameは対象エラー3
     let out2 = fx.tmp.path().join("out-name2");
@@ -554,7 +591,11 @@ fn download_idempotent_second_run() {
     let km = fx.key("manifest.jsonl.age");
     assert_eq!(get_for(&calls1, &ka), 1, "1回目a GetObject: {calls1}");
     assert_eq!(get_for(&calls1, &kb), 1, "1回目b GetObject: {calls1}");
-    assert_eq!(get_for(&calls1, &km), 1, "1回目manifest GetObject: {calls1}");
+    assert_eq!(
+        get_for(&calls1, &km),
+        1,
+        "1回目manifest GetObject: {calls1}"
+    );
 
     let (code, stdout, stderr) = fx.download(&out, &[]);
     assert_eq!(code, 0, "2回目exit 0: {stdout}{stderr}");
@@ -563,10 +604,22 @@ fn download_idempotent_second_run() {
     // 対象keyのGetObject・HeadObjectは再実行されない(ローカル.age照合一致→headのRestore確認をskip)
     assert_eq!(get_for(&calls2, &ka), 1, "a GetObject不変: {calls2}");
     assert_eq!(get_for(&calls2, &kb), 1, "b GetObject不変: {calls2}");
-    assert_eq!(head_for(&calls2, &ka), head_for(&calls1, &ka), "a head不変: {calls2}");
-    assert_eq!(head_for(&calls2, &kb), head_for(&calls1, &kb), "b head不変: {calls2}");
+    assert_eq!(
+        head_for(&calls2, &ka),
+        head_for(&calls1, &ka),
+        "a head不変: {calls2}"
+    );
+    assert_eq!(
+        head_for(&calls2, &kb),
+        head_for(&calls1, &kb),
+        "b head不変: {calls2}"
+    );
     // manifestは毎回再取得・headも再実行
-    assert_eq!(get_for(&calls2, &km), 2, "manifest GetObjectは毎回: {calls2}");
+    assert_eq!(
+        get_for(&calls2, &km),
+        2,
+        "manifest GetObjectは毎回: {calls2}"
+    );
     assert_eq!(
         head_for(&calls2, &km),
         head_for(&calls1, &km) + 1,
@@ -574,7 +627,11 @@ fn download_idempotent_second_run() {
     );
     // 平文も再復号せず成果物は保持されたまま
     let dir = out.join(&fx.date);
-    assert_eq!(std::fs::read(dir.join("a.zip")).unwrap(), fx.plain_a, "平文保持");
+    assert_eq!(
+        std::fs::read(dir.join("a.zip")).unwrap(),
+        fx.plain_a,
+        "平文保持"
+    );
 }
 
 /// [covers:restore.download-age-refetch]
@@ -593,7 +650,11 @@ fn download_refetches_mismatched_age() {
     let orig = std::fs::read(dir.join("a.zip.age")).unwrap();
 
     // ローカル.ageを改変→再取得でS3側正本へ戻る
-    std::fs::write(dir.join("a.zip.age"), [orig.as_slice(), b"CORRUPT-JUNK"].concat()).unwrap();
+    std::fs::write(
+        dir.join("a.zip.age"),
+        [orig.as_slice(), b"CORRUPT-JUNK"].concat(),
+    )
+    .unwrap();
     let (code, _, stderr) = fx.download(&out, &[]);
     assert_eq!(code, 0, "改変後再実行: {stderr}");
     assert_eq!(
@@ -606,8 +667,7 @@ fn download_refetches_mismatched_age() {
     let corrupted = [orig.as_slice(), b"CORRUPT-JUNK-2"].concat();
     std::fs::write(dir.join("a.zip.age"), &corrupted).unwrap();
     let ka = fx.key("a.zip.age");
-    let (code, _, stderr) =
-        fx.download_env(&out, &[], &[("FAKE_S3_FAIL_CP_FOR", ka.as_str())]);
+    let (code, _, stderr) = fx.download_env(&out, &[], &[("FAKE_S3_FAIL_CP_FOR", ka.as_str())]);
     assert_eq!(code, 5, "GetObject失敗は転送エラー5: {stderr}");
     assert_eq!(
         std::fs::read(dir.join("a.zip.age")).unwrap(),
@@ -633,14 +693,20 @@ fn download_plain_conflict_is_target_error() {
 
     let (code, _, stderr) = fx.download(&out, &[]);
     assert_eq!(code, 3, "平文衝突は対象エラー3: {stderr}");
-    assert!(stderr.contains("a.zip"), "衝突nameの案内(手動リネーム促し): {stderr}");
+    assert!(
+        stderr.contains("a.zip"),
+        "衝突nameの案内(手動リネーム促し): {stderr}"
+    );
     assert_eq!(
         std::fs::read(dir.join("a.zip")).unwrap(),
         b"tampered-plain-content",
         "既存平文は不変(上書きしない)"
     );
     // 処理順(3.4-5): .age取得(a〜c)の後の平文衝突判定(d)のため .age は取得済み
-    assert!(dir.join("a.zip.age").is_file(), ".ageは取得後に平文衝突で停止");
+    assert!(
+        dir.join("a.zip.age").is_file(),
+        ".ageは取得後に平文衝突で停止"
+    );
 }
 
 /// [covers:restore.download-verification-mismatch]
@@ -760,8 +826,10 @@ fn keep_going_continues_after_failures() {
         return;
     };
     let ka = fx.key("a.zip.age");
-    let (code, _, stderr) =
-        fx.request_env(&["--keep-going"], &[("FAKE_S3_FAIL_RESTORE_FOR", ka.as_str())]);
+    let (code, _, stderr) = fx.request_env(
+        &["--keep-going"],
+        &[("FAKE_S3_FAIL_RESTORE_FOR", ka.as_str())],
+    );
     assert_eq!(code, 5, "request keep-goingはexit 5: {stderr}");
     let calls = fx.calls();
     let ro = calls
@@ -769,10 +837,14 @@ fn keep_going_continues_after_failures() {
         .filter(|l| l.starts_with("s3 RestoreObject"))
         .count();
     assert_eq!(ro, 3, "全keyへ発行を試みる: {calls}");
-    assert!(!fx.state.join("restore").join(&ka).is_file(), "失敗keyは復元状態なし");
+    assert!(
+        !fx.state.join("restore").join(&ka).is_file(),
+        "失敗keyは復元状態なし"
+    );
     assert!(
         fx.state.join("restore").join(fx.key("b.7z.age")).is_file()
-            && fx.state
+            && fx
+                .state
                 .join("restore")
                 .join(fx.key("manifest.jsonl.age"))
                 .is_file(),
@@ -782,11 +854,18 @@ fn keep_going_continues_after_failures() {
     // download側: 1 keyのみGetObject失敗注入(失敗keyを手動で復元済みにしてから)
     fx.seed(&ka, "restored");
     let out = fx.tmp.path().join("restore-out");
-    let (code, _, stderr) =
-        fx.download_env(&out, &["--keep-going"], &[("FAKE_S3_FAIL_CP_FOR", ka.as_str())]);
+    let (code, _, stderr) = fx.download_env(
+        &out,
+        &["--keep-going"],
+        &[("FAKE_S3_FAIL_CP_FOR", ka.as_str())],
+    );
     assert_eq!(code, 5, "download keep-goingはexit 5: {stderr}");
     let dir = out.join(&fx.date);
-    assert!(dir.join("b.7z").is_file(), "成功分の平文は残る: {}", dir.display());
+    assert!(
+        dir.join("b.7z").is_file(),
+        "成功分の平文は残る: {}",
+        dir.display()
+    );
     assert!(dir.join("b.7z.age").is_file(), "成功分の.ageは残る");
     assert!(!dir.join("a.zip").is_file(), "失敗keyの平文は無い");
 }
@@ -824,12 +903,17 @@ fn download_preflight_key_and_age_errors() {
         &[("BACKUP_REMOTE_FAKE_S3_STATE", state_dir.as_str())],
         &empty_cwd,
     );
-    assert_eq!(code, 2, "--key未指定かつdecrypt_key解決不能は設定エラー2: {stderr}");
+    assert_eq!(
+        code, 2,
+        "--key未指定かつdecrypt_key解決不能は設定エラー2: {stderr}"
+    );
 
     // (b) --keyに不在path
     let bad_key = "/nonexistent/secret-key".to_string();
     let (code, _, stderr) = fx.run_env(
-        &["download", "--date", &date, "--out", &out_s, "--key", &bad_key],
+        &[
+            "download", "--date", &date, "--out", &out_s, "--key", &bad_key,
+        ],
         &[],
     );
     assert_eq!(code, 2, "鍵ファイル不在は設定エラー2: {stderr}");
@@ -838,7 +922,9 @@ fn download_preflight_key_and_age_errors() {
     let bin_only = "/nonexistent-bin-dir";
     let key_s = fx.secret.display().to_string();
     let (code, _, stderr) = fx.run_env(
-        &["download", "--date", &date, "--out", &out_s, "--key", &key_s],
+        &[
+            "download", "--date", &date, "--out", &out_s, "--key", &key_s,
+        ],
         &[("PATH", bin_only)],
     );
     assert_eq!(code, 2, "ageバイナリ不在は設定エラー2: {stderr}");
@@ -889,7 +975,11 @@ fn download_works_without_registry_and_pipeline() {
     for name in ["a.zip.age", "a.zip", "manifest.jsonl"] {
         assert!(dir.join(name).is_file(), "成果物 {name}");
     }
-    assert_eq!(std::fs::read(dir.join("b.7z")).unwrap(), fx.plain_b, "平文一致");
+    assert_eq!(
+        std::fs::read(dir.join("b.7z")).unwrap(),
+        fx.plain_b,
+        "平文一致"
+    );
 }
 
 /// [covers:restore.date-required]
@@ -933,10 +1023,7 @@ fn cli_overrides_reflected_in_restore_argv() {
         list_line.contains("bucket=ov-bucket"),
         "ListObjectsV2へ上書きbucket反映: {list_line}"
     );
-    for line in calls
-        .lines()
-        .filter(|l| l.starts_with("s3 RestoreObject"))
-    {
+    for line in calls.lines().filter(|l| l.starts_with("s3 RestoreObject")) {
         assert!(
             line.contains("bucket=ov-bucket"),
             "RestoreObjectへ上書きbucket反映: {line}"
@@ -1012,7 +1099,8 @@ fn request_name_cross_check() {
         .collect();
     assert_eq!(ro.len(), 2, "対象はa.zip.age+manifest: {calls}");
     assert!(
-        ro.iter().any(|l| l.contains(&format!("key={}", fx.key("a.zip.age")))),
+        ro.iter()
+            .any(|l| l.contains(&format!("key={}", fx.key("a.zip.age")))),
         "a.zip.age: {calls}"
     );
     assert!(
@@ -1021,7 +1109,8 @@ fn request_name_cross_check() {
         "manifest: {calls}"
     );
     assert!(
-        !ro.iter().any(|l| l.contains(&format!("key={}", fx.key("b.7z.age")))),
+        !ro.iter()
+            .any(|l| l.contains(&format!("key={}", fx.key("b.7z.age")))),
         "b.7z.ageへは発行しない: {calls}"
     );
 
@@ -1035,9 +1124,7 @@ fn request_name_cross_check() {
     assert_eq!(
         calls
             .lines()
-            .filter(
-                |l| l.starts_with("s3 RestoreObject") && l.contains(&format!("key={km}"))
-            )
+            .filter(|l| l.starts_with("s3 RestoreObject") && l.contains(&format!("key={km}")))
             .count(),
         2,
         "manifestへの発行は累積2回(絞り込みhappy pathの1回+今回の1回のみ・重複発行しない): {calls}"
@@ -1057,9 +1144,11 @@ fn manifest_head_404_is_batch_missing() {
     let d = "2099-12-31".to_string();
     let k = fx.secret.display().to_string();
     let o = out.display().to_string();
-    let (code, _, stderr) =
-        fx.run(&["download", "--date", &d, "--out", &o, "--key", &k]);
-    assert_eq!(code, 3, "manifestのHeadObject 404はバッチ不在の対象エラー3: {stderr}");
+    let (code, _, stderr) = fx.run(&["download", "--date", &d, "--out", &o, "--key", &k]);
+    assert_eq!(
+        code, 3,
+        "manifestのHeadObject 404はバッチ不在の対象エラー3: {stderr}"
+    );
     assert!(
         stderr.contains("manifest.jsonl.age") && stderr.contains("バッチ不在"),
         "専用案内文: {stderr}"
@@ -1100,8 +1189,10 @@ fn status_head_failure_outputs_summary() {
     };
     let ka = fx.key("a.zip.age");
     let d = fx.date.clone();
-    let (code, stdout, stderr) =
-        fx.run_env(&["status", "--date", &d], &[("FAKE_S3_FAIL_HEAD_FOR", ka.as_str())]);
+    let (code, stdout, stderr) = fx.run_env(
+        &["status", "--date", &d],
+        &[("FAKE_S3_FAIL_HEAD_FOR", ka.as_str())],
+    );
     assert_eq!(code, 5, "head失敗は転送エラー5: {stdout}{stderr}");
     assert!(
         stdout

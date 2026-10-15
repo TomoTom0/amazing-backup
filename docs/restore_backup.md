@@ -8,6 +8,8 @@ S3 Glacier Deep Archiveへ保管した暗号化アーカイブを、`backup-remo
 - 実装バージョン: 0.1.0
 - 最終確認: 2026-10-14(実装の`--help`出力・動作に基づく)
 
+> **2026-10-15 TASK-10 Phase A注記**: 復元の新経路として`get`(単一ファイル取得・`--date`必須なしで索引から版特定)・`backup pull`(一括復元・確認付き)・`list jobs`(復元job一覧)・暗号化索引(hot)を追加した(設計の正本は`tmp/tasks/tm-10/design_s3_storage.md`)。本書の記載は旧サブコマンド(`restore request/status/download`)のままで、新経路の手順と本書の全面改訂はTASK-11(Phase B)で行う。
+
 ## 1. 前提
 
 ### 1.1 ツールとcredentialファイル

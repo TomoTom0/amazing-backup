@@ -29,7 +29,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-001(検査仕様は2
 description = "整合している状態で構造検査(既定段階)が全項目ok・exit 0となる (unit)"
 given = "正常なencrypt済registry・.age・manifestが揃った状態で verify 実行"
 expect_return = "exit code 0(全検査項目ok表示)"
-source_lines = "src/cli.rs:1243"
+source_lines = "src/cli.rs:1309"
 
 [[condition]]
 id = "verify.missing-or-size-mismatch-error"
@@ -38,7 +38,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-002(2.4-1・7.1のex
 description = "構造検査で .age 欠損・age_sizeと実sizeの不一致を検出し、検証エラー4(欠損も不一致と同じく4に統一)。age_sizeは実ファイルsizeと完全一致を要求し、実sizeが記録値未満(切り詰め)・超過(追記)のいずれも不一致としてexit 4となる(記録値未満を警告継続にしない) (unit)"
 given = ".age を削除したcaseと、age_size と異なる実sizeの .age のcase(実sizeが記録値を超過するcaseと未満に切り詰めるcaseの両方)"
 expect_return = "exit code 4(該当recordのsource_pathと期待/実測の詳細表示)"
-source_lines = "src/cli.rs:1259"
+source_lines = "src/cli.rs:1325"
 
 [[condition]]
 id = "verify.torn-write-and-bad-json-lines"
@@ -47,7 +47,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-003(規則は4.1注�
 description = "registryの不正JSON行を検出。改行終端でない最終行はtorn writeとして警告のうえ除外され処理継続する (unit)"
 given = "不正JSON行を含むregistryと、改行終端しない最終行(torn write)を含むregistry"
 expect_return_shape = "不正JSON行は行番号付きでProcessError、torn write最終行は警告のうえ除外され残り行の読込が継続する"
-source_lines = "src/registry.rs:507"
+source_lines = "src/registry.rs:799"
 
 [[condition]]
 id = "verify.checksum-detects-mutation"
@@ -56,7 +56,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-004(2.4-2)"
 description = "--checksum で .age の改変(byte追加)をsha256再計算により検出する (unit)"
 given = ".age へ1byte追加した状態で --checksum 実行"
 expect_return = "exit code 4(期待age_sha256と実測の不一致表示)"
-source_lines = "src/cli.rs:1373"
+source_lines = "src/cli.rs:1436"
 
 [[condition]]
 id = "verify.roundtrip-sha256-match"
@@ -65,7 +65,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-005(2.4-3)"
 description = "--roundtrip で復号平文sha256(ストリーム計算)がregistry記録(source_sha256)と一致することを検証する(実age統合) (integration)"
 given = "正常なencrypt済状態で --roundtrip 実行(平文はディスクに書き出さない)"
 expect_return = "exit code 0"
-source_lines = "tests/verify_roundtrip.rs:33"
+source_lines = "tests/verify_roundtrip.rs:35"
 
 [[condition]]
 id = "verify.roundtrip-wrong-key-error"
@@ -74,7 +74,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-006(2.4・7.1)"
 description = "--roundtrip で鍵不一致(誤鍵)は処理エラー4となる (integration)"
 given = "暗号化recipientと対にならない秘密鍵で --roundtrip 実行"
 expect_return = "exit code 4(処理エラー)"
-source_lines = "tests/verify_roundtrip.rs:52"
+source_lines = "tests/verify_roundtrip.rs:58"
 
 [[condition]]
 id = "verify.roundtrip-manifest-crosscheck"
@@ -83,7 +83,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-007(2.4-3)"
 description = "--roundtrip でmanifest復号→registry突合(バッチ内ファイル数・各source_sha256・age_sha256)を行い、不一致を検出する (integration)"
 given = "registry記録と突合しない内容(ファイル数・sha256を変えた)の manifest.jsonl.age を配置"
 expect_return = "exit code 4(不一致検出)"
-source_lines = "tests/verify_roundtrip.rs:88"
+source_lines = "tests/verify_roundtrip.rs:100"
 
 [[condition]]
 id = "verify.runs-without-aws"
@@ -92,7 +92,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-008(2.4)"
 description = "verify は aws CLI不在・aws.toml不在でも完結する (unit)"
 given = "aws CLI不在・aws.toml不在の環境で verify 実行"
 expect_return = "exit code 0"
-source_lines = "src/cli.rs:1410"
+source_lines = "src/cli.rs:1473"
 
 [[condition]]
 id = "verify.unknown-record-type-skipped"
@@ -101,7 +101,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-009(規則は4.1注�
 description = "registry内の未知record_type行(既知3種 encrypt/upload/manifest_upload 以外)は警告のうえ無視され読込が継続する(既知3種のみreduce・将来のschema追加への前方互換) (unit)"
 given = "未知record_typeの行を既知レコードに混在させたregistry"
 expect_return_shape = "未知record_typeの行は警告表示のうえ結果から除外され、残り行の読込・reduceは継続する(読込エラーとならない)"
-source_lines = "src/registry.rs:535"
+source_lines = "src/registry.rs:835"
 
 [[condition]]
 id = "verify.registry-read-error-propagates"
@@ -110,7 +110,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-010(2026-10-08レビ
 description = "registry読込のread errorは ErrorKind::NotFound のみ「空」として扱い、他のread error(directory指定によるEISDIR・権限不足等)はProcessエラーとして伝播する(初回実行以外の読込失敗を黙って空扱いにしない) (unit)"
 given = "registry pathに実fileでないpath(directory)を指定した読込"
 expect_throw = "ProcessError(exit code 4)。ファイル不在(NotFound)のみ空配列を返す"
-source_lines = "src/registry.rs:481"
+source_lines = "src/registry.rs:773"
 
 [[condition]]
 id = "verify.roundtrip-env-error-exit-2"
@@ -119,7 +119,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-011(2026-10-08レビ
 description = "verify --roundtrip はroundtrip開始前に秘密鍵ファイルの存在とageバイナリを事前検査し、不在なら設定・環境エラー2で即終了する(対象ファイルごとの復号失敗に紛れて検証エラー4とならない) (unit)"
 given = "秘密鍵ファイルが不在の状態、およびageバイナリがPATH上に無い状態での verify --roundtrip 実行"
 expect_return = "exit code 2(設定・環境エラー)"
-source_lines = "src/cli.rs:1602"
+source_lines = "src/cli.rs:1690"
 
 [[condition]]
 id = "verify.decrypt-error-includes-age-stderr"
@@ -128,7 +128,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-012(2026-10-08レビ
 description = "復号のstdin投入threadエラー時のエラーメッセージにage stderrの内容を含める(encrypt側の「{e}; age stderr: {stderr_text}」形式と対称) (integration)"
 given = "age -d が異常終了する復号(誤鍵指定等)でstdin投入threadがEPIPE等のエラーを受け取るケース"
 expect_return_shape = "ProcessErrorのmessageに起因エラーと age stderr: <内容> が両方含まれる"
-source_lines = "tests/verify_roundtrip.rs:138"
+source_lines = "tests/verify_roundtrip.rs:156"
 
 [[condition]]
 id = "verify.structure-recipients-bijection"
@@ -137,4 +137,4 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-013(2.4-1・4.4。20
 description = "構造検査(既定段階)は各encrypt記録のage_pathの.age(manifestの.ageは含まない)のヘッダをparseし、ssh-ed25519 stanza識別子がregistry記録recipients指紋から導出したv1.2形式指紋prefix集合(記録指紋SHA256:<b64>のb64部をdecodeした32byteの先頭4byteをb64(paddingなし)符号化)と全単射で対応することを照合する。誤recipient鍵で作られた.age・stanza数不一致・識別子が指紋prefix形式(decode結果4byte)でない場合・記録指紋からprefixを導出できない場合(b64 decode不能・decode結果が32byte未満)・旧形式tagのみでv1.2形式stanzaを1つも持たない.ageは、いずれも検証エラー4(fail-closed。照合skipではなく) (unit)"
 given = "合成ageヘッダ(v1.2形式ssh-ed25519 stanza+`--- `終端)の.ageとrecipients記録をSHA256:<b64(32byte)>実形式の指紋で構成した、(a)正recipient(全単射一致)・(b)誤recipient指紋(stanzaは鍵Aのprefix・記録は鍵Bの指紋)・(c)stanza数不一致(ヘッダ2 stanza vs 記録1指紋)の3case"
 expect_return = "(a)はexit code 0、(b)(c)はexit code 4(recipient照合不一致の該当record特定表示)"
-source_lines = "src/cli.rs:1310; tests/verify_roundtrip.rs:180"
+source_lines = "src/cli.rs:1376; tests/verify_roundtrip.rs:200"
