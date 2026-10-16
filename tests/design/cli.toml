@@ -33,6 +33,11 @@
 #   cli.profile-namespace-isolated-by-bucketへ旧記録分岐(s3_bucket空文字のfile_upload記録は
 #     正本bucket扱い)の結合test検証を追加(descriptionの規則は既記載のため文言改訂は不要。
 #     given/expect_return_shapeへ(4)を追記)。
+# 2026-10-16: TASK-11(Phase B)prod 3bucket構成移行でテスト先行の更新
+#   (ユーザー指示2026-10-15: prodはyour-family-bucket/your-baked-bucket/your-atara-bucketの3bucket・profile使い分け・
+#   混同配置が構造的に起きないこと)。新規2件: cli.profile-multi-bucket-isolation
+#   (3bucket以上のprofile構成でもbucket単位分離が機能=H-1機構のprofile数非依存検証)・
+#   cli.backup-push-connection-dest-shown(backup pushの接続先profile/bucket/prefix表示)。
 
 [meta]
 feature = "cli"
@@ -483,3 +488,21 @@ description = "fakeのRestoreObjectは実S3と同様の事前検査を行う: (1
 given = "fake S3での、(1)存在しないkeyへの manage jobs reissue 実行 (2)STORAGE_CLASS=STANDARDでpush済みfile keyへの reissue 実行 (3)STORAGE_CLASS=DEEP_ARCHIVEでpush済みfile keyへの reissue 実行"
 expect_return_shape = "(1)(2)は exit 5でエラー表示に起因(NoSuchKey相当/InvalidObjectState相当)が含まれる。(3)は exit 0でRestoreObjectが発行される"
 source_lines = "tests/s3_backend.rs:411"
+
+[[condition]]
+id = "cli.profile-multi-bucket-isolation"
+target_function = "backup push(skip判定) / index::build_entries / storage::namespace_never_written"
+source = "TASK-11 body(ユーザー指示2026-10-15: prodはyour-family-bucket/your-baked-bucket/your-atara-bucketの3bucket構成・他bucketへの混同配置が構造的に起きないこと)+tmp/tasks/tm-10/design_s3_storage.md 4.2(4profile構成・混同防止)"
+description = "3つ以上のbucketを含む複数profile構成(dev + prod系の同一prefix・別bucket)でもnamespace分離はbucket単位で機能する(cli.profile-namespace-isolated-by-bucketのbucket一致規則はprofile数に依存しない=一致/不一致の2値判定のため)。prod系profile相互(family/baked等)でも、(a) backup pushのskip判定は他bucket実績ではskipしない(bucket横断で1byteもuploadされないrunを作らない) (b) 索引versions構築には当該bucketのfile_upload記録のみが載る(3bucket分の実績が同一registryに混在していても混入しない) (c) 索引不在時の未書込namespace例外もbucket単位で判定する (integration, fake seam)"
+given = "dev(active_profile)とprod系2profile(同一prefix・別bucket)を含むaws.toml構成での、(1)family profileでのbackup push後に同一内容をbaked profileでbackup pushする実行 (2)3bucketそれぞれへのfile_upload記録(registryのbucket別version_id)と、baked実行後に再構築された索引versionsの突合"
+expect_return_shape = "(1)baked側pushはskipされずにfile uploadが行われexit 0(ok表示あり) (2)索引versionsにはbaked bucketのfile_upload記録のversionのみが載る(dev・family bucketのversion_idは混入しない)"
+source_lines = "tests/phase_b_options.rs:626"
+
+[[condition]]
+id = "cli.backup-push-connection-dest-shown"
+target_function = "cmd_backup_push(接続先表示)"
+source = "TASK-11 body(ユーザー指示2026-10-15: 3prod bucket構成の混同防止要件。誤接続先への書き込みに気づかせるため)+tmp/tasks/tm-10/design_s3_storage.md 4.2(混同防止)"
+description = "backup push(通常実行・--dry-run)は実行開始時に接続先を表示する: 実効profile名・bucket・prefix(3prod bucket構成で誤profile・誤bucketへの書き込みに気づかせるため)。表示は対象解決・S3 API呼び出しに先行して出るため、--dry-run(S3 API呼び出しなし)でも表示される (integration, fake seam)"
+given = "複数profileのaws.tomlでの、(1)--profile prod系指定の backup push --dry-run 実行 (2)--profile prod系指定の通常 backup push 実行 (3)既定(active_profile=dev)での backup push 実行"
+expect_return_shape = "いずれの実行でも接続先行(profile=・bucket=・prefix=を含む)が表示され、表示値は当該実行の実効profile(--profile指定時は指定profile・省略時はactive_profile)の値。(1)ではS3 API呼び出しは行われない"
+source_lines = "tests/phase_b_options.rs:687"

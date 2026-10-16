@@ -5,7 +5,7 @@ NASバックアップアーカイブ(zip/7z)をageで暗号化し、S3(versionin
 - 対象読者: バックアップの書き込み・照会・復元を行う運用者(災害時の復旧担当を含む)
 - 正本参照: 設計の正本は `tmp/tasks/tm-10/design_s3_storage.md`(S3ストレージ構成・CLI体系・保持policyの正本)。旧パイプライン(暗号化経路・registry・終了コード)の設計は `tmp/tasks/tm-1/design_backup_pipeline.md`、AWS SDK移行の設計は `tmp/tasks/tm-9/design_sdk_migration.md`。実装挙動の正本は `tests/design/`の条件書
 - 実装バージョン: 0.1.0
-- 最終確認: 2026-10-15(TASK-11 Phase B。旧サブコマンド削除・新CLI体系集約後の実装に基づく)
+- 最終確認: 2026-10-16(TASK-11 Phase B。旧サブコマンド削除・新CLI体系集約・prod系3bucket構成移行後の実装に基づく)
 
 ## 1. 概要
 
@@ -72,7 +72,7 @@ secret_access_key = "<secret access key>" # 必須
 ```
 
 - 作成後`chmod 600`を推奨(秘密情報を含むファイルのため)
-- このファイルのpathを `configs/aws.toml` の各profile `credentials_file` へ記述する(3.2)
+- このファイルのpathを `configs/aws.toml` の各profile `credentials_file` へ記述する(3.2)。運用上は`dev.toml`と`prod.toml`の2種類(prod系3profileは同一AWS account運用を想定し`prod.toml`共通1本)
 - 空値・前後空白付き値・未知キーは設定エラー2(値そのものはerror文に表示されない)
 - 値を直接aws.tomlへ書くことはできない(`credentials_file`を除くcredential系キーは未知キーとして拒否)
 
@@ -175,7 +175,7 @@ path = "2020-2023/travel" # rel_path(""でcategory直下)
 
 ### 3.2 `configs/aws.toml`
 
-S3接続設定(credential値そのものは不含)。profile構成(dev=開発検証・prod=実運用)。現行の実物:
+S3接続設定(credential値そのものは不含)。profile構成(dev=開発検証1profile + prod=実運用3bucket使い分け)。現行の実物:
 
 ```toml
 [aws]
@@ -183,15 +183,32 @@ active_profile = "dev"
 
 [aws.profiles.dev]              # 開発検証(versioning有効bucket・STORAGE CLASS STANDARD)
 purpose = "dev"
+# dev bucketは提案値(bucket新設は未実施・ユーザー未承認)。新設時に要確認
 bucket = "backup-remote-dev"
 region = "ap-northeast-1"
 prefix = "backup-remote/"
 storage_class = "STANDARD"
 credentials_file = "configs/secret/aws-credentials/dev.toml"
 
-[aws.profiles.prod]             # 実運用(専用bucket・DEEP_ARCHIVE)
+[aws.profiles.family]           # 実運用(prod系3bucket・DEEP_ARCHIVE)
 purpose = "prod"
-bucket = "TODO-PROD-BUCKET"     # 専用bucket確定後に置換する(未確定のため明示プレースホルダ)
+bucket = "your-family-bucket"
+region = "ap-northeast-1"
+prefix = "backup-remote/"
+storage_class = "DEEP_ARCHIVE"
+credentials_file = "configs/secret/aws-credentials/prod.toml"
+
+[aws.profiles.baked]            # 実運用(prod系)
+purpose = "prod"
+bucket = "your-baked-bucket"
+region = "ap-northeast-1"
+prefix = "backup-remote/"
+storage_class = "DEEP_ARCHIVE"
+credentials_file = "configs/secret/aws-credentials/prod.toml"
+
+[aws.profiles.atara]            # 実運用(prod系)
+purpose = "prod"
+bucket = "your-atara-bucket"
 region = "ap-northeast-1"
 prefix = "backup-remote/"
 storage_class = "DEEP_ARCHIVE"
@@ -207,9 +224,10 @@ credentials_file = "configs/secret/aws-credentials/prod.toml"
 | `storage_class` | file objectのstorage class。`STANDARD`/`DEEP_ARCHIVE`等(allowlist検証) |
 | `credentials_file` | credentialファイル(2.2)のpath。必須 |
 
-- **test profileは廃止**(旧`test`/共用bucket your-dev-bucket構成の解除。dev/prod 2profile構成)
-- **prod bucket名はTODO-PROD-BUCKET(未確定)**。確定後は`configs/aws.toml`のprod profile `bucket`を書き換える(加えて`manage lifecycle apply`の再実行と2.2のprod用credentialファイル作成が必要)
-- profileの切替は`active_profile`書換えまたは`--profile`オプション(5.1。当該実行限りの一時上書き)
+- **prod系3bucketは用途別profile**(your-family-bucket/your-baked-bucket/your-atara-bucket。同一region)。profile名はbucket名の接尾辞(family/baked/atara)。`purpose`は`dev`/`prod`の2値のまま(3bucketはいずれもprod)
+- **prod系3profileのcredentials_fileは共通1本**(configs/secret/aws-credentials/prod.toml。同一AWS account運用を想定)。将来bucket別credentialへ分割する場合もschema上profile毎に独立したkeyのためaws.tomlの書換えのみで対応できる
+- **test profileは廃止**(旧`test`/共用bucket your-dev-bucket構成の解除)
+- profileの切替は`active_profile`書換えまたは`--profile`オプション(5.1。当該実行限りの一時上書き)。prod系の書き込みは`--profile family`等の明示指定を推奨(8.2)
 - 検証規則(設定エラー2): prefix形式違反・storage_class allowlist外・bucket/region/credentials_fileの空・前後空白付き値・credentialファイルの不在・不正
 
 **エンドポイント確定性の注記**: SDKは環境変数`AWS_ENDPOINT_URL`/`AWS_ENDPOINT_URL_S3`を解釈して接続先endpointを切替え得る。backup-remoteは起動時にこれらのenvが設定されていれば警告をstderrへ表示する(処理は継続)。意図した検証用構成か誤設定かは利用者側で確認すること。
@@ -375,7 +393,7 @@ backup-remote backup push [--from-list FILE] [--dry-run] [--pin <版名>] [--kee
 
 動作:
 
-1. pin名検証(規則違反はusage 64) -> pipeline.toml必須検査 -> 対象解決(存在・拡張子・重複) -> 分類解決(4.2)
+1. pin名検証(規則違反はusage 64) -> pipeline.toml必須検査 -> **接続先表示(実効profile・bucket・prefix。dry-runを含む全実行で表示)** -> 対象解決(存在・拡張子・重複) -> 分類解決(4.2)
 2. `--dry-run`なら予定表示で終了0
 3. bucketのversioning確認(無効は設定エラー2)
 4. per-file: skip判定(registry基準。file_write成功記録+指紋一致+同一identityのfile_upload記録があれば再暗号化せずskip) -> age暗号化 -> `default.age`へupload(64MiB超はmultipart) -> registryへfile_write/file_upload記録
@@ -557,12 +575,16 @@ get/pullは出力先の既存平文を保護する:
 
 書き込み系command(**backup push・pin add/rm・manage系**)の並列実行は禁止する(registry append・索引書換えの競合防止。lock file等の自動直列化は個人運用に対し過剰のため不採用)。書き込み系を実行中は、他の書き込み系commandを起動しないこと。照会系(list/query/get/diff)は並列に実行してよい。
 
-### 8.2 profile運用(dev/prod)
+### 8.2 profile運用(dev/prod・prod系3bucket)
 
 - dev: 開発検証(STORAGE CLASS STANDARD・復元job待ちがない。DA経路の試験はprodで実施)
-- prod: 実運用(DEEP_ARCHIVE・専用bucket。bucket名はTODO-PROD-BUCKET未確定。3.2)
-- 切替は`active_profile`の書換え(恒久)または`--profile prod`(当該実行限り)。**誤投入防止のため、prodへの書き込みは`--profile prod`を明示した実行を推奨**(active_profileはdev固定運用)
-- 名前空間の分離はbucketとprefixで働く。ローカルregistry(data/registry.jsonl)は単一だが、記録の参照(skip判定・索引構築・未書込namespace判定)は**bucket単位で分離**される。dev/prodが同一prefixでも他方bucketの書込実績は干渉しない(片方の実績で誤ってskipする・索引へ他方bucketの版が混入する事故が構造的に起きない)
+- prod系3bucket: 実運用(DEEP_ARCHIVE)。用途別にprofileを使い分ける(3.2):
+  - `family` -> `your-family-bucket`
+  - `baked` -> `your-baked-bucket`
+  - `atara` -> `your-atara-bucket`
+- 切替は`active_profile`の書換え(恒久)または`--profile <name>`(当該実行限り)。**誤投入防止のため、prod系への書き込みは`--profile family`等を明示した実行を推奨**(active_profileはdev固定運用)
+- **backup pushは実行開始時に接続先(実効profile・bucket・prefix)を表示**する(5.6。dry-runでも表示)。表示を確認してから書き込みを続けることで誤bucketへの投入に気づける
+- **名前空間の分離はbucket単位で働く(混同防止)**。prod系3bucketは同一prefix(`backup-remote/`)を共有するが、ローカルregistry(data/registry.jsonl)は単一でも記録の参照(skip判定・索引versions/pins構築・未書込namespace判定・pin解決)はすべて**bucket一致で分離**される。他bucketの書込実績では誤ってskipしない・索引へ他bucketの版やpinが混入しない・未書込救済判定に他bucket実績が採用されない、が構造的に保証される(bucket横断で1byteもuploadされないrunは作れない)
 
 ### 8.3 recipient鍵の管理
 

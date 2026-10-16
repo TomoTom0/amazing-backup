@@ -122,7 +122,7 @@ aws CLI(subprocess)依存のテスト構造をfake seamへ再構成:
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(12ファイル・156条件・excluded 23件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)反映済み |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(12ファイル・158条件・excluded 23件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)反映済み |
 | tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(新schema組立・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
 | tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
@@ -136,7 +136,7 @@ aws CLI(subprocess)依存のテスト構造をfake seamへ再構成:
 | tests/retention.rs | TASK-10/11 retentionエリア(lifecycle NCVE/MPU abort・prune dry-run/保護/削除条件・併置排他・category guard) | 作成済み |
 | tests/storage_query.rs | 照会系CLI(query/get/list/diff・版特定・復元job・--format human/json) | 作成済み(--format系・list jobs noncurrent版はPhase B実装前fail許容) |
 | tests/storage_backup.rs | 操作系CLI(backup push統合/dry-run・pull確認/範囲排他・versioning・索引不在・災害時動作)+keep_artifacts掃除+registry基準skip | 作成済み |
-| tests/phase_b_options.rs | TASK-11 Phase BのCLI option系(--profile系3件・--aws-config既定path・索引GET転送エラー・manage jobs reissue)+再レビュー(旧記録bucket扱い・pin/entryのbucket分離) | 作成済み(テスト先行。Phase B実装前は実行failを許容) |
+| tests/phase_b_options.rs | TASK-11 Phase BのCLI option系(--profile系3件・--aws-config既定path・索引GET転送エラー・manage jobs reissue)+再レビュー(旧記録bucket扱い・pin/entryのbucket分離)+prod 3bucket構成(3bucket分離・push接続先表示) | 作成済み |
 | src/**/*.rs 内 #[cfg(test)] | cargo単体test(S3実行はS3Backend fake(FakeS3)差替) | 作成済み |
 
 cargo testの階層: unit=src/各モジュール内`#[cfg(test)] mod tests`、
@@ -170,7 +170,7 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | fingerprint.toml | fingerprint | src/fingerprint.rs | 5 | FPR-001〜005 |
 | upload.toml | upload | src/s3.rs | 7 | UPL系のうちS3転送共通経路7件(TASK-11で旧upload固有16件廃止。backup push経路で検証) |
 | verify.toml | verify | src/storage.rs | 13 | VER-001〜013(TASK-11でbackup verify経路へ文言改訂・id不変) |
-| cli.toml | cli | src/cli.rs | 43 | CLI-001〜006 + TASK-9/10系 + TASK-11 Phase B(旧サブコマンド削除・--format/--profile・manage jobs reissue・pull範囲排他等) |
+| cli.toml | cli | src/cli.rs | 45 | CLI-001〜006 + TASK-9/10系 + TASK-11 Phase B(旧サブコマンド削除・--format/--profile・manage jobs reissue・pull範囲排他等)+prod 3bucket構成(3bucket分離・push接続先表示) |
 | restore.toml | restore | src/storage.rs | 4 | 復元job系共通経路4件(TASK-11で旧restore固有19件廃止。get/pull/list jobs経路で検証。平文衝突保護含む) |
 | layout.toml | layout | src/layout.rs | 9 | TASK-10設計1章(key生成・分類解決・衝突・検証。9章素案+rel_path正規化) |
 | index.toml | index | src/index.rs | 13 | TASK-10設計2章 + H-1/H-3 + TASK-11(version_ts供給源・未知record_type警告) + 再レビューM-R1(pins bucket分離)・L-R1(版・pin無しentry除外) |
@@ -227,6 +227,16 @@ $ uv run python scripts/design/verify-conditions.py
   同日レビュー指摘対応後は153条件すべてcover済み
   (Phase B実装待ちの条件もテスト先行でcoversタグ付き。(a)(c)(d)(e)もpass)。
   同日再レビュー指摘対応後は156条件すべてcover済み((a)(c)(d)(e)もpass)
+2026-10-16: TASK-11(Phase B)prod 3bucket構成移行でテスト先行の条件書更新
+(ユーザー指示2026-10-15: prodはyour-family-bucket/your-baked-bucket/your-atara-bucketの3bucket・
+profile使い分け・混同配置が構造的に起きないこと)。
+- cli.tomlへ2条件追加: cli.profile-multi-bucket-isolation(3bucket以上のprofile構成でも
+  bucket単位分離が機能=H-1機構のprofile数非依存検証)・cli.backup-push-connection-dest-shown
+  (backup pushの接続先実効profile/bucket/prefix表示。dry-runでも表示)
+- tests/phase_b_options.rsへ2test追加(three_bucket_aws_tomlによるdev+prod系2bucket構成)。
+  実装(AwsConfigへ実効profile名保持・push開始時の接続先表示)後にcargo test全件pass・
+  verify-conditions.py PASS
+- 条件数158
 - (c) 条件書tomlのschema検査(id形式・必須フィールド・expect_*の存在・givenの実質性)
 - (d) `source_lines`をタグ走査結果へ自動同期(自動メタデータ・手書きしない)
 - (e) `[[excluded]]`の構造検査(item/source/reasonの空欄をfail)

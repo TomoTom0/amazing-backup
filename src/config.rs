@@ -72,6 +72,9 @@ pub struct FileMapping {
 /// (credentialは`credentials_file`が指す外部ファイル明示参照のみ)。
 #[derive(Debug)]
 pub struct AwsConfig {
+    /// 実効profile名(--profile・env・active_profileの解決結果。
+    /// 接続先表示=誤接続防止用。TASK-11 Phase B: 3prod bucket構成の混同防止)
+    pub profile: String,
     pub bucket: String,
     pub region: String,
     /// credentialファイル(`configs/secret/aws-credentials.toml`等)のpath。
@@ -549,6 +552,7 @@ pub fn load_aws_profile(
     crate::layout::validate_prefix(&prefix)
         .map_err(|e| BackupError::Config(format!("[aws.profiles.{selected_name}].prefix: {e}")))?;
     Ok(AwsConfig {
+        profile: selected_name,
         bucket: prof.bucket.clone(),
         region: prof.region.clone(),
         credentials_file: std::path::PathBuf::from(credentials_file.clone()),
@@ -1001,6 +1005,7 @@ mod tests {
         let tmp = TempDir::new("conf-ready");
         let creds = write_credentials(tmp.path());
         let empty_both = AwsConfig {
+            profile: "dev".into(),
             bucket: String::new(),
             region: String::new(),
             credentials_file: creds.clone(),
@@ -1021,6 +1026,7 @@ mod tests {
         require_ready(&empty_region).unwrap_err();
 
         let ready = AwsConfig {
+            profile: "dev".into(),
             bucket: "b".into(),
             region: "r".into(),
             credentials_file: creds,

@@ -609,3 +609,130 @@ fn entries_without_bucket_versions_excluded_from_query() {
         "dev側は双方が現れる: {stdout}"
     );
 }
+
+/// dev(active_profile)とprod系family/bakedが同一prefix・別bucketの3profile aws.toml本文
+/// (cli.profile-multi-bucket-isolation・cli.backup-push-connection-dest-shown検証用。
+/// prod系3bucket構成(your-family-bucket/baked/atara)で同一prefix運用を模した配置)。
+fn three_bucket_aws_toml(fx: &StorageFixture) -> String {
+    let creds = fx.credentials.display();
+    format!(
+        "[aws]\nactive_profile = \"dev\"\n\n\
+         [aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"bucket-dev\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n\
+         [aws.profiles.family]\npurpose = \"prod\"\nbucket = \"bucket-family\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"DEEP_ARCHIVE\"\ncredentials_file = \"{creds}\"\n\n\
+         [aws.profiles.baked]\npurpose = \"prod\"\nbucket = \"bucket-baked\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"DEEP_ARCHIVE\"\ncredentials_file = \"{creds}\"\n"
+    )
+}
+
+/// [covers:cli.profile-multi-bucket-isolation]
+/// 3bucket以上のprofile構成(dev + prod系family/baked。同一prefix・別bucket): bucket単位の
+/// namespace分離はprofile数に依存せず機能する(H-1のbucket一致規則の3bucket版)。
+/// (a) 他bucket実績(prefix一致・内容同一)ではskipされない (b) 索引versionsには
+/// 当該bucketのfile_upload記録のみが載る(3bucket分の実績が同一registryに混在しても
+/// dev/family版はbaked索引へ混入しない)。
+#[test]
+fn multi_bucket_profiles_isolated() {
+    let Some(fx) = StorageFixture::new("pb-3bkt", StorageOpts::default()) else {
+        return;
+    };
+    fx.rewrite_aws_toml(&three_bucket_aws_toml(&fx));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"three-bucket-plain");
+    let key = fx.file_key("unfiled", None, "a.zip");
+
+    // dev(正本) -> family -> baked の順に同一内容をpush。いずれも前bucket実績では
+    // skipされない(bucket横断で1byteもuploadされないrunを作らない)
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let (code, stdout, stderr) = fx.push(&[&a], &["--profile", "family"], &[]);
+    assert_eq!(code, 0, "family pushはexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.contains("ok    a.zip"),
+        "family側はdev実績によりskipされない: {stdout}"
+    );
+    let (code, stdout, stderr) = fx.push(&[&a], &["--profile", "baked"], &[]);
+    assert_eq!(code, 0, "baked pushはexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.contains("ok    a.zip"),
+        "baked側はdev/family実績によりskipされない(prod系相互でも分離): {stdout}"
+    );
+
+    // registry: 3bucketそれぞれへfile_upload記録1件ずつ(版は相違)
+    let dev_ids = upload_ids_for_bucket(&fx, &key, "bucket-dev");
+    let family_ids = upload_ids_for_bucket(&fx, &key, "bucket-family");
+    let baked_ids = upload_ids_for_bucket(&fx, &key, "bucket-baked");
+    assert_eq!(dev_ids.len(), 1, "dev実績1件: {dev_ids:?}");
+    assert_eq!(family_ids.len(), 1, "family実績1件: {family_ids:?}");
+    assert_eq!(baked_ids.len(), 1, "baked実績1件: {baked_ids:?}");
+    assert_ne!(
+        dev_ids[0], family_ids[0],
+        "dev版とfamily版は別(同一内容でもbucket毎にupload)"
+    );
+    assert_ne!(
+        family_ids[0], baked_ids[0],
+        "family版とbaked版は別(prod系相互でもbucket毎にupload)"
+    );
+
+    // 索引versionsはbaked(最終再構築)版のみ。dev/family版は混入しない
+    let vids = index_version_ids(index_file_entry(&fx.read_index(), "a.zip"));
+    assert_eq!(vids.len(), 1, "索引versionsはbaked版のみ: {vids:?}");
+    assert!(
+        vids.contains(&baked_ids[0]),
+        "baked版は索引へ載る: {vids:?} vs {baked_ids:?}"
+    );
+    assert!(
+        !vids.contains(&dev_ids[0]) && !vids.contains(&family_ids[0]),
+        "他bucket(dev/family)の版は索引へ混入しない: {vids:?}"
+    );
+}
+
+/// [covers:cli.backup-push-connection-dest-shown]
+/// backup pushは実行開始時に接続先(実効profile・bucket・prefix)を表示する(3prod bucket
+/// 構成の混同防止: 誤profile・誤bucketへの書き込みに気づかせる)。--dry-runでも
+/// 表示され(S3 API呼び出しに先行)、dry-runではS3 API呼び出しは行われない。
+#[test]
+fn backup_push_shows_connection_destination() {
+    let Some(fx) = StorageFixture::new("pb-dest", StorageOpts::default()) else {
+        return;
+    };
+    fx.rewrite_aws_toml(&three_bucket_aws_toml(&fx));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"connection-dest-plain");
+
+    // dry-run: 接続先行が表示され、S3 API呼び出しは行われない
+    clear_calls(&fx);
+    let (code, stdout, stderr) = fx.push(&[&a], &["--dry-run", "--profile", "baked"], &[]);
+    assert_eq!(code, 0, "dry-runはexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.lines().any(|l| l.contains("接続先")
+            && l.contains("profile=baked")
+            && l.contains("bucket=bucket-baked")
+            && l.contains("prefix=backup-remote/")),
+        "dry-runにも接続先行(実効profile/bucket/prefix)が表示される: {stdout}"
+    );
+    assert!(
+        fx.calls().is_empty(),
+        "dry-runはS3 API呼び出しを行わない: {}",
+        fx.calls()
+    );
+
+    // 通常実行(--profile指定): 指定profileが表示される
+    let (code, stdout, stderr) = fx.push(&[&a], &["--profile", "family"], &[]);
+    assert_eq!(code, 0, "family pushはexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.lines().any(|l| l.contains("接続先")
+            && l.contains("profile=family")
+            && l.contains("bucket=bucket-family")
+            && l.contains("prefix=backup-remote/")),
+        "通常実行にも接続先行が表示される: {stdout}"
+    );
+
+    // 通常実行(profile省略): active_profile(dev)が表示される
+    let (code, stdout, stderr) = fx.push(&[&a], &[], &[]);
+    assert_eq!(code, 0, "既定profile pushはexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.lines().any(|l| l.contains("接続先")
+            && l.contains("profile=dev")
+            && l.contains("bucket=bucket-dev")
+            && l.contains("prefix=backup-remote/")),
+        "profile省略時はactive_profile(dev)の接続先が表示される: {stdout}"
+    );
+}

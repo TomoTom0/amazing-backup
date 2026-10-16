@@ -260,6 +260,14 @@ fn cmd_backup_push(
         // 正本bucket相当として扱うbucket一致規則の正本側)
         let canonical_bucket = config::canonical_bucket(&super::aws_config_path(&ctx.aws_config))?;
 
+        // 接続先表示(TASK-11 Phase B・3prod bucket構成の混同防止): 実効profile・bucket・
+        // prefixを実行の最初(対象解決・S3 API呼び出しに先行)に表示し、誤profile・誤bucket
+        // への書き込みに気づかせる。dry-runでも表示される
+        println!(
+            "接続先: profile={} bucket={} prefix={}",
+            aws.profile, aws.bucket, aws.prefix
+        );
+
         let targets = crate::targets::resolve_targets_storage(paths, from_list.as_deref())?;
         let registry_path = cfg.registry_path.clone();
         let records = registry::load_registry(&registry_path)?;
