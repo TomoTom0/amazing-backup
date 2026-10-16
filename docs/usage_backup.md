@@ -85,14 +85,12 @@ $ cargo install --path .         # PATHへ導入する場合(cargo bin)
 
 実行形式は `backup-remote <command> [options]`。`cargo run --quiet -- <command>` でも同一挙動。設定・出力の相対pathはrepo root(cwd)基準で解決されるため、**repo rootで実行する**のが前提。
 
-### 2.4 検証用bucket(dev)の新設手順
+### 2.4 検証用bucket(dev: your-dev-bucket)の準備手順
 
-dev profile向けbucket(versioning有効が必須・lifecycleなし):
+dev profileは既存bucket `your-dev-bucket` を使用する(2026-10-16確定・新設しない)。versioning有効が必須・lifecycleなし:
 
 ```console
-$ aws s3api create-bucket --bucket backup-remote-dev --region ap-northeast-1 \
-    --create-bucket-configuration LocationConstraint=ap-northeast-1
-$ aws s3api put-bucket-versioning --bucket backup-remote-dev \
+$ aws s3api put-bucket-versioning --bucket your-dev-bucket \
     --versioning-configuration Status=Enabled
 ```
 
@@ -183,8 +181,8 @@ active_profile = "dev"
 
 [aws.profiles.dev]              # 開発検証(versioning有効bucket・STORAGE CLASS STANDARD)
 purpose = "dev"
-# dev bucketは提案値(bucket新設は未実施・ユーザー未承認)。新設時に要確認
-bucket = "backup-remote-dev"
+# dev bucketは既存your-dev-bucketを流用(2026-10-16確定)
+bucket = "your-dev-bucket"
 region = "ap-northeast-1"
 prefix = "backup-remote/"
 storage_class = "STANDARD"
@@ -681,4 +679,4 @@ backup-remoteを使わない環境での復元手順。対象のkey配置(4.1)�
 - **旧サブコマンドとの併用は構造的に不可能**(旧commandがbinaryから削除されたため)
 - 旧`encrypt`のskip判定(.ageファイル存在基準)はregistry基準へ変更(.age不在でもregistry記録+指紋一致ならskip)
 - name override(`--name`・対象リストの`name`キー)は廃止(4.2の自動衝突分離へ置換)
-- TASK-10 Phase A時点の移行として、your-dev-bucket(共用bucket)上の旧配置objectは削除して離脱した: `aws s3 rm s3://your-dev-bucket/2026-10-14/ --recursive`(検証用ダミー1バッチのみ)
+- 旧配置object(旧形式`<date>/<name>.age`)は新構成へ変換せず削除する: `aws s3 rm s3://your-dev-bucket/2026-10-14/ --recursive`(検証用ダミー1バッチのみ)。your-dev-bucketは引き続きdev profileのbucketとして使用する(2.4)
