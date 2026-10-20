@@ -56,7 +56,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-003(規則は4.1注�
 description = "registryの不正JSON行を検出。改行終端でない最終行はtorn writeとして警告のうえ除外され処理継続する (unit)"
 given = "不正JSON行を含むregistryと、改行終端しない最終行(torn write)を含むregistry"
 expect_return_shape = "不正JSON行は行番号付きでProcessError、torn write最終行は警告のうえ除外され残り行の読込が継続する"
-source_lines = "src/registry.rs:685"
+source_lines = "src/registry.rs:699"
 
 [[condition]]
 id = "verify.checksum-detects-mutation"
@@ -110,7 +110,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-009(規則は4.1注�
 description = "registry内の未知record_type行は警告のうえ無視され読込が継続する(将来のschema追加への前方互換。Phase A以降の既知種は旧3種(encrypt/upload/manifest_upload)+新種(file_write/file_upload/manifest/index_upload/pin_write/pin_remove/prune)等の増加を含む) (unit)"
 given = "未知record_typeの行を既知レコードに混在させたregistry"
 expect_return_shape = "未知record_typeの行は警告表示のうえ結果から除外され、残り行の読込・reduceは継続する(読込エラーとならない)"
-source_lines = "src/registry.rs:721"
+source_lines = "src/registry.rs:735"
 
 [[condition]]
 id = "verify.registry-read-error-propagates"
@@ -119,7 +119,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-010(2026-10-08レビ
 description = "registry読込のread errorは ErrorKind::NotFound のみ「空」として扱い、他のread error(directory指定によるEISDIR・権限不足等)はProcessエラーとして伝播する(初回実行以外の読込失敗を黙って空扱いにしない) (unit)"
 given = "registry pathに実fileでないpath(directory)を指定した読込"
 expect_throw = "ProcessError(exit code 4)。ファイル不在(NotFound)のみ空配列を返す"
-source_lines = "src/registry.rs:659"
+source_lines = "src/registry.rs:673"
 
 [[condition]]
 id = "verify.roundtrip-env-error-exit-2"

@@ -262,7 +262,11 @@ pub enum Record {
 /// reduce後のregistry状態(4.1 reduce規則 + TASK-10新event)。
 /// encryptは`age_path`キーの後勝ち(挿入順保持)・upload状態は`age_path`/`manifest_path`ごとの最新。
 /// TASK-10新event: file_writeはidentity_hashキーの後勝ち・file_uploadは全件保持
-/// (各記録が1版に対応)・pin_write/pin_removeはpin_s3_keyキーの後勝ち。
+/// (各記録が1版に対応)・pin_write/pin_removeは(pin_s3_key, s3_bucket)組キーの後勝ち
+/// (TASK-15: 同名pinの別bucket付与が互いのmap entryを上書きしない)。
+/// pin_writeは処理時に同一(pin_s3_key, s3_bucket)組のpin_removeを除去する(rm→再addの
+/// 再付与がpin_writeとして勝つ。逆順のadd→rmはpin_removeが後に処理されて残る。
+/// bucket違いのremoveは同pin_s3_keyのwrite/removeを除去しない=bucket分離)。
 #[derive(Debug, Clone, Default)]
 pub struct Reduced {
     /// reduce後のencrypt記録(age_path後勝ち・挿入順保持)
@@ -279,10 +283,11 @@ pub struct Reduced {
     pub manifest_v2: HashMap<String, ManifestV2Record>,
     /// 最新のindex_upload記録
     pub index_upload: Option<IndexUploadRecord>,
-    /// pin_s3_keyごとの最新pin_write記録
-    pub pin_writes: HashMap<String, PinWriteRecord>,
-    /// pin_s3_keyごとの最新pin_remove記録(存在すればpinは削除済み)
-    pub pin_removes: HashMap<String, PinRemoveRecord>,
+    /// (pin_s3_key, s3_bucket)組ごとの最新pin_write記録
+    pub pin_writes: HashMap<(String, String), PinWriteRecord>,
+    /// (pin_s3_key, s3_bucket)組ごとの最新pin_remove記録(存在すればpinは削除済み。
+    /// 同一組のpin_write処理時に除去されるため、残っていれば削除が最終操作)
+    pub pin_removes: HashMap<(String, String), PinRemoveRecord>,
     /// prune実行記録(全件)
     pub prunes: Vec<PruneRecord>,
 }
@@ -512,10 +517,19 @@ pub fn reduce_records(records: &[Record]) -> Reduced {
                 reduced.index_upload = Some(i.clone());
             }
             Record::PinWrite(w) => {
-                reduced.pin_writes.insert(w.pin_s3_key.clone(), w.clone());
+                // 記録順に処理するため、このwriteより前の同一(pin_s3_key, s3_bucket)組の
+                // pin_remove(旧削除記録)を除去する(rm→再addの再付与が勝つ)。
+                // 逆順(先add→後rm)はpin_removeが後に処理されて残るため削除済みのまま。
+                // bucket違いのremoveで同pin_s3_keyのwrite側のentryは除去しない
+                // (bucket分離。TASK-15)。
+                let key = (w.pin_s3_key.clone(), w.s3_bucket.clone());
+                reduced.pin_removes.remove(&key);
+                reduced.pin_writes.insert(key, w.clone());
             }
             Record::PinRemove(r) => {
-                reduced.pin_removes.insert(r.pin_s3_key.clone(), r.clone());
+                reduced
+                    .pin_removes
+                    .insert((r.pin_s3_key.clone(), r.s3_bucket.clone()), r.clone());
             }
             Record::Prune(p) => {
                 reduced.prunes.push(p.clone());

@@ -741,6 +741,447 @@ fn unknown_record_warning_uses_plain_format() {
     );
 }
 
+/// [covers:index.pin-readd-after-remove-wins]
+/// write-once正規フロー「pin rm後に再付与」(設計1.3・TASK-12)が索引経由の参照でも
+/// 成立する: rm→同一pin名の再addではrecorded_atが新しい再付与のpin_writeが旧pin_removeに
+/// 抑止されず勝ち(reduce結果のpin_removesから当該pin_s3_keyが除かれる)。
+/// 索引pins[]へ載り(created_atは再付与時刻)list pins・get --pinで参照できる。
+/// manage index rebuildのpins復元も同一reduce結果を参照するため共通。
+#[test]
+fn pin_readd_after_remove_wins_in_index() {
+    let Some(fx) = StorageFixture::new("idx-pinreadd", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"pin-readd-plain");
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    // pin add(pm1)→pin rm(pm1)→同一pm1再付与(write-onceの正規フロー)
+    assert_eq!(fx.pin("add", "a.zip", &["--latest", "--as", "pm1"]).0, 0);
+    assert_eq!(fx.pin("rm", "a.zip", &["--pin", "pm1"]).0, 0);
+    let (code, stdout, stderr) = fx.pin("add", "a.zip", &["--latest", "--as", "pm1"]);
+    assert_eq!(
+        code, 0,
+        "rm後の同一pin名再付与はwrite-once違反にならずexit 0: {stdout}{stderr}"
+    );
+    let pin_key = fx.pin_key("unfiled", None, "a.zip", "pm1");
+    assert!(
+        fx.object_path(&pin_key).is_file(),
+        "再付与でpin objectが再作成される: {pin_key}"
+    );
+
+    // 索引当該entry pins[]へpm1が載る(created_atは再付与のpin_write記録時刻)
+    let lines = fx.read_index();
+    let entry = index_file_entry(&lines, "a.zip");
+    let pins = entry
+        .get("pins")
+        .and_then(|p| p.as_array())
+        .expect("pins配列");
+    assert_eq!(pins.len(), 1, "再付与後のpinsはpm1の1件: {pins:?}");
+    assert_eq!(pins[0].get("pin").and_then(|v| v.as_str()), Some("pm1"));
+    assert_eq!(
+        pins[0].get("s3_key").and_then(|v| v.as_str()),
+        Some(pin_key.as_str())
+    );
+    let registry = fx.registry_values();
+    let writes: Vec<&serde_json::Value> = registry
+        .iter()
+        .filter(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some("pin_write")
+                && r.get("pin").and_then(|p| p.as_str()) == Some("pm1")
+        })
+        .collect();
+    assert_eq!(
+        writes.len(),
+        2,
+        "pm1のpin_write記録は初回+再付与の2件: {writes:?}"
+    );
+    assert_eq!(
+        pins[0].get("created_at").and_then(|v| v.as_str()),
+        writes[1].get("recorded_at").and_then(|v| v.as_str()),
+        "created_atは再付与(後の)pin_write記録時刻: {pins:?}"
+    );
+
+    // list pinsにpm1が現れる
+    let (code, stdout, stderr) = fx.list("pins", &[]);
+    assert_eq!(code, 0, "list pinsはexit 0: {stdout}{stderr}");
+    assert!(stdout.contains("pm1"), "list pinsにpm1が現れる: {stdout}");
+
+    // get --pin pm1はexit 0でpin objectを取得できる
+    let out = fx.elsewhere.join("pinreadd-out");
+    let out_s = out.display().to_string();
+    let (code, stdout, stderr) = fx.get("a.zip", &["--pin", "pm1", "--out", &out_s]);
+    assert_eq!(code, 0, "get --pin pm1はexit 0: {stdout}{stderr}");
+    assert_eq!(
+        std::fs::read(out.join("a.zip")).expect("pin版の復号成果物"),
+        b"pin-readd-plain".to_vec(),
+        "再付与pin objectの内容が検証・復元されて出力される"
+    );
+
+    // 索引object喪失後のmanage index rebuild復元にもpm1が含まれる(同一reduce結果)
+    std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
+    let mut last = String::new();
+    let mut code = 0;
+    for _ in 0..2 {
+        let (c, stdout, stderr) = fx.manage("index", &["rebuild"]);
+        code = c;
+        last = format!("{stdout}{stderr}");
+        if fx.object_path(&fx.index_key()).is_file() {
+            break;
+        }
+    }
+    assert_eq!(code, 0, "manage index rebuildはexit 0: {last}");
+    let lines2 = fx.read_index();
+    let entry2 = index_file_entry(&lines2, "a.zip");
+    let pins2 = entry2
+        .get("pins")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(pins2.len(), 1, "rebuild復元後のpinsにもpm1: {pins2:?}");
+    assert_eq!(pins2[0].get("pin").and_then(|v| v.as_str()), Some("pm1"));
+
+    // 再付与後のpin rm再実行(pm1を再度rm)はexit 0で成功する
+    // (旧bugでは索引pins[]から消えたままのため対象エラー3で不能だった)
+    let (code, stdout, stderr) = fx.pin("rm", "a.zip", &["--pin", "pm1"]);
+    assert_eq!(
+        code, 0,
+        "再付与後のpin rm再実行はexit 0で成功: {stdout}{stderr}"
+    );
+}
+
+/// 索引file entryのpins配列(索引にpinsが無い場合は空)。
+fn entry_pins(entry: &serde_json::Value) -> Vec<serde_json::Value> {
+    entry
+        .get("pins")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// dev(active_profile)とprodが同一prefix・別bucketの2profile aws.toml本文
+/// (TASK-15検証用。phase_b_options.rsのsame_prefix_diff_bucket_aws_tomlと同一構成。
+/// 結合testの各ファイルは独立crateのため局部helperとして置く)。
+fn same_prefix_diff_bucket_aws_toml(fx: &StorageFixture) -> String {
+    format!(
+        "[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"bucket-dev\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n[aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"bucket-prod\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n",
+        creds = fx.credentials.display()
+    )
+}
+
+/// 両bucket同名pin付与状態の構築結果(TASK-15検証の共通構築)。
+struct BothBucketPin {
+    /// pin objectのkey(両bucketで同一・同一prefixのため)
+    pin_key: String,
+    /// dev側(先付け)pin_write記録のrecorded_at
+    dev_created_at: String,
+    /// prod側(後付け)pin_write記録のrecorded_at(構築時に差し替えた値)
+    prod_created_at: String,
+}
+
+/// a.zipをdev・prod両bucketへpushし、同一pin名pm1をdev(先付け)・prod(後付け)の順で
+/// 両bucketへ付与した状態を構築する(TASK-15のgiven)。fakeのS3 stateはbucket分離を
+/// 持たないため2つ目のbucketへのCLI pin addはwrite-once検査(HeadObject)が共有実体を
+/// 検出して拒否される。prod側pin_write記録はdev側実記録を複製しs3_bucket・時刻・
+/// source版をprod側へ差し替えてregistry.jsonlへ直接追記する(tests/pin.rsの
+/// append_pin_removeと同一のregistry構築手法)。
+fn setup_both_bucket_same_name_pin(
+    tag: &str,
+    plain: &[u8],
+) -> Option<(StorageFixture, BothBucketPin)> {
+    let Some(fx) = StorageFixture::new(tag, StorageOpts::default()) else {
+        return None;
+    };
+    fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, plain);
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0, "dev(既定profile) push");
+    assert_eq!(
+        fx.pin("add", "a.zip", &["--latest", "--as", "pm1"]).0,
+        0,
+        "dev側(先付け)pin add pm1"
+    );
+    assert_eq!(
+        fx.push(&[&a], &["--profile", "prod"], &[]).0,
+        0,
+        "prod側push(prod bucketへfile_upload記録)"
+    );
+
+    // dev側pin_write実記録を取得し、prod側(後付け)記録を組み立ててregistryへ追記する
+    let registry = fx.registry_values();
+    let dev_write = registry
+        .iter()
+        .find(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some("pin_write")
+                && r.get("s3_bucket").and_then(|b| b.as_str()) == Some("bucket-dev")
+                && r.get("pin").and_then(|p| p.as_str()) == Some("pm1")
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("dev側pin_write記録がある: {registry:?}"));
+    let dev_created_at = dev_write
+        .get("recorded_at")
+        .and_then(|v| v.as_str())
+        .expect("recorded_at")
+        .to_string();
+    // prod側付与時刻はdev側より後(後付け)で区別可能な値(+1時間)
+    let prod_created_at =
+        chrono::DateTime::parse_from_rfc3339(&dev_created_at)
+            .map(|dt| (dt + chrono::Duration::hours(1)).to_rfc3339())
+            .unwrap_or_else(|e| panic!("dev側recorded_atのparse: {e}"));
+    let prod_vid = registry
+        .iter()
+        .find(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload")
+                && r.get("s3_bucket").and_then(|b| b.as_str()) == Some("bucket-prod")
+        })
+        .and_then(|r| r.get("version_id").and_then(|v| v.as_str()))
+        .expect("prod側file_upload記録のversion_id")
+        .to_string();
+    let mut prod_write = dev_write.clone();
+    prod_write["recorded_at"] = serde_json::json!(prod_created_at);
+    prod_write["uploaded_at"] = serde_json::json!(prod_created_at);
+    prod_write["s3_bucket"] = serde_json::json!("bucket-prod");
+    prod_write["source_version_id"] = serde_json::json!(prod_vid);
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&fx.registry)
+            .expect("registry.jsonlへ追記");
+        writeln!(f, "{prod_write}").expect("prod側pin_write記録の追記");
+    }
+    let pin_key = fx.pin_key("unfiled", None, "a.zip", "pm1");
+    Some((
+        fx,
+        BothBucketPin {
+            pin_key,
+            dev_created_at,
+            prod_created_at,
+        },
+    ))
+}
+
+/// [covers:index.pins-multi-bucket-same-name-kept]
+/// 同一prefix・別bucket構成で同一fileへ同名pinを複数bucketへ付与しても、後bucketの
+/// pin_writeが先bucketのreduce map entryを上書きせず両bucketの索引pins[]にそれぞれの
+/// pinが載る(TASK-15: pin_writes/pin_removesのmap keyが(pin_s3_key, s3_bucket)組である
+/// こと。従来はpin_s3_key単位の後勝ちHashMapのため先付けdev側の索引からpinが消えた)。
+/// created_atは各bucketの付与時刻で、list pins・get --pinが各profileでexit 0。
+/// dev側索引object喪失後のmanage index rebuild復元後も含む。
+#[test]
+fn pins_multi_bucket_same_name_kept_in_each_index() {
+    let plain = b"pins-multi-bucket-plain";
+    let Some((fx, st)) = setup_both_bucket_same_name_pin("idx-pmbkt", plain) else {
+        return;
+    };
+    assert_ne!(
+        st.dev_created_at, st.prod_created_at,
+        "両bucketの付与時刻は区別可能な値"
+    );
+    let a = fx.data_root.join("a.zip");
+
+    // (1) dev側(先付けbucket)索引の再構築(all-skip push): pm1が載る
+    // (後付けprodのpin_writeがdev側のmap entryを上書きしない=片寄りなし)
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0, "dev all-skip push");
+    let pins = entry_pins(index_file_entry(&fx.read_index(), "a.zip"));
+    assert_eq!(
+        pins.len(),
+        1,
+        "dev側索引pins[]にpm1が載る(map上書きで消えない): {pins:?}"
+    );
+    assert_eq!(pins[0].get("pin").and_then(|v| v.as_str()), Some("pm1"));
+    assert_eq!(
+        pins[0].get("s3_key").and_then(|v| v.as_str()),
+        Some(st.pin_key.as_str())
+    );
+    assert_eq!(
+        pins[0].get("created_at").and_then(|v| v.as_str()),
+        Some(st.dev_created_at.as_str()),
+        "created_atはdev側(先付け)のpin_write記録時刻: {pins:?}"
+    );
+    // dev側のlist pins・get --pinが参照できる
+    let (code, stdout, stderr) = fx.list("pins", &[]);
+    assert_eq!(code, 0, "list pins(dev)はexit 0: {stdout}{stderr}");
+    assert!(stdout.contains("pm1"), "list pins(dev)にpm1が現れる: {stdout}");
+    let out = fx.elsewhere.join("pmbkt-dev-out");
+    let out_s = out.display().to_string();
+    let (code, stdout, stderr) = fx.get("a.zip", &["--pin", "pm1", "--out", &out_s]);
+    assert_eq!(code, 0, "get --pin pm1(dev)はexit 0: {stdout}{stderr}");
+    assert_eq!(
+        std::fs::read(out.join("a.zip")).expect("pin版の復号成果物(dev)"),
+        plain.to_vec()
+    );
+
+    // (2) prod側(後付けbucket)索引の再構築(all-skip push): pm1が載る
+    assert_eq!(
+        fx.push(&[&a], &["--profile", "prod"], &[]).0,
+        0,
+        "prod all-skip push"
+    );
+    let pins = entry_pins(index_file_entry(&fx.read_index(), "a.zip"));
+    assert_eq!(
+        pins.len(),
+        1,
+        "prod側索引pins[]にもpm1が載る(片寄りなし): {pins:?}"
+    );
+    assert_eq!(pins[0].get("pin").and_then(|v| v.as_str()), Some("pm1"));
+    assert_eq!(
+        pins[0].get("created_at").and_then(|v| v.as_str()),
+        Some(st.prod_created_at.as_str()),
+        "created_atはprod側(後付け)のpin_write記録時刻: {pins:?}"
+    );
+    let (code, stdout, stderr) = fx.list_env("pins", &["--profile", "prod"], &[]);
+    assert_eq!(code, 0, "list pins(prod)はexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.contains("pm1"),
+        "list pins(prod)にpm1が現れる: {stdout}"
+    );
+    let out = fx.elsewhere.join("pmbkt-prod-out");
+    let out_s = out.display().to_string();
+    let (code, stdout, stderr) = fx.get_env(
+        "a.zip",
+        &["--pin", "pm1", "--profile", "prod", "--out", &out_s],
+        &[],
+    );
+    assert_eq!(code, 0, "get --pin pm1(prod)はexit 0: {stdout}{stderr}");
+    assert_eq!(
+        std::fs::read(out.join("a.zip")).expect("pin版の復号成果物(prod)"),
+        plain.to_vec()
+    );
+
+    // (3) dev側索引object喪失後のmanage index rebuild復元にもpm1が含まれる
+    // (reduce結果を共有するためmap上書きが直っていれば復元でも載る)
+    std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
+    let mut last = String::new();
+    let mut code = 0;
+    for _ in 0..2 {
+        let (c, stdout, stderr) = fx.manage("index", &["rebuild"]);
+        code = c;
+        last = format!("{stdout}{stderr}");
+        if fx.object_path(&fx.index_key()).is_file() {
+            break;
+        }
+    }
+    assert_eq!(code, 0, "manage index rebuild(dev)はexit 0: {last}");
+    let pins = entry_pins(index_file_entry(&fx.read_index(), "a.zip"));
+    assert_eq!(
+        pins.len(),
+        1,
+        "rebuild復元後のdev側索引pins[]にもpm1が含まれる: {pins:?}"
+    );
+    assert_eq!(
+        pins[0].get("created_at").and_then(|v| v.as_str()),
+        Some(st.dev_created_at.as_str()),
+        "rebuild復元もdev側のpin_write記録時刻: {pins:?}"
+    );
+}
+
+/// [covers:index.pin-rm-multi-bucket-independent]
+/// 両bucket付与状態でのpin rmはbucket単位で独立している(TASK-15): dev側(先付け=
+/// 従来索引からpinが消えていた側)のrmがexit 0(索引pins[]に載っているためpin名不在の
+/// 対象エラー3にならない)で当該索引から除去・dev bucketのpin objectを削除する。
+/// prod側はpm1を保持し(get --pin exit 0)、続くprod側rmもexit 0。一方のbucketでの
+/// 実行のS3 API呼び出しは他方bucketへ向かわない。
+#[test]
+fn pin_rm_multi_bucket_independent() {
+    let plain = b"pin-rm-multi-bucket-plain";
+    let Some((fx, st)) = setup_both_bucket_same_name_pin("idx-rmbkt", plain) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+
+    // dev側索引を再構築(all-skip push)した状態でdev側pin rm(従来は索引pins[]が空のため
+    // 対象エラー3になった側)
+    assert_eq!(fx.push(&[&a], &[], &[]).0, 0, "dev all-skip push");
+    let pin_obj = fx.object_path(&st.pin_key);
+    let pin_bytes = std::fs::read(&pin_obj).expect("pin object実体(dev側写し)");
+    clear_calls(&fx);
+    let (code, stdout, stderr) = fx.pin("rm", "a.zip", &["--pin", "pm1"]);
+    assert_eq!(
+        code, 0,
+        "dev側pin rmは索引pins[]に載っているため対象エラー3にならずexit 0: {stdout}{stderr}"
+    );
+    let calls = fx.calls();
+    assert!(
+        calls.lines().any(|l| l.starts_with("s3 DeleteObjectVersion")
+            && l.contains("bucket=bucket-dev")
+            && l.contains(&format!("key={}", st.pin_key))),
+        "dev側rmのpin object削除はdev bucketへ向かう: {calls}"
+    );
+    assert!(
+        !calls.lines().any(|l| l.contains("bucket=bucket-prod")),
+        "dev側rmのS3 API呼び出しにprod bucketは無い(他方bucketへ影響しない): {calls}"
+    );
+    assert!(!pin_obj.is_file(), "dev bucketのpin objectは削除される");
+    // dev側索引pins[]からpm1が除かれる(rm実行が索引を再構築する)
+    let pins = entry_pins(index_file_entry(&fx.read_index(), "a.zip"));
+    assert!(pins.is_empty(), "dev側索引pins[]からpm1が除かれる: {pins:?}");
+
+    // fakeのS3 stateはbucket分離を持たないためdev側rmで共有実体が消えている。
+    // 実S3ではprod bucketのpin objectは独立に存在し続けるため、prod側写しの生存を
+    // stateへ再現する(実体+版state。prod側pin_write記録のage_sha256と同一bytes)
+    fx.seed_object(&st.pin_key, &pin_bytes);
+    let version_line = format!(
+        "v2\t{}\t{}\tput\tSTANDARD",
+        pin_bytes.len(),
+        chrono::Local::now().to_rfc3339()
+    );
+    write_file(
+        &fx.state.join("versions").join(&st.pin_key),
+        version_line.as_bytes(),
+    );
+
+    // prod側はpm1を保持する(dev側rmの影響を受けない): 索引pins[]・get --pin
+    assert_eq!(
+        fx.push(&[&a], &["--profile", "prod"], &[]).0,
+        0,
+        "prod all-skip push"
+    );
+    let pins = entry_pins(index_file_entry(&fx.read_index(), "a.zip"));
+    assert_eq!(
+        pins.len(),
+        1,
+        "prod側索引pins[]はpm1を保持する: {pins:?}"
+    );
+    assert_eq!(
+        pins[0].get("created_at").and_then(|v| v.as_str()),
+        Some(st.prod_created_at.as_str()),
+        "保持しているpm1はprod側のpin_write記録時刻: {pins:?}"
+    );
+    let out = fx.elsewhere.join("rmbkt-prod-out");
+    let out_s = out.display().to_string();
+    let (code, stdout, stderr) = fx.get_env(
+        "a.zip",
+        &["--pin", "pm1", "--profile", "prod", "--out", &out_s],
+        &[],
+    );
+    assert_eq!(code, 0, "prod側get --pin pm1はexit 0: {stdout}{stderr}");
+    assert_eq!(
+        std::fs::read(out.join("a.zip")).expect("pin版の復号成果物(prod)"),
+        plain.to_vec()
+    );
+
+    // 続くprod側rmもexit 0でprod側索引から除去される
+    clear_calls(&fx);
+    let (code, stdout, stderr) = fx.pin_env("rm", "a.zip", &["--pin", "pm1", "--profile", "prod"], &[]);
+    assert_eq!(code, 0, "prod側pin rmもexit 0: {stdout}{stderr}");
+    let calls = fx.calls();
+    assert!(
+        calls.lines().any(|l| l.starts_with("s3 DeleteObjectVersion")
+            && l.contains("bucket=bucket-prod")
+            && l.contains(&format!("key={}", st.pin_key))),
+        "prod側rmのpin object削除はprod bucketへ向かう: {calls}"
+    );
+    assert!(
+        !calls.lines().any(|l| l.contains("bucket=bucket-dev")),
+        "prod側rmのS3 API呼び出しにdev bucketは無い: {calls}"
+    );
+    let pins = entry_pins(index_file_entry(&fx.read_index(), "a.zip"));
+    assert!(
+        pins.is_empty(),
+        "prod側索引pins[]からpm1が除かれる: {pins:?}"
+    );
+}
+
 /// [covers:index.parse-failure-guides-rebuild]
 /// 索引parse失敗(schema違反JSON)のerror文には`manage index rebuild`による索引再構築の
 /// 案内を含める(L-6。終了コードは検証エラー4のまま)。

@@ -546,9 +546,10 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
         // pins復元(H-3・設計2.3): ローカルregistryのpin_write記録(未削除)を該当entryへ
         // 接続する。採用・削除済み判定ともbucket一致(registry::record_bucket_matched。
         // M-R1: 他方bucketのpin_writeは採用せず・pin_removeもs3_bucket一致するもののみ
-        // 削除済み扱い。索引構築build_entriesと同一規則)。registry喪失時(完全被災の新環境)
-        // はpin情報の補完は行われない(manifestにpin実体の記録が無いため。list_versions
-        // 走査での補完はPhase B課題)
+        // 削除済み扱い。索引構築build_entriesと同一規則。pin_writes/pin_removesのmap keyは
+        // (pin_s3_key, s3_bucket)組(TASK-15)のためwriteのbucketで組key照合する)。
+        // registry喪失時(完全被災の新環境)はpin情報の補完は行われない(manifestにpin実体の
+        // 記録が無いため。list_versions走査での補完はPhase B課題)
         let registry_path = cfg.registry_path.clone();
         if registry_path.is_file() {
             let records = registry::load_registry(&registry_path)?;
@@ -561,7 +562,12 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
                 ) {
                     continue;
                 }
-                if let Some(remove) = reduced_now.pin_removes.get(&pin.pin_s3_key) {
+                if let Some(remove) = reduced_now
+                    .pin_removes
+                    .get(&(pin.pin_s3_key.clone(), pin.s3_bucket.clone()))
+                {
+                    // 二次bucket判定: 組key照合によりremove.s3_bucketはpin.s3_bucketと
+                    // 同一が保証済み(採用判定を通ったpinと同一bucket)のため常に真・防御的再判定
                     if registry::record_bucket_matched(
                         &remove.s3_bucket,
                         &session.aws.bucket,

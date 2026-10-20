@@ -175,13 +175,20 @@ pub fn build_entries(
         entry.versions = versions;
         // pins: pin_write(未削除)をfolder位置へ接続。採用・削除済み判定ともbucket一致
         // (M-R1): 他方bucketのpin_writeは採用せず、pin_removeもs3_bucket一致する
-        // もののみ削除済み扱い(pin_s3_key一致のみでは照合しない)
+        // もののみ削除済み扱い(pin_s3_key一致のみでは照合しない)。
+        // pin_writes/pin_removesのmap keyは(pin_s3_key, s3_bucket)組(TASK-15: 同名pinの
+        // 別bucket付与がmap上書きし合わない)のため、writeのbucketで組key照合する
         for pin in reduced.pin_writes.values() {
             if !registry::record_bucket_matched(&pin.s3_bucket, effective_bucket, canonical_bucket)
             {
                 continue;
             }
-            if let Some(remove) = reduced.pin_removes.get(&pin.pin_s3_key) {
+            if let Some(remove) = reduced
+                .pin_removes
+                .get(&(pin.pin_s3_key.clone(), pin.s3_bucket.clone()))
+            {
+                // 二次bucket判定: 組key照合によりremove.s3_bucketはpin.s3_bucketと
+                // 同一が保証済み(採用判定を通ったpinと同一bucket)のため常に真・防御的再判定
                 if registry::record_bucket_matched(
                     &remove.s3_bucket,
                     effective_bucket,
@@ -211,7 +218,7 @@ pub fn build_entries(
     // versions[]もpins[]も無いentry(file_write記録のみで他方bucketにしかupload
     // されていないfile等)はlist/query/diffの対象外として落とす(L-R1)
     entries.retain(|e| !e.versions.is_empty() || !e.pins.is_empty());
-    // pinsの並びをs3_key(=pin_writesのkey・一意)で確定する: 採用源がHashMapの
+    // pinsの並びをs3_key(=pin_writesの組keyのpin_s3_key側)で確定する: 採用源がHashMapの
     // iteration order(process毎に不定)のため、sortしないと同一registryからの
     // 再構築でも索引内容(バイト列)が変わる=index.rebuild-from-registry-per-runの
     // 冪等(同一内容)を満たさない

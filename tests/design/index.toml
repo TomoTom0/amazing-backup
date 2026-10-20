@@ -13,6 +13,23 @@
 # 2026-10-15: TASK-11(Phase B)再レビュー指摘対応(M-R1・L-R1)でテスト先行の更新。
 #   新規2件: index.pins-bucket-isolated(索引pins[]構築・復元のbucket一致=M-R1)・
 #   index.entries-without-bucket-versions-excluded(当該bucketの版もpinも無いentryの索引載せ除外=L-R1)。
+# 2026-10-19: TASK-12(pin rm後の同一pin名再付与が索引へ反映されない)でテスト先行の更新。
+#   新規1件: index.pin-readd-after-remove-wins(pin rm→同一pin名再addでrecorded_atが新しい
+#   pin_writeが旧pin_removeに抑止されず勝ち、索引pins[]へ反映されlist pins/get --pinで参照できる。
+#   manage index rebuildのpins復元も同一reduce結果を参照するため共通)。
+#   「rmしたきり再addしない場合の排除」は既存index.pin-entriesのrm側期待値が担保済みのため
+#   excludedへ整理(重複追加せず)。実装(src/registry.rs reduce)後にcargo test全件pass・
+#   verify-conditions.py PASS。
+# 2026-10-19: TASK-15(同一prefix・別bucket構成で同一fileへ同名pinを複数bucketへ付与すると
+#   先付けbucket側の索引からpinが消える)でテスト先行の更新。新規2件:
+#   index.pins-multi-bucket-same-name-kept(reduceのpin_writes/pin_removesのmap keyが
+#   (pin_s3_key, s3_bucket)組であることで同名pinの複数bucket付与でも両bucketの索引pins[]
+#   にそれぞれ載る。pin_s3_key単位HashMap(後勝ち)の上書きによるpin_write記録喪失の回帰)・
+#   index.pin-rm-multi-bucket-independent(両bucket付与状態でのpin rmがbucket単位で独立して
+#   可能・他方bucketの索引・pin objectは不変)。「write-once trap解消の新規条件化」
+#   「bucket軸×時間軸(rm→再add)の複合条件」はexcludedへ整理。実装(src/registry.rs
+#   reduceの組key化・src/index.rs・src/storage/manage.rsの照合対応)後にcargo test全件pass・
+#   verify-conditions.py PASS。
 
 [meta]
 feature = "index"
@@ -28,7 +45,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 2.1(schema)"
 description = "索引JSONL(暗号化前の平文)schema: index_header(schema=1・record_type=index_header・updated_at ISO8601 JST・run_id・tool_version・entries=N)+file entry(record_type=file・name・category・rel_path・source_path・identity_hash・versions[]・pins[])。versionsはdate降順(先頭=最新)で各versionはdate(表示・--version日付filter用)・version_ts(同一日内複数版の一意化)・batch_id・s3_key(実keyをそのまま記録・規約から導出しない・衝突hash付きkeyもそのまま)・version_id・source_sha256・age_sha256・source_size・age_size。pins[]はpin・s3_key・created_at・date・source_sha256・age_sha256・source_size。identity_hash=sha256(realpath)先頭8hex(衝突folder名と同一・source_pathが変わればidentityも変わる)。直列化→parseの往復で全fieldが保たれる (unit)"
 given = "2 file entry(うち1 fileにversion 2件・pin 1件)を含む索引構造の直列化→parse"
 expect_return_shape = "headerのentries=Nがfile entry数と一致し、versionsはdate降順に保たれ、全fieldが往復で失われずparse結果が構築時と等価"
-source_lines = "src/index.rs:455; tests/index_storage.rs:65"
+source_lines = "src/index.rs:462; tests/index_storage.rs:65"
 
 [[condition]]
 id = "index.rebuild-from-registry-per-run"
@@ -37,7 +54,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 2.2(更新単位)"
 description = "索引の更新単位はrun毎(backup push完了時)+索引に影響する操作後(pin add/rm・manage prune)。ローカルregistry(reduce後)から全entryを再構築し、冪等(再構築・再PUTで同一内容) (integration, fake seam)"
 given = "file_upload記録(version_id・実s3_key付き)・pin_write/pin_remove記録を含むregistryからの索引再構築と、同一registryからの2回目の再構築"
 expect_return_shape = "全entryがregistry記録から再構築され(versions[].version_id・s3_keyはregistryのfile_upload記録値)、2回目の再構築結果は1回目と同一内容(冪等)"
-source_lines = "src/index.rs:484; tests/index_storage.rs:205"
+source_lines = "src/index.rs:491; tests/index_storage.rs:205"
 
 [[condition]]
 id = "index.hot-storage-class-upload"
@@ -46,7 +63,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 1.4(storage class表)・2.2"
 description = "索引 sys/index.jsonl.age のPUTはstorage class STANDARD固定(per-object指定。bucket default・lifecycle移行に依存しない)。profileのstorage_classがDEEP_ARCHIVEでもSTANDARDで置かれる (integration, fake seam)"
 given = "storage_class=DEEP_ARCHIVEのprofileでのbackup push実行(または索引更新を伴う操作)"
 expect_return_shape = "sys/index.jsonl.age のPutObject呼び出しが storage_class=STANDARD で行われる"
-source_lines = "src/index.rs:644; tests/index_storage.rs:271"
+source_lines = "src/index.rs:651; tests/index_storage.rs:271"
 
 [[condition]]
 id = "index.encrypted-with-configured-recipients"
@@ -73,7 +90,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 2.3(喪失時再構築)・2.2(ind
 description = "manage index rebuild: (1)ListObjectsV2 <prefix>/sys/manifests/ でmanifest一覧 (2)未復元のmanifestへ復元job発行(Bulk既定。進行中は再実行で継続) (3)取得・復号・parse→file recordからentry再構築(s3_key・version_idはmanifest記録値を使用。manifestのfile recordは実s3_key+version_idを記録する拡張schema) (4)version_id欠損(旧manifest等)はListObjectVersionsでkey+LastModifiedから補完 (5)sys/index.jsonl.ageへPUT・完了報告。開始時にtier別単価で区別した費用・所要の概算を表示(Deep Archive復元: Standard≈$0.10/GB級・最大12時間 / Bulk≈$0.02/GB級・最大48時間) (integration, fake seam)"
 given = "manifestがN件(DEEP_ARCHIVE未復元)で索引objectが不在のfake S3での manage index rebuild 実行・再実行(進行中)、およびversion_id欠損manifestを混ぜた実行"
 expect_return_shape = "未復元manifestへBulkの復元jobが発行され(再実行で継続)、全manifestからentryが再構築されs3_key・version_idはmanifest記録値(欠損分はListObjectVersionsで補完)で、sys/index.jsonl.ageへPUTされ、開始時にtier別の費用・所要概算表示が出る"
-source_lines = "src/index.rs:689; tests/index_storage.rs:410"
+source_lines = "src/index.rs:696; tests/index_storage.rs:410"
 
 [[condition]]
 id = "index.pin-entries"
@@ -148,7 +165,7 @@ source = "TASK-11(Phase B)コードレビュー指摘L-6+tmp/tasks/tm-10/design_
 description = "索引parse失敗(不正JSON行・index_header/file entryのschema違反・index_header不在)のerror文には`manage index rebuild`による索引再構築の案内を含める(終了コードは検証エラー4のまま変更しない。索引objectが壊れている場合の回復経路を利用者へ示す) (integration, fake seam)"
 given = "索引objectをschema違反の平文(file entry必須field欠損)へ書き換えた状態での list files 実行"
 expect_return_shape = "exit 4(検証エラー)。error文に manage index rebuild の案内が含まれる"
-source_lines = "tests/index_storage.rs:744"
+source_lines = "tests/index_storage.rs:1185"
 
 [[condition]]
 id = "index.pins-bucket-isolated"
@@ -157,7 +174,7 @@ source = "TASK-11(Phase B)再レビュー指摘M-R1+tmp/tasks/tm-10/design_s3_st
 description = "索引pins[]の構築・復元はregistry記録のs3_bucket一致(registry::record_bucket_matchedと同一規則。欠損空文字は正本bucket相当)を伴う: (a) pin_write記録はs3_bucketが当該実行の実効bucketと一致するもののみ採用(同一prefix・別bucket構成で他方bucketのみのpinが当方bucketの索引へ混入せず、get --pinが当方bucketでNoSuchKeyの転送エラー5にならない) (b) pin_remove記録はs3_bucket一致するもののみ削除済み扱い(pin_s3_key一致のみでは照合しない。誤ったprofileでのpin rm等・他方bucketでの解除が正bucket側の索引からpinを消さない=pin object残留を防ぐ)。manage index rebuildのローカルregistryからのpins復元も同一規則 (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成での、(1)dev push+pin add(pm1)後のprod側pushで再構築されたprod側索引 (2)get --pin pm1 --profile prod と pin rm --pin pm1 --profile prod の各実行 (3)registryへ他方bucket(bucket-prod)のs3_bucketを持つpin_remove記録を混入した状態と正bucket(bucket-dev)のs3_bucketを持つpin_remove記録を混入した状態での、dev側索引再構築(all-skip push)と manage index rebuild"
 expect_return_shape = "(1)prod側索引の当該entry pins[]は空(dev側pm1は混入しない。dev側索引はpm1を保持) (2)いずれも exit 3(pin名は当該索引に無し)でpin objectへのS3 API呼び出し(取得・削除)を行わず、dev側索引pins[]・pin objectは不変 (3)他方bucketのpin_removeではpinは索引に残り、正bucketのpin_removeでは除去される。manage index rebuildの復元も同一結果"
-source_lines = "src/index.rs:539; tests/phase_b_options.rs:469; tests/pin.rs:545"
+source_lines = "src/index.rs:546; tests/phase_b_options.rs:469; tests/pin.rs:545"
 
 [[condition]]
 id = "index.entries-without-bucket-versions-excluded"
@@ -166,4 +183,52 @@ source = "TASK-11(Phase B)再レビュー指摘L-R1+tmp/tasks/tm-10/design_s3_st
 description = "file_write記録にs3_bucket字段が無いためentry組立はbucket不関だが、索引の意味論は「当該namespace(bucket)で管理されるfile」: 当該実効bucketと一致するfile_upload記録によるversions[]もbucket一致するpin_write記録によるpins[]も持たないentry(同一prefix・別bucket構成で他方bucketにしかuploadされていないfile等)は索引entriesへ載せない(list/query/diffの表示・getのname解決から除外。版が無いentryがgetで版なしエラーになる表示面の混入を防ぐ。データ破壊は無い) (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成でa.zipを両bucketへ・b.zipをdevのみへpushした状態での、prod側(--profile)からの list files・query・get・diff の各実行と、dev側(正本bucket)での list files 実行"
 expect_return_shape = "prod側はいずれもa.zipのみが現れb.zipは現れない(list files表示・query一致・getはname不在の対象エラー3・diffのentries数)。dev側は従来どおりa.zip・b.zip双方が現れる"
-source_lines = "src/index.rs:540; tests/phase_b_options.rs:555"
+source_lines = "src/index.rs:547; tests/phase_b_options.rs:555"
+
+[[condition]]
+id = "index.pin-readd-after-remove-wins"
+target_function = "registry::reduce_records(pin_write/pin_remove) / index::build_entries / manage index rebuild(pins復元)"
+source = "TASK-12 body(pin rm後の同一pin名再付与が索引へ反映されない・write-once案内の正規フロー)+tmp/tasks/tm-10/design_s3_storage.md 1.3(write-once: 上書きしたい場合はpin rm後に再付与)・2.2(索引に影響する操作後の再構築)・2.3(pins復元)"
+description = "write-onceの正規フロー「pin rm後に再付与」(設計1.3)が索引経由の参照でも成立すること: registryの記録順処理で、pin rm→同一pin名の再addではrmよりrecorded_atが新しい再付与のpin_writeが旧pin_removeに抑止されず勝つ(reduce結果のpin_removesから当該pin_s3_keyが除かれる。bucket一致規則はindex.pins-bucket-isolatedのままで本条件と直交)。従来はpin_writes/pin_removesが独立mapのためrm→再addでも削除済み扱いが残り、索引pins[]から消えたままget --pin/list pins/pin rm再実行が不能になっていた(TASK-12)。manage index rebuildのpins復元も同一reduce結果を参照するため共通して直る (integration, fake seam)"
+given = "backup push→pin add(pm1)→pin rm(pm1)→同一pin名pm1の再付与(pin add)後の索引再構築と list pins・get --pin pm1 の各実行、および索引object削除後の manage index rebuild 実行"
+expect_return_shape = "再付与後の索引当該entry pins[]にpm1が載り(created_atは再付与のpin_write記録時刻)、list pinsにpm1が現れget --pin pm1はexit 0でpin objectを取得できる。manage index rebuild復元後の索引pins[]にもpm1が含まれる"
+source_lines = "tests/index_storage.rs:744"
+
+[[condition]]
+id = "index.pins-multi-bucket-same-name-kept"
+target_function = "registry::reduce_records(pin_writes/pin_removes) / index::build_entries / manage index rebuild(pins復元)"
+source = "TASK-15 body(別bucket同名pin付与で先付けbucket側の索引からpinが消える・設計4.2 231行のbucket分離期待の逆方向を破る)+tmp/tasks/tm-10/design_s3_storage.md 4.2(混同防止: 索引構築versions/pinsもbucket一致分離)・2.3(pins復元)"
+description = "索引pins[]構築のbucket分離は「他bucketのpin記録が混入しない」(index.pins-bucket-isolated)とともに「当方bucketのpin記録が他bucketの同名pin_writeで失われない」方向も含む: reduceのpin_writes/pin_removesのmap keyは(pin_s3_key, s3_bucket)組で、同一prefix・別bucket構成で同一fileへ同名pinを複数bucketへ付与しても、後bucketのpin_writeが先bucketのmap entryを上書きせず両bucketの索引pins[]にそれぞれのpinが載る(get --pin・list pinsで参照可能)。従来はpin_s3_key単位のHashMap(後勝ち単一entry)のため後bucketのwriteが先bucketのentryを上書きし、先付けbucket側の索引からpinが消えていた(pin_write記録がreduce結果から喪失するためbuild_entriesのbucket一致判定でも救えず、manage index rebuildでも回復しない=記録喪失。TASK-15) (integration, fake seam)"
+given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成でa.zipを両bucketへpushし、同一pin名pm1をdev(先付け)・prod(後付け)の順で両bucketへ付与した状態での、(1)prod側push(all-skip)後に再構築されたprod側索引と、dev側索引再構築(all-skip push)・list pins・get --pin pm1(dev・prod各profile)の各実行 (2)dev側索引object削除後の manage index rebuild 実行"
+expect_return_shape = "(1)dev側索引の当該entry pins[]にpm1(devのpin_write記録由来)が載り、prod側索引の当該entry pins[]にもpm1(prodのpin_write記録由来)が載る(created_atは各bucketの付与時刻。いずれも片側にのみ載る片寄りがない)。いずれのprofileでも list pins にpm1が現れ get --pin pm1 はexit 0で当該bucketのpin objectを取得できる (2)rebuild復元後のdev側索引pins[]にもpm1が含まれる"
+source_lines = "tests/index_storage.rs:963"
+
+[[condition]]
+id = "index.pin-rm-multi-bucket-independent"
+target_function = "pin rm(索引pins[]参照・pin object削除) / index::build_entries"
+source = "TASK-15 body(goal: 各bucketの索引からそれぞれのpinが消えず参照できること(pin rmも可能))+tmp/tasks/tm-10/design_s3_storage.md 4.2(混同防止: pin解決も当該実効bucketの索引に限る)"
+description = "同一file・同名pinを複数bucketへ付与した状態でのpin rmはbucket単位で独立して可能: 各bucketでの実行は当該bucketの索引pins[](当該bucketのpin_write記録由来)を参照してpin objectを削除・索引から除去し、他方bucketの索引pins[]・pin objectは不変(他方bucketで同名pinが引き続き参照できる)。従来は先付けbucket側の索引からpinが消えるため、当該bucketでpin rm不能(索引に無くpin名不在の対象エラー3)かつpin add不能(write-onceのhead検出で既存pin keyへのPUT拒否)のtrapになっていた(TASK-15 goalの「pin rmも可能」) (integration, fake seam)"
+given = "同一fileへ両bucketに同名pin(pm1)を付与した状態(index.pins-multi-bucket-same-name-keptのgivenと同一構成)での、(1)dev側(先付けbucket=従来索引から消えていた側)での pin rm --pin pm1 実行 (2)その後のprod側 get --pin pm1 --profile prod と pin rm --pin pm1 --profile prod の各実行"
+expect_return_shape = "(1)dev側pin rmはexit 0(索引pins[]に載っているためpin名不在の対象エラー3にならない)で、dev側索引pins[]からpm1が除かれdev bucketのpin objectも削除される (2)prod側索引pins[]はpm1を保持し(pin object不変) get --pin pm1 はexit 0。続くprod側 pin rm もexit 0でprod側索引から除去される。一方のbucketでの実行が他方bucketの索引pins[]・pin objectへ影響しない"
+source_lines = "tests/index_storage.rs:1078"
+
+[[excluded]]
+item = "pin rm後(再付与なし)のまま再構築・manage index rebuildを実行してもpinが索引から排除され続けることの新規条件化"
+source = "TASK-12 body(既有のpin_rm済みkeyは索引から排除される系の既存条件と両立する要求)"
+reason = "既存条件index.pin-entries(rm後は該当pin記録が除去される)がrmによる排除を、index.rebuild-preserves-folder-and-pinsがpin_write記録(未削除)からのrebuild復元をそれぞれ担保済み。rmしたきりの排除維持とrm→再addの新pin_write勝ちは排他的な分岐ではなく前者は現行挙動のままのため重複追加とする"
+decided_at = "2026-10-19"
+decided_by = "claude"
+
+[[excluded]]
+item = "同名pin複数bucket付与後の先付けbucketでのpin add再実行(write-once検出)・trap解消の新規条件化"
+source = "TASK-15 body(pin rm不能(索引に無い)かつpin add不能(write-onceのhead検出)のtrap)"
+reason = "trapは索引pins[]から当該pinが消えることの従属帰結で、索引に載ることがindex.pins-multi-bucket-same-name-kept・pin rmが通ることがindex.pin-rm-multi-bucket-independentで担保されれば正規フロー(rm→再add)が復旧する。write-once検出(head確認で既存pin keyへのPUT拒否)自体はpin.write-once-violation-rejectedが、rm後再付与が索引へ反映されることはindex.pin-readd-after-remove-winsがそれぞれ担保済みのため重複追加とする"
+decided_at = "2026-10-19"
+decided_by = "claude"
+
+[[excluded]]
+item = "bucket軸(map key組化)と時間軸(rm→同一pin名再add)を組み合わせた複合条件(例: 片bucketのrm→他bucketでの同名pin add後の当方bucket索引)の新規条件化"
+source = "TASK-15 body(修正案: map keyを(pin_s3_key, s3_bucket)組へ変更)+TASK-12 body(pin rm後の同一pin名再付与)"
+reason = "bucket軸の独立(今回のindex.pins-multi-bucket-same-name-kept・index.pin-rm-multi-bucket-independent)と時間軸の再付与勝ち(index.pin-readd-after-remove-wins)は直交する要件で、組key化しても時間軸処理(同一組keyのpin_remove除去)はbucket内で完結するため、各軸を単独条件で担保すれば複合の帰結は定まる。複合条件は組合せ数を増やすだけで新たな分岐を検証しないため追加しない"
+decided_at = "2026-10-19"
+decided_by = "claude"

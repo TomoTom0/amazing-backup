@@ -118,11 +118,51 @@ aws CLI(subprocess)依存のテスト構造をfake seamへ再構成:
   冪等(同一内容)違反。M-R1テストの多pin構成で顕在化したため修正)
 - 条件数156
 
+2026-10-16: TASK-11(Phase B)prod 3bucket構成移行でテスト先行の条件書更新
+(ユーザー指示2026-10-15: prodはyour-family-bucket/your-baked-bucket/your-atara-bucketの3bucket・
+profile使い分け・混同配置が構造的に起きないこと)。
+- cli.tomlへ2条件追加: cli.profile-multi-bucket-isolation(3bucket以上のprofile構成でも
+  bucket単位分離が機能=H-1機構のprofile数非依存検証)・cli.backup-push-connection-dest-shown
+  (backup pushの接続先実効profile/bucket/prefix表示。dry-runでも表示)
+- tests/phase_b_options.rsへ2test追加(three_bucket_aws_tomlによるdev+prod系2bucket構成)。
+  実装(AwsConfigへ実効profile名保持・push開始時の接続先表示)後にcargo test全件pass・
+  verify-conditions.py PASS
+- 条件数158
+
+2026-10-19: TASK-12(pin rm後の同一pin名再付与が索引へ反映されない)でテスト先行の更新。
+- index.tomlへ1条件追加: index.pin-readd-after-remove-wins(rm→同一pin名再addで
+  recorded_atが新しい再付与pin_writeが旧pin_removeに抑止されず索引pins[]へ載り
+  list pins・get --pinで参照できる。manage index rebuildの復元も同一reduce結果で共通)。
+  「rmしたきり再addしない場合の排除維持」の新規条件化は既存条件重複のためexcludedへ整理
+- tests/index_storage.rsへ1test追加(pin_readd_after_remove_wins_in_index)。
+  実装(src/registry.rs reduceのPinWrite処理で同一pin_s3_keyのpin_removes entry除去)後に
+  cargo test全件pass・verify-conditions.py PASS
+- 条件数159(excluded 24件)
+
+2026-10-19: TASK-15(同一prefix・別bucket構成で同一fileへ同名pinを複数bucketへ付与すると
+先付けbucket側の索引からpinが消える)でテスト先行の更新。
+- index.tomlへ2条件追加: index.pins-multi-bucket-same-name-kept(reduceのpin_writes/
+  pin_removesのmap keyが(pin_s3_key, s3_bucket)組で同名pin複数bucket付与でも両bucketの
+  索引pins[]に載る=get --pin・list pinsで参照可能。pin_s3_key単位HashMap後勝ちの上書きに
+  よるpin_write記録喪失の回帰。manage index rebuildも共通)・
+  index.pin-rm-multi-bucket-independent(両bucket付与状態でのpin rmがbucket単位で独立して
+  可能=従来のpin rm不能・pin add不能(write-once)trapの解消。他方bucketの索引・pin object
+  は不変)。「write-once trap解消の新規条件化」「bucket軸×時間軸の複合条件」は既存条件重複・
+  直交要件のためexcludedへ整理
+- tests/index_storage.rsへ2test追加(pins_multi_bucket_same_name_kept_in_each_index・
+  pin_rm_multi_bucket_independent。共通構築setup_both_bucket_same_name_pinはdev側
+  pin addをCLIで行いprod側pin_write記録をregistryへ直接追記=fakeのS3 stateがbucket
+  非分離のため2つ目bucketへのCLI pin addがwrite-once検査で拒否されるため。
+  tests/pin.rs append_pin_removeと同一のregistry構築手法)。
+  実装前のためRed確認済み(dev側索引pins[]が空=map上書き・dev側pin rmが対象エラー3。
+  既存12testはpass維持)・verify-conditions.py PASS(161条件すべてcover)
+- 条件数161(excluded 26件)
+
 ## 構成
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(12ファイル・158条件・excluded 23件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)反映済み |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(12ファイル・161条件・excluded 26件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)反映済み |
 | tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(新schema組立・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
 | tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
@@ -131,7 +171,7 @@ aws CLI(subprocess)依存のテスト構造をfake seamへ再構成:
 | tests/s3_backend.rs | S3 backend・credentialファイル系(fake seam・multipart・abort・endpoint env警告)をbackup push経路で検証(結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
 | tests/cli_bin.rs | bin entrypoint系(--version・lib/bin parity・旧サブコマンド削除。結合) | 作成済み(旧サブコマンド削除はPhase B実装前fail許容) |
 | tests/layout.rs | TASK-10 layoutエリア(key生成・分類解決・衝突・検証。dry-run表示とfake seamで観測) | 作成済み |
-| tests/index_storage.rs | TASK-10/11 indexエリア(索引schema・registry再構築・STANDARD・recipients・version_id・manifest再構築・pin反映・version_ts供給源・未知record_type警告) | 作成済み(後半2件はPhase B実装前fail許容) |
+| tests/index_storage.rs | TASK-10/11/12/15 indexエリア(索引schema・registry再構築・STANDARD・recipients・version_id・manifest再構築・pin反映・version_ts供給源・未知record_type警告・pin再付与・別bucket同名pinの両bucket索引保持・bucket独立pin rm) | 作成済み(TASK-12・TASK-15とも実装後にcargo test全件pass) |
 | tests/pin.rs | TASK-10/11 pinエリア(pin add/rm・write-once・backup時pin・skip対象への--pin・pin_removeのbucket照合) | 作成済み |
 | tests/retention.rs | TASK-10/11 retentionエリア(lifecycle NCVE/MPU abort・prune dry-run/保護/削除条件・併置排他・category guard) | 作成済み |
 | tests/storage_query.rs | 照会系CLI(query/get/list/diff・版特定・復元job・--format human/json) | 作成済み(--format系・list jobs noncurrent版はPhase B実装前fail許容) |
@@ -173,7 +213,7 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | cli.toml | cli | src/cli.rs | 45 | CLI-001〜006 + TASK-9/10系 + TASK-11 Phase B(旧サブコマンド削除・--format/--profile・manage jobs reissue・pull範囲排他等)+prod 3bucket構成(3bucket分離・push接続先表示) |
 | restore.toml | restore | src/storage.rs | 4 | 復元job系共通経路4件(TASK-11で旧restore固有19件廃止。get/pull/list jobs経路で検証。平文衝突保護含む) |
 | layout.toml | layout | src/layout.rs | 9 | TASK-10設計1章(key生成・分類解決・衝突・検証。9章素案+rel_path正規化) |
-| index.toml | index | src/index.rs | 13 | TASK-10設計2章 + H-1/H-3 + TASK-11(version_ts供給源・未知record_type警告) + 再レビューM-R1(pins bucket分離)・L-R1(版・pin無しentry除外) |
+| index.toml | index | src/index.rs | 17 | TASK-10設計2章 + H-1/H-3 + TASK-11(version_ts供給源・未知record_type警告) + 再レビューM-R1(pins bucket分離)・L-R1(版・pin無しentry除外) + TASK-12(pin rm後の再付与) + TASK-15(別bucket同名pinの両bucket索引保持・bucket独立pin rm) |
 | pin.toml | pin | src/cli.rs | 8 | TASK-10設計1.3・3.2 + M-4(--config早期検査) + TASK-11 M-6(skip対象への--pin) + 再レビューM-R1(pin解決のbucket分離) |
 | retention.toml | retention | src/cli.rs | 8 | TASK-10設計3.2・5.2 + TASK-11 L-8(prune併置排他)・M-2(category guard) |
 
@@ -227,16 +267,6 @@ $ uv run python scripts/design/verify-conditions.py
   同日レビュー指摘対応後は153条件すべてcover済み
   (Phase B実装待ちの条件もテスト先行でcoversタグ付き。(a)(c)(d)(e)もpass)。
   同日再レビュー指摘対応後は156条件すべてcover済み((a)(c)(d)(e)もpass)
-2026-10-16: TASK-11(Phase B)prod 3bucket構成移行でテスト先行の条件書更新
-(ユーザー指示2026-10-15: prodはyour-family-bucket/your-baked-bucket/your-atara-bucketの3bucket・
-profile使い分け・混同配置が構造的に起きないこと)。
-- cli.tomlへ2条件追加: cli.profile-multi-bucket-isolation(3bucket以上のprofile構成でも
-  bucket単位分離が機能=H-1機構のprofile数非依存検証)・cli.backup-push-connection-dest-shown
-  (backup pushの接続先実効profile/bucket/prefix表示。dry-runでも表示)
-- tests/phase_b_options.rsへ2test追加(three_bucket_aws_tomlによるdev+prod系2bucket構成)。
-  実装(AwsConfigへ実効profile名保持・push開始時の接続先表示)後にcargo test全件pass・
-  verify-conditions.py PASS
-- 条件数158
 - (c) 条件書tomlのschema検査(id形式・必須フィールド・expect_*の存在・givenの実質性)
 - (d) `source_lines`をタグ走査結果へ自動同期(自動メタデータ・手書きしない)
 - (e) `[[excluded]]`の構造検査(item/source/reasonの空欄をfail)
