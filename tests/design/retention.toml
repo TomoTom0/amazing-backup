@@ -18,6 +18,15 @@
 #   新規1件: lifecycle-data-ncve-and-sweep-rules。
 #   excludedへdev bucket初期化手順(設計8章)を追加。
 #   実装前のため新規条件のテストは未作成・改訂期待値のテストは実行failを許容。
+# 2026-10-22: TASK-18追加仕様「manage reset」(設計8章の原則変更2026-10-22ユーザー承認:
+#   旧承認事項9「恒久コマンドは作らない」撤回により恒久コマンド化)対応で
+#   テスト先行の更新(出典: 設計8.1コマンド仕様・5.12)。
+#   除外解消1件: dev bucket初期化手順(恒久コマンドmanage resetの実装により条件化。
+#   旧excludedの理由「恒久コマンド・繰り返し可能な全消去コマンドは作らない設計」は
+#   設計8章冒頭の原則変更で消滅)。
+#   新規5件: reset-dev-purpose-guard・reset-prod-registry-records-guard・
+#   reset-dry-run-default・reset-apply-clears-versions-and-registry・reset-idempotent。
+#   実装前のため新規条件のテストは実行failを許容。
 
 [meta]
 feature = "retention"
@@ -101,6 +110,51 @@ given = "noncurrent 2版のlast_modifiedを文字列辞書順と実時刻が逆�
 expect_return_shape = "実時刻で古い版(辞書順では新しい方)が削除対象となり、実時刻で新しい版は残る(削除DeleteObjectVersionのversion_idが実時刻順の期待と一致)"
 source_lines = "tests/retention.rs:560"
 
+[[condition]]
+id = "retention.reset-dev-purpose-guard"
+target_function = "cli::cmd_manage_reset(安全弁1)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(8.1コマンド仕様)・5.12(manage)"
+description = "manage reset(dev bucket初期化・恒久コマンド)の安全弁1: 実効profileのpurposeがdevであること(AwsConfig(src/config.rs)へpurpose保持を追加し、選択時のみでなく実行時にも参照)。prod等のpurposeでの実行はbucket指定によらず拒否。違反は設定エラー2+案内で、S3 API呼び出しを行わない (integration, fake seam)"
+given = "dev/purposeとprod/purposeのprofileを併記したaws.tomlで、prod側profileを--profile指定した manage reset 実行(既定dry-runのまま実行)"
+expect_return_shape = "exit 2でpurpose=dev限定の旨の案内表示が出て、S3 API呼び出し(ListObjectVersions等)は一切行われない"
+source_lines = "tests/retention.rs:673"
+
+[[condition]]
+id = "retention.reset-prod-registry-records-guard"
+target_function = "cli::cmd_manage_reset(安全弁2)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(8.1コマンド仕様)・5.12(manage)"
+description = "manage resetの安全弁2: ローカルregistry(data/registry.jsonl。registry.jsonlはprofile共用の1ファイル)に当該bucketと異なるbucket宛のfile_upload記録(prod由来)が存在する場合、実行拒否(消去するとprod側の記録を失うため。案内: prod記録の退避・協議)。違反は設定エラー2+案内で、S3 API呼び出しを行わない (integration, fake seam)"
+given = "registryにs3_bucketが実効bucketと異なるfile_upload記録を含む状態(dev/purpose profile)での manage reset --apply 実行"
+expect_return_shape = "exit 2でprod記録の退避・協議を促す案内表示が出て、S3 API呼び出しは一切行われずregistryも消去されない"
+source_lines = "tests/retention.rs:703"
+
+[[condition]]
+id = "retention.reset-dry-run-default"
+target_function = "cli::cmd_manage_reset"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(8.1コマンド仕様)・5.12(manage)"
+description = "manage resetは--apply無し既定dry-run(prune/reconcileと同一流儀): 削除を行わず、消去対象のobject version数(Versions・DeleteMarkers別)とregistry退避先path(./tmp/<yyyymmdd(JST)>_registry_before_reset.jsonl)を報告してexit 0する (integration, fake seam)"
+given = "push済み(Versions複数)かつdelete marker 1件が存在する状態での、オプション省略の manage reset 実行"
+expect_return_shape = "DeleteObjectVersionは呼ばれず、Versions・DeleteMarkers別の対象数表示とregistry退避先pathの表示が出てexit 0。registry・S3 objectは変化しない"
+source_lines = "tests/retention.rs:738"
+
+[[condition]]
+id = "retention.reset-apply-clears-versions-and-registry"
+target_function = "cli::cmd_manage_reset(apply操作)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(8.1コマンド仕様)・5.12(manage)"
+description = "manage reset --applyの操作順: 1) registryを./tmp/<yyyymmdd(JST)>_registry_before_reset.jsonlへ退避(不在ならskip) 2) list_versions(prefix=root prefix)でVersions・DeleteMarkers全件を列挙し各件delete_object_versionで削除(data/配下に留まらずsys/索引・manifestも消去対象。S3Backend操作はlist_versions/delete_object_versionのみ) 3) ローカルregistry削除(data/outはreset対象外・手動掃除) 4) 再list_versionsで0件であることを確認表示 (integration, fake seam)"
+given = "push済み(data object・索引・manifest・metadata)かつdelete marker 1件が存在する状態での manage reset --apply 実行(退避先がcwd基準のため専用作業dirで実行)"
+expect_return_shape = "exit 0で、退避fileが退避時点のregistryと同一内容で作成され、全version(delete marker含む)がDeleteObjectVersionで削除され、再list_versions 0件の確認表示が出て、registry.jsonlが削除される"
+source_lines = "tests/retention.rs:794"
+
+[[condition]]
+id = "retention.reset-idempotent"
+target_function = "cli::cmd_manage_reset(冪等性)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(8.1コマンド仕様)・5.12(manage)"
+description = "manage resetは冪等: 空状態への再実行(registry不在のため退避skip・0件削除)も成功する。途中失敗時は再実行で残りを削除 (integration, fake seam)"
+given = "manage reset --apply実行済みの空状態(S3 version 0件・ローカルregistry不在)での再実行"
+expect_return_shape = "exit 0で、registry退避はskip表示・削除対象0件・再list_versions 0件の確認表示が出て、新たな退避fileは作られない"
+source_lines = "tests/retention.rs:857"
+
 [[excluded]]
 item = "IAM policy案(principal A: 全操作 / principal B: 復元専用最小権限)"
 source = "tmp/tasks/tm-10/design_s3_storage.md 5.3"
@@ -113,11 +167,4 @@ item = "Object Lockの採用(5.4)"
 source = "tmp/tasks/tm-10/design_s3_storage.md 5.4"
 reason = "不採用の設計判断(versioning+IAM分離で十分・compliance modeの誤設定復旧不能リスク等の根拠は5.4)。実装・検証対象が存在しない。将来要件が出た場合の拡張点としてのみ記録"
 decided_at = "2026-10-14"
-decided_by = "claude"
-
-[[excluded]]
-item = "dev bucket(your-dev-bucket)初期化手順(旧形式オブジェクト・索引・manifest・ローカルregistryの全消去。aws CLIによる一度限り手作業)"
-source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(dev初期化手順)"
-reason = "実行はユーザーの明示承認後・一度限りの手順(恒久コマンド・繰り返し可能な全消去コマンドは作らない設計)であり検証対象コードの振る舞い条件が存在しない(TASK-10 7.1の除外と同様)"
-decided_at = "2026-10-22"
 decided_by = "claude"

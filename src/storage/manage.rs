@@ -1,5 +1,6 @@
-//! manage系(TASK-18 5.12・6.2/6.3/6.4): prune(data/一括)・lifecycle(3rule)・
-//! index(rebuild/reconcile)・jobs(reissue)・location rm(旧所在の明示除去)。
+//! manage系(TASK-18 5.12・6.2/6.3/6.4・8章): prune(data/一括)・lifecycle(3rule)・
+//! index(rebuild/reconcile)・jobs(reissue)・location rm(旧所在の明示除去)・
+//! reset(dev bucket初期化の全消去・8.1)。
 
 use super::get::{RestoreCheck, ensure_restored, restore_guidance};
 use super::{CtxArgs, now_jst, open_session, resolve_key, sha256_hex};
@@ -45,6 +46,13 @@ pub enum ManageSub {
     Jobs {
         #[command(subcommand)]
         sub: JobsSub,
+    },
+    /// dev bucketの初期化(全消去・冪等。安全弁付き。dry-run既定・--applyで実行)
+    Reset {
+        #[command(flatten)]
+        ctx: CtxArgs,
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -135,6 +143,7 @@ pub fn cmd_manage(args: &ManageArgs) -> i32 {
                 tier,
             } => cmd_manage_jobs_reissue(ctx, object_key, tier.as_deref()),
         },
+        ManageSub::Reset { ctx, apply } => cmd_manage_reset(ctx, *apply),
     }
 }
 
@@ -877,4 +886,143 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             e.exit_code()
         }
     }
+}
+
+/// manage reset(TASK-18 8章・8.1): dev bucket初期化の恒久コマンド(全消去・冪等)。
+/// 既定dry-run・--applyで実行(prune/reconcileと同一流儀)。
+/// 安全弁(違反は設定エラー2+案内・S3 API呼び出しなし): 1) 実効profileのpurposeが
+/// devであること(AwsConfigのpurpose保持。prod等ではbucket指定によらず拒否)
+/// 2) ローカルregistryに当該bucketと異なるbucket宛のfile_upload記録(prod由来。
+/// registry.jsonlはprofile共用の1ファイル)があれば実行拒否(案内: prod記録の退避・協議)。
+/// apply操作: registry退避→list_versions(root prefix)でVersions・DeleteMarkers全件を
+/// delete_object_version→ローカルregistry削除(data/outは対象外・手動掃除)→
+/// 再list_versionsで0件確認。S3Backend操作は既存のlist_versions・
+/// delete_object_versionのみ(新API追加なし)。
+fn cmd_manage_reset(ctx: &CtxArgs, apply: bool) -> i32 {
+    let run = (|| -> BackupResult<i32> {
+        let session = open_session(ctx)?;
+        let cfg = session.cfg.as_ref().ok_or_else(|| {
+            BackupError::Config("manage resetには--config(pipeline.toml)が必要です".to_string())
+        })?;
+        // 安全弁1: purpose=dev限定
+        if session.aws.purpose != "dev" {
+            return Err(BackupError::Config(format!(
+                "manage resetはdev用bucketの初期化コマンドです(実効profile {}のpurpose={})。prod等のbucketではbucket指定によらず実行できません",
+                session.aws.profile, session.aws.purpose
+            )));
+        }
+        // 安全弁2: 当該bucketと異なるbucket宛のfile_upload記録(prod由来)の混在拒否
+        let registry_path = cfg.registry_path.clone();
+        if registry_path.is_file() {
+            let records = registry::load_registry(&registry_path)?;
+            let reduced = registry::reduce_records(&records);
+            if let Some(u) = reduced.file_uploads.iter().find(|u| {
+                !registry::record_bucket_matched(
+                    &u.s3_bucket,
+                    &session.aws.bucket,
+                    &session.canonical_bucket,
+                )
+            }) {
+                return Err(BackupError::Config(format!(
+                    "registry({})に当該bucket({})と異なるbucket({})宛のfile_upload記録があります。resetで消去すると当該bucket側の記録を失うため実行を拒否します(prod記録の退避・対応を協議してください)",
+                    registry_path.display(),
+                    session.aws.bucket,
+                    u.s3_bucket
+                )));
+            }
+        }
+        let backup_path = registry_backup_path();
+        let prefix = session.aws.prefix.clone();
+        let versions = session
+            .backend
+            .list_versions(&session.aws.bucket, &prefix)?;
+        let n_versions = versions.iter().filter(|v| !v.is_delete_marker).count();
+        let n_markers = versions.iter().filter(|v| v.is_delete_marker).count();
+        if !apply {
+            println!(
+                "[dry-run] manage reset: prefix={prefix} Versions={n_versions} DeleteMarkers={n_markers}"
+            );
+            println!("[dry-run] registry退避先: {}", backup_path.display());
+            println!(
+                "[dry-run] 実行は --apply (data/配下に留まらずsys/索引・manifestも消去します)"
+            );
+            return Ok(0);
+        }
+        // 1. registry退避(証跡。復元しない前提。不在ならskip)
+        if registry_path.is_file() {
+            if let Some(parent) = backup_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    BackupError::Process(format!(
+                        "registry退避先dirの作成に失敗({}): {e}",
+                        parent.display()
+                    ))
+                })?;
+            }
+            std::fs::copy(&registry_path, &backup_path).map_err(|e| {
+                BackupError::Process(format!(
+                    "registry退避に失敗({} -> {}): {e}",
+                    registry_path.display(),
+                    backup_path.display()
+                ))
+            })?;
+            println!(
+                "registry退避: {} -> {}",
+                registry_path.display(),
+                backup_path.display()
+            );
+        } else {
+            println!(
+                "registry退避: skip ({}は存在しません)",
+                registry_path.display()
+            );
+        }
+        // 2. S3全消去: Versions・DeleteMarkers全件をDeleteObjectVersion
+        //    (root prefix配下一括。途中失敗時は再実行で残りを削除)
+        for v in &versions {
+            session
+                .backend
+                .delete_object_version(&session.aws.bucket, &v.key, &v.version_id)?;
+            println!("delete {} version_id={}", v.key, v.version_id);
+        }
+        // 3. ローカルregistry削除(data/outはreset対象外・手動掃除)
+        if registry_path.is_file() {
+            std::fs::remove_file(&registry_path).map_err(|e| {
+                BackupError::Process(format!(
+                    "registryの削除に失敗({}): {e}",
+                    registry_path.display()
+                ))
+            })?;
+        }
+        // 4. 検証: 再list_versionsで0件であることを確認表示
+        let rest = session
+            .backend
+            .list_versions(&session.aws.bucket, &prefix)?;
+        if rest.is_empty() {
+            println!("検証: 再list_versionsで残存version 0件を確認しました");
+        } else {
+            return Err(BackupError::Process(format!(
+                "reset後も{}件のversionが残っています。再実行(--apply)で残りを削除してください",
+                rest.len()
+            )));
+        }
+        println!("reset完了: Versions={n_versions} DeleteMarkers={n_markers}を削除しました");
+        Ok(0)
+    })();
+    match run {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// registry退避先path(8.1): cwd基準 ./tmp/<yyyymmdd(JST)>_registry_before_reset.jsonl。
+fn registry_backup_path() -> std::path::PathBuf {
+    let jst = chrono::FixedOffset::east_opt(9 * 3600).expect("JST offset");
+    let ymd = chrono::Utc::now()
+        .with_timezone(&jst)
+        .format("%Y%m%d")
+        .to_string();
+    std::path::PathBuf::from(format!("./tmp/{ymd}_registry_before_reset.jsonl"))
 }

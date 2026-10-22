@@ -98,6 +98,10 @@ pub struct AwsConfig {
     /// 実効profile名(--profile・env・active_profileの解決結果。
     /// 接続先表示=誤接続防止用。TASK-11 Phase B: 3prod bucket構成の混同防止)
     pub profile: String,
+    /// 実効profileのpurpose(dev/prod等)。従来はprofile選択時にのみ使われ破棄
+    /// されていたが、TASK-18 8章の`manage reset`安全弁(実効profileのpurpose=dev
+    /// 限定)のため保持する
+    pub purpose: String,
     pub bucket: String,
     pub region: String,
     /// credentialファイル(`configs/secret/aws-credentials.toml`等)のpath。
@@ -605,6 +609,7 @@ pub fn load_aws_profile(
     }
     Ok(AwsConfig {
         profile: selected_name,
+        purpose: prof.purpose.clone(),
         bucket: prof.bucket.clone(),
         region: prof.region.clone(),
         credentials_file: std::path::PathBuf::from(credentials_file.clone()),
@@ -1063,6 +1068,7 @@ mod tests {
         let creds = write_credentials(tmp.path());
         let empty_both = AwsConfig {
             profile: "dev".into(),
+            purpose: "dev".into(),
             bucket: String::new(),
             region: String::new(),
             credentials_file: creds.clone(),
@@ -1089,6 +1095,7 @@ mod tests {
 
         let ready = AwsConfig {
             profile: "dev".into(),
+            purpose: "dev".into(),
             bucket: "b".into(),
             region: "r".into(),
             credentials_file: creds,

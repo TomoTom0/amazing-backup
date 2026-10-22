@@ -600,3 +600,299 @@ fn prune_orders_versions_by_epoch() {
         "実時刻(epoch)順で最古のids[0]が削除される(文字列順ならids[1]が削除される): ids={ids:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// manage reset(TASK-18 8章・8.1: dev bucket初期化の恒久コマンド)
+
+/// reset系testの共通setup: 1件push(title=tag)済みのfixtureと作業dirを返す
+/// (退避先./tmp/がcwd基準のため、reset本体はrepoのtmp/を汚さない作業dirで実行する)。
+fn reset_setup(tag: &str) -> Option<(StorageFixture, std::path::PathBuf)> {
+    let fx = StorageFixture::new(tag, StorageOpts::default())?;
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"reset-plain");
+    let (code, stdout) = push_titled_pty(&fx, &[&a], tag, &[])?;
+    assert_eq!(code, 0, "初回push(pty promptでtitle付与): {stdout}");
+    let work = fx
+        .cfg
+        .parent()
+        .map(|p| p.join("reset-work"))
+        .unwrap_or_default();
+    std::fs::create_dir_all(&work).expect("reset作業dir作成");
+    Some((fx, work))
+}
+
+/// cwd指定で`manage reset`を実行する(registry退避先./tmp/<yyyymmdd>_registry_before_
+/// reset.jsonlがcwd基準のため)。
+fn reset_run_cwd(
+    fx: &StorageFixture,
+    extra: &[&str],
+    cwd: &std::path::Path,
+) -> (i32, String, String) {
+    let mut args: Vec<String> = vec!["manage".into(), "reset".into()];
+    args.extend(extra.iter().map(|s| s.to_string()));
+    args.push("--config".into());
+    args.push(fx.cfg.display().to_string());
+    args.push("--aws-config".into());
+    args.push(fx.aws_toml.display().to_string());
+    args.push("--key".into());
+    args.push(fx.secret.display().to_string());
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let state_s = fx.state.display().to_string();
+    run_bin_cwd(
+        &refs,
+        &[("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())],
+        cwd,
+    )
+}
+
+/// versions stateへ指定keyのdelete marker 1件を直接配置する(resetの
+/// DeleteMarkers計上・削除の観察用。FakeS3の版state 5列形式: vid/size/mtime/kind/sc)。
+/// 版stateを置くkeyは実objectを持たないorphan(pin rm残渣相当)を指定し、
+/// push産物の版stateを上書きしない。
+fn seed_delete_marker(fx: &StorageFixture, key: &str, vid: &str) {
+    let path = fx.state.join("versions").join(key);
+    write_file(
+        &path,
+        format!("{vid}\t0\t2026-10-22T00:00:00Z\tmarker\t\n").as_bytes(),
+    );
+}
+
+/// reset表示から`<label>=<n>`の値を読む(無ければ-1。値の直後に空白を挟まず
+/// 日本語が続く行にも対応)。
+fn reset_count(stdout: &str, label: &str) -> i64 {
+    stdout
+        .split(&format!("{label}="))
+        .nth(1)
+        .and_then(|rest| {
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse().ok()
+        })
+        .unwrap_or(-1)
+}
+
+/// [covers:retention.reset-dev-purpose-guard]
+/// 安全弁1(8.1): 実効profileのpurposeがdevであること。prod等のpurposeでの実行は
+/// bucket指定によらず拒否(設定エラー2+案内・S3 API呼び出しなし)。
+#[test]
+fn reset_rejects_non_dev_purpose_profile() {
+    let Some((fx, _)) = reset_setup("ret-reset-prod") else {
+        return;
+    };
+    // aws.tomlへprod/purposeのprofileを追加し実効profileへ指定(dev側と同一bucket・
+    // prefixでもpurpose違反で拒否=bucket指定によらないことを観察)
+    fx.rewrite_aws_toml(&format!(
+        "{}\n[aws.profiles.prod1]\npurpose = \"prod\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"{}\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{}\"\n",
+        fx.aws_toml_body(),
+        fx.prefix,
+        fx.credentials.display()
+    ));
+    clear_calls(&fx);
+    // 既定dry-runの実行でも安全弁は先に判定される
+    let (code, stdout, stderr) = fx.manage("reset", &["--profile", "prod1"]);
+    assert_eq!(
+        code, 2,
+        "prod/purposeでの実行は設定エラー2(bucket指定によらず拒否): {stdout}{stderr}"
+    );
+    assert!(
+        stderr.contains("purpose") && stderr.contains("dev"),
+        "purpose=dev限定の案内: {stdout}{stderr}"
+    );
+    assert_eq!(fx.calls(), "", "S3 API呼び出しは行われない: {}", fx.calls());
+}
+
+/// [covers:retention.reset-prod-registry-records-guard]
+/// 安全弁2(8.1): ローカルregistryに当該bucketと異なるbucket宛のfile_upload記録
+/// (prod由来。registry.jsonlはprofile共用の1ファイル)が存在する場合は実行拒否
+/// (設定エラー2+案内・S3 API呼び出しなし・registryも消去しない)。
+#[test]
+fn reset_rejects_foreign_bucket_upload_records() {
+    let Some((fx, _)) = reset_setup("ret-reset-foreign") else {
+        return;
+    };
+    // registryへprod由来のfile_upload記録(s3_bucket=実効bucketと異なる)を直接追記
+    let mut foreign = fx
+        .registry_values()
+        .into_iter()
+        .find(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload"))
+        .expect("file_upload記録")
+        .clone();
+    foreign["s3_bucket"] = serde_json::json!("prod-your-family-bucket");
+    foreign["s3_key"] =
+        serde_json::json!("backup-remote/data/00000000-0000-7000-8000-000000000000/default.age");
+    append_registry_line(&fx.registry, &foreign);
+    clear_calls(&fx);
+
+    let (code, stdout, stderr) = fx.manage("reset", &["--apply"]);
+    assert_eq!(
+        code, 2,
+        "他bucket宛file_upload記録での実行は設定エラー2: {stdout}{stderr}"
+    );
+    assert!(
+        stderr.contains("prod-your-family-bucket"),
+        "拒否案内に当該bucket(prod記録の退避・協議の案内): {stdout}{stderr}"
+    );
+    assert!(fx.registry.is_file(), "registryは消去されない");
+    assert_eq!(fx.calls(), "", "S3 API呼び出しは行われない: {}", fx.calls());
+}
+
+/// [covers:retention.reset-dry-run-default]
+/// manage resetは--applyなき実行が既定dry-run(prune/reconcileと同一流儀): 削除を
+/// 行わず、消去対象のobject version数(Versions・DeleteMarkers別)とregistry退避先path
+/// (./tmp/<yyyymmdd(JST)>_registry_before_reset.jsonl)を報告してexit 0。
+#[test]
+fn reset_dry_run_is_default_and_reports_counts() {
+    let Some((fx, _)) = reset_setup("ret-reset-dry") else {
+        return;
+    };
+    let uuid = uuid_of_path(&fx, &fx.data_root.join("a.zip"));
+    let data_key = fx.data_key(&uuid);
+    let marker_key = format!("{}data/{}/pin-gone.age", fx.prefix, uuid);
+    seed_delete_marker(&fx, &marker_key, "reset-marker-1");
+    clear_calls(&fx);
+
+    let (code, stdout, stderr) = fx.manage("reset", &[]);
+    assert_eq!(
+        code, 0,
+        "reset(オプション省略=dry-run)はexit 0: {stdout}{stderr}"
+    );
+    assert!(
+        stdout.contains("[dry-run]"),
+        "dry-run報告であることの表示: {stdout}"
+    );
+    // 初回pushの最小構成: default.age・manifest・索引・metadataの4版+seed marker 1件
+    assert!(
+        reset_count(&stdout, "Versions") >= 4,
+        "Versions計上(pushの4object以上): {stdout}"
+    );
+    assert_eq!(
+        reset_count(&stdout, "DeleteMarkers"),
+        1,
+        "DeleteMarkers計上(seed marker 1件): {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "tmp/{}_registry_before_reset.jsonl",
+            jst_today().replace('-', "")
+        )),
+        "registry退避先pathの表示: {stdout}"
+    );
+    // dry-runでは削除・退避とも行わない
+    assert!(
+        !fx.calls()
+            .lines()
+            .any(|l| l.starts_with("s3 DeleteObjectVersion")),
+        "dry-runではDeleteObjectVersionは呼ばれない: {}",
+        fx.calls()
+    );
+    assert!(fx.registry.is_file(), "registryは削除されない");
+    assert!(
+        fx.object_path(&data_key).is_file() && fx.object_path(&fx.index_key()).is_file(),
+        "data object・索引objectは残る"
+    );
+}
+
+/// [covers:retention.reset-apply-clears-versions-and-registry]
+/// manage reset --apply(8.1の操作順): 1) registry退避 2) list_versions(root prefix)で
+/// Versions・DeleteMarkers全件をdelete_object_version(data/配下に留まらずsys/索引・
+/// manifestも消去) 3) ローカルregistry削除(data/outは対象外) 4) 再list_versionsで
+/// 0件確認表示。
+#[test]
+fn reset_apply_clears_versions_and_registry() {
+    let Some((fx, work)) = reset_setup("ret-reset-apply") else {
+        return;
+    };
+    let uuid = uuid_of_path(&fx, &fx.data_root.join("a.zip"));
+    let data_key = fx.data_key(&uuid);
+    let meta_key = fx.metadata_key(&uuid, "ret-reset-apply");
+    let marker_key = format!("{}data/{}/pin-gone.age", fx.prefix, uuid);
+    seed_delete_marker(&fx, &marker_key, "reset-marker-1");
+    let registry_before = fx.registry_values();
+
+    let (code, stdout, stderr) = reset_run_cwd(&fx, &["--apply"], &work);
+    assert_eq!(code, 0, "reset --applyはexit 0: {stdout}{stderr}");
+
+    // 1. registry退避: ./tmp/<yyyymmdd>_registry_before_reset.jsonl(registryと同一内容)
+    let backup = work.join("tmp").join(format!(
+        "{}_registry_before_reset.jsonl",
+        jst_today().replace('-', "")
+    ));
+    assert!(
+        backup.is_file(),
+        "退避fileが作成される: {}",
+        backup.display()
+    );
+    assert_eq!(
+        read_registry_lines(&backup),
+        registry_before,
+        "退避内容は退避時点のregistryと同一"
+    );
+    // 2. S3全消去(delete marker含む・sys/索引も消去対象)
+    assert!(
+        !fx.object_path(&data_key).is_file(),
+        "data object(default.age)は削除"
+    );
+    assert!(
+        !fx.object_path(&meta_key).is_file(),
+        "metadata objectは削除"
+    );
+    assert!(
+        !fx.object_path(&fx.index_key()).is_file(),
+        "索引object(sys/)も削除"
+    );
+    assert!(
+        version_ids_in_calls(&fx.calls(), "s3 DeleteObjectVersion", &marker_key)
+            .contains(&"reset-marker-1".to_string()),
+        "delete markerもDeleteObjectVersionで削除: {}",
+        fx.calls()
+    );
+    // 3. ローカルregistry削除
+    assert!(!fx.registry.is_file(), "registry.jsonlは削除される");
+    // 4. 再list_versions 0件の確認表示
+    assert!(
+        stdout.contains("0件"),
+        "再list_versions 0件の確認表示: {stdout}"
+    );
+}
+
+/// [covers:retention.reset-idempotent]
+/// 冪等性(8.1): 空状態への再実行(退避skip・0件削除)も成功する。
+#[test]
+fn reset_is_idempotent_on_empty_state() {
+    let Some((fx, work)) = reset_setup("ret-reset-idem") else {
+        return;
+    };
+    let (code, stdout, stderr) = reset_run_cwd(&fx, &["--apply"], &work);
+    assert_eq!(code, 0, "1回目のreset --apply: {stdout}{stderr}");
+    assert!(!fx.registry.is_file(), "1回目でregistry削除済み");
+    let backup = work.join("tmp").join(format!(
+        "{}_registry_before_reset.jsonl",
+        jst_today().replace('-', "")
+    ));
+    assert!(backup.is_file(), "1回目で退避file作成済み");
+
+    // 2回目: 空状態(S3 0件・registry不在)への再実行も成功(退避skip・0件削除)
+    clear_calls(&fx);
+    let (code, stdout, stderr) = reset_run_cwd(&fx, &["--apply"], &work);
+    assert_eq!(code, 0, "空状態への再実行もexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.contains("skip"),
+        "registry退避はskip表示(不在): {stdout}"
+    );
+    assert_eq!(reset_count(&stdout, "Versions"), 0, "削除対象0件: {stdout}");
+    assert_eq!(
+        reset_count(&stdout, "DeleteMarkers"),
+        0,
+        "削除対象0件(marker): {stdout}"
+    );
+    assert!(
+        !fx.calls()
+            .lines()
+            .any(|l| l.starts_with("s3 DeleteObjectVersion")),
+        "削除呼び出しは無い: {}",
+        fx.calls()
+    );
+    assert!(
+        stdout.contains("0件"),
+        "再list_versions 0件の確認表示: {stdout}"
+    );
+}

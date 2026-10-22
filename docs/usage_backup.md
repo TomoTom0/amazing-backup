@@ -23,7 +23,7 @@ NASバックアップアーカイブ(zip/7z)をageで暗号化し、S3(versionin
 | 復元 | `backup pull` | category/run/全対象の一括復元(確認付き) |
 | 検査 | `backup verify` | ローカル成果物の整合検査 |
 | 管理 | `pin add/rm` | 世代管理対象外のピン留め版の付与・解除 |
-| 管理 | `manage prune/lifecycle/index/jobs` | 世代削除・bucket保持設定・索引再構築・復元job再発行 |
+| 管理 | `manage prune/lifecycle/index/location/jobs/reset` | 世代削除・bucket保持設定・索引再構築・旧所在除去・復元job再発行・dev bucket初期化 |
 | 設定 | `edit categories/files/layout/policy` | 設定sectionの確認 |
 
 ### 1.2 パイプラインと成果物
@@ -285,11 +285,10 @@ fileの配置先は次の優先順位で解決される:
 
 ### 4.4 世代管理(lifecycle・prune)
 
-保持は「category毎のkeep値」で制御される。削除条件の定義はlifecycle(NCVE)とpruneで共通: **同一keyのnoncurrent版を新しい順に並べたとき、newer noncurrent版の数がkeep以上となった版を削除**(境界のちょうどkeep番目は残す)。
+保持は`configs/aws.toml`の`[aws.lifecycle]`(`noncurrent_days`・`keep_versions`・`mpu_abort_days`)で制御される。削除条件の定義はlifecycle(NCVE)とpruneで共通: **同一keyのnoncurrent版を新しい順に並べたとき、newer noncurrent版の数が`keep_versions`以上となった版を削除**(境界のちょうど`keep_versions`番目は残す)。
 
-- **`manage lifecycle apply`**(bucket側・自動): category毎のNCVE rule(`NoncurrentDays=180`・`NewerNoncurrentVersions=keep`)とMPU abort rule(7日)をbucketへ適用。180日はDeep Archive最小保存期間(early deletion課金)に合わせたもの
-- **`manage prune`**(即時実行・dry-run既定): 同一条件で即時にDeleteObjectVersion。現行version・pin keyは構造的保護で対象外
-- category追加時は`manage lifecycle apply`の再実行が必要
+- **`manage lifecycle apply`**(bucket側・自動): `{prefix}data/`一括の3rule(1) NCVE(`NoncurrentDays=noncurrent_days`・`NewerNoncurrentVersions=keep_versions`) 2) MPU abort(`mpu_abort_days`日) 3) 期限切れdelete marker掃除)をbucketへ適用(rule一式の置換・冪等。値はすべてaws.tomlから)。Deep Archive最小保存期間(early deletion課金)との整合のため、DEEP_ARCHIVE profileで`noncurrent_days<180`は設定エラー2
+- **`manage prune`**(即時実行・dry-run既定): 同一条件で即時にDeleteObjectVersion(`{prefix}data/`一括・`/default.age`終端のみ)。現行version・pin key・metadata keyは構造的保護で対象外
 
 ## 5. コマンドリファレンス
 
@@ -299,7 +298,7 @@ fileの配置先は次の優先順位で解決される:
 
 | option | 既定 | 意味 |
 |---|---|---|
-| `--config PATH` | なし | pipeline.toml。**照会系は省略可**(getの`--key`既定解決に使う場合は指定)。backup push・pin・manage prune/lifecycle/indexは必須(省略は設定エラー2) |
+| `--config PATH` | なし | pipeline.toml。**照会系は省略可**(getの`--key`既定解決に使う場合は指定)。backup push・pin・manageの一部(prune/index/location rm/reset)は必須(省略は設定エラー2) |
 | `--aws-config PATH` | `configs/aws.toml` | aws.toml |
 | `--key PATH` | pipeline.toml `[verify].decrypt_key` | 復号用SSH ed25519秘密鍵(get/pull・pinの索引読込等)。どちらにも無ければ設定エラー2 |
 | `--profile NAME` | aws.toml `[aws].active_profile` | 当該実行限りprofileを上書き(aws.tomlへの書戻しはしない) |
@@ -448,21 +447,27 @@ backup-remote pin rm <name> --pin <版名>
 ### 5.10 manage — 保持・索引・lifecycle・job管理
 
 ```
-backup-remote manage prune --category C [--keep N] [--dry-run | --apply]
+backup-remote manage prune [--dry-run | --apply]
 backup-remote manage lifecycle show|apply
 backup-remote manage index rebuild
+backup-remote manage index reconcile [--apply]
+backup-remote manage location rm <source_path> [--uuid <uuid>]
 backup-remote manage jobs reissue <object_key> [--tier T]
+backup-remote manage reset [--apply]
 ```
 
 | subcommand | 動作 |
 |---|---|
-| `prune` | 世代削除の即時実行。`--category`必須(予約語・未定義は設定エラー2)。**dry-runが既定**(削除予定を表示)。`--apply`でDeleteObjectVersionを実行し索引を更新。`--keep N`は当該実行のみ設定値を上書き(1〜100)。`--dry-run`と`--apply`の併用はusage 64。現行version・pin keyは対象外(構造的保護) |
+| `prune` | 世代削除の即時実行(`{prefix}data/`一括)。**dry-runが既定**(削除予定を表示)。`--apply`でDeleteObjectVersionを実行し索引を更新。keepはaws.toml `[aws.lifecycle].keep_versions`(実行時上書き不可)。`--dry-run`と`--apply`の併用はusage 64。現行version・pin key・metadata keyは対象外(構造的保護) |
 | `lifecycle show` | bucketの現在のlifecycle設定を表示 |
-| `lifecycle apply` | category毎NCVE rule(NoncurrentDays=180・NewerNoncurrentVersions=keep)+MPU abort 7日ruleを適用(rule一式の置換・冪等)。`--config`必須 |
-| `index rebuild` | 索引をmanifest(`sys/manifests/`)から再構築(9.2)。`--config`必須 |
+| `lifecycle apply` | `{prefix}data/`一括の3rule(NCVE+MPU abort+期限切れdelete marker掃除)を適用(rule一式の置換・冪等)。値はすべてaws.toml `[aws.lifecycle]`から |
+| `index rebuild` | 索引をmanifest(`sys/manifests/`)から再構築(9.2)。完了時に続けての`index reconcile`実行を案内。`--config`必須 |
+| `index reconcile` | lifecycle消滅版の索引整合。**dry-runが既定**(件数表示)。`--apply`でsweep記録+索引再構築(S3実在集合へ整合)。`--config`必須 |
+| `location rm` | 旧所在の明示除去(`--uuid`でentity絞込可。不在・複数hitは対象エラー3)。location_remove記録+索引再構築+metadata sync。S3・実体には触れない(再backupで所在は復活) |
 | `jobs reissue` | 復元jobの再発行(tier変更可。Tierのallowlist外はusage 64)。対象はobject keyで指定 |
+| `reset` | dev bucketの初期化(全消去・冪等)。**dry-runが既定**(消去対象version数=Versions・DeleteMarkers別とregistry退避先pathを表示)。`--apply`で 1) ローカルregistryを`./tmp/<yyyymmdd>_registry_before_reset.jsonl`へ退避(不在ならskip) 2) root prefix配下の全object version(Versions・DeleteMarkers)をDeleteObjectVersionで削除(`{prefix}data/`配下に留まらず`sys/`索引・manifestも消去) 3) ローカルregistry削除(`data/out`は対象外・手動掃除) 4) 再list_versionsで0件確認。安全弁(違反は設定エラー2+案内・S3 API呼び出しなし): 実効profileのpurpose=dev限定・ローカルregistryに当該bucketと異なるbucket宛のfile_upload記録があれば拒否。`--config`必須 |
 
-`prune`/`lifecycle`/`index`は`--config`必須。`jobs reissue`はconfig不要。
+`prune`/`index`/`location rm`/`reset`は`--config`必須。`lifecycle`/`jobs reissue`はconfig不要。
 
 ### 5.11 edit — 設定の確認
 
