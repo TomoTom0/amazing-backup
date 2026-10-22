@@ -954,8 +954,13 @@ impl S3Backend for RealS3 {
             {
                 Ok(out) => out,
                 Err(err) => {
-                    // 未設定(NoSuchLifecycleConfiguration)はNone
-                    if err.to_string().contains("NoSuchLifecycleConfiguration") {
+                    // 未設定(NoSuchLifecycleConfiguration)はNone(modeled errorが無い
+                    // APIのためcode文字列判定。SDK推奨の`err.code()`形式)
+                    let not_set = err.as_service_error().is_some_and(|e| {
+                        use aws_sdk_s3::error::ProvideErrorMetadata as _;
+                        e.code() == Some("NoSuchLifecycleConfiguration")
+                    });
+                    if not_set {
                         return Ok(None);
                     }
                     return Err(map_sdk_error(
