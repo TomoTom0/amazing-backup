@@ -319,6 +319,8 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 - 分割理由: test-structureの`[meta].source_file`(検証対象の実装ファイル・ファイル単位に1つ)が
   7エリアでそれぞれ別moduleに対応し、単一ファイルでは特定できないため。分割によりidの`<area>`部と
   ファイルstem = featureが一致し、id体系とファイル体系が1:1で噛み合う
+- 本表の条件数列は条件書を更新する作業(update-tests)のたびに実ファイルの`[[condition]]`件数へ
+  合わせて更新する(本READMEは索引であり実態との一致を保つ。2026-10-22 TASK-16)
 - 条件idはstable id(`<area>.<kebab-topic>`)。設計8章のPLAN-001等の表idは条件idに使わず、
   各条件の`source`欄に「tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-001(詳細は2.1)」の形で参照する。
   TASK-9の改訂条件もidは付与後不変のため旧idのまま文言のみ更新し、`source`欄へTASK-9設計書を追記
