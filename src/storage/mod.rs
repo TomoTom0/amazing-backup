@@ -142,7 +142,7 @@ pub(crate) fn read_index_for_query(
         .backend
         .head(&session.aws.bucket, &index_key)?
         .is_none()
-        && namespace_never_written(session)
+        && namespace_never_written(session)?
     {
         return Ok((
             crate::index::IndexHeader {
@@ -160,30 +160,29 @@ pub(crate) fn read_index_for_query(
 }
 
 /// ローカルregistryに当該prefix配下へのfile_upload記録が無い(=未書込namespace)か。
-/// registry不在・読込失敗はfalse(索引不在を異常扱い)。
+/// registry不在はfalse(索引不在を異常扱い)。registryの不正行(parse失敗)はエラー伝播
+/// する(黙って空扱いにしない)。
 /// 書込実績の判定はbucket一致(registry::record_bucket_matched。H-1)を伴う:
 /// 同一prefix・別bucketの他方profileの実績では未書込のまま(0件例外はbucket単位)。
-fn namespace_never_written(session: &Session) -> bool {
+fn namespace_never_written(session: &Session) -> BackupResult<bool> {
     let Some(cfg) = session.cfg.as_ref() else {
-        return false;
+        return Ok(false);
     };
     let registry_path = cfg.registry_path.clone();
     if !registry_path.is_file() {
-        return false;
+        return Ok(false);
     }
-    let Ok(records) = crate::registry::load_registry(&registry_path) else {
-        return false;
-    };
+    let records = crate::registry::load_registry(&registry_path)?;
     let reduced = crate::registry::reduce_records(&records);
     let prefix = session.aws.prefix.clone();
-    !reduced.file_uploads.iter().any(|u| {
+    Ok(!reduced.file_uploads.iter().any(|u| {
         u.s3_key.starts_with(&prefix)
             && crate::registry::record_bucket_matched(
                 &u.s3_bucket,
                 &session.aws.bucket,
                 &session.canonical_bucket,
             )
-    })
+    }))
 }
 
 /// 書き込み系コマンドの起動時versioning確認(設計5.1)。無効は設定エラー2+有効化案内。
@@ -214,6 +213,32 @@ pub(crate) fn sha256_hex_file(path: &Path) -> BackupResult<String> {
         ))
     })?;
     Ok(sha256_hex(&bytes))
+}
+
+/// 平文sha256のstreaming計算(dry-run予測などsize不明の大ファイル対象で
+/// 全文readによるメモリ膨張を避ける。読込失敗は対象エラー)。
+pub(crate) fn sha256_hex_streaming(path: &Path) -> BackupResult<String> {
+    use sha2::Digest;
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|e| {
+        crate::errors::BackupError::Target(format!("対象の読込に失敗({}): {e}", path.display()))
+    })?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| {
+            crate::errors::BackupError::Target(format!("対象の読込に失敗({}): {e}", path.display()))
+        })?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// 既存平文のsha256(平文衝突保護用。読込失敗は対象エラー)。

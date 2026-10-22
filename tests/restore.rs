@@ -24,7 +24,10 @@ fn tier_days_validation_before_s3_calls() {
     };
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"tier-days-plain");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
     clear_calls(&fx);
 
     for (tag, extra, want) in [
@@ -70,12 +73,15 @@ fn restore_header_parse_via_list_jobs() {
     write_file(&a, b"hdrparse-a");
     write_file(&b, b"hdrparse-b");
     write_file(&c, b"hdrparse-c");
-    for p in [&a, &b, &c] {
-        assert_eq!(fx.push(&[p], &[], &[]).0, 0);
+    for (p, title) in [(&a, "a.zip"), (&b, "b.zip"), (&c, "c.zip")] {
+        let Some((code, stdout)) = push_titled_pty(&fx, &[p], title, &[]) else {
+            return;
+        };
+        assert_eq!(code, 0, "初回push({title}): {stdout}");
     }
-    let key_a = fx.file_key("unfiled", None, "a.zip");
-    let key_b = fx.file_key("unfiled", None, "b.zip");
-    let key_c = fx.file_key("unfiled", None, "c.zip");
+    let key_a = fx.data_key(&uuid_of_path(&fx, &a));
+    let key_b = fx.data_key(&uuid_of_path(&fx, &b));
+    let key_c = fx.data_key(&uuid_of_path(&fx, &c));
     // fake backendのHeadObject応答のRestore状態: a=復元済み・b=進行中・c=未発行(不在)
     fx.seed_restore(&key_a, "restored");
     fx.seed_restore(&key_b, "ongoing");
@@ -109,7 +115,10 @@ fn get_preflight_key_and_age_errors() {
     };
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"preflight-plain");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
     clear_calls(&fx);
     let state_dir = fx.state.display().to_string();
     let aws_s = fx.aws_toml.display().to_string();
@@ -169,7 +178,10 @@ fn get_plain_conflict_protection() {
     };
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"plain-conflict-original");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
     let out = fx.elsewhere.join("plain-out");
     let out_s = out.display().to_string();
 
@@ -232,14 +244,33 @@ fn plain_conflict_unreadable_existing_file_protected_get_and_pull() {
     };
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"pull-unreadable-v1-longer");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "v1 push: {stdout}");
+    let uuid1 = uuid_of_path(&fx, &a);
     let out = fx.elsewhere.join("pull-out");
     let out_s = out.display().to_string();
     // 1度取得して既存平文を配置
-    assert_eq!(fx.get("a.zip", &["--out", &out_s]).0, 0);
-    // 新版push(既存平文とのsha256不一致)
+    assert_eq!(fx.get(&uuid1, &["--out", &out_s]).0, 0);
+    // 新版(内容変更は別entity発行・同一title。設計4.3「移動+内容変更」と同経路)
     write_file(&a, b"pull-unreadable-v2-long");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "v2 push(同一title別entity): {stdout}");
+    let uuid2 = uuid_of_path(&fx, &a);
+    // v2 runのみを対象範囲にする(pull --run。全対象だと同一title別entityの復元先が
+    // 衝突するため)
+    let run2 = fx
+        .registry_values()
+        .into_iter()
+        .find(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some("file_write")
+                && r.get("uuid").and_then(|u| u.as_str()) == Some(uuid2.as_str())
+        })
+        .and_then(|r| r.get("batch_id").and_then(|b| b.as_str()).map(String::from))
+        .expect("v2のbatch_id");
     let dest = out.join("a.zip");
     use std::os::unix::fs::PermissionsExt as _;
     let make_unreadable = || {
@@ -251,9 +282,9 @@ fn plain_conflict_unreadable_existing_file_protected_get_and_pull() {
             .expect("既存平文を読込可能化")
     };
 
-    // get --yesなし: 読込失敗=検証不能でも上書きしない(対象エラー3)
+    // get --yesなし(uuid探索でv2 entityを指定): 読込失敗=検証不能でも上書きしない(対象エラー3)
     make_unreadable();
-    let (code, _, stderr) = fx.get("a.zip", &["--out", &out_s]);
+    let (code, _, stderr) = fx.get(&uuid2, &["--out", &out_s]);
     assert_eq!(
         code, 3,
         "getは読込不能な既存平文を--yesなしで対象エラー3保護(上書きしない): {stderr}"
@@ -271,7 +302,7 @@ fn plain_conflict_unreadable_existing_file_protected_get_and_pull() {
 
     // get --yes: 明示的上書き指示のため読込不能な既存平文も上書きして続行
     make_unreadable();
-    let (code, stdout, stderr) = fx.get("a.zip", &["--out", &out_s, "--yes"]);
+    let (code, stdout, stderr) = fx.get(&uuid2, &["--out", &out_s, "--yes"]);
     assert_eq!(
         code, 0,
         "get --yesは読込不能な既存平文を上書きしてexit 0: {stdout}{stderr}"
@@ -285,9 +316,22 @@ fn plain_conflict_unreadable_existing_file_protected_get_and_pull() {
 
     // さらに新版push(pull対象を変えて上書きの観測性を保つ)
     write_file(&a, b"pull-unreadable-v3-longest");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "v3 push: {stdout}");
+    let uuid3 = uuid_of_path(&fx, &a);
+    let run3 = fx
+        .registry_values()
+        .into_iter()
+        .find(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some("file_write")
+                && r.get("uuid").and_then(|u| u.as_str()) == Some(uuid3.as_str())
+        })
+        .and_then(|r| r.get("batch_id").and_then(|b| b.as_str()).map(String::from))
+        .expect("v3のbatch_id");
 
-    // pull --yesなし(確認はTTY入力で通す): 読込失敗=検証不能でも上書きしない
+    // pull --yesなし(確認はTTY入力で通す・範囲はv3 run): 読込失敗=検証不能でも上書きしない
     make_unreadable();
     let state_s = fx.state.display().to_string();
     let cfg_s = fx.cfg.display().to_string();
@@ -297,7 +341,8 @@ fn plain_conflict_unreadable_existing_file_protected_get_and_pull() {
         &[
             "backup",
             "pull",
-            "--all",
+            "--run",
+            run3.as_str(),
             "--config",
             &cfg_s,
             "--aws-config",
@@ -325,9 +370,10 @@ fn plain_conflict_unreadable_existing_file_protected_get_and_pull() {
         "pull --yesなしでは既存平文は不変"
     );
 
-    // pull --yes: 上書きして続行
+    // pull --yes(範囲はv3 run): 上書きして続行
     make_unreadable();
-    let (code, stdout, stderr) = fx.backup_pull(&["--all", "--yes", "--out", &out_s]);
+    let (code, stdout, stderr) =
+        fx.backup_pull(&["--run", run3.as_str(), "--yes", "--out", &out_s]);
     assert_eq!(
         code, 0,
         "pull --yesは読込不能な既存平文を上書きしてexit 0: {stdout}{stderr}"

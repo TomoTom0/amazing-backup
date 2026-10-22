@@ -19,7 +19,11 @@ fn pushed_env(tag: &str, plain: &[u8]) -> Option<StorageFixture> {
     )?;
     let src = fx.data_root.join("a.zip");
     write_file(&src, plain);
-    assert_eq!(fx.push(&[&src], &[], &[]).0, 0);
+    // 新規発行はtitle必須(設計6.1)のためpty promptで与える
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&src], "verify-title", &[]) else {
+        return None;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
     Some(fx)
 }
 

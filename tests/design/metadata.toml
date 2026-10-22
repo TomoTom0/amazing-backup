@@ -1,0 +1,60 @@
+# backup-remote テスト設計条件書(metadata エリア)
+# 出典: tmp/tasks/tm-18/design_key-uuid-versioning.md 2章(metadata schema・更新規則)・5.5・10章(backup push metadata sync)
+# 2026-10-22: TASK-18(S3キー設計: UUID+versioning)対応でテスト先行の条件書(新設feature)。
+#   src/metadata.rs は設計5.5で新設されるmodule(MetadataDoc導出・差分書込・title変更キーローテーション)。
+#   metadataは data/{uuid}/metadata_{title}.json(平文JSON・STANDARD固定・versioning対象で非現行版は
+#   data/一括NCVEで自動掃除)。sync契機はbackup push run末尾(touched_entities)・pin add/rm・location rm。
+#   実装前のため条件に対応するテストコードは未作成(網羅検査は後段のテスト作成で解消)。
+
+[meta]
+feature = "metadata"
+source_file = "src/metadata.rs"
+verified = true
+verified_at = "2026-10-22"
+verified_by = "claude"
+test_command = "cargo test"
+source_hash = "5a7c81ec2742575f4a8c5f5a46288f440d016251"
+note = "TASK-18(設計2章・5.5本文)の条件化。metadataはregistry reduceから正規形として導出できる実体の身元票(災害時にS3コンソールだけで実体を同定する目的・平文JSON)。書込観測はfake seamのPutObject/GetObject呼び出し記録で行う。encrypted版latest_source_pathは実ageでの暗号化を要する"
+
+[[condition]]
+id = "metadata.doc-built-from-registry"
+target_function = "metadata::build_metadata"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 2.1(schema=1のfield定義)・2.3.1(pins/recipients導出規則)・5.5・10章(metadata sync)"
+description = "MetadataDocはregistry reduceから正規形として導出される: 現行title=uuid直近file_writeのtitle・現行版=bucket一致のuuid直近file_upload(version_id/source_sha256/age_sha256/size両側/date/version_ts)・pins=未削除bucket一致pin_writeから{pin,date,source_sha256}(並びはpin名辞書順で確定=冪等)・recipients=現行版のbatch_idとuuidが一致するfile_writeのrecipients(file_uploadはrecipientsを持たないため。欠損時はuuid直近file_writeへfall back)・latest_source_path=last_backup最新location。serializeはstruct宣言順で固定(同内容ならbyte同一=差分比較の前提)。版歴全件・所在履歴全件・分類(category/rel_path)は載せない(承認事項1) (unit)"
+given = "同一uuidへfile_write複数(直近title=B)・file_upload 2件(bucket一致は新方のみ)・pin_write 2件(pin名辞書順と逆の記録順)を含むregistryからのbuild_metadata"
+expect_return_shape = "title=B・version_id/各shaは新方file_upload記録値・pinsはpin名辞書順・recipientsは現行版batch一致file_write由来(fall back分岐含む)のdoc。同一registryからの2回の導出はbyte同一"
+source_lines = "tests/metadata_storage.rs:53"
+
+[[condition]]
+id = "metadata.put-only-if-changed"
+target_function = "metadata::read_metadata / put_metadata_if_changed / sync_entity_metadata"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 2.3(更新規則・書込手順・低3)・5.5・10章(metadata sync)"
+description = "metadata書込は変更時のみ: 導出docをGETした現行metadata keyの内容(平文・STANDARDなのでrestore不要)とbyte比較し、内容不一致またはGETが404(不在)のときのみPUT(STANDARD固定)。同一内容なら書かない(非現行版の無意味な増加を防ぐ)。GETの404以外の失敗(network error等)はエラーとして伝播し比較skipの冪等性を維持する。更新契機(新規uuid・新版upload・合流による最新所在変化・title変更・pin増減)はいずれも差分比較で自然に処理される (integration, fake seam)"
+given = "(1)内容変化後(新版upload後) (2)同一内容(再skip run後) (3)metadata object不在(404) (4)GETへ失敗注入(404以外)の各状態でのsync実行"
+expect_return_shape = "(1)(3)はPutObject(storage_class=STANDARD)が行われる。(2)はPutObjectなし。(4)はエラー伝播(比較skipによる黙示成功とならない)"
+source_lines = "tests/metadata_storage.rs:157"
+
+[[condition]]
+id = "metadata.latest-source-path-modes"
+target_function = "metadata::build_metadata(latest_source_path) / encrypt_path"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 2.2(latest_source_pathの3形態・承認事項11)・5.5・10章(metadata sync)"
+description = "latest_source_pathはconfigs/pipeline.toml [metadata].latest_source_path設定に従い3形態: \"none\"=null・\"plain\"(既定)=path文字列そのまま・\"encrypted\"=object{format:\"age\", recipients:[指紋列], sha256:暗号文blobのsha256 hex64, data:暗号文blobのbase64}。暗号化はcrypto::encrypt_bytes(tmp経由のage)でpath文字列(UTF-8)を暗号化し、鍵はpipeline.tomlのpublic_keysと同一(recipients指紋列は鍵特定用に一緒に記録)。復号は通常運用では不要(get等の経路では読まない) (integration, 実age・fake seam)"
+given = "同一registry・[metadata].latest_source_pathの3設定値それぞれでのbuild_metadata(encryptedは実ageで暗号化)"
+expect_return_shape = "noneはlatest_source_pathがnull。plainはpath文字列。encryptedはformat=ageのobject(recipientsに指紋列・sha256・base64 dataを含み、dataを秘密鍵で復号すると元path文字列に一致)"
+source_lines = "tests/metadata_storage.rs:217"
+
+[[condition]]
+id = "metadata.title-change-rotates-key"
+target_function = "metadata::sync_entity_metadata(title変更時のキー掃除)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 2.3(更新契機4・title変更時は新キーPUT+旧キーdelete marker)・5.5(低2: 旧titleキー特定はlist_keys列挙)・10章"
+description = "title変更時は新キーmetadata_{新title}.jsonへPUT先行のうえ旧キーへDELETE(delete marker付与)。旧titleキーの特定はlist_keys(bucket, \"{prefix}data/{uuid}/\")でmetadata_接頭辞キーを列挙し現行titleキー以外をすべてDELETEする方式(複数回のtitle変更やdelete失敗の残骸を掃除でき、現行titleキーとの差分追跡を不要にする=冪等。list_keys呼び出しはsync対象uuidごとに1回)。default.ageは不動 (integration, fake seam)"
+given = "title=A→B→Cと2回変更した状態(旧キーmetadata_A.json・metadata_B.jsonがS3に残存)でのsync実行"
+expect_return_shape = "metadata_C.jsonへのPUTののち、metadata_A.json・metadata_B.jsonへDELETE(delete marker)が行われ、default.age・pin objectへの変更は行われない"
+source_lines = "tests/metadata_storage.rs:349"
+
+[[excluded]]
+item = "decrypt_path(latest_source_path暗号化blobの復号関数)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 2.2・5.5(将来用・当面不要なら実装しない)"
+reason = "復号を必要とする運用経路が存在しない設計(2.2: 災害時の手がかりでありget等の経路では読まない)。実装しない設計判断のため検証対象コードが存在しない"
+decided_at = "2026-10-22"
+decided_by = "claude"

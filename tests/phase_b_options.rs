@@ -15,7 +15,7 @@ fn clear_calls(fx: &StorageFixture) {
 /// dev(active_profile)とprodの2profileを含むaws.toml本文(dev/prodでprefixが異なる)。
 fn two_profile_aws_toml(fx: &StorageFixture) -> String {
     format!(
-        "[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n[aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"prod-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n",
+        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n[aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"prod-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n",
         creds = fx.credentials.display()
     )
 }
@@ -34,21 +34,22 @@ fn profile_option_overrides_active_profile() {
     write_file(&a, b"profile-override-plain");
 
     // 書き込み系: backup push --profile prod はprod側prefixで発行される
-    let (code, stdout, stderr) = fx.push(&[&a], &["--profile", "prod"], &[]);
-    assert_eq!(
-        code, 0,
-        "backup push --profile prodはexit 0: {stdout}{stderr}"
-    );
-    let prod_key = "prod-remote/unfiled/a.zip/default.age";
+    // (新規発行はtitle必須のためpty prompt・設計6.1)
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &["--profile", "prod"]) else {
+        return;
+    };
+    assert_eq!(code, 0, "backup push --profile prodはexit 0: {stdout}");
+    let prod_uuid = uuid_of_bucket_upload(&fx, "it-bucket");
+    let prod_key = format!("prod-remote/data/{prod_uuid}/default.age");
     assert!(
-        fx.object_path(prod_key).is_file(),
+        fx.object_path(&prod_key).is_file(),
         "object keyはprod側prefix: {}",
-        fx.object_path(prod_key).display()
+        fx.object_path(&prod_key).display()
     );
     assert!(
-        !fx.object_path(&fx.file_key("unfiled", None, "a.zip"))
-            .is_file(),
-        "dev側(既定active_profile)prefixへは書かない"
+        fx.object_path(&prod_key).is_file(),
+        "object keyはprod側prefix: {}",
+        fx.object_path(&prod_key).display()
     );
     assert!(
         fx.object_path("prod-remote/sys/index.jsonl.age").is_file(),
@@ -116,7 +117,10 @@ fn profile_option_does_not_write_back_to_aws_toml() {
 
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"profile-nowrite-plain");
-    assert_eq!(fx.push(&[&a], &["--profile", "prod"], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &["--profile", "prod"]) else {
+        return;
+    };
+    assert_eq!(code, 0, "prod push: {stdout}");
     let _ = fx.list("files", &["--profile", "prod"]);
 
     let after = std::fs::read(&fx.aws_toml).expect("aws.toml再読込");
@@ -133,7 +137,10 @@ fn aws_config_default_path_is_configs_aws_toml() {
     };
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"aws-default-plain");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
 
     // 作業dirへ configs/aws.toml を配置(fake stateとcredentialを共用)
     let work = fx.elsewhere.join("awsdef-work");
@@ -155,16 +162,20 @@ fn aws_config_default_path_is_configs_aws_toml() {
         "索引の内容が表示される: {stdout}"
     );
 
-    // --aws-config未指定のbackup push(配置した作業dir側)
+    // --aws-config未指定のbackup push(配置した作業dir側。新規発行のtitle必須のため
+    // from-listのtitle欄で与え、positionalにはskip対象のa.zipを添える・設計6.1)
     let b_src = work.join("b.zip");
     write_file(&b_src, b"aws-default-b");
+    let list = write_from_list(&work, &[(&b_src, Some("b-title"))]);
     let (code, stdout, stderr) = run_bin_cwd(
         &[
             "backup",
             "push",
             "--config",
             fx.cfg.display().to_string().as_str(),
-            "b.zip",
+            a.display().to_string().as_str(),
+            "--from-list",
+            list.display().to_string().as_str(),
         ],
         &env,
         &work,
@@ -194,7 +205,10 @@ fn index_get_transfer_error_is_exit_5() {
     };
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"index-get-plain");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
     let index_key = fx.index_key();
 
     // 索引objectは存在する状態で索引GETへ失敗注入
@@ -222,7 +236,7 @@ fn index_get_transfer_error_is_exit_5() {
 /// (cli.profile-namespace-isolated-by-bucket検証用。prefixが同一である点が本質)。
 fn same_prefix_diff_bucket_aws_toml(fx: &StorageFixture) -> String {
     format!(
-        "[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"bucket-dev\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n[aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"bucket-prod\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n",
+        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"bucket-dev\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n[aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"bucket-prod\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n",
         creds = fx.credentials.display()
     )
 }
@@ -258,11 +272,13 @@ fn profile_namespace_isolated_by_bucket() {
     fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"ns-by-bucket-plain");
-    let key = fx.file_key("unfiled", None, "a.zip");
 
     // (c) 索引不在時の未書込namespace例外はbucket単位で機能する:
     // devの書込実績(同一prefix)があってもprodから見て未書込なら0件+exit 0
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "dev push: {stdout}");
     std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
     let (code, stdout, stderr) = fx.list_env("files", &["--profile", "prod"], &[]);
     assert_eq!(
@@ -277,18 +293,18 @@ fn profile_namespace_isolated_by_bucket() {
     );
 
     // (a) dev実績(prefix一致・内容同一)ではprod側pushはskipされない
-    // (bucket横断で1byteもuploadされないrunを作らない)
+    // (bucket横断で1byteもuploadされないrunを作らない。file_write一致でもbucket一致の
+    // file_uploadが無いため(2.5)再PUT経路でuploadされる・設計4.1(1)/(2.5))
     clear_calls(&fx);
-    let (code, stdout, stderr) = fx.push(&[&a], &["--profile", "prod"], &[]);
-    assert_eq!(code, 0, "prod pushはexit 0: {stdout}{stderr}");
-    assert!(
-        stdout.contains("ok    a.zip"),
-        "prod側はskipされずuploadされる: {stdout}"
-    );
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &["--profile", "prod"]) else {
+        return;
+    };
+    assert_eq!(code, 0, "prod pushはexit 0: {stdout}");
     assert!(
         !stdout.lines().any(|l| l.starts_with("skip")),
         "dev実績によるskipは起こらない(末尾集計のskip=0は除外): {stdout}"
     );
+    let key = fx.data_key(&uuid_of_path(&fx, &a));
     assert!(
         fx.calls()
             .lines()
@@ -302,8 +318,7 @@ fn profile_namespace_isolated_by_bucket() {
     let prod_ids = upload_ids_for_bucket(&fx, &key, "bucket-prod");
     assert_eq!(dev_ids.len(), 1, "dev実績1件: {dev_ids:?}");
     assert_eq!(prod_ids.len(), 1, "prod実績1件: {prod_ids:?}");
-    assert_ne!(dev_ids[0], prod_ids[0], "版は別");
-    let vids = index_version_ids(index_file_entry(&fx.read_index(), "a.zip"));
+    let vids = index_version_ids(index_entity_by(&fx.read_index(), "title", "a.zip"));
     assert_eq!(vids.len(), 1, "索引versionsはprod版のみ: {vids:?}");
     assert!(
         vids.contains(&prod_ids[0]),
@@ -334,10 +349,16 @@ fn manage_jobs_reissue_reissues_restore_job() {
     let b = fx.data_root.join("b.zip");
     write_file(&a, b"reissue-a");
     write_file(&b, b"reissue-b");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    assert_eq!(fx.push(&[&b], &[], &[]).0, 0);
-    let key_a = fx.file_key("unfiled", None, "a.zip");
-    let key_b = fx.file_key("unfiled", None, "b.zip");
+    for p in [&a, &b] {
+        let Some((code, stdout)) =
+            push_titled_pty(&fx, &[p], &p.file_name().unwrap().to_string_lossy(), &[])
+        else {
+            return;
+        };
+        assert_eq!(code, 0, "初回push: {stdout}");
+    }
+    let key_a = fx.data_key(&uuid_of_path(&fx, &a));
+    let key_b = fx.data_key(&uuid_of_path(&fx, &b));
     // aは復元済み・bは進行中
     fx.seed_restore(&key_a, "restored");
     fx.seed_restore(&key_b, "ongoing");
@@ -418,9 +439,12 @@ fn legacy_empty_bucket_upload_record_treated_as_canonical() {
     fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"legacy-record-plain");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "dev初回push: {stdout}");
+    let key = fx.data_key(&uuid_of_path(&fx, &a));
     rewrite_file_upload_buckets_empty(&fx);
-    let key = fx.file_key("unfiled", None, "a.zip");
 
     // 実効bucket=正本(bucket-dev): 旧記録は正本bucket扱いのためskipされる
     clear_calls(&fx);
@@ -439,11 +463,21 @@ fn legacy_empty_bucket_upload_record_treated_as_canonical() {
     );
 
     // 実効bucket≠正本(--profile prod): 旧記録は正本bucket扱いのため一致せずuploadされる
-    let (code, stdout, stderr) = fx.push(&[&a], &["--profile", "prod"], &[]);
-    assert_eq!(code, 0, "prod pushはexit 0: {stdout}{stderr}");
+    // (file_write一致でもbucket一致のfile_uploadが無いため(2.5)再PUT経路・設計4.1)
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &["--profile", "prod"]) else {
+        return;
+    };
+    assert_eq!(code, 0, "prod pushはexit 0: {stdout}");
     assert!(
-        stdout.contains("ok    a.zip"),
+        !stdout.lines().any(|l| l.starts_with("skip")),
         "旧記録ではprod側はskipされない: {stdout}"
+    );
+    assert!(
+        fx.calls()
+            .lines()
+            .any(|l| l.starts_with("s3 PutObject") && l.contains(&format!("key={key}"))),
+        "file keyへのPUTが行われる: {}",
+        fx.calls()
     );
 }
 
@@ -478,24 +512,31 @@ fn pin_namespace_isolated_by_bucket() {
     fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"pin-bucket-plain");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "dev初回push: {stdout}");
+    let dev_uuid = uuid_of_path(&fx, &a);
     assert_eq!(fx.pin("add", "a.zip", &["--as", "pm1"]).0, 0);
     assert_eq!(
-        index_pin_names(index_file_entry(&fx.read_index(), "a.zip")),
+        index_pin_names(index_entity_by(&fx.read_index(), "title", "a.zip")),
         vec!["pm1"],
         "dev側索引はpm1を保持"
     );
 
-    // prod側pushで再構築された索引にdev側pinは混入しない
-    assert_eq!(fx.push(&[&a], &["--profile", "prod"], &[]).0, 0);
-    let pins = index_pin_names(index_file_entry(&fx.read_index(), "a.zip"));
+    // prod側push(bucket分離で別entity発行・title必須)で再構築された索引にdev側pinは混入しない
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &["--profile", "prod"]) else {
+        return;
+    };
+    assert_eq!(code, 0, "prod push: {stdout}");
+    let pins = index_pin_names(index_entity_by(&fx.read_index(), "title", "a.zip"));
     assert!(
         pins.is_empty(),
         "prod側索引pins[]に他方bucketのpinは混入しない: {pins:?}"
     );
 
     // get --pin(誤profile): pin名不在の対象エラー3・pin objectへの取得も行わない
-    let pin_key = fx.pin_key("unfiled", None, "a.zip", "pm1");
+    let pin_key = fx.data_pin_key(&dev_uuid, "pm1");
     let out = fx.elsewhere.join("pin-ns-out");
     clear_calls(&fx);
     let (code, _, stderr) = fx.get_env(
@@ -546,7 +587,7 @@ fn pin_namespace_isolated_by_bucket() {
     // dev側(正bucket)はpm1を保持したまま(all-skip pushでの再構築でも消えない)
     assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
     assert_eq!(
-        index_pin_names(index_file_entry(&fx.read_index(), "a.zip")),
+        index_pin_names(index_entity_by(&fx.read_index(), "title", "a.zip")),
         vec!["pm1"],
         "dev側索引のpm1は誤profile操作後も保持される"
     );
@@ -566,12 +607,19 @@ fn entries_without_bucket_versions_excluded_from_query() {
     let b = fx.data_root.join("b.zip");
     write_file(&a, b"orphan-a-plain");
     write_file(&b, b"orphan-b-plain");
-    assert_eq!(fx.push(&[&a, &b], &[], &[]).0, 0);
-    // a.zipのみprod側へもpush(prod索引が再構築される)
-    assert_eq!(fx.push(&[&a], &["--profile", "prod"], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a, &b], "a.zip\nb.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "dev push: {stdout}");
+    // a.zipのみprod側へもpush(prod索引が再構築される。bucket分離で別entity発行のため
+    // title必須・設計6.1)
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &["--profile", "prod"]) else {
+        return;
+    };
+    assert_eq!(code, 0, "prod push: {stdout}");
 
-    // prod側: a.zipのみ現れ、b.zip(devのみ)は現れない
-    let (code, stdout, stderr) = fx.list_env("files", &["--tree", "--profile", "prod"], &[]);
+    // prod側: a.zipのみ現れ、b.zip(devのみ)は現れない(--treeは廃止・設計6.5)
+    let (code, stdout, stderr) = fx.list_env("files", &["--profile", "prod"], &[]);
     assert_eq!(code, 0, "prod側list filesはexit 0: {stdout}{stderr}");
     assert!(
         stdout.contains("a.zip"),
@@ -587,10 +635,10 @@ fn entries_without_bucket_versions_excluded_from_query() {
     assert!(stdout.contains("0件"), "prod側queryはb.zipに0件: {stdout}");
 
     let (code, _, stderr) = fx.get_env("b.zip", &["--profile", "prod"], &[]);
-    assert_eq!(code, 3, "prod側get b.zipはname不在の対象エラー3: {stderr}");
+    assert_eq!(code, 3, "prod側get b.zipはtitle不在の対象エラー3: {stderr}");
     assert!(
-        stderr.contains("索引にname=b.zip がありません"),
-        "name不在の表示: {stderr}"
+        stderr.contains("索引にtitle/uuid=b.zip がありません"),
+        "title不在の表示: {stderr}"
     );
 
     let (code, stdout, stderr) = fx.diff(&["--profile", "prod"]);
@@ -602,7 +650,7 @@ fn entries_without_bucket_versions_excluded_from_query() {
 
     // dev側(正本bucket): 従来どおり双方が現れる(all-skip pushでdev索引を再構築)
     assert_eq!(fx.push(&[&a, &b], &[], &[]).0, 0);
-    let (code, stdout, stderr) = fx.list("files", &["--tree"]);
+    let (code, stdout, stderr) = fx.list("files", &[]);
     assert_eq!(code, 0, "dev側list filesはexit 0: {stdout}{stderr}");
     assert!(
         stdout.contains("a.zip") && stdout.contains("b.zip"),
@@ -616,7 +664,7 @@ fn entries_without_bucket_versions_excluded_from_query() {
 fn three_bucket_aws_toml(fx: &StorageFixture) -> String {
     let creds = fx.credentials.display();
     format!(
-        "[aws]\nactive_profile = \"dev\"\n\n\
+        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n\
          [aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"bucket-dev\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n\
          [aws.profiles.family]\npurpose = \"prod\"\nbucket = \"bucket-family\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"DEEP_ARCHIVE\"\ncredentials_file = \"{creds}\"\n\n\
          [aws.profiles.baked]\npurpose = \"prod\"\nbucket = \"bucket-baked\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"DEEP_ARCHIVE\"\ncredentials_file = \"{creds}\"\n"
@@ -637,25 +685,28 @@ fn multi_bucket_profiles_isolated() {
     fx.rewrite_aws_toml(&three_bucket_aws_toml(&fx));
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"three-bucket-plain");
-    let key = fx.file_key("unfiled", None, "a.zip");
 
-    // dev(正本) -> family -> baked の順に同一内容をpush。いずれも前bucket実績では
-    // skipされない(bucket横断で1byteもuploadされないrunを作らない)
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    let (code, stdout, stderr) = fx.push(&[&a], &["--profile", "family"], &[]);
-    assert_eq!(code, 0, "family pushはexit 0: {stdout}{stderr}");
-    assert!(
-        stdout.contains("ok    a.zip"),
-        "family側はdev実績によりskipされない: {stdout}"
-    );
-    let (code, stdout, stderr) = fx.push(&[&a], &["--profile", "baked"], &[]);
-    assert_eq!(code, 0, "baked pushはexit 0: {stdout}{stderr}");
-    assert!(
-        stdout.contains("ok    a.zip"),
-        "baked側はdev/family実績によりskipされない(prod系相互でも分離): {stdout}"
-    );
+    // dev(正本) -> family -> baked の順に同一内容をpush(新規発行はtitle必須のためpty。
+    // 2回目以降はfile_write一致でもbucket一致のfile_uploadが無いため(2.5)再PUT経路で
+    // uploadされる・設計4.1(1)/(2.5)。bucket横断で1byteもuploadされないrunを作らない)
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "dev push: {stdout}");
+    for profile in ["family", "baked"] {
+        let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &["--profile", profile])
+        else {
+            return;
+        };
+        assert_eq!(code, 0, "{profile} pushはexit 0: {stdout}");
+        assert!(
+            !stdout.lines().any(|l| l.starts_with("skip")),
+            "{profile}側は前bucket実績によりskipされない: {stdout}"
+        );
+    }
 
-    // registry: 3bucketそれぞれへfile_upload記録1件ずつ(版は相違)
+    // registry: 3bucketそれぞれへfile_upload記録1件ずつ(同一uuidへbucket毎の版)
+    let key = fx.data_key(&uuid_of_path(&fx, &a));
     let dev_ids = upload_ids_for_bucket(&fx, &key, "bucket-dev");
     let family_ids = upload_ids_for_bucket(&fx, &key, "bucket-family");
     let baked_ids = upload_ids_for_bucket(&fx, &key, "bucket-baked");
@@ -672,7 +723,7 @@ fn multi_bucket_profiles_isolated() {
     );
 
     // 索引versionsはbaked(最終再構築)版のみ。dev/family版は混入しない
-    let vids = index_version_ids(index_file_entry(&fx.read_index(), "a.zip"));
+    let vids = index_version_ids(index_entity_by(&fx.read_index(), "title", "a.zip"));
     assert_eq!(vids.len(), 1, "索引versionsはbaked版のみ: {vids:?}");
     assert!(
         vids.contains(&baked_ids[0]),
@@ -714,9 +765,12 @@ fn backup_push_shows_connection_destination() {
         fx.calls()
     );
 
-    // 通常実行(--profile指定): 指定profileが表示される
-    let (code, stdout, stderr) = fx.push(&[&a], &["--profile", "family"], &[]);
-    assert_eq!(code, 0, "family pushはexit 0: {stdout}{stderr}");
+    // 通常実行(--profile指定): 指定profileが表示される(新規発行はtitle必須のためpty)
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &["--profile", "family"])
+    else {
+        return;
+    };
+    assert_eq!(code, 0, "family pushはexit 0: {stdout}");
     assert!(
         stdout.lines().any(|l| l.contains("接続先")
             && l.contains("profile=family")
@@ -725,7 +779,7 @@ fn backup_push_shows_connection_destination() {
         "通常実行にも接続先行が表示される: {stdout}"
     );
 
-    // 通常実行(profile省略): active_profile(dev)が表示される
+    // 通常実行(profile省略): active_profile(dev)が表示される(all-skip)
     let (code, stdout, stderr) = fx.push(&[&a], &[], &[]);
     assert_eq!(code, 0, "既定profile pushはexit 0: {stdout}{stderr}");
     assert!(

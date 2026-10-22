@@ -371,16 +371,30 @@ pub struct StorageOpts {
     pub files: String,
     /// auto_path_rootsへdata_rootの後に追記するroot(順序優先の検証用)
     pub extra_auto_path_roots: Vec<PathBuf>,
+    /// [metadata]セクションとしてpipeline.tomlへ追記するtoml断片
+    /// (TASK-18: latest_source_pathの3値指定。既定空=セクション省略=plain)
+    pub metadata_section: String,
+    /// [aws.lifecycle]としてaws.tomlへ追記するtoml断片
+    /// (TASK-18: noncurrent_days/keep_versions/mpu_abort_days。既定空=セクション無し)
+    pub aws_lifecycle: String,
+    /// [categories]セクション自体を出力しない(TASK-18で[categories]は廃止・
+    /// 存在時設定エラー2となるための新体系向け組立。既定false=現行実装向け)
+    pub no_categories: bool,
 }
 
 impl Default for StorageOpts {
     fn default() -> Self {
+        // TASK-18後の既定: [categories]は廃止(存在時は設定エラー2)のため出力せず、
+        // [aws.lifecycle]3キーは必須のため既定で含める(設計5.15・7章)
         StorageOpts {
             storage_class: "STANDARD",
             keep_artifacts: "run",
             categories: String::new(),
             files: String::new(),
             extra_auto_path_roots: Vec::new(),
+            metadata_section: String::new(),
+            aws_lifecycle: aws_lifecycle_toml(180, 10, 7),
+            no_categories: true,
         }
     }
 }
@@ -410,20 +424,27 @@ impl StorageFixture {
             .map(|r| format!("\"{}\"", r.display()))
             .collect::<Vec<_>>()
             .join(", ");
+        // [categories]はTASK-18で廃止(存在時設定エラー2)。no_categories=trueの組立では
+        // 出力しない(既定false=現行実装向けに[categories.unfiled]を含める)
+        let categories_part = if opts.no_categories {
+            String::new()
+        } else {
+            format!("[categories.unfiled]\nkeep = 5\n{}", opts.categories)
+        };
         let cfg_body = format!(
             "[recipients]\npublic_keys = [\"{}\"]\n\
              [output]\ndir = \"{}\"\nregistry = \"{}\"\nkeep_artifacts = \"{}\"\n\
              [behavior]\nkeep_going = false\n\
              [verify]\ndecrypt_key = \"{}\"\n\
              [layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [{roots_toml}]\n\
-             [categories.unfiled]\nkeep = 5\n{}{}",
+             {categories_part}{}{}",
             public.display(),
             out_dir.display(),
             registry.display(),
             opts.keep_artifacts,
             secret.display(),
-            opts.categories,
             opts.files,
+            opts.metadata_section,
         );
         let cfg = tmp.path().join("pipeline.toml");
         write_file(&cfg, cfg_body.as_bytes());
@@ -431,7 +452,9 @@ impl StorageFixture {
         let credentials = write_fake_credentials(tmp.path());
         let aws_toml = tmp.path().join("aws.toml");
         let prefix = "backup-remote/".to_string();
-        let body = storage_aws_toml_body("it-bucket", &prefix, opts.storage_class, &credentials);
+        let mut body =
+            storage_aws_toml_body("it-bucket", &prefix, opts.storage_class, &credentials);
+        body.push_str(&opts.aws_lifecycle);
         write_file(&aws_toml, body.as_bytes());
 
         let state = tmp.path().join("s3state");
@@ -467,6 +490,11 @@ impl StorageFixture {
         std::fs::read_to_string(&self.cfg).unwrap_or_default()
     }
 
+    /// aws.tomlの現在の本文(書換えの基準取得用)。
+    pub fn aws_toml_body(&self) -> String {
+        std::fs::read_to_string(&self.aws_toml).unwrap_or_default()
+    }
+
     /// fake seam環境でbinを実行する(共通envに追加envを合わせる)。
     pub fn bin(&self, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
         let state_s = self.state.display().to_string();
@@ -477,6 +505,16 @@ impl StorageFixture {
 
     /// `backup push <paths...>`(+追加options/env)。
     pub fn push(
+        &self,
+        paths: &[&Path],
+        extra: &[&str],
+        env: &[(&str, &str)],
+    ) -> (i32, String, String) {
+        self.push_env(paths, extra, env)
+    }
+
+    /// pushのenv指定版(失敗注入等)。
+    pub fn push_env(
         &self,
         paths: &[&Path],
         extra: &[&str],
@@ -496,6 +534,48 @@ impl StorageFixture {
         args.extend(extra.iter().map(|s| s.to_string()));
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         self.bin(&refs, env)
+    }
+
+    /// `backup push <paths...> --from-list <toml>`(TASK-18のtitle入力経路。
+    /// PATH位置引数1個以上必須・positionalとfrom-listのpath重複は解決エラーのため、
+    /// positionalにはskip対象等の別pathを渡す)。
+    pub fn push_from_list(
+        &self,
+        positional: &[&Path],
+        entries: &[(&Path, Option<&str>)],
+        extra: &[&str],
+    ) -> (i32, String, String) {
+        let list = write_from_list(&self.tmp_path(), entries);
+        let mut extra_owned: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+        extra_owned.push("--from-list".into());
+        extra_owned.push(list.display().to_string());
+        let refs: Vec<&str> = extra_owned.iter().map(|s| s.as_str()).collect();
+        self.push(positional, &refs, &[])
+    }
+
+    /// `backup push <paths...> --from-list <toml>`(+追加options/env付き。
+    /// 失敗注入などenvを伴う実行用)。
+    pub fn push_from_list_env(
+        &self,
+        positional: &[&Path],
+        entries: &[(&Path, Option<&str>)],
+        extra: &[&str],
+        env: &[(&str, &str)],
+    ) -> (i32, String, String) {
+        let list = write_from_list(&self.tmp_path(), entries);
+        let mut extra_owned: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+        extra_owned.push("--from-list".into());
+        extra_owned.push(list.display().to_string());
+        let refs: Vec<&str> = extra_owned.iter().map(|s| s.as_str()).collect();
+        self.push_env(positional, &refs, env)
+    }
+
+    /// TestDirのpath(内部保持。tmpはprivateのための参照用)。
+    fn tmp_path(&self) -> PathBuf {
+        self.cfg
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default()
     }
 
     /// `get <name>`(+追加options)。
@@ -675,6 +755,27 @@ impl StorageFixture {
         }
     }
 
+    /// TASK-18 data領域のfile object key({prefix}data/{uuid}/default.age)。
+    pub fn data_key(&self, uuid: &str) -> String {
+        format!("{}data/{}/default.age", self.prefix, uuid)
+    }
+
+    /// TASK-18 data領域のpin object key({prefix}data/{uuid}/{pin}.age)。
+    pub fn data_pin_key(&self, uuid: &str, pin: &str) -> String {
+        format!("{}data/{}/{}.age", self.prefix, uuid, pin)
+    }
+
+    /// TASK-18 metadata object key({prefix}data/{uuid}/metadata_{title}.json)。
+    pub fn metadata_key(&self, uuid: &str, title: &str) -> String {
+        format!("{}data/{}/metadata_{}.json", self.prefix, uuid, title)
+    }
+
+    /// metadata objectの内容をJSONで読む(不在はNone)。
+    pub fn read_metadata_doc(&self, uuid: &str, title: &str) -> Option<serde_json::Value> {
+        let bytes = std::fs::read(self.object_path(&self.metadata_key(uuid, title))).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
     /// 索引objectのkey。
     pub fn index_key(&self) -> String {
         format!("{}sys/index.jsonl.age", self.prefix)
@@ -807,10 +908,233 @@ pub fn registry_upload_version_ids(registry: &[serde_json::Value], s3_key: &str)
         .collect()
 }
 
+/// registryのfile_write記録からsource_pathでuuidを引く(同一pathに複数記録がある
+/// 場合は最新=最後の記録。TASK-18では内容変更で別entityが発行されるため)。
+pub fn uuid_of_path(fx: &StorageFixture, path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).expect("realpath");
+    fx.registry_values()
+        .into_iter()
+        .filter(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some("file_write")
+                && r.get("source_path").and_then(|p| p.as_str())
+                    == Some(canonical.to_string_lossy().as_ref())
+        })
+        .last()
+        .and_then(|r| r.get("uuid").and_then(|u| u.as_str()).map(String::from))
+        .unwrap_or_else(|| panic!("file_write.uuid({})", canonical.display()))
+}
+
+/// 当該bucketのfile_upload記録からuuidを引く(複数bucket構成でのkey組立用)。
+pub fn uuid_of_bucket_upload(fx: &StorageFixture, bucket: &str) -> String {
+    fx.registry_values()
+        .into_iter()
+        .find(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload")
+                && r.get("s3_bucket").and_then(|b| b.as_str()) == Some(bucket)
+        })
+        .and_then(|r| r.get("uuid").and_then(|u| u.as_str()).map(String::from))
+        .unwrap_or_else(|| panic!("file_upload.uuid(bucket={bucket})"))
+}
+
+/// crash残存(file_upload記録の除去)→再pushのre-put経路(設計4.4(ii)(iii))で同一entityの
+/// default.ageへ版を重ねたのち、除去した記録を元の位置へ復元する(各版のfile_upload記録が
+/// 残る通常運用相当のregistry状態。S3には全版が実在する)。extraは再pushへの追加option
+/// (--pin等)。戻り値は時系列順(古い方から)のversion_id。
+pub fn add_version_via_reput(fx: &StorageFixture, path: &Path, extra: &[&str]) -> Vec<String> {
+    let uuid = uuid_of_path(fx, path);
+    let key = fx.data_key(&uuid);
+    let before = read_registry_lines(&fx.registry);
+    let kept: Vec<serde_json::Value> = before
+        .iter()
+        .filter(|r| {
+            !(r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload")
+                && r.get("s3_key").and_then(|k| k.as_str()) == Some(key.as_str()))
+        })
+        .cloned()
+        .collect();
+    let mut text = String::new();
+    for r in &kept {
+        text.push_str(&serde_json::to_string(r).expect("registry行serialize"));
+        text.push('\n');
+    }
+    write_file(&fx.registry, text.as_bytes());
+    let (code, stdout, stderr) = fx.push(&[path], extra, &[]);
+    assert_eq!(code, 0, "re-put(版追加): {stdout}{stderr}");
+    // re-putの追記分(kept行数以降)を退避済み記録の後ろへ繋いで復元
+    let after = read_registry_lines(&fx.registry);
+    let tail: Vec<serde_json::Value> = after[kept.len()..].to_vec();
+    let mut restored = before;
+    restored.extend(tail);
+    let mut text = String::new();
+    for r in &restored {
+        text.push_str(&serde_json::to_string(r).expect("registry行serialize"));
+        text.push('\n');
+    }
+    write_file(&fx.registry, text.as_bytes());
+    // 復元後のregistry(各版のfile_upload記録)を索引へ反映させるため、all-skip runで
+    // run末尾の索引再構築を走らせる(成功run末尾で常時再構築・設計2.2/H-2)
+    let (code, stdout, stderr) = fx.push(&[path], &[], &[]);
+    assert_eq!(code, 0, "復元後のall-skip再構築push: {stdout}{stderr}");
+    registry_upload_version_ids(&read_registry_lines(&fx.registry), &key)
+}
+
 /// registryのrecord_typeの記録数。
 pub fn registry_count(registry: &[serde_json::Value], record_type: &str) -> usize {
     registry
         .iter()
         .filter(|r| r.get("record_type").and_then(|t| t.as_str()) == Some(record_type))
         .count()
+}
+
+// ---------------------------------------------------------------------------
+// TASK-18(S3キー設計: UUID+versioning・tmp/tasks/tm-18/design_key-uuid-versioning.md)
+// のテスト先行で追加したhelper群。
+
+/// [aws.lifecycle]のtoml断片(3キー)。
+pub fn aws_lifecycle_toml(noncurrent_days: u32, keep_versions: u32, mpu_abort_days: u32) -> String {
+    format!(
+        "[aws.lifecycle]\nnoncurrent_days = {noncurrent_days}\nkeep_versions = {keep_versions}\nmpu_abort_days = {mpu_abort_days}\n"
+    )
+}
+
+/// from-list tomlを書いてpathを返す(TASK-18: [[targets]]のtitle欄。Noneはtitle省略)。
+pub fn write_from_list(dir: &Path, entries: &[(&Path, Option<&str>)]) -> PathBuf {
+    let mut body = String::new();
+    for (path, title) in entries {
+        body.push_str(&format!("[[targets]]\npath = \"{}\"\n", path.display()));
+        if let Some(t) = title {
+            body.push_str(&format!("title = \"{t}\"\n"));
+        }
+    }
+    let p = dir.join("from-list.toml");
+    write_file(&p, body.as_bytes());
+    p
+}
+
+/// pty経由でbackup pushを実行し、新規発行対象のtitleをstdinへ与える
+/// (TASK-18: 新規uuid発行はtitle必須・prompt入力。非ttyの新規発行は対象エラー3の
+/// ため、testからの新規発行setupはこの経路で行う。stdin_linesはprompt出現順に
+/// 改行区切りで並べる。`script`が不在ならNone=呼び出し側testはskip扱い)。
+pub fn push_titled_pty(
+    fx: &StorageFixture,
+    paths: &[&Path],
+    stdin_lines: &str,
+    extra: &[&str],
+) -> Option<(i32, String)> {
+    let mut args: Vec<String> = vec![
+        "backup".into(),
+        "push".into(),
+        "--config".into(),
+        fx.cfg.display().to_string(),
+        "--aws-config".into(),
+        fx.aws_toml.display().to_string(),
+    ];
+    for p in paths {
+        args.push(p.display().to_string());
+    }
+    args.extend(extra.iter().map(|s| s.to_string()));
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let state_s = fx.state.display().to_string();
+    run_bin_pty_stdin(
+        &refs,
+        &[("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())],
+        stdin_lines,
+    )
+}
+
+/// 索引のentity entryをuuid(またはtitle)で引く(TASK-18 schema=2索引の実体単位entry)。
+pub fn index_entity_by<'a>(
+    lines: &'a [serde_json::Value],
+    field: &str,
+    value: &str,
+) -> &'a serde_json::Value {
+    lines
+        .iter()
+        .find(|v| {
+            v.get("record_type").and_then(|r| r.as_str()) == Some("file")
+                && v.get(field).and_then(|n| n.as_str()) == Some(value)
+        })
+        .unwrap_or_else(|| panic!("索引にentity entry({field}={value})が無い: {lines:?}"))
+}
+
+/// entity entryのlocations配列(索引にlocationsが無い場合は空)。
+pub fn entity_locations(entry: &serde_json::Value) -> Vec<serde_json::Value> {
+    entry
+        .get("locations")
+        .and_then(|l| l.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// entity entryのpins配列(索引にpinsが無い場合は空)。
+pub fn entity_pins(entry: &serde_json::Value) -> Vec<serde_json::Value> {
+    entry
+        .get("pins")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// registry.jsonlへ1行追記する(fixture構築・crash残存やsweep/location_removeの模擬)。
+pub fn append_registry_line(path: &Path, value: &serde_json::Value) {
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .unwrap_or_else(|e| panic!("registry.jsonl({})へ追記: {e}", path.display()));
+    writeln!(f, "{value}").expect("registry行の追記");
+}
+
+/// registry.jsonlを行filterで書き換える(当該recordの除去等のfixture編集)。
+pub fn rewrite_registry_lines(path: &Path, keep: impl Fn(&serde_json::Value) -> bool) {
+    let kept: Vec<serde_json::Value> = read_registry_lines(path)
+        .into_iter()
+        .filter(|r| keep(r))
+        .collect();
+    let mut text = String::new();
+    for r in kept {
+        text.push_str(&serde_json::to_string(&r).expect("registry行serialize"));
+        text.push('\n');
+    }
+    write_file(path, text.as_bytes());
+}
+
+/// versions state fileから指定版の行を除去する(lifecycleで版が消滅した状態の模擬。
+/// 現行版を行除去した場合はobjects/<key>実体も削除する)。
+pub fn drop_version_state(state_dir: &Path, key: &str, version_id: &str) {
+    let versions_path = state_dir.join("versions").join(key);
+    let text = std::fs::read_to_string(&versions_path)
+        .unwrap_or_else(|e| panic!("versions state({})の読込: {e}", versions_path.display()));
+    let mut out = String::new();
+    let mut removed_current = false;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        if line.split('\t').next() == Some(version_id) {
+            removed_current = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    assert!(
+        removed_current,
+        "対象版({version_id})がversions stateに無い: {text}"
+    );
+    write_file(&versions_path, out.as_bytes());
+    let _ = std::fs::remove_file(state_dir.join("object-versions").join(key).join(version_id));
+}
+
+/// registryのrecordのうちfield=valueのものを取り出す。
+pub fn registry_records<'a>(
+    registry: &'a [serde_json::Value],
+    record_type: &str,
+    field: &str,
+    value: &str,
+) -> Vec<&'a serde_json::Value> {
+    registry
+        .iter()
+        .filter(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some(record_type)
+                && r.get(field).and_then(|v| v.as_str()) == Some(value)
+        })
+        .collect()
 }

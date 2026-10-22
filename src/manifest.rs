@@ -97,15 +97,17 @@ pub fn write_manifest(
 // 旧`build_manifest`(encrypt時構築・旧encrypt/upload経路が使う)とは分離されており、
 // 新経路はfile upload後に構築する(file recordに実s3_keyとversion_idを記録)。
 
-/// manifest V2のfile record 1件(backup pushのupload済み対象)。
+/// manifest V2のfile record 1件(backup pushのupload済み対象・TASK-18 3.3 schema=2)。
+/// uuid/title追加・identity_hash/folder削除。name/category/rel_path/source_pathは
+/// 所在記録として維持(index rebuildのlocations源)。
 #[derive(Debug, Clone)]
 pub struct ManifestV2File {
+    pub uuid: String,
+    pub title: String,
     pub name: String,
     pub category: String,
     pub rel_path: String,
     pub source_path: String,
-    pub identity_hash: String,
-    pub folder: String,
     pub s3_key: String,
     pub version_id: String,
     pub date: String,
@@ -130,7 +132,7 @@ pub fn build_manifest_v2(
 ) -> BackupResult<String> {
     let total_source_size: u64 = files.iter().map(|f| f.source_size).sum();
     let header = serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "record_type": "batch",
         "batch_id": batch_id,
         "created_at": created_at,
@@ -143,14 +145,14 @@ pub fn build_manifest_v2(
     out.push('\n');
     for f in files {
         let rec = serde_json::json!({
-            "schema": 1,
+            "schema": 2,
             "record_type": "file",
+            "uuid": f.uuid,
+            "title": f.title,
             "name": f.name,
             "category": f.category,
             "rel_path": f.rel_path,
             "source_path": f.source_path,
-            "identity_hash": f.identity_hash,
-            "folder": f.folder,
             "s3_key": f.s3_key,
             "version_id": f.version_id,
             "date": f.date,

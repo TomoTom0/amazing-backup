@@ -24,7 +24,7 @@ fn rewrite_credentials(fx: &StorageFixture, body: &str) {
 /// profileを1つだけ含むaws.toml本文(credentials_fileは引数)。
 fn aws_toml_with(credentials_file: &str) -> String {
     format!(
-        "[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{credentials_file}\"\n"
+        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{credentials_file}\"\n"
     )
 }
 
@@ -40,16 +40,19 @@ fn fake_seam_uses_fake_backend_with_warning() {
     };
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"seam-plain");
-    let (code, stdout, stderr) = fx.push(&[&a], &[], &[]);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    let stderr = "WARNING: FAKE S3 MODE"; // pty経由のstderrは結合出力に含まれる
     assert_eq!(
         code, 0,
-        "fake seamでbackup push成功(ダミーcredentialでも=実network不使用): {stdout}{stderr}"
+        "fake seamでbackup push成功(ダミーcredentialでも=実network不使用): {stdout}"
     );
     assert!(
-        stderr.contains("WARNING: FAKE S3 MODE"),
-        "fake選択時のWARNING表示: {stderr}"
+        stdout.contains("WARNING: FAKE S3 MODE"),
+        "fake選択時のWARNING表示: {stdout}"
     );
-    let obj = fx.object_path(&fx.file_key("unfiled", None, "a.zip"));
+    let obj = fx.object_path(&fx.data_key(&uuid_of_path(&fx, &a)));
     assert!(obj.is_file(), "state dirへobject配置: {}", obj.display());
     let calls = fx.calls();
     assert!(
@@ -72,7 +75,7 @@ fn credentials_file_key_required() {
     write_file(&a, b"cred-req-plain");
     // キー欠落
     fx.rewrite_aws_toml(
-        "[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\n",
+        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\n",
     );
     clear_calls(&fx);
     let (code, _, stderr) = fx.push(&[&a], &[], &[]);
@@ -104,8 +107,10 @@ fn credentials_file_schema_validation() {
         &fx,
         "[credentials]\naccess_key_id = \"AKITEST0000000000000A\"\nsecret_access_key = \"test-secret-value-not-real\"\n",
     );
-    let (code, _, stderr) = fx.push(&[&a], &[], &[]);
-    assert_eq!(code, 0, "session_token省略の正しい形式は成功: {stderr}");
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "session_token省略の正しい形式は成功: {stdout}");
     assert!(!fx.calls().is_empty(), "S3 API呼び出しまで到達");
 
     // 不正系はすべて設定エラー2(load_credentials検査=RealS3構築経路・seam無し。
@@ -222,11 +227,13 @@ fn credentials_values_never_leaked_in_output() {
         &fx,
         "[credentials]\naccess_key_id = \"LEAKMARK-AKID-9f8e7d6c\"\nsecret_access_key = \"LEAKMARK-SECRET-5a4b3c2d1e\"\n",
     );
-    let (code, stdout, stderr) = fx.push(&[&a], &[], &[]);
-    assert_eq!(code, 0, "正常backup push: {stdout}{stderr}");
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "正常backup push: {stdout}");
     assert!(
-        !stdout.contains("LEAKMARK") && !stderr.contains("LEAKMARK"),
-        "正常時の出力へcredential値を出さない: {stdout}{stderr}"
+        !stdout.contains("LEAKMARK"),
+        "正常時の出力へcredential値を出さない: {stdout}"
     );
     assert!(
         !fx.calls().contains("LEAKMARK"),
@@ -234,10 +241,19 @@ fn credentials_values_never_leaked_in_output() {
         fx.calls()
     );
 
-    // (c) 転送エラー経路(失敗注入でexit 5): 値が出力に現れない(map_sdk_errorのmessage含む)
+    // (c) 転送エラー経路(失敗注入でexit 5): 値が出力に現れない(map_sdk_errorのmessage含む)。
+    // bをcrash残存化して注入対象keyを確定(再PUTはtitle不要・設計4.4)
     let b = fx.data_root.join("b.zip");
     write_file(&b, b"leak-check-fail");
-    let fail_key = fx.file_key("unfiled", None, "b.zip");
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&b], "b.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "bの初回push: {stdout}");
+    let fail_key = fx.data_key(&uuid_of_path(&fx, &b));
+    rewrite_registry_lines(&fx.registry, |r| {
+        !(r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload")
+            && r.get("s3_key").and_then(|k| k.as_str()) == Some(fail_key.as_str()))
+    });
     let (code, _, stderr) = fx.push(&[&b], &[], &[("FAKE_S3_FAIL_CP_FOR", fail_key.as_str())]);
     assert_eq!(code, 5, "失敗注入で転送エラー5: {stderr}");
     assert!(
@@ -268,10 +284,12 @@ fn multipart_upload_above_threshold() {
     // 閾値(64MiB)を確実に超える対象(平文64MiB+1MiB → .ageも64MiB超)
     let big = fx.data_root.join("big.zip");
     make_archive(&big, THRESHOLD + MIB);
-    let (code, stdout, stderr) = fx.push(&[&big], &[], &[]);
-    assert_eq!(code, 0, "multipart backup push成功: {stdout}{stderr}");
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&big], "big.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "multipart backup push成功: {stdout}");
 
-    let key = fx.file_key("unfiled", None, "big.zip");
+    let key = fx.data_key(&uuid_of_path(&fx, &big));
     // runの.age(keep_artifacts=alwaysで残る)
     let writes: Vec<_> = fx
         .registry_values()
@@ -365,7 +383,17 @@ fn multipart_abort_on_part_failure() {
     };
     let big = fx.data_root.join("big.zip");
     make_archive(&big, THRESHOLD + MIB);
-    let key = fx.file_key("unfiled", None, "big.zip");
+    // crash残存化して注入対象keyを確定(再PUTはtitle不要・設計4.4)
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&big], "big.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    let key = fx.data_key(&uuid_of_path(&fx, &big));
+    rewrite_registry_lines(&fx.registry, |r| {
+        !(r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload")
+            && r.get("s3_key").and_then(|k| k.as_str()) == Some(key.as_str()))
+    });
+    clear_calls(&fx);
     let (code, stdout, stderr) = fx.push(&[&big], &[], &[("FAKE_S3_FAIL_CP_FOR", key.as_str())]);
     assert_eq!(code, 5, "part失敗は転送エラー5: {stdout}{stderr}");
     let calls = fx.calls();
@@ -396,14 +424,31 @@ fn endpoint_url_env_warns_on_stderr() {
         };
         let a = fx.data_root.join("a.zip");
         write_file(&a, b"endpoint-plain");
-        let (code, stdout, stderr) = fx.push(&[&a], &[], &[(env_name, "http://127.0.0.1:19000")]);
-        assert_eq!(
-            code, 0,
-            "{env_name}設定時も処理継続(exit 0): {stdout}{stderr}"
-        );
+        // 新規発行のtitle必須(設計6.1)のためpty promptで与える(env付き)
+        let state_s = fx.state.display().to_string();
+        let Some((code, output)) = run_bin_pty_stdin(
+            &[
+                "backup",
+                "push",
+                "--config",
+                fx.cfg.display().to_string().as_str(),
+                "--aws-config",
+                fx.aws_toml.display().to_string().as_str(),
+                a.display().to_string().as_str(),
+            ],
+            &[
+                ("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str()),
+                (env_name, "http://127.0.0.1:19000"),
+            ],
+            "endpoint-title",
+        ) else {
+            eprintln!("skipping: script(pty)が利用できない");
+            return;
+        };
+        assert_eq!(code, 0, "{env_name}設定時も処理継続(exit 0): {output}");
         assert!(
-            stderr.contains("AWS_ENDPOINT_URL"),
-            "{env_name}検出の警告表示: {stderr}"
+            output.contains("AWS_ENDPOINT_URL"),
+            "{env_name}検出の警告表示: {output}"
         );
     }
 }
@@ -421,11 +466,14 @@ fn fake_s3_restore_validates_key_and_archive_state() {
     };
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"restore-validate-std");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    let std_key = fx.file_key("unfiled", None, "a.zip");
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    let std_key = fx.data_key(&uuid_of_path(&fx, &a));
 
     // 不在keyへの復元job発行はNoSuchKey相当の転送エラー5
-    let ghost_key = "backup-remote/unfiled/ghost.zip/default.age";
+    let ghost_key = "backup-remote/data/00000000-0000-7000-8000-0000000000ff/default.age";
     let (code, _, stderr) = fx.manage("jobs", &["reissue", ghost_key]);
     assert_eq!(code, 5, "不在keyへのreissueは転送エラー5: {stderr}");
     assert!(
@@ -453,8 +501,11 @@ fn fake_s3_restore_validates_key_and_archive_state() {
     };
     let b = fx_da.data_root.join("b.zip");
     write_file(&b, b"restore-validate-da");
-    assert_eq!(fx_da.push(&[&b], &[], &[]).0, 0);
-    let da_key = fx_da.file_key("unfiled", None, "b.zip");
+    let Some((code, stdout)) = push_titled_pty(&fx_da, &[&b], "b.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    let da_key = fx_da.data_key(&uuid_of_path(&fx_da, &b));
     let (code, stdout, stderr) = fx_da.manage("jobs", &["reissue", &da_key]);
     assert_eq!(
         code, 0,

@@ -1,13 +1,16 @@
 //! backup push(書き込み)・backup pull(一括復元)・backup verify(ローカル整合検査)。
-//! 設計3.2・8.5(暗号化経路・checksum・multipart等の共通基盤は変更なし)。
+//! TASK-18 4.1/5.7: 所在skip/uuid再利用判定→暗号化→sha照合(合流/新規発行)の
+//! 対象1件処理とrun内状態(run_map・run_entity_titles・touched_entities)。
 
 use super::{
     CtxArgs, fmt_size, load_aws, mtime_jst_precise, now_jst, require_versioning, sha256_hex,
+    sha256_hex_streaming,
 };
 use crate::config::{self, PipelineConfig};
 use crate::errors::{BackupError, BackupResult};
 use crate::registry::{self, FileUploadRecord, FileWriteRecord, Reduced};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::io::IsTerminal as _;
 use std::path::PathBuf;
 
 #[derive(clap::Args, Debug)]
@@ -18,7 +21,7 @@ pub struct BackupArgs {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum BackupSub {
-    /// 書き込み(暗号化→upload→manifest→索引更新を1実行で)
+    /// 書き込み(暗号化→upload→manifest→索引更新→metadata syncを1実行で)
     Push {
         #[command(flatten)]
         ctx: CtxArgs,
@@ -27,7 +30,7 @@ pub enum BackupSub {
         /// 対象アーカイブ(zip/7z)
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-        /// 予定表示のみ(旧plan相当)
+        /// 予測表示のみ(暗号化せず平文sha256のみ計算)
         #[arg(long)]
         dry_run: bool,
         /// backup時ピン(uploadと同時に版名でも上げる)
@@ -116,21 +119,18 @@ pub fn cmd_backup(args: &BackupArgs) -> i32 {
     }
 }
 
-/// pushの対象1件(解決・分類・衝突folder確定済み)。
+/// pushの対象1件(解決・分類解決済み。TASK-18: キーは発行時のuuidから生成するため
+/// plan段階では分類とidentityのみ確定する)。
 struct Planned {
     target: crate::targets::Target,
     category: String,
     rel_path: String,
     identity: String,
-    folder: String,
-    s3_key: String,
 }
 
 fn plan_push(
     targets: &[crate::targets::Target],
     cfg: &PipelineConfig,
-    aws_prefix: &str,
-    reduced: &Reduced,
 ) -> Result<Vec<Planned>, BackupError> {
     let files: BTreeMap<String, crate::layout::FileMapping> = cfg
         .files
@@ -147,74 +147,14 @@ fn plan_push(
         .collect();
     let unfiled = cfg.layout.unfiled_category.clone();
     let roots = cfg.layout.auto_path_roots.clone();
-
-    struct Resolved {
-        idx: usize,
-        category: String,
-        rel_path: String,
-        identity: String,
-    }
-    let mut resolved: Vec<Resolved> = Vec::with_capacity(targets.len());
-    for (idx, t) in targets.iter().enumerate() {
+    let mut planned = Vec::with_capacity(targets.len());
+    for t in targets {
         let c = crate::layout::classify(&t.source_path, &t.source_name, &files, &unfiled, &roots)?;
-        resolved.push(Resolved {
-            idx,
+        planned.push(Planned {
+            identity: crate::layout::identity_hash(&t.source_path),
             category: c.category,
             rel_path: c.rel_path,
-            identity: crate::layout::identity_hash(&t.source_path),
-        });
-    }
-
-    // 衝突folderの決定論的帰属(設計1.2):
-    // (1) registryに同一slot(category+rel_path+name)の無hash保持者があれば維持
-    // (2) 自identityに前回folderがあればそれを再利用(安定)
-    // (3) 新規slotは同一run内の辞書順最小realpathのみ無hash
-    let mut planned = Vec::with_capacity(targets.len());
-    for r in &resolved {
-        let t = &targets[r.idx];
-        let slot_plain_holder = reduced.file_writes.iter().find_map(|w| {
-            (w.category == r.category
-                && w.rel_path == r.rel_path
-                && w.source_name == t.source_name
-                && w.folder == t.source_name)
-                .then_some(w.identity_hash.as_str())
-        });
-        let folder = if let Some(holder) = slot_plain_holder {
-            // 既存の無hash保持者の維持判定はlayout::existing_holder_primaryへ統一(L-12)
-            let primary = crate::layout::existing_holder_primary(holder, &r.identity);
-            crate::layout::folder_name(&t.source_name, &r.identity, primary)
-        } else if let Some(prev) = reduced
-            .file_writes
-            .iter()
-            .find(|w| w.identity_hash == r.identity)
-        {
-            prev.folder.clone()
-        } else {
-            // 同一run内の同slot候補で辞書順最小が無hash
-            let candidates: Vec<String> = resolved
-                .iter()
-                .filter(|o| {
-                    o.category == r.category
-                        && o.rel_path == r.rel_path
-                        && targets[o.idx].source_name == t.source_name
-                })
-                .map(|o| targets[o.idx].source_path.to_string_lossy().into_owned())
-                .collect();
-            let own = t.source_path.to_string_lossy().into_owned();
-            let primary = crate::layout::lexicographic_primary(
-                &candidates.iter().map(String::as_str).collect::<Vec<_>>(),
-            )
-            .is_some_and(|m| m == own);
-            crate::layout::folder_name(&t.source_name, &r.identity, primary)
-        };
-        let key = crate::layout::file_object_key(aws_prefix, &r.category, &r.rel_path, &folder)?;
-        planned.push(Planned {
             target: clone_target(t),
-            category: r.category.clone(),
-            rel_path: r.rel_path.clone(),
-            identity: r.identity.clone(),
-            folder,
-            s3_key: key,
         });
     }
     Ok(planned)
@@ -227,6 +167,89 @@ fn clone_target(t: &crate::targets::Target) -> crate::targets::Target {
         source_name: t.source_name.clone(),
         size: t.size,
         mtime: t.mtime,
+        title: t.title.clone(),
+    }
+}
+
+/// 新規発行時のtitle入力prompt(tty時)。空・違反は再要求する(6.1)。
+fn prompt_title() -> BackupResult<String> {
+    use std::io::Write as _;
+    loop {
+        print!("title: ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| BackupError::Process(format!("title入力の読込に失敗: {e}")))?;
+        let title = line.trim().to_string();
+        match crate::layout::validate_title(&title) {
+            Ok(()) => return Ok(title),
+            Err(e) => eprintln!("{e}(再入力してください)"),
+        }
+    }
+}
+
+/// 合流・再PUT時のtitle解決(4.1 resolve_title): 指定titleがあれば現行titleと比較
+/// (異なればtitle変更扱い)・未指定なら現行titleを継続(prompt不要)。
+fn resolve_title(current: Option<&str>, specified: Option<&str>) -> BackupResult<String> {
+    match specified {
+        Some(t) => {
+            crate::layout::validate_title(t)?;
+            Ok(t.to_string())
+        }
+        None => Ok(current.unwrap_or_default().to_string()),
+    }
+}
+
+/// run内のbackup push実行状態(4.1前提)。
+struct RunState {
+    /// 同一run内同一sha合流(即時追記+このmap)
+    run_map: HashMap<String, String>,
+    /// run内のentity title最新値(初期値=reducedから一括導出・file_write追記のたび更新。
+    /// 同一run内のtitle変更を2件目以降の合流にも反映させる)
+    run_entity_titles: HashMap<String, String>,
+    /// run末尾のmetadata sync対象uuid(記録順・重複除去)
+    touched_entities: Vec<String>,
+    /// 当該runで追記したfile_upload記録(pin組み立て等の最新版参照用)
+    run_uploads: Vec<FileUploadRecord>,
+}
+
+impl RunState {
+    /// run開始時の初期化(4.2): run_entity_titlesはreducedから一括導出
+    /// (uuid毎のrecorded_at最大・同値ならVec後方=後勝ちのtitle)。
+    fn new(reduced: &Reduced) -> Self {
+        let mut by_uuid: HashMap<&str, Vec<&registry::FileWriteRecord>> = HashMap::new();
+        for w in &reduced.file_writes {
+            by_uuid.entry(w.uuid.as_str()).or_default().push(w);
+        }
+        let run_entity_titles = by_uuid
+            .into_iter()
+            .map(|(uuid, writes)| {
+                let title = writes
+                    .iter()
+                    .max_by(|a, b| a.recorded_at.cmp(&b.recorded_at))
+                    .map(|w| w.title.clone())
+                    .unwrap_or_default();
+                (uuid.to_string(), title)
+            })
+            .collect();
+        RunState {
+            run_map: HashMap::new(),
+            run_entity_titles,
+            touched_entities: Vec::new(),
+            run_uploads: Vec::new(),
+        }
+    }
+
+    fn touch(&mut self, uuid: &str) {
+        if !self.touched_entities.iter().any(|u| u == uuid) {
+            self.touched_entities.push(uuid.to_string());
+        }
+    }
+
+    fn set_title(&mut self, uuid: &str, title: &str) {
+        self.run_entity_titles
+            .insert(uuid.to_string(), title.to_string());
     }
 }
 
@@ -256,47 +279,34 @@ fn cmd_backup_push(
             }
         };
         let aws = load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
-        // 正本profile(active_profile)のbucket(H-1: registry記録s3_bucket欠損の旧記録は
-        // 正本bucket相当として扱うbucket一致規則の正本側)
+        // 正本profile(active_profile)のbucket(bucket一致規則の正本側)
         let canonical_bucket = config::canonical_bucket(&super::aws_config_path(&ctx.aws_config))?;
 
-        // 接続先表示(TASK-11 Phase B・3prod bucket構成の混同防止): 実効profile・bucket・
-        // prefixを実行の最初(対象解決・S3 API呼び出しに先行)に表示し、誤profile・誤bucket
-        // への書き込みに気づかせる。dry-runでも表示される
+        // 接続先表示: 実効profile・bucket・prefixを実行の最初(対象解決・S3 API呼び出しに
+        // 先行)に表示し、誤profile・誤bucketへの書き込みに気づかせる。dry-runでも表示
         println!(
             "接続先: profile={} bucket={} prefix={}",
             aws.profile, aws.bucket, aws.prefix
         );
 
         let targets = crate::targets::resolve_targets_storage(paths, from_list.as_deref())?;
+        // from-listのtitle欄は引数形式検証として先に(usage 64・S3 API呼び出しに先行)
+        for t in &targets {
+            if let Some(title) = t.title.as_deref()
+                && let Err(e) = crate::layout::validate_title(title)
+            {
+                return Err(e);
+            }
+        }
         let registry_path = cfg.registry_path.clone();
         let records = registry::load_registry(&registry_path)?;
         let reduced = registry::reduce_records(&records);
-        let planned = plan_push(&targets, &cfg, &aws.prefix, &reduced)?;
+        let planned = plan_push(&targets, &cfg)?;
+        let tty = std::io::stdin().is_terminal();
+        let mut state = RunState::new(&reduced);
 
         if dry_run {
-            // 旧plan相当: 対象・分類・衝突・size集計・予定keyの表示(S3 API呼び出しなし)
-            let total: u64 = planned.iter().map(|p| p.target.size).sum();
-            for p in &planned {
-                println!(
-                    "push  {}  {}/{}  {}  ->  {}",
-                    p.target.source_name,
-                    p.category,
-                    if p.rel_path.is_empty() {
-                        "-".to_string()
-                    } else {
-                        p.rel_path.clone()
-                    },
-                    fmt_size(p.target.size),
-                    p.s3_key
-                );
-            }
-            println!(
-                "plan: {}件  計 {}  (dry-run: 暗号化・S3 API呼び出しは行いません)",
-                planned.len(),
-                fmt_size(total)
-            );
-            return Ok(0);
+            return dry_run_push(&planned, &reduced, &aws, &canonical_bucket, &mut state);
         }
 
         let backend = crate::cli::select_backend(&aws)?;
@@ -313,33 +323,44 @@ fn cmd_backup_push(
             .map_err(|e| BackupError::Process(format!("run dirの作成に失敗: {e}")))?;
 
         let mut uploaded: Vec<UploadItem> = Vec::new();
-        let mut skipped = 0usize;
-        let mut skipped_identities: Vec<String> = Vec::new();
+        let mut merged: Vec<MergedItem> = Vec::new();
+        let mut skipped: usize = 0;
+        let mut skipped_uuids: Vec<String> = Vec::new();
         let mut failed = 0usize;
         let mut first_err: Option<i32> = None;
 
         for p in &planned {
             let mtime_str = mtime_jst_precise(&p.target.source_path)?;
-            // skip判定(registry基準・8.3+M-1): file_write成功記録+指紋一致に加え、
-            // 同一identityのfile_upload記録(=S3へ実際に載った版)が存在することも確認する
-            // (file_write記録後・file_upload記録前にcrashした対象は再uploadする)。
-            // file_upload記録はbucket一致(H-1: registry::record_bucket_matched)を要する
-            // (同一prefix・別bucket構成で他方bucket実績によりskipされない)
-            let skip = reduced.file_writes.iter().any(|w| {
+            // (1) 所在skip / uuid再利用の判定(4.1): file_write成功記録一致
+            // (identity_hash+size+mtime)かつfile_upload記録がuuid照合+bucket一致で存在。
+            // file_write一致でもfile_upload無し(crash残存)はskipせず(2.5)再PUT分岐へ。
+            let w = reduced.file_writes.iter().find(|w| {
                 w.identity_hash == p.identity
                     && w.source_size == p.target.size
                     && w.source_mtime == mtime_str
-            }) && reduced.file_uploads.iter().any(|u| {
-                u.identity_hash == p.identity
-                    && u.s3_key == p.s3_key
-                    && registry::record_bucket_matched(&u.s3_bucket, &aws.bucket, &canonical_bucket)
             });
-            if skip {
+            let upload_recorded = w.is_some_and(|w| {
+                reduced.file_uploads.iter().any(|u| {
+                    u.uuid == w.uuid
+                        && registry::record_bucket_matched(
+                            &u.s3_bucket,
+                            &aws.bucket,
+                            &canonical_bucket,
+                        )
+                })
+            });
+            if let (Some(w), true) = (w, upload_recorded) {
                 println!("skip  {} (registry match)", p.target.source_name);
                 skipped += 1;
-                skipped_identities.push(p.identity.clone());
+                skipped_uuids.push(w.uuid.clone());
+                // skip対象もmetadata sync対象に含める(2.3の差分比較により変更無ければ
+                // PUTは行われず、metadata object不在(404)時の復旧もrunを通じて機能する)
+                state.touch(&w.uuid);
                 continue;
             }
+            let reuse_uuid = w.filter(|_| !upload_recorded).map(|w| w.uuid.clone());
+
+            // (2) 暗号化(平文sha256入手)
             let age_path = run_dir.join(format!("{}.age", p.target.source_name));
             let res = match crate::crypto::encrypt_stream(
                 &p.target.source_path,
@@ -361,8 +382,32 @@ fn cmd_backup_push(
                 }
             };
             let recorded_at = now_jst();
-            let version_id =
-                match backend.put(&aws.bucket, &p.s3_key, &age_path, &aws.storage_class) {
+
+            if let Some(uuid) = reuse_uuid {
+                // (2.5) crash救済のuuid再利用再PUT分岐: sha照合・新規発行を経ず
+                // 同uuidのdefault.ageへ再PUTしfile_uploadを記録(孤児uuid不発生)。
+                let current_title = state.run_entity_titles.get(&uuid).cloned();
+                let title = resolve_title(current_title.as_deref(), p.target.title.as_deref())?;
+                let title_changed = current_title.as_deref() != Some(title.as_str());
+                if title_changed {
+                    // title変更時のみfile_writeを再追記(新title・新batch_id)
+                    append_file_write(
+                        &registry_path,
+                        &aws.prefix,
+                        &batch_id,
+                        &batch_date,
+                        &uuid,
+                        &title,
+                        p,
+                        &mtime_str,
+                        &res,
+                        &recorded_at,
+                        &age_path,
+                    )?;
+                    state.set_title(&uuid, &title);
+                }
+                let key = crate::layout::data_object_key(&aws.prefix, &uuid)?;
+                let vid = match backend.put(&aws.bucket, &key, &age_path, &aws.storage_class) {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("error: {e}");
@@ -374,99 +419,177 @@ fn cmd_backup_push(
                         continue;
                     }
                 };
-            let write = FileWriteRecord {
-                schema: 1,
-                record_type: "file_write".into(),
-                recorded_at: recorded_at.clone(),
-                batch_id: batch_id.clone(),
-                batch_date: batch_date.clone(),
-                source_path: p.target.source_path.display().to_string(),
-                source_name: p.target.source_name.clone(),
-                source_size: p.target.size,
-                source_mtime: mtime_str.clone(),
-                source_sha256: res.source_sha256.clone(),
-                age_path: age_path.display().to_string(),
-                age_size: res.age_size,
-                age_sha256: res.age_sha256.clone(),
-                recipients: res.recipients.clone(),
-                category: p.category.clone(),
-                rel_path: p.rel_path.clone(),
-                identity_hash: p.identity.clone(),
-                folder: p.folder.clone(),
-                s3_key: p.s3_key.clone(),
-            };
-            // version_tsの供給源はfile_write記録のrecorded_at(暗号化時刻。TASK-11 Phase B。
-            // upload記録の時刻とは独立)
-            let upload = FileUploadRecord {
-                schema: 1,
-                record_type: "file_upload".into(),
-                recorded_at: recorded_at.clone(),
-                batch_id: batch_id.clone(),
-                version_ts: recorded_at.clone(),
-                name: p.target.source_name.clone(),
-                category: p.category.clone(),
-                rel_path: p.rel_path.clone(),
-                identity_hash: p.identity.clone(),
-                s3_key: p.s3_key.clone(),
-                s3_bucket: aws.bucket.clone(),
-                s3_region: aws.region.clone(),
-                version_id: version_id.clone(),
-                s3_size: res.age_size as i64,
-                s3_checksum_sha256: res.age_sha256.clone(),
-                s3_checksum_type: "FULL_OBJECT".into(),
-                source_sha256: res.source_sha256.clone(),
-                age_sha256: res.age_sha256.clone(),
-                source_size: p.target.size,
-                age_size: res.age_size,
-                uploaded_at: recorded_at.clone(),
-            };
-            if let Err(e) = registry::append_record(&registry_path, &write)
-                .and_then(|()| registry::append_record(&registry_path, &upload))
-            {
-                eprintln!("error: {e}");
-                failed += 1;
-                first_err.get_or_insert(e.exit_code());
-                if !keep_going {
-                    return Err(e);
-                }
+                let upload = file_upload_record(
+                    &batch_id,
+                    &uuid,
+                    &title,
+                    &key,
+                    &aws,
+                    &vid,
+                    p,
+                    &res,
+                    &recorded_at,
+                );
+                registry::append_record(&registry_path, &upload)?;
+                state.run_uploads.push(upload.clone());
+                state
+                    .run_map
+                    .insert(res.source_sha256.clone(), uuid.clone());
+                uploaded.push(UploadItem {
+                    uuid: uuid.clone(),
+                    title: title.clone(),
+                    name: p.target.source_name.clone(),
+                    category: p.category.clone(),
+                    rel_path: p.rel_path.clone(),
+                    source_path: p.target.source_path.display().to_string(),
+                    s3_key: key.clone(),
+                    version_id: vid.clone(),
+                    date: batch_date.clone(),
+                    version_ts: recorded_at.clone(),
+                    source_sha256: res.source_sha256.clone(),
+                    age_sha256: res.age_sha256.clone(),
+                    source_size: p.target.size,
+                    age_size: res.age_size,
+                    age_path: age_path.display().to_string(),
+                });
+                state.touch(&uuid);
+                println!(
+                    "re-put {}  ->  {} (crash救済の再PUT・version {vid})",
+                    p.target.source_name, key
+                );
                 continue;
             }
-            uploaded.push(UploadItem {
-                name: p.target.source_name.clone(),
-                category: p.category.clone(),
-                rel_path: p.rel_path.clone(),
-                source_path: p.target.source_path.display().to_string(),
-                identity: p.identity.clone(),
-                folder: p.folder.clone(),
-                s3_key: p.s3_key.clone(),
-                version_id: version_id.clone(),
-                date: batch_date.clone(),
-                version_ts: recorded_at.clone(),
-                source_sha256: res.source_sha256.clone(),
-                age_sha256: res.age_sha256.clone(),
-                source_size: p.target.size,
-                age_size: res.age_size,
-                age_path: age_path.display().to_string(),
+
+            // (3) sha照合(run内map優先 → registry lookup)
+            let sha = res.source_sha256.clone();
+            let found = state.run_map.get(&sha).cloned().or_else(|| {
+                registry::sha_uuid_lookup(&reduced, &sha, &aws.bucket, &canonical_bucket)
             });
-            println!(
-                "ok    {}  ->  {} (version {})",
-                p.target.source_name, p.s3_key, version_id
-            );
+            match found {
+                Some(uuid) => {
+                    // (3a) 合流: uploadしない・file_write追記(新所在)→索引locations追加
+                    let current_title = state.run_entity_titles.get(&uuid).cloned();
+                    let title = resolve_title(current_title.as_deref(), p.target.title.as_deref())?;
+                    append_file_write(
+                        &registry_path,
+                        &aws.prefix,
+                        &batch_id,
+                        &batch_date,
+                        &uuid,
+                        &title,
+                        p,
+                        &mtime_str,
+                        &res,
+                        &recorded_at,
+                        &age_path,
+                    )?;
+                    state.run_map.insert(sha.clone(), uuid.clone());
+                    state.set_title(&uuid, &title);
+                    merged.push(MergedItem { uuid: uuid.clone() });
+                    state.touch(&uuid);
+                    println!(
+                        "merge {}  ->  data/{uuid}/default.age (所在追加・upload省略)",
+                        p.target.source_name
+                    );
+                }
+                None => {
+                    // (3b) 新規発行。記録順序は「file_write追記 → PUT → file_upload追記」
+                    // (4.4: registry記録がS3変更に先行=crash救済)
+                    let title = match p.target.title.as_deref() {
+                        Some(t) => t.to_string(),
+                        None if tty => prompt_title()?,
+                        None => {
+                            // 非tty+title無しの新規発行は当該対象の失敗(対象エラー3。
+                            // keep_goingに従い残対象の処理を継続)
+                            eprintln!(
+                                "error: 対象エラー: 新規発行にはtitleが必要です(ttyの対話入力または--from-listのtitle欄): {}",
+                                p.target.source_path.display()
+                            );
+                            failed += 1;
+                            first_err.get_or_insert(3);
+                            if !keep_going {
+                                return Ok(3);
+                            }
+                            continue;
+                        }
+                    };
+                    warn_if_title_duplicate(&reduced, &title);
+                    let uuid = crate::layout::generate_uuid();
+                    append_file_write(
+                        &registry_path,
+                        &aws.prefix,
+                        &batch_id,
+                        &batch_date,
+                        &uuid,
+                        &title,
+                        p,
+                        &mtime_str,
+                        &res,
+                        &recorded_at,
+                        &age_path,
+                    )?;
+                    state.set_title(&uuid, &title);
+                    let key = crate::layout::data_object_key(&aws.prefix, &uuid)?;
+                    let vid = match backend.put(&aws.bucket, &key, &age_path, &aws.storage_class) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            failed += 1;
+                            first_err.get_or_insert(e.exit_code());
+                            if !keep_going {
+                                return Err(e);
+                            }
+                            continue;
+                        }
+                    };
+                    let upload = file_upload_record(
+                        &batch_id,
+                        &uuid,
+                        &title,
+                        &key,
+                        &aws,
+                        &vid,
+                        p,
+                        &res,
+                        &recorded_at,
+                    );
+                    registry::append_record(&registry_path, &upload)?;
+                    state.run_uploads.push(upload);
+                    state.run_map.insert(sha.clone(), uuid.clone());
+                    uploaded.push(UploadItem {
+                        uuid: uuid.clone(),
+                        title: title.clone(),
+                        name: p.target.source_name.clone(),
+                        category: p.category.clone(),
+                        rel_path: p.rel_path.clone(),
+                        source_path: p.target.source_path.display().to_string(),
+                        s3_key: key.clone(),
+                        version_id: vid.clone(),
+                        date: batch_date.clone(),
+                        version_ts: recorded_at.clone(),
+                        source_sha256: res.source_sha256.clone(),
+                        age_sha256: res.age_sha256.clone(),
+                        source_size: p.target.size,
+                        age_size: res.age_size,
+                        age_path: age_path.display().to_string(),
+                    });
+                    state.touch(&uuid);
+                    println!(
+                        "ok    {}  ->  {} (version {vid})  title={title}",
+                        p.target.source_name, key
+                    );
+                }
+            }
         }
 
-        // backup時ピン: upload済み.ageを版名keyへも直接upload(復元job不要・CopyObject制約なし)
+        // backup時ピン: uploaded(新規+再PUT)=手元.ageをpin keyへ直接upload
+        // (復元job不要・CopyObject 5GB上限の制約なし)。merged/skipped=最新版から
+        // ensure_restored+copy_object(現行skip分pin付与と同一経路・M-6の統合)
         if let Some(pin_name) = pin {
             for item in &uploaded {
-                let pin_key = crate::layout::pin_object_key(
-                    &aws.prefix,
-                    &item.category,
-                    &item.rel_path,
-                    &item.folder,
-                    pin_name,
-                )?;
+                let pin_key = crate::layout::pin_object_key(&aws.prefix, &item.uuid, pin_name)?;
                 // write-once違反(既存pin key)は警告+当該fileのみskip(M-2: run全体を中断
-                // しない。fileのupload・registry記録は済んでおり、run末尾の索引再構築・
-                // manifest uploadは必ず実行する。skip対象へのpin付与と挙動を統一)
+                // しない。run末尾の索引再構築・manifest uploadは必ず実行する)
                 if backend.head(&aws.bucket, &pin_key)?.is_some() {
                     eprintln!(
                         "WARNING: pin名({pin_name})は既に存在します(write-once)。当該fileのpin付与を飛ばします(pin rm後に再付与してください): {pin_key}"
@@ -479,68 +602,49 @@ fn cmd_backup_push(
                     std::path::Path::new(&item.age_path),
                     &aws.storage_class,
                 )?;
-                let recorded = registry::PinWriteRecord {
-                    schema: 1,
-                    record_type: "pin_write".into(),
-                    recorded_at: now_jst(),
-                    name: item.name.clone(),
-                    category: item.category.clone(),
-                    rel_path: item.rel_path.clone(),
-                    folder: item.folder.clone(),
-                    pin: pin_name.to_string(),
-                    pin_s3_key: pin_key.clone(),
-                    source_s3_key: item.s3_key.clone(),
-                    source_version_id: item.version_id.clone(),
-                    date: item.date.clone(),
-                    source_sha256: item.source_sha256.clone(),
-                    age_sha256: item.age_sha256.clone(),
-                    source_size: item.source_size,
-                    s3_bucket: aws.bucket.clone(),
-                    s3_size: item.age_size as i64,
-                    s3_checksum_sha256: item.age_sha256.clone(),
-                    uploaded_at: now_jst(),
-                };
-                registry::append_record(&registry_path, &recorded)?;
+                registry::append_record(
+                    &registry_path,
+                    &registry::PinWriteRecord {
+                        schema: 2,
+                        record_type: "pin_write".into(),
+                        recorded_at: now_jst(),
+                        uuid: item.uuid.clone(),
+                        pin: pin_name.to_string(),
+                        pin_s3_key: pin_key.clone(),
+                        source_s3_key: item.s3_key.clone(),
+                        source_version_id: item.version_id.clone(),
+                        date: item.date.clone(),
+                        source_sha256: item.source_sha256.clone(),
+                        age_sha256: item.age_sha256.clone(),
+                        source_size: item.source_size,
+                        s3_bucket: aws.bucket.clone(),
+                        s3_size: item.age_size as i64,
+                        s3_checksum_sha256: item.age_sha256.clone(),
+                        uploaded_at: now_jst(),
+                    },
+                )?;
+                state.touch(&item.uuid);
                 println!("ok    pin {pin_name} -> {pin_key} (version {pin_vid})");
             }
 
-            // skip対象(変更なし)への--pin指定: 警告表示のうえ最新版へpin付与(M-6。
-            // 当該runに新規.ageが無いためCopyObjectで写す)
-            if !skipped_identities.is_empty() {
+            let mut copy_targets: Vec<String> = merged.iter().map(|m| m.uuid.clone()).collect();
+            copy_targets.extend(skipped_uuids.iter().cloned());
+            if !copy_targets.is_empty() {
                 println!(
-                    "WARNING: --pin指定の対象に変更なし(skip)のfileが{}件あります。最新版へpinを付与します",
-                    skipped_identities.len()
+                    "WARNING: --pin指定の対象に変更なし(skip)・合流(merge)のfileが{}件あります。最新版へpinを付与します",
+                    copy_targets.len()
                 );
-                for identity in &skipped_identities {
-                    let Some(write) = reduced
-                        .file_writes
-                        .iter()
-                        .find(|w| &w.identity_hash == identity)
+                for uuid in &copy_targets {
+                    // 当該entityの最新版(run内追記分を含むbucket一致file_uploadの最終記録)
+                    let Some(version) =
+                        latest_upload(&reduced, &state, uuid, &aws, &canonical_bucket)
                     else {
                         continue;
                     };
-                    // 当該identityの最新版(registry記録順の最後。bucket一致する記録のみが
-                    // 対象=当該bucketの最新版。H-1)
-                    let Some(version) = reduced.file_uploads.iter().rfind(|u| {
-                        &u.identity_hash == identity
-                            && registry::record_bucket_matched(
-                                &u.s3_bucket,
-                                &aws.bucket,
-                                &canonical_bucket,
-                            )
-                    }) else {
-                        continue;
-                    };
-                    let pin_key = crate::layout::pin_object_key(
-                        &aws.prefix,
-                        &write.category,
-                        &write.rel_path,
-                        &write.folder,
-                        pin_name,
-                    )?;
+                    let pin_key = crate::layout::pin_object_key(&aws.prefix, uuid, pin_name)?;
                     if backend.head(&aws.bucket, &pin_key)?.is_some() {
                         eprintln!(
-                            "WARNING: pin名({pin_name})は既に存在します(write-once)。skip対象のpin付与を飛ばします: {pin_key}"
+                            "WARNING: pin名({pin_name})は既に存在します(write-once)。skip/合流対象のpin付与を飛ばします: {pin_key}"
                         );
                         continue;
                     }
@@ -556,8 +660,7 @@ fn cmd_backup_push(
                             println!(
                                 "{}",
                                 super::get::restore_guidance(&format!(
-                                    "pin add {} --as {pin_name}",
-                                    write.source_name
+                                    "pin add --latest --as {pin_name}"
                                 ))
                             );
                             continue;
@@ -574,18 +677,15 @@ fn cmd_backup_push(
                     registry::append_record(
                         &registry_path,
                         &registry::PinWriteRecord {
-                            schema: 1,
+                            schema: 2,
                             record_type: "pin_write".into(),
                             recorded_at: now_jst(),
-                            name: write.source_name.clone(),
-                            category: write.category.clone(),
-                            rel_path: write.rel_path.clone(),
-                            folder: write.folder.clone(),
+                            uuid: uuid.clone(),
                             pin: pin_name.to_string(),
                             pin_s3_key: pin_key.clone(),
                             source_s3_key: version.s3_key.clone(),
                             source_version_id: version.version_id.clone(),
-                            date: version.recorded_at.get(..10).unwrap_or("").to_string(),
+                            date: version.version_ts.get(..10).unwrap_or("").to_string(),
                             source_sha256: version.source_sha256.clone(),
                             age_sha256: version.age_sha256.clone(),
                             source_size: version.source_size,
@@ -595,12 +695,14 @@ fn cmd_backup_push(
                             uploaded_at: now_jst(),
                         },
                     )?;
-                    println!("ok    pin {pin_name} -> {pin_key} (skip対象の最新版)");
+                    state.touch(uuid);
+                    println!("ok    pin {pin_name} -> {pin_key} (skip/合流対象の最新版)");
                 }
             }
         }
 
-        // run manifest(F8: file upload後に構築。file recordに実s3_key+version_idを記録)
+        // run manifest(V2・schema=2: file upload後に構築。file recordにuuid/title入・
+        // identity_hash/folder無しの所在記録と実s3_key+version_idを記録)
         if !uploaded.is_empty() {
             // ヘッダのrecipientsは現在設定の指紋列
             let mut current_fingerprints = Vec::with_capacity(cfg.public_keys.len());
@@ -614,12 +716,12 @@ fn cmd_backup_push(
                 &uploaded
                     .iter()
                     .map(|u| crate::manifest::ManifestV2File {
+                        uuid: u.uuid.clone(),
+                        title: u.title.clone(),
                         name: u.name.clone(),
                         category: u.category.clone(),
                         rel_path: u.rel_path.clone(),
                         source_path: u.source_path.clone(),
-                        identity_hash: u.identity.clone(),
-                        folder: u.folder.clone(),
                         s3_key: u.s3_key.clone(),
                         version_id: u.version_id.clone(),
                         date: u.date.clone(),
@@ -684,6 +786,17 @@ fn cmd_backup_push(
                 &now_jst(),
                 &registry_path,
             )?;
+            // touched_entities各uuidのmetadata sync(2.3: 変更時のみPUT+旧titleキー掃除)
+            for uuid in &state.touched_entities {
+                crate::metadata::sync_entity_metadata(
+                    backend.as_ref(),
+                    &aws,
+                    &canonical_bucket,
+                    &cfg,
+                    &reduced_now,
+                    uuid,
+                )?;
+            }
         }
 
         // data/out掃除(keep_artifacts="run"・run成功時のみ)。掃除対象は当該run分
@@ -712,14 +825,219 @@ fn cmd_backup_push(
     }
 }
 
+/// file_write記録(schema2)の追記組み立て(4.1の各分岐共通)。
+#[allow(clippy::too_many_arguments)]
+fn append_file_write(
+    registry_path: &std::path::Path,
+    prefix: &str,
+    batch_id: &str,
+    batch_date: &str,
+    uuid: &str,
+    title: &str,
+    p: &Planned,
+    mtime_str: &str,
+    res: &crate::crypto::EncryptResult,
+    recorded_at: &str,
+    age_path: &std::path::Path,
+) -> BackupResult<()> {
+    let s3_key = crate::layout::data_object_key(prefix, uuid)?;
+    let write = FileWriteRecord {
+        schema: 2,
+        record_type: "file_write".into(),
+        recorded_at: recorded_at.to_string(),
+        batch_id: batch_id.to_string(),
+        batch_date: batch_date.to_string(),
+        uuid: uuid.to_string(),
+        title: title.to_string(),
+        source_path: p.target.source_path.display().to_string(),
+        source_name: p.target.source_name.clone(),
+        source_size: p.target.size,
+        source_mtime: mtime_str.to_string(),
+        source_sha256: res.source_sha256.clone(),
+        age_path: age_path.display().to_string(),
+        age_size: res.age_size,
+        age_sha256: res.age_sha256.clone(),
+        recipients: res.recipients.clone(),
+        category: p.category.clone(),
+        rel_path: p.rel_path.clone(),
+        identity_hash: p.identity.clone(),
+        s3_key,
+    };
+    registry::append_record(registry_path, &write)
+}
+
+/// file_upload記録(schema2)の組み立て。
+#[allow(clippy::too_many_arguments)]
+fn file_upload_record(
+    batch_id: &str,
+    uuid: &str,
+    title: &str,
+    s3_key: &str,
+    aws: &config::AwsConfig,
+    version_id: &str,
+    p: &Planned,
+    res: &crate::crypto::EncryptResult,
+    recorded_at: &str,
+) -> FileUploadRecord {
+    FileUploadRecord {
+        schema: 2,
+        record_type: "file_upload".into(),
+        recorded_at: recorded_at.to_string(),
+        batch_id: batch_id.to_string(),
+        version_ts: recorded_at.to_string(),
+        uuid: uuid.to_string(),
+        title: title.to_string(),
+        s3_key: s3_key.to_string(),
+        s3_bucket: aws.bucket.clone(),
+        s3_region: aws.region.clone(),
+        version_id: version_id.to_string(),
+        s3_size: res.age_size as i64,
+        s3_checksum_sha256: res.age_sha256.clone(),
+        s3_checksum_type: "FULL_OBJECT".into(),
+        source_sha256: res.source_sha256.clone(),
+        age_sha256: res.age_sha256.clone(),
+        source_size: p.target.size,
+        age_size: res.age_size,
+        uploaded_at: recorded_at.to_string(),
+    }
+}
+
+/// 新規発行時のtitle重複警告(4.1・4.3): 既存entityとのtitle重複は許容+警告
+/// (titleは識別子でなくラベル・一意性はuuidが担う)。
+fn warn_if_title_duplicate(reduced: &Reduced, title: &str) {
+    let dup = reduced.file_writes.iter().any(|w| w.title == title);
+    if dup {
+        println!(
+            "WARNING: title({title})は既存entityと重複しています(許容されます。一意化はuuid/所在指定で行ってください)"
+        );
+    }
+}
+
+/// 当該uuidの最新版(run内追記分を含むbucket一致file_uploadの最終記録)。
+fn latest_upload(
+    reduced: &Reduced,
+    state: &RunState,
+    uuid: &str,
+    aws: &config::AwsConfig,
+    canonical_bucket: &str,
+) -> Option<FileUploadRecord> {
+    reduced
+        .file_uploads
+        .iter()
+        .chain(state.run_uploads.iter())
+        .rfind(|u| {
+            u.uuid == uuid
+                && registry::record_bucket_matched(&u.s3_bucket, &aws.bucket, canonical_bucket)
+        })
+        .cloned()
+}
+
+/// backup push --dry-run(4.1・6.1): 暗号化せず平文sha256のみ計算(ファイル読込)して
+/// (1)skip (2)crash残存のre-put (3)sha合流のmerge(合流先uuid表示) (4)新規発行のnew
+/// (uuid未確定はkeyをdata/(新規uuid)/default.ageと表示)を出し分ける。
+/// dry-run中もrun_map相当のmapを更新する(同一run内同一shaの2件目以降はmerge表示)。
+/// age実行・S3 API呼び出し・registry追記を行わない。
+fn dry_run_push(
+    planned: &[Planned],
+    reduced: &Reduced,
+    aws: &config::AwsConfig,
+    canonical_bucket: &str,
+    state: &mut RunState,
+) -> BackupResult<i32> {
+    let mut counts = (0usize, 0usize, 0usize, 0usize); // skip, re-put, merge, new
+    let mut total: u64 = 0;
+    for p in planned {
+        total += p.target.size;
+        let mtime_str = mtime_jst_precise(&p.target.source_path)?;
+        let w = reduced.file_writes.iter().find(|w| {
+            w.identity_hash == p.identity
+                && w.source_size == p.target.size
+                && w.source_mtime == mtime_str
+        });
+        let upload_recorded = w.is_some_and(|w| {
+            reduced.file_uploads.iter().any(|u| {
+                u.uuid == w.uuid
+                    && registry::record_bucket_matched(&u.s3_bucket, &aws.bucket, canonical_bucket)
+            })
+        });
+        if let (Some(_w), true) = (w, upload_recorded) {
+            println!("skip  {} (registry match)", p.target.source_name);
+            counts.0 += 1;
+            continue;
+        }
+        // 平文sha256のみ計算(暗号化しない。全文readを避けるためstreaming計算)
+        let sha = sha256_hex_streaming(&p.target.source_path)?;
+        if let Some(uuid) = w.map(|w| w.uuid.clone()) {
+            // (2.5) crash残存のre-put予測
+            let key = crate::layout::data_object_key(&aws.prefix, &uuid)?;
+            println!(
+                "re-put {}  ->  {key} (crash救済の再PUT)",
+                p.target.source_name
+            );
+            state.run_map.insert(sha, uuid);
+            counts.1 += 1;
+            continue;
+        }
+        match state
+            .run_map
+            .get(&sha)
+            .cloned()
+            .or_else(|| registry::sha_uuid_lookup(reduced, &sha, &aws.bucket, canonical_bucket))
+        {
+            Some(uuid) => {
+                // (3a) 合流予測(同一run内同一shaの2件目以降もこの表示)
+                println!(
+                    "merge {}  ->  data/{uuid}/default.age (所在追加・upload省略)",
+                    p.target.source_name
+                );
+                counts.2 += 1;
+            }
+            None => {
+                // (3b) 新規発行予測(uuid未確定のためkeyは仮表示)
+                match p.target.title.as_deref() {
+                    Some(t) => println!(
+                        "new   {}  ->  data/(新規uuid)/default.age  title={t}",
+                        p.target.source_name
+                    ),
+                    None => {
+                        println!(
+                            "new   {}  ->  data/(新規uuid)/default.age",
+                            p.target.source_name
+                        );
+                        println!(
+                            "WARNING: {} は新規発行予測ですがtitleが未指定です(実行時は対象エラーになります。--from-listのtitle欄または対話入力で指定してください)",
+                            p.target.source_name
+                        );
+                    }
+                }
+                // dry-run内でもrun_map相当を更新( uuidは未発行のためshaのみ登録できない
+                // =新規uuidの代わりに仮idを発行して2件目以降をmerge表示にする)
+                let pseudo = format!("(dry-run:{})", &sha[..16.min(sha.len())]);
+                state.run_map.insert(sha, pseudo);
+                counts.3 += 1;
+            }
+        }
+    }
+    println!(
+        "plan: {}件  計 {}  skip={} re-put={} merge={} new={} (dry-run: 暗号化・S3 API呼び出しは行いません)",
+        planned.len(),
+        fmt_size(total),
+        counts.0,
+        counts.1,
+        counts.2,
+        counts.3
+    );
+    Ok(0)
+}
+
 /// pushでuploadした対象1件(manifest・pin組み立て用)。
 pub(crate) struct UploadItem {
+    uuid: String,
+    title: String,
     name: String,
     category: String,
     rel_path: String,
     source_path: String,
-    identity: String,
-    folder: String,
     s3_key: String,
     version_id: String,
     date: String,
@@ -729,4 +1047,9 @@ pub(crate) struct UploadItem {
     source_size: u64,
     age_size: u64,
     age_path: String,
+}
+
+/// 合流分(pin組み立て用。手元.ageが無いため最新版からCopyObject)。
+struct MergedItem {
+    uuid: String,
 }

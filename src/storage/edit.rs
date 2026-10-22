@@ -21,11 +21,16 @@ pub fn cmd_edit(args: &EditArgs) -> i32 {
             .unwrap_or_else(|| PathBuf::from("configs/pipeline.toml"));
         let cfg = config::load_pipeline(&cfg_path)?;
         match args.target.as_str() {
-            "categories" => {
-                println!("現在の[categories]({}):", cfg_path.display());
-                for (name, cat) in &cfg.categories {
-                    println!("  [categories.{name}] keep = {}", cat.keep);
-                }
+            "metadata" => {
+                println!(
+                    "[metadata] latest_source_path = {:?}({})",
+                    match cfg.metadata.latest_source_path {
+                        config::PathMode::Plain => "plain",
+                        config::PathMode::Encrypted => "encrypted",
+                        config::PathMode::None => "none",
+                    },
+                    cfg_path.display()
+                );
                 println!("編集はpipeline.tomlを直接編集してください(保存後に検証されます)");
             }
             "files" => {
@@ -60,13 +65,11 @@ pub fn cmd_edit(args: &EditArgs) -> i32 {
                         config::KeepArtifacts::Always => "always",
                     }
                 );
-                for (name, cat) in &cfg.categories {
-                    println!("[categories.{name}] keep = {}", cat.keep);
-                }
+                println!("保持数(lifecycle)はconfigs/aws.toml [aws.lifecycle]で管理します");
             }
             other => {
                 return Err(BackupError::Usage(format!(
-                    "editの対象は categories|files|layout|policy です: {other}"
+                    "editの対象は metadata|files|layout|policy です: {other}"
                 )));
             }
         }

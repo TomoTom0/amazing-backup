@@ -31,35 +31,42 @@ fn systemtime_to_jst(st: std::time::SystemTime) -> chrono::DateTime<chrono::Fixe
     dt.with_timezone(&jst_offset()).trunc_subsecs(0)
 }
 
-/// 解決済みの対象アーカイブ(3.1)。
+/// 解決済みの対象アーカイブ(3.1)。TASK-18: title(新規発行時の実体ラベル)を追加。
 #[derive(Debug)]
 pub struct Target {
     /// realpath解決後の絶対path
     pub source_path: PathBuf,
-    /// 出力名(basenameまたはname override後。拡張子付き)
+    /// 出力名(basename。拡張子付き)
     pub source_name: String,
     /// 平文サイズ(bytes)
     pub size: u64,
     /// 平文のmtime(JST・秒精度に切捨て正規化。registry記録は4.1注記の文字列形式)
     pub mtime: chrono::DateTime<chrono::FixedOffset>,
+    /// TASK-18: from-listの[[targets]] title欄由来のtitle(位置引数は常にNone)。
+    /// 新規uuid発行時のみ必須(合流・再PUT時は現行title継続のため省略可)
+    pub title: Option<String>,
 }
 
-/// from-list tomlのentry(2.5)。
+/// from-list tomlのentry(TASK-18 5.6: title欄追加)。
 #[derive(Debug)]
 pub struct FromListEntry {
     /// 必須・文字列
     pub path: PathBuf,
-    /// 任意・basename形式の出力名override
+    /// 任意・basename形式の出力名override(新経路では拒否)
     pub name: Option<String>,
+    /// 任意・実体のtitle(validate_titleはbackup push側で実施)
+    pub title: Option<String>,
 }
 
-/// from-list tomlのschema(2.5。未知キー・path必須を検証)。
+/// from-list tomlのschema(未知キー・path必須を検証。TASK-18: title欄追加)。
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FromListEntryFile {
     path: PathBuf,
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -102,21 +109,21 @@ fn resolve_targets_opts(
     from_list: Option<&Path>,
     enforce_unique_names: bool,
 ) -> BackupResult<Vec<Target>> {
-    // 和集合の構築(位置引数 → from-listの順)
-    let mut candidates: Vec<(PathBuf, Option<String>)> = Vec::new();
+    // 和集合の構築(位置引数 → from-listの順。TASK-18: title欄を伴う)
+    let mut candidates: Vec<(PathBuf, Option<String>, Option<String>)> = Vec::new();
     for p in positionals {
-        candidates.push((p.clone(), None));
+        candidates.push((p.clone(), None, None));
     }
     if let Some(list_path) = from_list {
         for entry in parse_from_list(list_path)? {
-            candidates.push((entry.path, entry.name));
+            candidates.push((entry.path, entry.name, entry.title));
         }
     }
 
     // 3.1-1/2: realpath解決・通常file検査・拡張子検査(エラー集約)
     let mut errors: Vec<String> = Vec::new();
-    let mut resolved: Vec<(PathBuf, String)> = Vec::new();
-    for (raw, name_override) in &candidates {
+    let mut resolved: Vec<(PathBuf, String, Option<String>)> = Vec::new();
+    for (raw, name_override, title) in &candidates {
         let abs = match raw.canonicalize() {
             Ok(p) => p,
             Err(_) => {
@@ -169,12 +176,12 @@ fn resolve_targets_opts(
             }
             None => basename,
         };
-        resolved.push((abs, source_name));
+        resolved.push((abs, source_name, title.clone()));
     }
 
     // 3.1-3: realpath重複検査
     let mut seen_paths = std::collections::HashSet::new();
-    for (abs, _) in &resolved {
+    for (abs, _, _) in &resolved {
         if !seen_paths.insert(abs.clone()) {
             errors.push(format!("realpathが重複している: {}", abs.display()));
         }
@@ -183,7 +190,7 @@ fn resolve_targets_opts(
     // layoutの衝突folder(name--hash8)で分離するためこの検査をスキップする)
     if enforce_unique_names {
         let mut seen_names = std::collections::HashSet::new();
-        for (abs, name) in &resolved {
+        for (abs, name, _) in &resolved {
             if !seen_names.insert(name.clone()) {
                 errors.push(format!("出力名が重複している: {name} ({})", abs.display()));
             }
@@ -195,7 +202,7 @@ fn resolve_targets_opts(
     }
 
     let mut targets = Vec::with_capacity(resolved.len());
-    for (abs, source_name) in resolved {
+    for (abs, source_name, title) in resolved {
         let meta = std::fs::metadata(&abs).map_err(|e| {
             BackupError::Target(format!("対象のmetadata取得に失敗 ({}): {e}", abs.display()))
         })?;
@@ -205,6 +212,7 @@ fn resolve_targets_opts(
             source_path: abs,
             source_name,
             mtime,
+            title,
         });
     }
     Ok(targets)
@@ -239,6 +247,7 @@ pub fn parse_from_list(path: &Path) -> BackupResult<Vec<FromListEntry>> {
         .map(|t| FromListEntry {
             path: t.path,
             name: t.name,
+            title: t.title,
         })
         .collect())
 }
@@ -403,12 +412,12 @@ mod tests {
             "未知キー名がmessageに含まれる: {msg}"
         );
 
-        // 正常系: path必須・name任意
+        // 正常系(TASK-18): path必須・title欄追加・省略可
         let ok = tmp.path().join("ok.toml");
         write_file(
             &ok,
             format!(
-                "[[targets]]\npath = \"/tmp/a.zip\"\n\n[[targets]]\npath = \"/tmp/b.7z\"\nname = \"b-2025.7z\"\n"
+                "[[targets]]\npath = \"/tmp/a.zip\"\n\n[[targets]]\npath = \"/tmp/b.7z\"\ntitle = \"旅のしおり\"\n"
             )
             .as_bytes(),
         );
@@ -416,6 +425,7 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].path, PathBuf::from("/tmp/a.zip"));
         assert_eq!(entries[0].name, None);
-        assert_eq!(entries[1].name.as_deref(), Some("b-2025.7z"));
+        assert_eq!(entries[0].title, None, "title省略可");
+        assert_eq!(entries[1].title.as_deref(), Some("旅のしおり"), "title欄");
     }
 }

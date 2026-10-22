@@ -239,14 +239,13 @@ pub(crate) fn restore_state(head: Option<&HeadInfo>) -> &'static str {
     }
 }
 
-/// 取得対象1件(get/pull共通)。
+/// 取得対象1件(get/pull共通・TASK-18 5.9: 復元先は<out>/<title>・rel_path廃止)。
 pub(crate) struct FetchTarget {
     pub(crate) s3_key: String,
     pub(crate) version_id: Option<String>,
     pub(crate) age_sha256: String,
     pub(crate) source_sha256: String,
     pub(crate) dest_name: String,
-    pub(crate) rel_path: String,
 }
 
 impl FetchTarget {
@@ -256,8 +255,7 @@ impl FetchTarget {
             version_id: Some(v.version_id.clone()),
             age_sha256: v.age_sha256.clone(),
             source_sha256: v.source_sha256.clone(),
-            dest_name: entry.name.clone(),
-            rel_path: entry.rel_path.clone(),
+            dest_name: entry.title.clone(),
         }
     }
 
@@ -267,21 +265,13 @@ impl FetchTarget {
             version_id: None,
             age_sha256: p.age_sha256.clone(),
             source_sha256: p.source_sha256.clone(),
-            dest_name: entry.name.clone(),
-            rel_path: entry.rel_path.clone(),
+            dest_name: entry.title.clone(),
         }
     }
 
-    /// 配置先path(<out>/<rel_path>/<name>。rel_pathなしfileは<out>/<name>)。
+    /// 配置先path(<out>/<title>。拡張子が必要ならtitleに含める運用・設計5.9)。
     pub(crate) fn dest_path(&self, out_dir: &Path) -> PathBuf {
-        let mut dest = out_dir.to_path_buf();
-        if !self.rel_path.is_empty() {
-            for seg in self.rel_path.split('/') {
-                dest.push(seg);
-            }
-        }
-        dest.push(&self.dest_name);
-        dest
+        out_dir.join(&self.dest_name)
     }
 
     /// 取得→sha検証(索引正本)→復号→<out>/<rel_path>/<name>へ配置。
@@ -337,31 +327,59 @@ impl FetchTarget {
     }
 }
 
-/// 索引からnameでentryを引き、候補が複数なら--path特定を求める(対象エラー3)。
+/// 索引からterm(title完全一致またはuuid完全一致)でentity entryを引く(TASK-18 5.9・6.6)。
+/// 候補が複数(title重複等)なら候補一覧(source_path付き)+--path特定を求める(対象エラー3)。
+/// --pathはlocation.source_path完全一致で一意化する。
 pub(crate) fn find_entry<'a>(
     entries: &'a [IndexFileEntry],
-    name: &str,
+    term: &str,
     path: Option<&str>,
 ) -> Result<&'a IndexFileEntry, BackupError> {
-    let mut matched = entries.iter().filter(|e| e.name == name);
-    if let Some(p) = path {
-        return matched.find(|e| e.rel_path == p).ok_or_else(|| {
-            BackupError::Target(format!(
-                "name={name} path={p} の組は索引にありません(--pathの確認またはqueryで候補を表示してください)"
-            ))
-        });
-    }
-    let first = matched.next().ok_or_else(|| {
-        BackupError::Target(format!(
-            "索引にname={name} がありません(queryで確認してください)"
-        ))
-    })?;
-    if matched.next().is_some() {
+    let matched: Vec<&IndexFileEntry> = entries
+        .iter()
+        .filter(|e| e.title == term || e.uuid == term)
+        .collect();
+    if matched.is_empty() {
         return Err(BackupError::Target(format!(
-            "name={name} の候補が複数あります。--path で特定してください(query {name} で候補一覧)"
+            "索引にtitle/uuid={term} がありません(queryで確認してください)"
         )));
     }
-    Ok(first)
+    if let Some(p) = path {
+        return matched
+            .into_iter()
+            .find(|e| e.locations.iter().any(|l| l.source_path == p))
+            .ok_or_else(|| {
+                BackupError::Target(format!(
+                    "term={term} --path={p} の組は索引にありません(--pathの確認またはqueryで候補を表示してください)"
+                ))
+            });
+    }
+    if matched.len() > 1 {
+        let candidates = matched
+            .iter()
+            .map(|e| {
+                format!(
+                    "  {}  (uuid={}, 所在: {})",
+                    e.title,
+                    e.uuid,
+                    if e.locations.is_empty() {
+                        "-".to_string()
+                    } else {
+                        e.locations
+                            .iter()
+                            .map(|l| l.source_path.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(BackupError::Target(format!(
+            "term={term} の候補が複数あります。--path <source_path> で特定してください:\n{candidates}"
+        )));
+    }
+    Ok(matched[0])
 }
 
 /// 版選択(--version-id > --version日付filter > 既定=最新)。同日複数hitは対象エラー3。
@@ -377,8 +395,8 @@ pub(crate) fn select_version<'a>(
             .find(|v| v.version_id == vid)
             .ok_or_else(|| {
                 BackupError::Target(format!(
-                    "version_id={vid} の版は索引にありません(name={})",
-                    entry.name
+                    "version_id={vid} の版は索引にありません(title={})",
+                    entry.title
                 ))
             });
     }
@@ -387,8 +405,8 @@ pub(crate) fn select_version<'a>(
         return match hits.as_slice() {
             [one] => Ok(one),
             [] => Err(BackupError::Target(format!(
-                "date={date} の版はありません(name={}。候補: {})",
-                entry.name,
+                "date={date} の版はありません(title={}。候補: {})",
+                entry.title,
                 entry
                     .versions
                     .iter()
@@ -408,7 +426,7 @@ pub(crate) fn select_version<'a>(
     entry
         .versions
         .first()
-        .ok_or_else(|| BackupError::Target(format!("索引に版がありません(name={})", entry.name)))
+        .ok_or_else(|| BackupError::Target(format!("索引に版がありません(title={})", entry.title)))
 }
 
 /// get引数から取得対象を解決する(pin指定 > 版選択規則)。
@@ -428,8 +446,8 @@ pub(crate) fn resolve_fetch_target(
             .find(|p| p.pin == pin_name)
             .ok_or_else(|| {
                 BackupError::Target(format!(
-                    "pin名({pin_name})はname={} の索引にありません(list pinsで確認してください)",
-                    entry.name
+                    "pin名({pin_name})はtitle={} の索引にありません(list pinsで確認してください)",
+                    entry.title
                 ))
             })?;
         return Ok(FetchTarget::from_pin(entry, p));

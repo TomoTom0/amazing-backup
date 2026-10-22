@@ -51,11 +51,11 @@
 [meta]
 feature = "upload"
 source_file = "src/s3.rs"
-verified = false
-verified_at = "2026-10-09"
+verified = true
+verified_at = "2026-10-22"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "c3b4dfed918c313962d4d827afd9711c18a2ba5c"
+source_hash = "613bc9596fe66943ccabf1c7bc37d9446b590b4c"
 note = "S3転送(S3Backend::put・multipart・checksum)とbackend選択(seam・env警告)の条件群。TASK-11(Phase B)で旧uploadサブコマンドが削除され、S3転送はbackup push経路で検証する(実APIはsrc/s3.rsのRealS3/FakeS3)。source_fileをsrc/s3.rsへ変更(旧src/uploader.rsの旧CLI統括run_uploadは削除対象)"
 
 [[condition]]
@@ -65,7 +65,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-005(コマンド仕�
 description = "upload時のPutObject呼び出しにstorage_class(設定値)とchecksum_algorithm SHA256が指定される(backup pushのobject PUT) (integration, fake seam)"
 given = "backup push 実行(fake seam がAPI呼び出し参数を記録)"
 expect_return_shape = "PutObject呼び出しの記録に storage_class=<設定値> と checksum_algorithm SHA256(ChecksumAlgorithm::Sha256)が含まれる"
-source_lines = "tests/encrypt_batch.rs:357"
+source_lines = "tests/encrypt_batch.rs:440"
 
 [[condition]]
 id = "upload.cp-failure-transfer-error"
@@ -74,7 +74,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-009(7.1転送エラ�
 description = "PutObject失敗(SDK error・retry上限後)は転送エラー5。messageは操作名・bucket・key・SDK由来のerror文を含み、credential値・署名stringを含まない (integration, fake seam)"
 given = "fake seam の put が失敗(失敗注入FAKE_S3_FAIL_CP_FOR)する backup push 実行"
 expect_throw = "TransferError(exit code 5)。messageに操作名・bucket・key・SDK由来error文が含まれcredential値は含まれない"
-source_lines = "tests/encrypt_batch.rs:449"
+source_lines = "tests/encrypt_batch.rs:546"
 
 [[condition]]
 id = "upload.keep-going-continues"
@@ -83,7 +83,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-012(規則は7.2)。
 description = "--keep-going でper-object失敗(PutObject失敗)でも継続し、exitは最初のエラー区分(5)。成功分の記録(file_upload・manifest等の新経路event)がregistryにappendされる (integration, fake seam)"
 given = "1件put失敗+1件成功+manifest成功の backup push --keep-going 実行"
 expect_return_shape = "exit code 5。成功分のfile_upload記録とmanifest/index_upload記録がappendされる"
-source_lines = "tests/encrypt_batch.rs:396"
+source_lines = "tests/encrypt_batch.rs:481"
 
 [[condition]]
 id = "upload.multipart-threshold"
@@ -92,7 +92,7 @@ source = "TASK-9 SDK移行設計 5.1〜5.3(tmp/tasks/tm-9/design_sdk_migration.m
 description = "multipart閾値: 対象file sizeがMULTIPART_THRESHOLD_BYTES(64 MiB)超の場合はCreateMultipartUpload→UploadPart×N(part size 64 MiB)→CompleteMultipartUploadでuploadし、閾値未満(manifest・索引等)は単発PutObject(設計5.3) (integration, fake seam)"
 given = "64 MiB超の対象(暗号化済み.age)と閾値未満の対象を含む backup push 実行(fake seam)"
 expect_return_shape = "64 MiB超keyの呼び出し記録はCreateMultipartUpload→UploadPart×N→CompleteMultipartUpload(単発PutObject無し)で、閾値未満keyは単発PutObject(CreateMultipartUpload無し)。完成objectは実体とbyte一致"
-source_lines = "src/s3.rs:1867; tests/s3_backend.rs:249"
+source_lines = "src/s3.rs:1913; tests/s3_backend.rs:265"
 
 [[condition]]
 id = "upload.multipart-checksum-per-part"
@@ -101,7 +101,7 @@ source = "TASK-9 SDK移行設計 5.4(tmp/tasks/tm-9/design_sdk_migration.md 5章
 description = "multipart時のchecksum指定: CreateMultipartUploadと各UploadPartの両方へchecksum_algorithm SHA256を指定する(完成objectはcomposite checksum・head応答ChecksumType=COMPOSITE) (integration, fake seam)"
 given = "multipart閾値超の対象を含む backup push 実行(fake seam)"
 expect_return_shape = "CreateMultipartUpload行と各UploadPart行の呼び出し記録がともにchecksum=SHA256を含む"
-source_lines = "tests/s3_backend.rs:250"
+source_lines = "tests/s3_backend.rs:266"
 
 [[condition]]
 id = "upload.multipart-abort-on-part-failure"
@@ -110,7 +110,7 @@ source = "TASK-9 SDK移行設計 5.7・12.4(tmp/tasks/tm-9/design_sdk_migration.
 description = "part失敗時のabort: multipart送信中のpart失敗(SDK標準retry後)は転送エラー5とし、その際AbortMultipartUploadを発火する(DEEP_ARCHIVEの不完全MPU課金防止。abort自体の失敗はwarn表示のみのbest-effort) (integration, fake seam)"
 given = "multipart閾値超の対象keyへPutObject系失敗注入(FAKE_S3_FAIL_CP_FOR)した backup push 実行"
 expect_return_shape = "exit code 5。呼び出し記録にAbortMultipartUpload行が現れ、CompleteMultipartUploadは実行されない"
-source_lines = "tests/s3_backend.rs:350"
+source_lines = "tests/s3_backend.rs:368"
 
 [[condition]]
 id = "upload.endpoint-url-env-warning"
@@ -119,7 +119,7 @@ source = "TASK-9 SDK移行設計 9.3(tmp/tasks/tm-9/design_sdk_migration.md 9章
 description = "AWS_ENDPOINT_URL系env検出警告: 起動時にAWS_ENDPOINT_URL/AWS_ENDPOINT_URL_S3等(AWS_ENDPOINT_URL系env)の存在を検出したら警告をstderrへ表示する(SDKが当該envを解釈して接続先endpointを切替え得るため。切替え事実を通知して気づかせる) (integration, fake seam)"
 given = "AWS_ENDPOINT_URL_S3(またはAWS_ENDPOINT_URL)を設定した環境での backup push 実行"
 expect_return_shape = "処理は継続し(exit 0)、stderrにenv検出の警告表示(AWS_ENDPOINT_URLの語を含む)が出る"
-source_lines = "tests/s3_backend.rs:387"
+source_lines = "tests/s3_backend.rs:415"
 
 [[excluded]]
 item = "8章末尾注記: aws実行を含むものはすべてAwsInvoker traitのfake差替で行う(実networkなし)"

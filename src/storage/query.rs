@@ -1,12 +1,13 @@
-//! list/query/diff(照会系・設計3.1)。`--format json`はstdout全体が単一JSON
-//! (TASK-11 Phase B。humanと同一の対象データ・警告はstderr)。
+//! list/query/diff(照会系・TASK-18 5.11・6.5/6.6)。entity(uuid/title/locations)単位の
+//! 表示。`--format json`はstdout全体が単一JSON(warning等のhuman向け通知はstderr)。
+//! 廃止: list files --tree・list categories・--name語彙(→--title)。
 
 use super::get::restore_state;
 use super::{
     CtxArgs, Format, fmt_size, open_session, print_json, read_index_for_query, resolve_key,
 };
 use crate::errors::BackupResult;
-use crate::index::IndexFileEntry;
+use crate::index::{IndexFileEntry, IndexLocation};
 use crate::layout;
 use std::collections::BTreeMap;
 
@@ -18,24 +19,22 @@ pub struct ListArgs {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum ListSub {
-    /// 全ファイルの目録
+    /// 実体(entity)の目録
     Files {
         #[command(flatten)]
         ctx: CtxArgs,
-        /// 階層表示
-        #[arg(long)]
-        tree: bool,
-        /// category絞り込み
+        /// category絞り込み(いずれかのlocation.category一致)
         #[arg(long)]
         category: Option<String>,
     },
-    /// ファイル毎の版一覧
+    /// 実体毎の版一覧
     Versions {
         #[command(flatten)]
         ctx: CtxArgs,
+        /// entity指定(title完全一致・uuid完全一致も受理)
         #[arg(long)]
-        name: Option<String>,
-        /// category絞り込み
+        title: Option<String>,
+        /// category絞り込み(いずれかのlocation.category一致)
         #[arg(long)]
         category: Option<String>,
     },
@@ -43,16 +42,12 @@ pub enum ListSub {
     Pins {
         #[command(flatten)]
         ctx: CtxArgs,
+        /// entity指定(title完全一致・uuid完全一致も受理)
         #[arg(long)]
-        name: Option<String>,
+        title: Option<String>,
     },
     /// run(batch)一覧
     Runs {
-        #[command(flatten)]
-        ctx: CtxArgs,
-    },
-    /// 管理区分一覧
-    Categories {
         #[command(flatten)]
         ctx: CtxArgs,
     },
@@ -67,7 +62,7 @@ pub enum ListSub {
 pub struct QueryArgs {
     #[command(flatten)]
     pub ctx: CtxArgs,
-    /// 探索の手がかり(名前/path部分一致)
+    /// 探索の手がかり(title部分一致 / uuid完全・前方一致 / location.source_path部分一致)
     pub term: String,
     #[arg(long)]
     pub category: Option<String>,
@@ -95,106 +90,28 @@ pub fn cmd_query(args: &QueryArgs) -> i32 {
     }
 }
 
-fn run_query(args: &QueryArgs) -> BackupResult<i32> {
-    let session = open_session(&args.ctx)?;
-    let key_path = resolve_key(&args.ctx, session.cfg.as_ref())?;
-    let (_header, entries) = read_index_for_query(&session, &key_path)?;
-    let term = args.term.as_str();
-    let matched: Vec<&IndexFileEntry> = entries
-        .iter()
-        .filter(|e| {
-            e.name.contains(term) || e.rel_path.contains(term) || e.source_path.contains(term)
-        })
-        .filter(|e| args.category.as_deref().is_none_or(|c| e.category == c))
-        .collect();
-    if matched.is_empty() {
-        match args.ctx.format {
-            Format::Json => print_json(&serde_json::json!([])),
-            Format::Human => println!(
-                "0件 (一致するfileがありません。query <手がかり> で名前/path部分一致を探せます)"
-            ),
-        }
-        return Ok(0);
-    }
-    if args.ctx.format == Format::Json {
-        let value = matched
-            .iter()
-            .map(|e| entry_summary_json(e, args.versions))
-            .collect::<Vec<_>>();
-        print_json(&serde_json::json!(value));
-        return Ok(0);
-    }
-    for e in &matched {
-        let latest = e.versions.first();
-        println!(
-            "{}  {}/{}  {}版  latest {} ({}){}",
-            e.name,
-            e.category,
-            if e.rel_path.is_empty() {
-                "-".to_string()
-            } else {
-                e.rel_path.clone()
-            },
-            e.versions.len(),
-            latest.map(|v| v.date.as_str()).unwrap_or("-"),
-            latest
-                .map(|v| fmt_size(v.source_size))
-                .unwrap_or_else(|| "-".into()),
-            if e.pins.is_empty() {
-                String::new()
-            } else {
-                format!("  pins={}", e.pins.len())
-            },
-        );
-        if args.versions {
-            for v in &e.versions {
-                println!(
-                    "    {} {} {} {}",
-                    v.date,
-                    v.version_ts,
-                    v.version_id,
-                    fmt_size(v.source_size)
-                );
-            }
-        }
-    }
-    // 同名候補が複数ある場合はget --path特定の案内
-    let mut names: Vec<&str> = matched.iter().map(|e| e.name.as_str()).collect();
-    names.sort();
-    names.dedup();
-    let duplicated = names
-        .iter()
-        .any(|n| matched.iter().filter(|e| e.name == *n).count() > 1);
-    if duplicated {
-        println!("同名の候補が複数あります。候補(rel_path / folder)で特定してください:");
-        for e in &matched {
-            let dup = matched.iter().filter(|o| o.name == e.name).count() > 1;
-            if dup {
-                println!(
-                    "  {}  --path {}  (folder: {})",
-                    e.name,
-                    if e.rel_path.is_empty() {
-                        "\"\""
-                    } else {
-                        &e.rel_path
-                    },
-                    if e.folder.is_empty() { "-" } else { &e.folder }
-                );
-            }
-        }
-        println!("get <name> --path <rel_path> で特定できます");
-    }
-    Ok(0)
+/// entityのcategory一致判定(--category絞り込み・いずれかのlocation.category一致)。
+fn category_matched(e: &IndexFileEntry, want: Option<&str>) -> bool {
+    want.is_none_or(|c| e.locations.iter().any(|l| l.category == c))
 }
 
-/// file entryの要約JSON(--format json・query/list系共通形)。
+fn location_json(l: &IndexLocation) -> serde_json::Value {
+    serde_json::json!({
+        "source_path": l.source_path,
+        "category": l.category,
+        "rel_path": l.rel_path,
+        "identity_hash": l.identity_hash,
+        "last_backup": l.last_backup,
+    })
+}
+
+/// entityの要約JSON(--format json・query/list系共通形)。
 fn entry_summary_json(e: &IndexFileEntry, with_versions: bool) -> serde_json::Value {
     let latest = e.versions.first();
     let mut obj = serde_json::json!({
-        "name": e.name,
-        "category": e.category,
-        "rel_path": e.rel_path,
-        "folder": e.folder,
+        "uuid": e.uuid,
+        "title": e.title,
+        "locations": e.locations.iter().map(location_json).collect::<Vec<_>>(),
         "versions": e.versions.len(),
         "latest_date": latest.map(|v| v.date.clone()).unwrap_or_default(),
         "latest_size": latest.map(|v| v.source_size).unwrap_or(0),
@@ -223,6 +140,94 @@ fn entry_summary_json(e: &IndexFileEntry, with_versions: bool) -> serde_json::Va
     obj
 }
 
+fn run_query(args: &QueryArgs) -> BackupResult<i32> {
+    let session = open_session(&args.ctx)?;
+    let key_path = resolve_key(&args.ctx, session.cfg.as_ref())?;
+    let (_header, entries) = read_index_for_query(&session, &key_path)?;
+    let term = args.term.as_str();
+    let matched: Vec<&IndexFileEntry> = entries
+        .iter()
+        .filter(|e| {
+            // title部分一致 / uuid前方一致 / location.source_path部分一致
+            e.title.contains(term)
+                || e.uuid.starts_with(term)
+                || e.locations.iter().any(|l| l.source_path.contains(term))
+        })
+        .filter(|e| category_matched(e, args.category.as_deref()))
+        .collect();
+    if matched.is_empty() {
+        match args.ctx.format {
+            Format::Json => print_json(&serde_json::json!([])),
+            Format::Human => println!(
+                "0件 (一致するentityがありません。query <手がかり> でtitle/uuid/所在pathの部分一致を探せます)"
+            ),
+        }
+        return Ok(0);
+    }
+    if args.ctx.format == Format::Json {
+        let value = matched
+            .iter()
+            .map(|e| entry_summary_json(e, args.versions))
+            .collect::<Vec<_>>();
+        print_json(&serde_json::json!(value));
+        return Ok(0);
+    }
+    for e in &matched {
+        println!(
+            "{}  {}  所在{}  {}版  latest {} ({}){}",
+            e.title,
+            e.uuid,
+            e.locations.len(),
+            e.versions.len(),
+            e.versions.first().map(|v| v.date.as_str()).unwrap_or("-"),
+            e.versions
+                .first()
+                .map(|v| fmt_size(v.source_size))
+                .unwrap_or_else(|| "-".into()),
+            if e.pins.is_empty() {
+                String::new()
+            } else {
+                format!("  pins={}", e.pins.len())
+            },
+        );
+        for l in &e.locations {
+            println!("    所在: {}", l.source_path);
+        }
+        if args.versions {
+            for v in &e.versions {
+                println!(
+                    "    {} {} {} {}",
+                    v.date,
+                    v.version_ts,
+                    v.version_id,
+                    fmt_size(v.source_size)
+                );
+            }
+        }
+    }
+    // title重複(別uuid同title)候補は--path特定の案内
+    let mut titles: Vec<&str> = matched.iter().map(|e| e.title.as_str()).collect();
+    titles.sort();
+    titles.dedup();
+    let duplicated = titles
+        .iter()
+        .any(|t| matched.iter().filter(|e| e.title == *t).count() > 1);
+    if duplicated {
+        println!("title重複の候補があります。--path <source_path> で特定してください:");
+        for e in &matched {
+            let dup = matched.iter().filter(|o| o.title == e.title).count() > 1;
+            if dup {
+                println!("  {}  (uuid={})", e.title, e.uuid);
+                for l in &e.locations {
+                    println!("    --path {}", l.source_path);
+                }
+            }
+        }
+        println!("WARNING: 同一titleのentityが複数あります(重複は許容・一意化はuuid/所在指定)");
+    }
+    Ok(0)
+}
+
 pub fn cmd_list(args: &ListArgs) -> i32 {
     match run_list(args) {
         Ok(code) => code,
@@ -235,164 +240,92 @@ pub fn cmd_list(args: &ListArgs) -> i32 {
 
 fn run_list(args: &ListArgs) -> BackupResult<i32> {
     match &args.sub {
-        ListSub::Files {
-            ctx,
-            tree,
-            category,
-        } => list_files(ctx, *tree, category.as_deref()),
+        ListSub::Files { ctx, category } => list_files(ctx, category.as_deref()),
         ListSub::Versions {
             ctx,
-            name,
+            title,
             category,
-        } => list_versions(ctx, name.as_deref(), category.as_deref()),
-        ListSub::Pins { ctx, name } => list_pins(ctx, name.as_deref()),
+        } => list_versions(ctx, title.as_deref(), category.as_deref()),
+        ListSub::Pins { ctx, title } => list_pins(ctx, title.as_deref()),
         ListSub::Runs { ctx } => list_runs(ctx),
-        ListSub::Categories { ctx } => list_categories(ctx),
         ListSub::Jobs { ctx } => list_jobs(ctx),
     }
 }
 
-fn list_files(ctx: &CtxArgs, tree: bool, category_filter: Option<&str>) -> BackupResult<i32> {
+/// list files(TASK-18 5.11): entity毎に
+/// `title  uuid(先頭8字)  所在n  {v}版  latest {date} ({size})  pins=n`の目録表示。
+fn list_files(ctx: &CtxArgs, category_filter: Option<&str>) -> BackupResult<i32> {
     let session = open_session(ctx)?;
     let key_path = resolve_key(ctx, session.cfg.as_ref())?;
     let (_h, entries) = read_index_for_query(&session, &key_path)?;
-    let mut by_category: BTreeMap<&str, Vec<&IndexFileEntry>> = BTreeMap::new();
-    for e in &entries {
-        if category_filter.is_some_and(|c| e.category != c) {
-            continue;
-        }
-        by_category.entry(e.category.as_str()).or_default().push(e);
-    }
-    if by_category.is_empty() {
+    let matched: Vec<&IndexFileEntry> = entries
+        .iter()
+        .filter(|e| category_matched(e, category_filter))
+        .collect();
+    if matched.is_empty() {
         match ctx.format {
             Format::Json => print_json(&serde_json::json!([])),
             Format::Human => {
                 if entries.is_empty() {
                     println!("0件 (索引は空です)");
                 } else {
-                    println!("0件 (該当categoryのfileがありません)");
+                    println!("0件 (該当categoryのentityがありません)");
                 }
             }
         }
         return Ok(0);
     }
     if ctx.format == Format::Json {
-        let value: Vec<serde_json::Value> = by_category
+        let value: Vec<serde_json::Value> = matched
             .iter()
-            .map(|(category, list)| {
-                let mut obj = category_summary_json(category, list);
-                if tree {
-                    obj["entries"] = serde_json::Value::Array(
-                        list.iter()
-                            .map(|e| serde_json::json!({
-                                "path": if e.rel_path.is_empty() {
-                                    format!("{category}/{}", e.name)
-                                } else {
-                                    format!("{category}/{}/{}", e.rel_path, e.name)
-                                },
-                                "versions": e.versions.len(),
-                                "latest_date": e.versions.first().map(|v| v.date.clone()).unwrap_or_default(),
-                                "pins": e.pins.len(),
-                            }))
-                            .collect(),
-                    );
-                }
-                obj
-            })
+            .map(|e| entry_summary_json(e, false))
             .collect();
         print_json(&serde_json::json!(value));
         return Ok(0);
     }
-    for (category, list) in &by_category {
+    for e in &matched {
         println!(
-            "{category}  files={}  noncurrent={}  最新日={}  last run={}  latest計size={}  pins={}",
-            list.len(),
-            list.iter()
-                .map(|e| e.versions.len().saturating_sub(1))
-                .sum::<usize>(),
-            list.iter()
-                .filter_map(|e| e.versions.first())
-                .map(|v| v.date.as_str())
-                .max()
-                .unwrap_or("-"),
-            list.iter()
-                .flat_map(|e| e.versions.iter())
-                .map(|v| v.batch_id.as_str())
-                .max()
-                .unwrap_or("-"),
-            fmt_size(
-                list.iter()
-                    .filter_map(|e| e.versions.first())
-                    .map(|v| v.source_size)
-                    .sum::<u64>()
-            ),
-            list.iter().map(|e| e.pins.len()).sum::<usize>(),
+            "{}  {}  所在{}  {}版  latest {} ({})  pins={}",
+            e.title,
+            &e.uuid[..8.min(e.uuid.len())],
+            e.locations.len(),
+            e.versions.len(),
+            e.versions.first().map(|v| v.date.as_str()).unwrap_or("-"),
+            e.versions
+                .first()
+                .map(|v| fmt_size(v.source_size))
+                .unwrap_or_else(|| "-".into()),
+            e.pins.len(),
         );
     }
-    if tree {
-        for (category, list) in &by_category {
-            for e in list {
-                println!(
-                    "{}/{}  {}版  latest {}{}",
-                    category,
-                    if e.rel_path.is_empty() {
-                        e.name.clone()
-                    } else {
-                        format!("{}/{}", e.rel_path, e.name)
-                    },
-                    e.versions.len(),
-                    e.versions.first().map(|v| v.date.as_str()).unwrap_or("-"),
-                    if e.pins.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  pins={}", e.pins.len())
-                    },
-                );
-            }
-        }
+    // title重複があれば警告行
+    let mut titles: Vec<&str> = matched.iter().map(|e| e.title.as_str()).collect();
+    titles.sort();
+    titles.dedup();
+    if titles
+        .iter()
+        .any(|t| matched.iter().filter(|e| e.title == *t).count() > 1)
+    {
+        println!("WARNING: 同一titleのentityが複数あります(重複は許容・一意化はuuid/所在指定)");
     }
     Ok(0)
 }
 
-/// category毎の目録要約JSON(humanのcategory行と同一データ)。
-fn category_summary_json(category: &str, list: &[&IndexFileEntry]) -> serde_json::Value {
-    serde_json::json!({
-        "category": category,
-        "files": list.len(),
-        "noncurrent": list.iter().map(|e| e.versions.len().saturating_sub(1)).sum::<usize>(),
-        "latest_date": list.iter()
-            .filter_map(|e| e.versions.first())
-            .map(|v| v.date.clone())
-            .max()
-            .unwrap_or_default(),
-        "last_run": list.iter()
-            .flat_map(|e| e.versions.iter())
-            .map(|v| v.batch_id.clone())
-            .max()
-            .unwrap_or_default(),
-        "latest_size": list.iter()
-            .filter_map(|e| e.versions.first())
-            .map(|v| v.source_size)
-            .sum::<u64>(),
-        "pins": list.iter().map(|e| e.pins.len()).sum::<usize>(),
-    })
-}
-
 fn list_versions(
     ctx: &CtxArgs,
-    name: Option<&str>,
+    title: Option<&str>,
     category_filter: Option<&str>,
 ) -> BackupResult<i32> {
     let session = open_session(ctx)?;
     let key_path = resolve_key(ctx, session.cfg.as_ref())?;
     let (_h, entries) = read_index_for_query(&session, &key_path)?;
-    let targets: Vec<&IndexFileEntry> = match name {
-        Some(n) => {
-            let e = super::get::find_entry(&entries, n, None)?;
-            if category_filter.is_some_and(|c| e.category != c) {
+    let targets: Vec<&IndexFileEntry> = match title {
+        Some(t) => {
+            let e = super::get::find_entry(&entries, t, None)?;
+            if !category_matched(e, category_filter) {
                 match ctx.format {
                     Format::Json => print_json(&serde_json::json!([])),
-                    Format::Human => println!("0件 (該当categoryのfileがありません)"),
+                    Format::Human => println!("0件 (該当categoryのentityがありません)"),
                 }
                 return Ok(0);
             }
@@ -400,13 +333,13 @@ fn list_versions(
         }
         None => entries
             .iter()
-            .filter(|e| category_filter.is_none_or(|c| e.category == c))
+            .filter(|e| category_matched(e, category_filter))
             .collect(),
     };
     if targets.is_empty() {
         match ctx.format {
             Format::Json => print_json(&serde_json::json!([])),
-            Format::Human => println!("0件 (該当するfileがありません)"),
+            Format::Human => println!("0件 (該当するentityがありません)"),
         }
         return Ok(0);
     }
@@ -416,9 +349,9 @@ fn list_versions(
             .map(|e| {
                 let current_vid = e.versions.first().map(|f| f.version_id.as_str());
                 serde_json::json!({
-                    "name": e.name,
-                    "category": e.category,
-                    "rel_path": e.rel_path,
+                    "uuid": e.uuid,
+                    "title": e.title,
+                    "locations": e.locations.iter().map(location_json).collect::<Vec<_>>(),
                     "versions": e.versions.iter().map(|v| serde_json::json!({
                         "date": v.date,
                         "version_ts": v.version_ts,
@@ -438,7 +371,15 @@ fn list_versions(
         return Ok(0);
     }
     for e in targets {
-        println!("{}  ({}/{})", e.name, e.category, print_rel(&e.rel_path));
+        println!("{}  (uuid={})", e.title, e.uuid);
+        for l in &e.locations {
+            println!(
+                "  所在: {}  ({}/{})",
+                l.source_path,
+                l.category,
+                print_rel(&l.rel_path)
+            );
+        }
         let current_vid = e.versions.first().map(|f| f.version_id.as_str());
         for v in &e.versions {
             println!(
@@ -469,22 +410,21 @@ fn print_rel(rel: &str) -> String {
     }
 }
 
-fn list_pins(ctx: &CtxArgs, name: Option<&str>) -> BackupResult<i32> {
+fn list_pins(ctx: &CtxArgs, title: Option<&str>) -> BackupResult<i32> {
     let session = open_session(ctx)?;
     let key_path = resolve_key(ctx, session.cfg.as_ref())?;
     let (_h, entries) = read_index_for_query(&session, &key_path)?;
-    let targets: Vec<&IndexFileEntry> = match name {
-        Some(n) => vec![super::get::find_entry(&entries, n, None)?],
+    let targets: Vec<&IndexFileEntry> = match title {
+        Some(t) => vec![super::get::find_entry(&entries, t, None)?],
         None => entries.iter().collect(),
     };
-    // JSONは対象file単位の構造(file名とpins[]を並べる。humanの行データと同一対象)
+    // JSONは対象entity単位の構造(titleとpins[]を並べる。humanの行データと同一対象)
     let file_values: Vec<serde_json::Value> = targets
         .iter()
         .map(|e| {
             serde_json::json!({
-                "name": e.name,
-                "category": e.category,
-                "rel_path": e.rel_path,
+                "uuid": e.uuid,
+                "title": e.title,
                 "pins": e.pins.iter().map(|p| serde_json::json!({
                     "pin": p.pin,
                     "date": p.date,
@@ -504,7 +444,7 @@ fn list_pins(ctx: &CtxArgs, name: Option<&str>) -> BackupResult<i32> {
                 for p in &e.pins {
                     println!(
                         "{}  {}  {}  {}",
-                        e.name,
+                        e.title,
                         p.pin,
                         p.date,
                         fmt_size(p.source_size),
@@ -520,24 +460,24 @@ fn list_runs(ctx: &CtxArgs) -> BackupResult<i32> {
     let session = open_session(ctx)?;
     let key_path = resolve_key(ctx, session.cfg.as_ref())?;
     let (_h, entries) = read_index_for_query(&session, &key_path)?;
-    // run(batch_id)ごとの対象file数と名前(JSONはhumanの行と同一対象のfile名を含む)
+    // run(batch_id)ごとの対象entity数とtitle(JSONはhumanの行と同一対象のtitleを含む)
     let mut runs: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for e in &entries {
         for v in &e.versions {
             runs.entry(v.batch_id.as_str())
                 .or_default()
-                .push(e.name.as_str());
+                .push(e.title.as_str());
         }
     }
     match ctx.format {
         Format::Json => {
             let value: Vec<serde_json::Value> = runs
                 .iter()
-                .map(|(run, names)| {
+                .map(|(run, titles)| {
                     serde_json::json!({
                         "run": run,
-                        "files": names.len(),
-                        "names": names,
+                        "files": titles.len(),
+                        "titles": titles,
                     })
                 })
                 .collect();
@@ -548,61 +488,8 @@ fn list_runs(ctx: &CtxArgs) -> BackupResult<i32> {
                 println!("0件 (索引は空です)");
                 return Ok(0);
             }
-            for (run, names) in &runs {
-                println!("{run}  files={}", names.len());
-            }
-        }
-    }
-    Ok(0)
-}
-
-fn list_categories(ctx: &CtxArgs) -> BackupResult<i32> {
-    let session = open_session(ctx)?;
-    let key_path = resolve_key(ctx, session.cfg.as_ref())?;
-    let (_h, entries) = read_index_for_query(&session, &key_path)?;
-    let mut cats: BTreeMap<String, usize> = BTreeMap::new();
-    for e in &entries {
-        *cats.entry(e.category.clone()).or_insert(0) += 1;
-    }
-    // 設定のcategories(索引に実体が無くても表示。keepは設定値・災害時設定なしは"-")
-    if let Some(cfg) = session.cfg.as_ref() {
-        for name in cfg.categories.keys() {
-            cats.entry(name.clone()).or_insert(0);
-        }
-    }
-    match ctx.format {
-        Format::Json => {
-            let value: Vec<serde_json::Value> = cats
-                .iter()
-                .map(|(c, n)| {
-                    serde_json::json!({
-                        "category": c,
-                        "files": n,
-                        "keep": session
-                            .cfg
-                            .as_ref()
-                            .and_then(|cfg| cfg.categories.get(c))
-                            .map(|cat| cat.keep)
-                            .map(serde_json::Value::from)
-                            .unwrap_or(serde_json::Value::Null),
-                    })
-                })
-                .collect();
-            print_json(&serde_json::json!(value));
-        }
-        Format::Human => {
-            if cats.is_empty() {
-                println!("0件 (索引は空です)");
-                return Ok(0);
-            }
-            for (c, n) in &cats {
-                let keep = session
-                    .cfg
-                    .as_ref()
-                    .and_then(|cfg| cfg.categories.get(c))
-                    .map(|cat| cat.keep.to_string())
-                    .unwrap_or_else(|| "-".to_string());
-                println!("{c}  files={n}  keep={keep}");
+            for (run, titles) in &runs {
+                println!("{run}  files={}", titles.len());
             }
         }
     }
@@ -703,6 +590,21 @@ pub fn cmd_diff(args: &DiffArgs) -> i32 {
     }
 }
 
+/// 突合対象外のkey判定: 予約領域(sys)と{prefix}data/配下のmetadata_接頭辞file名
+/// (いずれも索引管理外・TASK-18 5.11)。
+fn diff_out_of_scope(prefix: &str, key: &str) -> bool {
+    let reserve_prefix = format!("{prefix}{}/", layout::RESERVE_SEGMENT);
+    if key.starts_with(reserve_prefix.as_str()) {
+        return true;
+    }
+    let data_prefix = layout::data_prefix(prefix);
+    if key.starts_with(data_prefix.as_str()) {
+        let basename = key.rsplit('/').next().unwrap_or("");
+        return basename.starts_with("metadata_");
+    }
+    false
+}
+
 fn run_diff(args: &DiffArgs) -> BackupResult<i32> {
     let session = open_session(&args.ctx)?;
     let key_path = resolve_key(&args.ctx, session.cfg.as_ref())?;
@@ -710,13 +612,10 @@ fn run_diff(args: &DiffArgs) -> BackupResult<i32> {
     let versions = session
         .backend
         .list_versions(&session.aws.bucket, &session.aws.prefix)?;
-    // 予約領域(sys)は突合対象外(索引・manifestは索引の管理外)
-    let reserve_prefix = format!("{}{}/", session.aws.prefix, layout::RESERVE_SEGMENT);
-    let is_reserved = |k: &str| k.starts_with(reserve_prefix.as_str());
     let present: std::collections::BTreeSet<&str> = versions
         .iter()
         .map(|v| v.key.as_str())
-        .filter(|k| !is_reserved(k))
+        .filter(|k| !diff_out_of_scope(&session.aws.prefix, k))
         .collect();
 
     if let Some(run) = args.run.as_deref() {
@@ -795,14 +694,13 @@ fn run_diff(args: &DiffArgs) -> BackupResult<i32> {
     }
     match args.ctx.format {
         Format::Json => print_json(&serde_json::json!({
-            // 索引側の対象file一覧(humanの突合対象と同一データ)
+            // 索引側の対象entity一覧(humanの突合対象と同一データ)
             "entries": entries.len(),
             "files": entries
                 .iter()
                 .map(|e| serde_json::json!({
-                    "name": e.name,
-                    "category": e.category,
-                    "rel_path": e.rel_path,
+                    "uuid": e.uuid,
+                    "title": e.title,
                 }))
                 .collect::<Vec<_>>(),
             "missing": missing,

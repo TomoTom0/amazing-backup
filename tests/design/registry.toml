@@ -1,0 +1,78 @@
+# backup-remote テスト設計条件書(registry エリア)
+# 出典: tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(registry schema 1→2)・5.3・4.1(sha_uuid_lookup)・10章(registry)
+# 2026-10-22: TASK-18(S3キー設計: UUID+versioning)対応でテスト先行の条件書(新設feature)。
+#   src/registry.rs のrecord schema=2化(file_write/file_upload/pin_write/pin_remove/prune)・
+#   新record_type(sweep/location_remove)・sha_uuid_lookup(合流正本・承認事項4)の条件群。
+#   dev初期化(設計8章)で旧registryは消去・prodは空のため旧schema1記録の互換層は不要(3.2)。
+#   実装前のため条件に対応するテストコードは未作成(網羅検査は後段のテスト作成で解消)。
+
+[meta]
+feature = "registry"
+source_file = "src/registry.rs"
+verified = true
+verified_at = "2026-10-22"
+verified_by = "claude"
+test_command = "cargo test"
+source_hash = "3b3f17e6bd88a5be275a54b7c14ef5a063132c2c"
+note = "TASK-18(設計3.2・5.3本文)の条件化。registryは追記型JSONL(data/registry.jsonl・schema=2)。bucket一致規則(record_bucket_matched)は不変で、H-1/M-R1系の既存条件(cli.profile-namespace-isolated-by-bucket・index.pins-bucket-isolated等)がbucket分離の振る舞いを担保。registry読込の共通振る舞い(不正JSON行・torn write・未知record_type・read error伝播)はverifyエリアの既存条件が担保"
+
+[[condition]]
+id = "registry.schema2-records-roundtrip"
+target_function = "registry::append_record / load_registry(schema2 record)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(registry schema 1→2・record単位)・5.3・10章(registry)"
+description = "schema2 recordのappend→load往復: file_write(+uuid,+title/削除folder・identity_hash維持)・file_upload(+uuid,+title/削除name,category,rel_path,identity_hash)・pin_write(+uuid/削除name,category,rel_path,folder)・pin_remove(+uuid/削除name)・prune(削除category,keep・deleted[]維持)の全fieldがserialize→parseで失われることなく復元される(s3_keyはdata/{uuid}/default.age記録値・Record enumへ正しく分類) (unit)"
+given = "5種のschema2 record(file_write・file_upload・pin_write・pin_remove・prune各1件)を含むregistryのappend→load往復"
+expect_return_shape = "全recordの全field(schema=2・record_type・uuid・title等の新field含む)がparse結果で失われず減reduceまで読み込まれる"
+source_lines = "tests/registry_storage.rs:33"
+
+[[condition]]
+id = "registry.old-schema-fields-rejected"
+target_function = "registry::load_registry(deny_unknown_fields)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2・5.3(deny_unknown_fieldsにより旧schema1行はparse失敗。dev初期化でregistryごと消えるため互換層不要)"
+description = "旧schema1形式のrecord行(旧フィールドfolder/name等の混入・schema=1)はdeny_unknown_fieldsによりparse失敗となる(旧記録の互換読込・黙黙変換は行わない。失敗はverify.torn-write-and-bad-json-linesと同じ不正JSON行の扱い) (unit)"
+given = "旧schema1形式のfile_write行(folder入り・uuid/title無し・schema=1)を既知recordに混入したregistry"
+expect_return_shape = "当該行は行番号付きでparseエラー(ProcessError)となり、黙って読み飛ばされず変換もされない"
+source_lines = "src/registry.rs:938; tests/registry_storage.rs:155"
+
+[[condition]]
+id = "registry.sweep-location-remove-records"
+target_function = "registry::load_registry / reduce_records(sweep・location_remove)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(sweep/location_remove新設)・5.3・10章(registry)"
+description = "新record_typeのparse/reduce: sweep={schema:1, record_type:\"sweep\", recorded_at, reason:\"lifecycle\", deleted:[{s3_key, version_id}]}(manage index reconcileの実行記録・索引再構築で消滅版を復活させない除外集合)・location_remove={schema:1, record_type:\"location_remove\", recorded_at, uuid, identity_hash, source_path}(manage location rmの実行記録)。reduce結果はReducedのsweeps/location_removesへ全件格納される (unit)"
+given = "sweep(deleted 2件)・location_remove各1行を含むregistryのloadとreduce"
+expect_return_shape = "両record_typeが既知種として読み込まれ(未知record_type警告なし)、Reducedのsweeps/location_removesに全件格納される"
+source_lines = "src/registry.rs:915; tests/registry_storage.rs:198"
+
+[[condition]]
+id = "registry.sha-uuid-lookup-resolves-unique"
+target_function = "registry::sha_uuid_lookup"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(Reducedへの追加・sha_uuid_lookup)・4.1(3)・10章(registry)"
+description = "sha_uuid_lookup(合流正本・承認事項4): file_uploadsからbucket一致する同source_sha256記録のuuid集合を作り、1件ならそのuuidを返す。bucket一致はrecord_bucket_matchedと同一規則(記録s3_bucket欠損の空文字は正本bucket相当) (unit)"
+given = "実効bucket=正本bucketのregistryに同shaのbucket一致file_uploadが1件だけ存在する状態でのlookup"
+expect_return = "当該uuidのSome(uuid)"
+source_lines = "src/registry.rs:958; tests/registry_storage.rs:280"
+
+[[condition]]
+id = "registry.sha-uuid-lookup-multiple-picks-min-uuid"
+target_function = "registry::sha_uuid_lookup"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(複数(歴史的重複)なら辞書順最小uuid)・4.3(同一sha複数uuid)・10章(registry)"
+description = "同一shaがbucket一致する複数uuidに存在する(歴史的重複)場合は辞書順最小uuidを返す(合流先を決定的にする) (unit)"
+given = "同shaのbucket一致file_uploadがuuid昇順でuuid-b・uuid-aの2件存在する状態でのlookup"
+expect_return = "uuid-a(辞書順最小)のSome"
+source_lines = "src/registry.rs:959; tests/registry_storage.rs:332"
+
+[[condition]]
+id = "registry.sha-uuid-lookup-bucket-scoped"
+target_function = "registry::sha_uuid_lookup"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2・10章(registry: bucket分離・s3_bucket欠損旧記録相当の正本bucket解釈)"
+description = "lookupのuuid集合はbucket一致で分離される: 他方bucketの同sha記録は不採用(同一prefix・別bucket構成で他bucket実績へ合流しない)。s3_bucket欠損(空文字)の旧記録相当は正本bucket解釈(record_bucket_matchedと同一規則)で、実効bucket=正本bucketの実行でのみ採用される (unit, fake S3Backend)"
+given = "dev(active_profile=正本)とprodが同一prefix・別bucketの構成で、(1)同shaのfile_uploadがprod bucket側のみ存在する状態でのdev実効bucketでのlookup (2)同shaのfile_upload(s3_bucket空文字)が存在する状態でのdev・prod各実効bucketでのlookup"
+expect_return_shape = "(1)None(他方bucket記録は不採用) (2)正本bucket(dev)側はSome・prod側はNone"
+source_lines = "src/registry.rs:960; tests/registry_storage.rs:398"
+
+[[excluded]]
+item = "registry喪失(索引はS3に残る)からの回復操作(manage index rebuildで索引をmanifest基準へ現状化したうえで重複実体の不要側をprune・手動deleteで回収)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 4.3(境界条件表 registry喪失行)"
+reason = "運用手順(設計は回復手段を記載するが自動化しない)。registry喪失時に合流できず重複uuidを発行する許容挙動自体はcli.backup-push-registry-loss-new-uuidで条件化"
+decided_at = "2026-10-22"
+decided_by = "claude"

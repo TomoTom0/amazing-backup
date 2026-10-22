@@ -1,9 +1,10 @@
-//! manage系(prune/lifecycle/index/jobs・設計3.2)。
+//! manage系(TASK-18 5.12・6.2/6.3/6.4): prune(data/一括)・lifecycle(3rule)・
+//! index(rebuild/reconcile)・jobs(reissue)・location rm(旧所在の明示除去)。
 
 use super::get::{RestoreCheck, ensure_restored, restore_guidance};
 use super::{CtxArgs, now_jst, open_session, resolve_key, sha256_hex};
 use crate::errors::{BackupError, BackupResult};
-use crate::index::{INDEX_SCHEMA, IndexFileEntry, IndexPin, IndexVersion};
+use crate::index::{INDEX_SCHEMA, IndexFileEntry, IndexLocation, IndexPin, IndexVersion};
 use crate::layout;
 use crate::registry;
 use std::collections::BTreeMap;
@@ -16,15 +17,10 @@ pub struct ManageArgs {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum ManageSub {
-    /// 世代管理の即時実行(dry-run既定)
+    /// 世代管理の即時実行(data/一括・dry-run既定)
     Prune {
         #[command(flatten)]
         ctx: CtxArgs,
-        #[arg(long, required = true)]
-        category: String,
-        /// 当該実行のみのkeep上書き
-        #[arg(long)]
-        keep: Option<u32>,
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
@@ -35,10 +31,15 @@ pub enum ManageSub {
         #[command(subcommand)]
         sub: LifecycleSub,
     },
-    /// 索引の再構築(manifestから)
+    /// 索引の再構築(manifestから)・整合(lifecycle消滅版)
     Index {
         #[command(subcommand)]
         sub: IndexSub,
+    },
+    /// 旧所在の明示除去(索引・registryの記録値のみ。S3・実体には触れない)
+    Location {
+        #[command(subcommand)]
+        sub: LocationSub,
     },
     /// 復元job管理(再発行)
     Jobs {
@@ -63,10 +64,31 @@ pub enum LifecycleSub {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum IndexSub {
-    /// manifest(DA)から索引を再構築
+    /// manifestから索引を再構築
     Rebuild {
         #[command(flatten)]
         ctx: CtxArgs,
+    },
+    /// lifecycle消滅版の索引整合(既定dry-run・--applyで実行)
+    Reconcile {
+        #[command(flatten)]
+        ctx: CtxArgs,
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum LocationSub {
+    /// 旧所在の除去(location_remove記録→索引再構築→metadata sync)
+    Rm {
+        #[command(flatten)]
+        ctx: CtxArgs,
+        /// 除去する所在のrealpath(source_path完全一致)
+        source_path: String,
+        /// entity絞り込み(uuid)
+        #[arg(long)]
+        uuid: Option<String>,
     },
 }
 
@@ -88,17 +110,23 @@ pub fn cmd_manage(args: &ManageArgs) -> i32 {
     match &args.sub {
         ManageSub::Prune {
             ctx,
-            category,
-            keep,
             dry_run,
             apply,
-        } => cmd_manage_prune(ctx, category, *keep, *dry_run, *apply),
+        } => cmd_manage_prune(ctx, *dry_run, *apply),
         ManageSub::Lifecycle { sub } => match sub {
             LifecycleSub::Show { ctx } => cmd_manage_lifecycle(ctx, &LifecycleOp::Show),
             LifecycleSub::Apply { ctx } => cmd_manage_lifecycle(ctx, &LifecycleOp::Apply),
         },
         ManageSub::Index { sub } => match sub {
             IndexSub::Rebuild { ctx } => cmd_manage_index_rebuild(ctx),
+            IndexSub::Reconcile { ctx, apply } => cmd_manage_index_reconcile(ctx, *apply),
+        },
+        ManageSub::Location { sub } => match sub {
+            LocationSub::Rm {
+                ctx,
+                source_path,
+                uuid,
+            } => cmd_manage_location_rm(ctx, source_path, uuid.as_deref()),
         },
         ManageSub::Jobs { sub } => match sub {
             JobsSub::Reissue {
@@ -110,7 +138,7 @@ pub fn cmd_manage(args: &ManageArgs) -> i32 {
     }
 }
 
-/// manage jobs reissue <key>(TASK-11 Phase B): 対象objectの復元jobを再発行する。
+/// manage jobs reissue <key>: 対象objectの復元jobを再発行する。
 /// tierはStandard/Bulkのallowlist検査(allowlist外はusage 64・S3 API呼び出しなし)。
 fn cmd_manage_jobs_reissue(ctx: &CtxArgs, key: &str, tier: Option<&str>) -> i32 {
     let run = (|| -> BackupResult<i32> {
@@ -131,13 +159,9 @@ fn cmd_manage_jobs_reissue(ctx: &CtxArgs, key: &str, tier: Option<&str>) -> i32 
     }
 }
 
-fn cmd_manage_prune(
-    ctx: &CtxArgs,
-    category: &str,
-    keep_override: Option<u32>,
-    dry_run: bool,
-    apply: bool,
-) -> i32 {
+/// manage prune(TASK-18 5.12・6.5): {prefix}data/一括。`/default.age`終端のみ・
+/// noncurrent版のみ・keep=[aws.lifecycle].keep_versions(--keep廃止・実行時上書き不可)。
+fn cmd_manage_prune(ctx: &CtxArgs, dry_run: bool, apply: bool) -> i32 {
     let run = (|| -> BackupResult<i32> {
         if dry_run && apply {
             return Err(BackupError::Usage(
@@ -148,38 +172,11 @@ fn cmd_manage_prune(
         let cfg = session.cfg.as_ref().ok_or_else(|| {
             BackupError::Config("manage pruneには--config(pipeline.toml)が必要です".to_string())
         })?;
-        // categoryの検証(M-2: 予約語(sys)・旧表記(_sys)・形式違反・未定義categoryを
-        // ListObjectVersionsより前に弾く)
-        layout::validate_category_name(category)
-            .map_err(|e| BackupError::Config(format!("--categoryが不正です: {e}")))?;
-        if !cfg.categories.contains_key(category) {
-            return Err(BackupError::Config(format!(
-                "category({category})は[categories]に定義されていません"
-            )));
-        }
-        let keep = match keep_override {
-            Some(k) => {
-                if !(1..=100).contains(&k) {
-                    return Err(BackupError::Config(format!(
-                        "--keepは1以上100以下で指定してください: {k}"
-                    )));
-                }
-                k
-            }
-            None => cfg
-                .categories
-                .get(category)
-                .map(|c| c.keep)
-                .ok_or_else(|| {
-                    BackupError::Config(format!(
-                        "category({category})は[categories]に定義されていません"
-                    ))
-                })?,
-        };
-        // 対象計算: ListObjectVersions。同一keyのnoncurrent版を新しい順に並べ、
-        // newer noncurrent数がkeep以上となった版を削除対象とする(NCVEと同一定義・5.2)。
-        // 現行version(is_latest)・pin key(default.age以外)は対象外(構造的保護)。
-        let prefix = format!("{}{}/", session.aws.prefix, category);
+        let keep = session.aws.lifecycle.keep_versions as usize;
+        // 対象計算: ListObjectVersions(data/一括)。同一keyのnoncurrent版を新しい順に並べ、
+        // newer noncurrent数がkeep以上となった版を削除対象とする(NCVEと同一定義)。
+        // 現行version(is_latest)・pin key(default.age以外)・metadata keyは対象外(構造的保護)。
+        let prefix = layout::data_prefix(&session.aws.prefix);
         let versions = session
             .backend
             .list_versions(&session.aws.bucket, &prefix)?;
@@ -190,7 +187,7 @@ fn cmd_manage_prune(
         let mut deletions: Vec<(String, String)> = Vec::new();
         for (key, mut vs) in by_key {
             if !key.ends_with("/default.age") {
-                continue; // pin key等は構造的保護
+                continue; // pin key・metadata keyは構造的保護
             }
             // listは新しい順に揃える(実装差を吸収するため明示sort・安定)。
             // 現行(is_latest)を除外した残り=noncurrent(新しい順)。
@@ -203,7 +200,7 @@ fn cmd_manage_prune(
             });
             vs.retain(|v| !v.is_latest && !v.is_delete_marker);
             for (i, v) in vs.iter().enumerate() {
-                if i >= keep as usize {
+                if i >= keep {
                     deletions.push((key.clone(), v.version_id.clone()));
                 }
             }
@@ -213,7 +210,7 @@ fn cmd_manage_prune(
                 println!("[dry-run] delete {key} version_id={vid}");
             }
             println!(
-                "[dry-run] manage prune: category={category} keep={keep} 削除対象={}版 (実行は --apply)",
+                "[dry-run] manage prune: prefix={prefix} keep={keep} 削除対象={}版 (実行は --apply)",
                 deletions.len()
             );
             return Ok(0);
@@ -231,11 +228,9 @@ fn cmd_manage_prune(
             registry::append_record(
                 &registry_path,
                 &registry::PruneRecord {
-                    schema: 1,
+                    schema: 2,
                     record_type: "prune".into(),
                     recorded_at: now_jst(),
-                    category: category.to_string(),
-                    keep,
                     deleted: vec![registry::PruneDeleted {
                         s3_key: key.clone(),
                         version_id: vid.clone(),
@@ -245,20 +240,7 @@ fn cmd_manage_prune(
             deleted_ok.push((key.clone(), vid.clone()));
         }
         // 索引の再構築・配置(削除済み版の除外はbuild_entriesがprune記録で行う)
-        let records = registry::load_registry(&registry_path)?;
-        let reduced = registry::reduce_records(&records);
-        let entries =
-            crate::index::build_entries(&reduced, &session.aws.bucket, &session.canonical_bucket);
-        crate::index::upload_index(
-            session.backend.as_ref(),
-            &session.aws.bucket,
-            &session.aws.prefix,
-            &cfg.public_keys,
-            &entries,
-            "prune",
-            &now_jst(),
-            &registry_path,
-        )?;
+        rebuild_and_upload(&session, &registry_path, "prune")?;
         println!("deleted {} version(s)", deleted_ok.len());
         Ok(0)
     })();
@@ -271,7 +253,7 @@ fn cmd_manage_prune(
     }
 }
 
-/// lifecycle操作(show|apply)。引数構造の都合でleafで受けてopへ写像する。
+/// lifecycle操作(show|apply)。値はすべてaws.toml [aws.lifecycle]から(ハードコード禁止)。
 enum LifecycleOp {
     Show,
     Apply,
@@ -280,13 +262,30 @@ enum LifecycleOp {
 fn cmd_manage_lifecycle(ctx: &CtxArgs, op: &LifecycleOp) -> i32 {
     let run = (|| -> BackupResult<i32> {
         let session = open_session(ctx)?;
-        let cfg = session.cfg.as_ref().ok_or_else(|| {
-            BackupError::Config("manage lifecycleには--config(pipeline.toml)が必要です".to_string())
-        })?;
+        let lc = session.aws.lifecycle;
+        // 3rule(data/一括・TASK-18 7章):
+        // 1) data-ncve: NCVE{NoncurrentDays, NewerNoncurrentVersions}
+        // 2) mpu-abort: AbortIncompleteMultipartUpload
+        // 3) delete-marker-sweep: Expiration ExpiredObjectDeleteMarker
+        let rules: Vec<crate::s3::LifecycleSpec> = vec![
+            crate::s3::LifecycleSpec::Noncurrent {
+                prefix: layout::data_prefix(&session.aws.prefix),
+                noncurrent_days: lc.noncurrent_days as i32,
+                newer_noncurrent_versions: lc.keep_versions as i32,
+            },
+            crate::s3::LifecycleSpec::MpuAbort {
+                prefix: session.aws.prefix.clone(),
+                days_after_initiation: lc.mpu_abort_days as i32,
+            },
+            crate::s3::LifecycleSpec::DeleteMarkerSweep {
+                prefix: layout::data_prefix(&session.aws.prefix),
+                expired_object_delete_marker: true,
+            },
+        ];
         match op {
             LifecycleOp::Show => {
-                let rules = session.backend.get_lifecycle(&session.aws.bucket)?;
-                match rules {
+                let current = session.backend.get_lifecycle(&session.aws.bucket)?;
+                match current {
                     None => println!("未設定 (manage lifecycle apply で適用できます)"),
                     Some(rules) => {
                         for r in &rules {
@@ -297,19 +296,6 @@ fn cmd_manage_lifecycle(ctx: &CtxArgs, op: &LifecycleOp) -> i32 {
                 Ok(0)
             }
             LifecycleOp::Apply => {
-                // category毎NCVE rule(prefix filterで予約領域は構造的に対象外)+MPU abort
-                let mut rules: Vec<crate::s3::LifecycleSpec> = Vec::new();
-                for (name, cat) in &cfg.categories {
-                    rules.push(crate::s3::LifecycleSpec::Noncurrent {
-                        prefix: format!("{}{}/", session.aws.prefix, name),
-                        noncurrent_days: 180,
-                        newer_noncurrent_versions: cat.keep as i32,
-                    });
-                }
-                rules.push(crate::s3::LifecycleSpec::MpuAbort {
-                    prefix: session.aws.prefix.clone(),
-                    days_after_initiation: 7,
-                });
                 for r in &rules {
                     println!("{}", format_spec(r));
                 }
@@ -341,9 +327,218 @@ fn format_spec(r: &crate::s3::LifecycleSpec) -> String {
             prefix,
             days_after_initiation,
         } => format!("AbortIncompleteMultipartUpload {prefix} {days_after_initiation}日"),
+        crate::s3::LifecycleSpec::DeleteMarkerSweep { prefix, .. } => {
+            format!("Expiration {prefix} ExpiredObjectDeleteMarker=true")
+        }
     }
 }
 
+/// registryから索引を再構築してS3へ配置する(prune/pin等の索引影響操作後)。
+fn rebuild_and_upload(
+    session: &super::Session,
+    registry_path: &std::path::Path,
+    run_tag: &str,
+) -> BackupResult<()> {
+    let cfg = session
+        .cfg
+        .as_ref()
+        .ok_or_else(|| BackupError::Config("pipeline.tomlが必要です".to_string()))?;
+    let records = registry::load_registry(registry_path)?;
+    let reduced = registry::reduce_records(&records);
+    let entries =
+        crate::index::build_entries(&reduced, &session.aws.bucket, &session.canonical_bucket);
+    crate::index::upload_index(
+        session.backend.as_ref(),
+        &session.aws.bucket,
+        &session.aws.prefix,
+        &cfg.public_keys,
+        &entries,
+        run_tag,
+        &now_jst(),
+        registry_path,
+    )?;
+    Ok(())
+}
+
+/// manage index reconcile(TASK-18 6.3): read_index → ListObjectVersions(bucket,
+/// {prefix}data/)のpresent集合と突合し、索引versions[]・pins[]のうちS3に存在しない
+/// もの(lifecycle消滅版)を特定 → sweep記録→索引再構築+upload。
+/// 既定dry-run(件数表示)・--applyで実行。
+fn cmd_manage_index_reconcile(ctx: &CtxArgs, apply: bool) -> i32 {
+    let run = (|| -> BackupResult<i32> {
+        let session = open_session(ctx)?;
+        let cfg = session.cfg.as_ref().ok_or_else(|| {
+            BackupError::Config(
+                "manage index reconcileには--config(pipeline.toml)が必要です".to_string(),
+            )
+        })?;
+        let key_path = resolve_key(ctx, session.cfg.as_ref())?;
+        let (_h, entries) = super::read_index(session.backend.as_ref(), &session.aws, &key_path)?;
+        // present集合(key, version_id・delete marker除外)。version_id空の索引記録は
+        // key存在のみで判定
+        let versions = session.backend.list_versions(
+            &session.aws.bucket,
+            &layout::data_prefix(&session.aws.prefix),
+        )?;
+        let mut present_keys: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        let mut present_pairs: std::collections::BTreeSet<(String, String)> =
+            std::collections::BTreeSet::new();
+        for v in &versions {
+            if v.is_delete_marker {
+                continue;
+            }
+            present_keys.insert(v.key.clone());
+            present_pairs.insert((v.key.clone(), v.version_id.clone()));
+        }
+        // 索引記載のうちS3に存在しない版・pinを特定
+        let mut vanished: Vec<registry::PruneDeleted> = Vec::new();
+        for e in &entries {
+            for v in &e.versions {
+                let gone = if v.version_id.is_empty() {
+                    !present_keys.contains(&v.s3_key)
+                } else {
+                    !present_pairs.contains(&(v.s3_key.clone(), v.version_id.clone()))
+                };
+                if gone {
+                    vanished.push(registry::PruneDeleted {
+                        s3_key: v.s3_key.clone(),
+                        version_id: v.version_id.clone(),
+                    });
+                }
+            }
+            for p in &e.pins {
+                if !present_keys.contains(&p.s3_key) {
+                    vanished.push(registry::PruneDeleted {
+                        s3_key: p.s3_key.clone(),
+                        version_id: String::new(),
+                    });
+                }
+            }
+        }
+        if !apply {
+            for d in &vanished {
+                println!("[dry-run] sweep {} version_id={}", d.s3_key, d.version_id);
+            }
+            println!(
+                "[dry-run] manage index reconcile: 消滅版候補={}件 (実行は --apply)",
+                vanished.len()
+            );
+            return Ok(0);
+        }
+        // sweep記録(以降のbuild_entries・manage index rebuildでも当該版は復活しない)
+        let registry_path = cfg.registry_path.clone();
+        registry::append_record(
+            &registry_path,
+            &registry::SweepRecord {
+                schema: 1,
+                record_type: "sweep".into(),
+                recorded_at: now_jst(),
+                reason: "lifecycle".into(),
+                deleted: vanished.clone(),
+            },
+        )?;
+        rebuild_and_upload(&session, &registry_path, "reconcile")?;
+        println!(
+            "sweep {} version(s): 索引をS3実在集合へ整合しました",
+            vanished.len()
+        );
+        Ok(0)
+    })();
+    match run {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// manage location rm <source_path> [--uuid](TASK-18 6.2): 索引からsource_path完全一致の
+/// 所在を探し(--uuid指定でentity絞込)、不在は対象エラー3。実行はlocation_remove記録→
+/// 索引再構築+upload→当該entityのmetadata sync。S3・実体には触れない。
+/// 再backupすると所在が復活する(recorded_at比較規則)。
+fn cmd_manage_location_rm(ctx: &CtxArgs, source_path: &str, uuid_filter: Option<&str>) -> i32 {
+    let run = (|| -> BackupResult<i32> {
+        let session = open_session(ctx)?;
+        let cfg = session.cfg.as_ref().ok_or_else(|| {
+            BackupError::Config(
+                "manage location rmには--config(pipeline.toml)が必要です".to_string(),
+            )
+        })?;
+        let key_path = resolve_key(ctx, session.cfg.as_ref())?;
+        let (_h, entries) = super::read_index(session.backend.as_ref(), &session.aws, &key_path)?;
+        // 索引からsource_path完全一致の所在を探す(uuid指定でentity絞込)
+        let mut hits: Vec<(&IndexFileEntry, &IndexLocation)> = Vec::new();
+        for e in &entries {
+            if uuid_filter.is_some_and(|u| e.uuid != u) {
+                continue;
+            }
+            for l in &e.locations {
+                if l.source_path == source_path {
+                    hits.push((e, l));
+                }
+            }
+        }
+        if hits.is_empty() {
+            return Err(BackupError::Target(format!(
+                "所在(source_path={source_path})は索引にありません(list files/queryで確認してください)"
+            )));
+        }
+        if hits.len() > 1 {
+            return Err(BackupError::Target(format!(
+                "所在(source_path={source_path})が複数entityで見つかりました。--uuidで特定してください: {}",
+                hits.iter()
+                    .map(|(e, _)| e.uuid.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        let (entry, loc) = hits[0];
+        let registry_path = cfg.registry_path.clone();
+        // location_remove記録 → 索引再構築+upload → metadata sync
+        registry::append_record(
+            &registry_path,
+            &registry::LocationRemoveRecord {
+                schema: 1,
+                record_type: "location_remove".into(),
+                recorded_at: now_jst(),
+                uuid: entry.uuid.clone(),
+                identity_hash: loc.identity_hash.clone(),
+                source_path: loc.source_path.clone(),
+            },
+        )?;
+        rebuild_and_upload(&session, &registry_path, "location-rm")?;
+        let records = registry::load_registry(&registry_path)?;
+        let reduced = registry::reduce_records(&records);
+        crate::metadata::sync_entity_metadata(
+            session.backend.as_ref(),
+            &session.aws,
+            &session.canonical_bucket,
+            cfg,
+            &reduced,
+            &entry.uuid,
+        )?;
+        println!(
+            "ok: 所在を除去しました (uuid={} source_path={})。S3・実体には触れていません",
+            entry.uuid, loc.source_path
+        );
+        Ok(0)
+    })();
+    match run {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// manage index rebuild(TASK-18 5.12・3.3): manifest(V2・schema=2: uuid/title入り)から
+/// entity単位へentry再構築。locationsはfile recordsのsource_path単位(最新)から復元。
+/// prunes/sweepsの除外集合を適用(prune除去版の索引への復活防止)。pin復元はuuid照合。
+/// version_id欠損manifestはListObjectVersionsで補完。完了時は続けての
+/// manage index reconcile実行を案内表示する。
 fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
     let run = (|| -> BackupResult<i32> {
         let session = open_session(ctx)?;
@@ -383,14 +578,14 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             return Ok(0);
         }
 
-        // manifest取得・復号・parse
+        // manifest取得・復号・parse(TASK-18 3.3 schema=2: uuid/title入り・
+        // identity_hash/folder無し・name/category/rel_path/source_pathは所在記録として維持)
         struct Rec {
-            name: String,
+            uuid: String,
+            title: String,
             category: String,
             rel_path: String,
             source_path: String,
-            identity_hash: String,
-            folder: String,
             s3_key: String,
             version_id: Option<String>,
             date: String,
@@ -434,17 +629,11 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
                         .to_string()
                 };
                 all.push(Rec {
-                    name: g("name"),
+                    uuid: g("uuid"),
+                    title: g("title"),
                     category: g("category"),
                     rel_path: g("rel_path"),
                     source_path: g("source_path"),
-                    identity_hash: g("identity_hash"),
-                    folder: {
-                        // manifestのfolder記録を使う(欠損時はnameから導出・H-3:
-                        // folderが落ちるとrebuild後のpin key生成が壊れる)
-                        let f = g("folder");
-                        if f.is_empty() { g("name") } else { f }
-                    },
                     s3_key: g("s3_key"),
                     version_id: v
                         .get("version_id")
@@ -496,25 +685,81 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             }
         }
 
-        // identity単位のentry組立(versionsは新しい順)
+        // uuid単位のentry組立(versionsは新しい順・locationsはfile recordsの
+        // source_path単位(最新)から復元。identity_hashはsource_pathから再計算
+        // =file_write記録と同一規則)
         let mut order: Vec<String> = Vec::new();
         let mut entries: BTreeMap<String, IndexFileEntry> = BTreeMap::new();
+        // 所在はsource_path単位で最新(version_ts最大)の記録値を採用
+        struct LocRec {
+            source_path: String,
+            category: String,
+            rel_path: String,
+            last_backup: String,
+        }
+        let mut latest_loc: BTreeMap<(String, String), LocRec> = BTreeMap::new();
         for r in &all {
-            if !entries.contains_key(&r.identity_hash) {
-                order.push(r.identity_hash.clone());
+            let key = (r.uuid.clone(), r.source_path.clone());
+            // 同日の再記録も最新側(>=)を採用する(低8: 同日境界で先行記録が勝つと
+            // 当日の再backup所在が落ちる)
+            let replace = match latest_loc.get(&key) {
+                Some(prev) => prev.last_backup.as_str() <= r.version_ts.get(..10).unwrap_or(""),
+                None => true,
+            };
+            if replace {
+                latest_loc.insert(
+                    key,
+                    LocRec {
+                        source_path: r.source_path.clone(),
+                        category: r.category.clone(),
+                        rel_path: r.rel_path.clone(),
+                        last_backup: r.date.clone(),
+                    },
+                );
+            }
+        }
+        // title導出(中1): uuid毎のversion_ts最大file recordのtitle(entity_titleと
+        // 同一規則・同値はVec後方=後勝ち)。manifest走査の最初出現titleだとtitle変更後に
+        // rebuildした際に旧titleへ退行するため、最終記録のtitleを採る
+        let mut latest_title: BTreeMap<String, (String, String)> = BTreeMap::new();
+        for r in &all {
+            let replace = match latest_title.get(&r.uuid) {
+                // 記録順走査のため同version_tsの後方レコードも置換する(>=)
+                Some((ts, _)) => ts.as_str() <= r.version_ts.as_str(),
+                None => true,
+            };
+            if replace {
+                latest_title.insert(r.uuid.clone(), (r.version_ts.clone(), r.title.clone()));
+            }
+        }
+        for r in &all {
+            if !entries.contains_key(&r.uuid) {
+                order.push(r.uuid.clone());
+                let mut locations: Vec<IndexLocation> = latest_loc
+                    .iter()
+                    .filter(|((u, _), _)| u == &r.uuid)
+                    .map(|(_, l)| IndexLocation {
+                        source_path: l.source_path.clone(),
+                        category: l.category.clone(),
+                        rel_path: l.rel_path.clone(),
+                        identity_hash: layout::identity_hash(std::path::Path::new(&l.source_path)),
+                        last_backup: l.last_backup.clone(),
+                    })
+                    .collect();
+                locations.sort_by(|a, b| a.source_path.cmp(&b.source_path));
                 entries.insert(
-                    r.identity_hash.clone(),
+                    r.uuid.clone(),
                     IndexFileEntry {
                         schema: INDEX_SCHEMA,
                         record_type: "file".into(),
-                        name: r.name.clone(),
-                        category: r.category.clone(),
-                        rel_path: r.rel_path.clone(),
-                        source_path: r.source_path.clone(),
-                        identity_hash: r.identity_hash.clone(),
-                        folder: r.folder.clone(),
+                        uuid: r.uuid.clone(),
+                        title: latest_title
+                            .get(&r.uuid)
+                            .map(|(_, t)| t.clone())
+                            .unwrap_or_else(|| r.title.clone()),
                         versions: Vec::new(),
                         pins: Vec::new(),
+                        locations,
                     },
                 );
             }
@@ -522,7 +767,7 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
         let mut sorted = all;
         sorted.sort_by(|a, b| a.version_ts.cmp(&b.version_ts));
         for r in sorted {
-            if let Some(e) = entries.get_mut(&r.identity_hash) {
+            if let Some(e) = entries.get_mut(&r.uuid) {
                 e.versions.push(IndexVersion {
                     date: r.date,
                     version_ts: r.version_ts,
@@ -538,22 +783,37 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
         }
         for e in entries.values_mut() {
             e.versions.reverse(); // date降順(先頭=最新)
+            e.locations
+                .sort_by(|a, b| a.source_path.cmp(&b.source_path)); // 冪等
         }
         let mut entry_list: Vec<IndexFileEntry> = order
             .into_iter()
             .filter_map(|id| entries.remove(&id))
             .collect();
-        // pins復元(H-3・設計2.3): ローカルregistryのpin_write記録(未削除)を該当entryへ
-        // 接続する。採用・削除済み判定ともbucket一致(registry::record_bucket_matched。
-        // M-R1: 他方bucketのpin_writeは採用せず・pin_removeもs3_bucket一致するもののみ
-        // 削除済み扱い。索引構築build_entriesと同一規則。pin_writes/pin_removesのmap keyは
-        // (pin_s3_key, s3_bucket)組(TASK-15)のためwriteのbucketで組key照合する)。
-        // registry喪失時(完全被災の新環境)はpin情報の補完は行われない(manifestにpin実体の
-        // 記録が無いため。list_versions走査での補完はPhase B課題)
+        // pins復元(uuid照合)・prunes/sweepsの除外集合適用(TASK-18 5.12:
+        // prune/sweep済み版がrebuildで索引へ復活しない。registry喪失後等の除外集合が
+        // 無い環境では除外が効かないため、完了時にreconcile実行を案内する)
         let registry_path = cfg.registry_path.clone();
+        let mut excluded: std::collections::BTreeSet<(String, String)> =
+            std::collections::BTreeSet::new();
         if registry_path.is_file() {
             let records = registry::load_registry(&registry_path)?;
             let reduced_now = registry::reduce_records(&records);
+            for d in reduced_now
+                .prunes
+                .iter()
+                .flat_map(|p| p.deleted.iter())
+                .chain(reduced_now.sweeps.iter().flat_map(|p| p.deleted.iter()))
+            {
+                excluded.insert((d.s3_key.clone(), d.version_id.clone()));
+            }
+            for e in entry_list.iter_mut() {
+                e.versions.retain(|v| {
+                    v.version_id.is_empty()
+                        || !excluded.contains(&(v.s3_key.clone(), v.version_id.clone()))
+                });
+                e.versions.sort_by(|a, b| b.version_ts.cmp(&a.version_ts)); // date降順維持
+            }
             for pin in reduced_now.pin_writes.values() {
                 if !registry::record_bucket_matched(
                     &pin.s3_bucket,
@@ -562,26 +822,13 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
                 ) {
                     continue;
                 }
-                if let Some(remove) = reduced_now
+                if reduced_now
                     .pin_removes
-                    .get(&(pin.pin_s3_key.clone(), pin.s3_bucket.clone()))
+                    .contains_key(&(pin.pin_s3_key.clone(), pin.s3_bucket.clone()))
                 {
-                    // 二次bucket判定: 組key照合によりremove.s3_bucketはpin.s3_bucketと
-                    // 同一が保証済み(採用判定を通ったpinと同一bucket)のため常に真・防御的再判定
-                    if registry::record_bucket_matched(
-                        &remove.s3_bucket,
-                        &session.aws.bucket,
-                        &session.canonical_bucket,
-                    ) {
-                        continue;
-                    }
+                    continue;
                 }
-                if let Some(entry) = entry_list.iter_mut().find(|e| {
-                    e.name == pin.name
-                        && e.category == pin.category
-                        && e.rel_path == pin.rel_path
-                        && e.folder == pin.folder
-                }) {
+                if let Some(entry) = entry_list.iter_mut().find(|e| e.uuid == pin.uuid) {
                     entry.pins.push(IndexPin {
                         pin: pin.pin.clone(),
                         s3_key: pin.pin_s3_key.clone(),
@@ -617,6 +864,9 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             "索引を再構築しました: entries={} (manifests={})",
             entry_list.len(),
             manifest_keys.len()
+        );
+        println!(
+            "案内: 続けて `backup-remote manage index reconcile` を実行してください(manifest由来の再構築ではregistryのprune/sweep除外が及ばない場合があるため、S3実在集合へ整合します)"
         );
         Ok(0)
     })();

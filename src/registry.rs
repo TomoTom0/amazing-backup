@@ -1,10 +1,12 @@
-//! registry.jsonl追記・読込・reduce(設計5章registry.rs・4.1)。
+//! registry.jsonl追記・読込・reduce(TASK-18設計3.2・5.3)。
+//! file系recordはschema=2(uuid/title入り・folder等廃止・deny_unknown_fieldsにより
+//! 旧schema1行はparse失敗。dev初期化でregistryごと消えるため互換層は不要)。
 
 use crate::errors::{BackupError, BackupResult};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// `record_type: "encrypt"`のレコード(4.1)。
+/// `record_type: "encrypt"`のレコード(旧経路の管理event。schema不変)。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EncryptRecord {
@@ -32,7 +34,7 @@ pub struct EncryptRecord {
     pub manifest_path: String,
 }
 
-/// `record_type: "upload"`のレコード(4.1)。
+/// `record_type: "upload"`のレコード(旧経路の管理event。schema不変)。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UploadRecord {
@@ -43,9 +45,8 @@ pub struct UploadRecord {
     pub age_path: String,
     /// `<batch_date>/<source_name>.age`
     pub s3_key: String,
-    /// upload先の実効bucket(2.3のCLI一時上書き適用後の値。pending列挙・skip判定は
-    /// この値と当該実行の実効bucketの一致で照合。欠損時のdefault空文字は追加前の
-    /// 既存記録であり正本bucket相当として解釈する。4.1)
+    /// upload先の実効bucket(欠損時のdefault空文字は追加前の既存記録であり
+    /// 正本bucket相当として解釈する)
     #[serde(default)]
     pub s3_bucket: String,
     /// 同じく実効region(記録用。判定には使わない)
@@ -59,7 +60,7 @@ pub struct UploadRecord {
     pub uploaded_at: String,
 }
 
-/// `record_type: "manifest_upload"`のレコード(4.1)。
+/// `record_type: "manifest_upload"`のレコード(旧経路の管理event。schema不変)。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestUploadRecord {
@@ -71,11 +72,10 @@ pub struct ManifestUploadRecord {
     pub manifest_path: String,
     /// `<batch_date>/manifest.jsonl.age`
     pub s3_key: String,
-    /// upload先の実効bucket(2.3のCLI一時上書き適用後の値。欠損時のdefault空文字は
-    /// 追加前の既存記録であり正本bucket相当として解釈する。4.1)
+    /// upload先の実効bucket(欠損時のdefault空文字は追加前の既存記録であり
+    /// 正本bucket相当として解釈する)
     #[serde(default)]
     pub s3_bucket: String,
-    /// 同じく実効region(記録用。判定には使わない)
     #[serde(default)]
     pub s3_region: String,
     pub s3_size: i64,
@@ -84,10 +84,10 @@ pub struct ManifestUploadRecord {
     pub uploaded_at: String,
 }
 
-/// `record_type: "file_write"`のレコード(TASK-10設計7.3・新経路のencrypt相当)。
-/// 旧`encrypt`eventとは種別分離されており、旧upload経路の処理対象にならない
-/// (Phase A干渉防止。旧経路はTASK-11 Phase Bで削除済み)。
-/// 索引のfile entry源(identity単位・layout情報と実keyを含む)。
+/// `record_type: "file_write"`のレコード(TASK-18 schema=2)。
+/// 所在単位の記録(索引locations・metadata recipients導出の源)。
+/// uuid/title追加・folder廃止。identity_hashは所在skipの突合キーとして維持。
+/// s3_keyは`data/{uuid}/default.age`記録値。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileWriteRecord {
@@ -97,6 +97,10 @@ pub struct FileWriteRecord {
     pub batch_id: String,
     /// `YYYY-MM-DD`(JST暦日・runの日付)
     pub batch_date: String,
+    /// 実体UUID(v7 hyphenated)
+    pub uuid: String,
+    /// 実体のtitle(人間用識別子。後勝ち=entity title)
+    pub title: String,
     pub source_path: String,
     pub source_name: String,
     pub source_size: u64,
@@ -106,19 +110,19 @@ pub struct FileWriteRecord {
     pub age_size: u64,
     pub age_sha256: String,
     pub recipients: Vec<String>,
-    /// TASK-10 layout: 分類解決結果と衝突hash・実key(規約導出でなく記録値が正本)
+    /// 分類解決結果(所在記録値)
     pub category: String,
-    /// 正規化済みrel_path(空=なし)
+    /// 正規化済みrel_path(空=なし。所在記録値)
     pub rel_path: String,
-    /// sha256(realpath)先頭8hex(identity)
+    /// sha256(realpath)先頭8hex(所在の突合キー)
     pub identity_hash: String,
-    /// folder名(nameまたはname--hash8)
-    pub folder: String,
+    /// `data/{uuid}/default.age`記録値
     pub s3_key: String,
 }
 
-/// `record_type: "file_upload"`のレコード(TASK-10設計7.3・8.1)。
-/// 索引versions[]の供給源(version_idはS3Backend::put応答)。自足的な版情報を持つ。
+/// `record_type: "file_upload"`のレコード(TASK-18 schema=2)。
+/// 索引versions[]の供給源(version_idはS3Backend::put応答・version_tsは自足)。
+/// uuid/title追加・name/category/rel_path/identity_hash削除(uuid接続へ一本化)。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileUploadRecord {
@@ -126,12 +130,12 @@ pub struct FileUploadRecord {
     pub record_type: String,
     pub recorded_at: String,
     pub batch_id: String,
-    /// 版の暗号化時刻(ISO8601 JST。索引versions[].version_ts)
+    /// 版の暗号化時刻(ISO8601 JST。索引versions[].version_tsの正本)
     pub version_ts: String,
-    pub name: String,
-    pub category: String,
-    pub rel_path: String,
-    pub identity_hash: String,
+    /// 実体UUID
+    pub uuid: String,
+    /// 実体のtitle(記録時点)
+    pub title: String,
     pub s3_key: String,
     pub s3_bucket: String,
     pub s3_region: String,
@@ -147,7 +151,7 @@ pub struct FileUploadRecord {
     pub uploaded_at: String,
 }
 
-/// `record_type: "manifest"`のレコード(TASK-10設計7.3・新配置のrun manifest upload)。
+/// `record_type: "manifest"`のレコード(run manifest upload。schema不変)。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestV2Record {
@@ -165,7 +169,7 @@ pub struct ManifestV2Record {
     pub uploaded_at: String,
 }
 
-/// `record_type: "index_upload"`のレコード(TASK-10設計2.2・完全性突合と冪等skip用)。
+/// `record_type: "index_upload"`のレコード(完全性突合と冪等skip用。schema不変)。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IndexUploadRecord {
@@ -182,19 +186,18 @@ pub struct IndexUploadRecord {
     pub uploaded_at: String,
 }
 
-/// `record_type: "pin_write"`のレコード(TASK-10設計1.3・3.2。索引pins[]の供給源)。
+/// `record_type: "pin_write"`のレコード(TASK-18 schema=2)。
+/// uuid追加・name/category/rel_path/folder削除(uuid照合のみへ単純化)。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinWriteRecord {
     pub schema: i64,
     pub record_type: String,
     pub recorded_at: String,
-    pub name: String,
-    pub category: String,
-    pub rel_path: String,
-    pub folder: String,
+    /// 実体UUID
+    pub uuid: String,
     pub pin: String,
-    /// pin objectの実key
+    /// pin objectの実key(`data/{uuid}/{pin}.age`)
     pub pin_s3_key: String,
     /// 写し元のfile object keyと版
     pub source_s3_key: String,
@@ -210,28 +213,29 @@ pub struct PinWriteRecord {
     pub uploaded_at: String,
 }
 
-/// `record_type: "pin_remove"`のレコード(TASK-10設計3.2。pin rmの実行記録)。
+/// `record_type: "pin_remove"`のレコード(TASK-18 schema=2)。
+/// uuid追加・name削除。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinRemoveRecord {
     pub schema: i64,
     pub record_type: String,
     pub recorded_at: String,
-    pub name: String,
+    /// 実体UUID
+    pub uuid: String,
     pub pin: String,
     pub pin_s3_key: String,
     pub s3_bucket: String,
 }
 
-/// `record_type: "prune"`のレコード(TASK-10設計3.2。manage prune --applyの実行記録)。
+/// `record_type: "prune"`のレコード(TASK-18 schema=2・data/一括化に伴い
+/// category/keep削除。keep値の管理先はaws.toml [aws.lifecycle])。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PruneRecord {
     pub schema: i64,
     pub record_type: String,
     pub recorded_at: String,
-    pub category: String,
-    pub keep: u32,
     /// 削除した版(対象計算の正本記録)
     pub deleted: Vec<PruneDeleted>,
 }
@@ -242,6 +246,31 @@ pub struct PruneRecord {
 pub struct PruneDeleted {
     pub s3_key: String,
     pub version_id: String,
+}
+
+/// `record_type: "sweep"`のレコード(TASK-18新設・manage index reconcileの実行記録)。
+/// 索引再構築でlifecycle消滅版を復活させないための除外集合。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SweepRecord {
+    pub schema: i64,
+    pub record_type: String,
+    pub recorded_at: String,
+    /// 現行は"lifecycle"固定
+    pub reason: String,
+    pub deleted: Vec<PruneDeleted>,
+}
+
+/// `record_type: "location_remove"`のレコード(TASK-18新設・manage location rmの実行記録)。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocationRemoveRecord {
+    pub schema: i64,
+    pub record_type: String,
+    pub recorded_at: String,
+    pub uuid: String,
+    pub identity_hash: String,
+    pub source_path: String,
 }
 
 /// 読込後の既知レコード(未知`record_type`は警告のうえ無視される)。
@@ -257,16 +286,19 @@ pub enum Record {
     PinWrite(PinWriteRecord),
     PinRemove(PinRemoveRecord),
     Prune(PruneRecord),
+    Sweep(SweepRecord),
+    LocationRemove(LocationRemoveRecord),
 }
 
-/// reduce後のregistry状態(4.1 reduce規則 + TASK-10新event)。
+/// reduce後のregistry状態。
 /// encryptは`age_path`キーの後勝ち(挿入順保持)・upload状態は`age_path`/`manifest_path`ごとの最新。
-/// TASK-10新event: file_writeはidentity_hashキーの後勝ち・file_uploadは全件保持
-/// (各記録が1版に対応)・pin_write/pin_removeは(pin_s3_key, s3_bucket)組キーの後勝ち
+/// file_writeはidentity_hashキーの後勝ち・file_uploadは全件保持(各記録が1版に対応)・
+/// pin_write/pin_removeは(pin_s3_key, s3_bucket)組キーの後勝ち
 /// (TASK-15: 同名pinの別bucket付与が互いのmap entryを上書きしない)。
 /// pin_writeは処理時に同一(pin_s3_key, s3_bucket)組のpin_removeを除去する(rm→再addの
 /// 再付与がpin_writeとして勝つ。逆順のadd→rmはpin_removeが後に処理されて残る。
 /// bucket違いのremoveは同pin_s3_keyのwrite/removeを除去しない=bucket分離)。
+/// sweep/location_removeは全件保持(索引組立の除外集合)。
 #[derive(Debug, Clone, Default)]
 pub struct Reduced {
     /// reduce後のencrypt記録(age_path後勝ち・挿入順保持)
@@ -290,16 +322,20 @@ pub struct Reduced {
     pub pin_removes: HashMap<(String, String), PinRemoveRecord>,
     /// prune実行記録(全件)
     pub prunes: Vec<PruneRecord>,
+    /// sweep実行記録(全件・manage index reconcile)
+    pub sweeps: Vec<SweepRecord>,
+    /// location_remove実行記録(全件・manage location rm)
+    pub location_removes: Vec<LocationRemoveRecord>,
 }
 
-/// 1行JSON + `\n`を単一write、flush、fsync(親dirも初回作成)(4.1)。
+/// 1行JSON + `\n`を単一write、flush、fsync(親dirも初回作成)。
 pub fn append_record<T: serde::Serialize>(path: &Path, record: &T) -> BackupResult<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                BackupError::Process(format!("registry親dir作成失敗 ({}): {e}", parent.display()))
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            BackupError::Process(format!("registry親dir作成失敗 ({}): {e}", parent.display()))
+        })?;
     }
     let mut line = serde_json::to_string(record)
         .map_err(|e| BackupError::Internal(format!("registry recordのserializeに失敗: {e}")))?;
@@ -321,7 +357,7 @@ pub fn append_record<T: serde::Serialize>(path: &Path, record: &T) -> BackupResu
     Ok(())
 }
 
-/// 全行parse(4.1注記)。不正JSON行は行番号付きで`Process`エラー。
+/// 全行parse。不正JSON行は行番号付きで`Process`エラー。
 /// 改行終端でない最終行はtorn writeとして警告のうえ除外。
 /// 未知`record_type`の行は警告のうえ無視する。ファイル不在(NotFound)のみ空として読み、
 /// 他のread error(directory指定・権限不足等)はProcessエラーとして伝播する。
@@ -344,7 +380,7 @@ pub fn load_registry(path: &Path) -> BackupResult<Vec<Record>> {
     let text = String::from_utf8(bytes).map_err(|e| {
         BackupError::Process(format!("registryがUTF-8でない ({}): {e}", path.display()))
     })?;
-    // 改行終端でない最終行はtorn writeとして除外(4.1注記)
+    // 改行終端でない最終行はtorn writeとして除外
     let (body, torn_tail) = if text.ends_with('\n') {
         (text.as_str(), None)
     } else {
@@ -467,6 +503,24 @@ pub fn load_registry(path: &Path) -> BackupResult<Vec<Record>> {
                 })?;
                 records.push(Record::Prune(rec));
             }
+            "sweep" => {
+                let rec: SweepRecord = serde_json::from_value(value).map_err(|e| {
+                    BackupError::Process(format!(
+                        "registryの{lineno}行目のsweep記録がschema違反 ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                records.push(Record::Sweep(rec));
+            }
+            "location_remove" => {
+                let rec: LocationRemoveRecord = serde_json::from_value(value).map_err(|e| {
+                    BackupError::Process(format!(
+                        "registryの{lineno}行目のlocation_remove記録がschema違反 ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                records.push(Record::LocationRemove(rec));
+            }
             other => {
                 eprintln!(
                     "WARNING: registryの{lineno}行目は未知のrecord_type({other})のため無視します ({})",
@@ -478,7 +532,7 @@ pub fn load_registry(path: &Path) -> BackupResult<Vec<Record>> {
     Ok(records)
 }
 
-/// reduce規則の適用(4.1 + TASK-10新eventのreduce規則)。
+/// reduce規則の適用。
 pub fn reduce_records(records: &[Record]) -> Reduced {
     let mut reduced = Reduced::default();
     let mut encrypt_index: HashMap<String, usize> = HashMap::new();
@@ -519,7 +573,6 @@ pub fn reduce_records(records: &[Record]) -> Reduced {
             Record::PinWrite(w) => {
                 // 記録順に処理するため、このwriteより前の同一(pin_s3_key, s3_bucket)組の
                 // pin_remove(旧削除記録)を除去する(rm→再addの再付与が勝つ)。
-                // 逆順(先add→後rm)はpin_removeが後に処理されて残るため削除済みのまま。
                 // bucket違いのremoveで同pin_s3_keyのwrite側のentryは除去しない
                 // (bucket分離。TASK-15)。
                 let key = (w.pin_s3_key.clone(), w.s3_bucket.clone());
@@ -534,12 +587,18 @@ pub fn reduce_records(records: &[Record]) -> Reduced {
             Record::Prune(p) => {
                 reduced.prunes.push(p.clone());
             }
+            Record::Sweep(s) => {
+                reduced.sweeps.push(s.clone());
+            }
+            Record::LocationRemove(l) => {
+                reduced.location_removes.push(l.clone());
+            }
         }
     }
     reduced
 }
 
-/// encrypt skip判定用の一致検索(2.2-1)。mtime比較は4.1注記の正規化文字列同士の厳密比較。
+/// encrypt skip判定用の一致検索。mtime比較は正規化文字列同士の厳密比較。
 pub fn find_match<'a>(
     reduced: &'a Reduced,
     source_path: &Path,
@@ -553,21 +612,50 @@ pub fn find_match<'a>(
     })
 }
 
-/// 記録のs3_bucketと当該実行の実効bucketの一致判定(4.1)。
-/// 記録の`s3_bucket`と当該実行の実効bucketの一致判定(2.3-2・4.1)。
+/// 記録のs3_bucketと当該実行の実効bucketの一致判定。
 /// `s3_bucket`欠損(フィールド追加前の既存記録)は正本bucket相当として解釈し、
 /// 実効bucketが正本と一致する実行でのみ一致扱いとする。
-/// H-1(TASK-11 Phase Bレビュー): backup push skip判定・索引versions構築・
-/// 未書込namespace判定でも同一規則を使う(namespace分離はbucket単位)。
-/// M-R1(TASK-11 Phase B再レビュー): 索引pins[]の構築・復元(pin_write採用・
-/// pin_remove照合)でも同一規則を使う。
+/// H-1: backup push skip判定・索引versions構築でも同一規則(namespace分離はbucket単位)。
+/// M-R1: 索引pins[]の構築・復元(pin_write採用・pin_remove照合)でも同一規則を使う。
 pub(crate) fn record_bucket_matched(record_bucket: &str, effective: &str, canonical: &str) -> bool {
     if record_bucket.is_empty() {
-        // 欠損は正本bucket相当(4.1互換): 実効bucketが正本と一致する実行でのみ成功済み扱い
+        // 欠損は正本bucket相当: 実効bucketが正本と一致する実行でのみ成功済み扱い
         effective == canonical
     } else {
         record_bucket == effective
     }
+}
+
+/// 合流正本(TASK-18 3.2・承認事項4): file_uploadsからbucket一致する同sha記録のuuid集合を
+/// 作り、1件ならそれ、複数(歴史的重複)なら辞書順最小uuidを返す。
+pub fn sha_uuid_lookup(
+    reduced: &Reduced,
+    source_sha256: &str,
+    effective_bucket: &str,
+    canonical_bucket: &str,
+) -> Option<String> {
+    let mut candidates: Vec<&str> = reduced
+        .file_uploads
+        .iter()
+        .filter(|u| {
+            u.source_sha256 == source_sha256
+                && record_bucket_matched(&u.s3_bucket, effective_bucket, canonical_bucket)
+        })
+        .map(|u| u.uuid.as_str())
+        .collect();
+    candidates.sort_unstable();
+    candidates.first().map(|s| s.to_string())
+}
+
+/// entityの現行title導出(TASK-18 4.2): uuid一致するfile_write群のうち
+/// recorded_at最大(ISO8601同形式の文字列比較。同値ならVec後方=後勝ち)のtitle。
+pub fn entity_title(reduced: &Reduced, uuid: &str) -> Option<String> {
+    reduced
+        .file_writes
+        .iter()
+        .filter(|w| w.uuid == uuid)
+        .max_by(|a, b| a.recorded_at.cmp(&b.recorded_at))
+        .map(|w| w.title.clone())
 }
 
 #[cfg(test)]
@@ -801,10 +889,7 @@ mod tests {
     }
 
     /// s3_bucket/s3_regionフィールドを持たない既存記録(追加前の記録)は
-    /// `#[serde(default)]`で読み込め、s3_bucket空文字=正本bucket相当扱いとなる(4.1互換)。
-    /// (bucket一致規則自体の結合test検証はcli.profile-namespace-isolated-by-bucket:
-    /// 旧upload経路のpending_uploads_for_bucket/upload_candidatesはPhase Bで
-    /// デッドコードとして削除済み)
+    /// `#[serde(default)]`で読み込め、s3_bucket空文字=正本bucket相当扱いとなる。
     #[test]
     fn upload_record_without_bucket_fields_deserializes() {
         let tmp = TempDir::new("reg-oldrec");
@@ -825,5 +910,147 @@ mod tests {
             "欠損はdefault空文字(正本bucket相当として解釈)"
         );
         assert_eq!(u.s3_region, "");
+    }
+
+    /// [covers:registry.sweep-location-remove-records]
+    /// sweep・location_remove recordのparse/reduce(Reducedのsweeps/location_removesへ全件)。
+    #[test]
+    fn sweep_and_location_remove_parse_and_reduce() {
+        let tmp = TempDir::new("reg-swloc");
+        let reg = tmp.path().join("registry.jsonl");
+        write_file(
+            &reg,
+            concat!(
+                "{\"schema\":1,\"record_type\":\"sweep\",\"recorded_at\":\"2999-01-01T00:00:00+09:00\",\"reason\":\"lifecycle\",\"deleted\":[{\"s3_key\":\"k\",\"version_id\":\"v1\"}]}\n",
+                "{\"schema\":1,\"record_type\":\"location_remove\",\"recorded_at\":\"2999-01-01T00:00:00+09:00\",\"uuid\":\"u\",\"identity_hash\":\"abcd0001\",\"source_path\":\"/p\"}\n"
+            )
+            .as_bytes(),
+        );
+        let records = load_registry(&reg).expect("sweep/location_removeは既知種");
+        assert_eq!(records.len(), 2);
+        let reduced = reduce_records(&records);
+        assert_eq!(reduced.sweeps.len(), 1);
+        assert_eq!(reduced.sweeps[0].deleted.len(), 1);
+        assert_eq!(reduced.location_removes.len(), 1);
+        assert_eq!(reduced.location_removes[0].identity_hash, "abcd0001");
+    }
+
+    /// [covers:registry.old-schema-fields-rejected]
+    /// 旧schema1形式(旧フィールド混入・uuid/title無し)はdeny_unknown_fieldsでparse失敗。
+    #[test]
+    fn old_schema_file_write_line_is_rejected() {
+        let tmp = TempDir::new("reg-oldsch");
+        let reg = tmp.path().join("registry.jsonl");
+        write_file(
+            &reg,
+            b"{\"schema\":1,\"record_type\":\"file_write\",\"recorded_at\":\"t\",\"batch_id\":\"b\",\"batch_date\":\"d\",\"source_path\":\"/p\",\"source_name\":\"a.zip\",\"source_size\":1,\"source_mtime\":\"m\",\"source_sha256\":\"s\",\"age_path\":\"a\",\"age_size\":1,\"age_sha256\":\"x\",\"recipients\":[],\"category\":\"c\",\"rel_path\":\"\",\"identity_hash\":\"i\",\"folder\":\"a.zip\",\"s3_key\":\"k\"}\n",
+        );
+        let e = load_registry(&reg).unwrap_err();
+        match &e {
+            BackupError::Process(msg) => {
+                assert!(msg.contains("schema違反") && msg.contains("1行目"), "{msg}");
+            }
+            other => panic!("期待した区分はProcess、実際は {other:?}"),
+        }
+        assert_eq!(e.exit_code(), 4);
+    }
+
+    /// [covers:registry.sha-uuid-lookup-resolves-unique]
+    /// [covers:registry.sha-uuid-lookup-multiple-picks-min-uuid]
+    /// [covers:registry.sha-uuid-lookup-bucket-scoped]
+    /// sha_uuid_lookup: 1候補=そのuuid・複数=辞書順最小・bucket分離(他方bucket不採用・
+    /// s3_bucket欠損は正本bucket扱い)。
+    #[test]
+    fn sha_uuid_lookup_rules() {
+        let fu = |uuid: &str, bucket: &str, sha: &str| {
+            Record::FileUpload(FileUploadRecord {
+                schema: 2,
+                record_type: "file_upload".into(),
+                recorded_at: "2026-10-14T10:00:00+09:00".into(),
+                batch_id: "20261014-abcdef01".into(),
+                version_ts: "2026-10-14T10:00:00+09:00".into(),
+                uuid: uuid.into(),
+                title: "t".into(),
+                s3_key: format!("backup-remote/data/{uuid}/default.age"),
+                s3_bucket: bucket.into(),
+                s3_region: "r".into(),
+                version_id: format!("vid-{uuid}"),
+                s3_size: 1,
+                s3_checksum_sha256: "c".into(),
+                s3_checksum_type: "FULL_OBJECT".into(),
+                source_sha256: sha.into(),
+                age_sha256: "a".into(),
+                source_size: 1,
+                age_size: 1,
+                uploaded_at: "u".into(),
+            })
+        };
+        let sha = "f".repeat(64);
+        let records = vec![
+            fu("bbbbbbbb-0000-7000-8000-000000000001", "b1", &sha),
+            fu("aaaaaaaa-0000-7000-8000-000000000002", "b1", &sha), // 辞書順最小
+            fu("cccccccc-0000-7000-8000-000000000003", "other", &sha), // 他方bucket
+            fu("dddddddd-0000-7000-8000-000000000004", "", &sha),   // 欠損=正本bucket扱い
+        ];
+        let reduced = reduce_records(&records);
+
+        // 実効=b1・正本=b1: 辞書順最小
+        assert_eq!(
+            sha_uuid_lookup(&reduced, &sha, "b1", "b1").as_deref(),
+            Some("aaaaaaaa-0000-7000-8000-000000000002")
+        );
+        // 他sha
+        assert_eq!(sha_uuid_lookup(&reduced, &"e".repeat(64), "b1", "b1"), None);
+        // 実効=b2(正本=b1): b1側記録は不採用・欠損記録も不採用
+        assert_eq!(sha_uuid_lookup(&reduced, &sha, "b2", "b1"), None);
+        // 実効=b1・正本=b2: 欠損記録は不採用(b1は正本でないため)
+        assert_eq!(
+            sha_uuid_lookup(&reduced, &sha, "b1", "b2").as_deref(),
+            Some("aaaaaaaa-0000-7000-8000-000000000002")
+        );
+        // 実効=other・正本=other: 他方bucket側のみ
+        assert_eq!(
+            sha_uuid_lookup(&reduced, &sha, "other", "other").as_deref(),
+            Some("cccccccc-0000-7000-8000-000000000003")
+        );
+    }
+
+    /// entity_title導出: recorded_at最大(同値ならVec後方)のtitle。
+    #[test]
+    fn entity_title_latest_wins() {
+        let fw = |uuid: &str, title: &str, at: &str| {
+            Record::FileWrite(FileWriteRecord {
+                schema: 2,
+                record_type: "file_write".into(),
+                recorded_at: at.into(),
+                batch_id: "b".into(),
+                batch_date: "2026-10-14".into(),
+                uuid: uuid.into(),
+                title: title.into(),
+                source_path: "/p".into(),
+                source_name: "a.zip".into(),
+                source_size: 1,
+                source_mtime: "m".into(),
+                source_sha256: "s".into(),
+                age_path: "a".into(),
+                age_size: 1,
+                age_sha256: "x".into(),
+                recipients: vec![],
+                category: "c".into(),
+                rel_path: "".into(),
+                identity_hash: format!("i{title}"),
+                s3_key: "k".into(),
+            })
+        };
+        let records = vec![
+            fw("u1", "A", "2026-10-14T10:00:00+09:00"),
+            fw("u1", "B", "2026-10-14T11:00:00+09:00"),
+            fw("u1", "C", "2026-10-14T10:00:00+09:00"), // 同一時刻=Vec後方扱い
+            fw("u2", "X", "2026-10-14T12:00:00+09:00"),
+        ];
+        let reduced = reduce_records(&records);
+        assert_eq!(entity_title(&reduced, "u1").as_deref(), Some("B"));
+        assert_eq!(entity_title(&reduced, "u2").as_deref(), Some("X"));
+        assert_eq!(entity_title(&reduced, "u3"), None);
     }
 }

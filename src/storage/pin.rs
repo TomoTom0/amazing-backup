@@ -1,4 +1,5 @@
-//! pin add/rm(ピン留め版の付与/解除・設計3.2・1.3)。
+//! pin add/rm(ピン留め版の付与/解除・TASK-18 5.8・6.6)。探索語彙は<title完全一致|
+//! uuid完全一致>・pin keyはdata/{uuid}/{pin}.age。実行後に索引再構築+metadata sync。
 
 use super::get::{RestoreCheck, ensure_restored, find_entry, restore_guidance, select_version};
 use super::{CtxArgs, now_jst, open_session, read_index, require_versioning, resolve_key};
@@ -15,7 +16,7 @@ pub struct PinArgs {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum PinSub {
-    /// ピン留め付与(write-once写し)
+    /// ピン留め付与(write-once写し。対象はtitle/uuid完全一致)
     Add {
         #[command(flatten)]
         ctx: CtxArgs,
@@ -27,7 +28,7 @@ pub enum PinSub {
         #[arg(long = "as")]
         as_pin: Option<String>,
     },
-    /// ピン留め解除
+    /// ピン留め解除(対象はtitle/uuid完全一致)
     Rm {
         #[command(flatten)]
         ctx: CtxArgs,
@@ -84,14 +85,8 @@ fn cmd_pin_add(ctx: &CtxArgs, name: &str, version: Option<&str>, as_pin: Option<
             // 既定=最新
             select_version(entry, None, None)?
         };
-        // write-once確認(既存pin keyへの再付与拒否)
-        let pin_key = crate::layout::pin_object_key(
-            &session.aws.prefix,
-            &entry.category,
-            &entry.rel_path,
-            &entry.folder,
-            pin_name,
-        )?;
+        // write-once確認(既存pin keyへの再付与拒否)。pin keyはdata/{uuid}/{pin}.age
+        let pin_key = crate::layout::pin_object_key(&session.aws.prefix, &entry.uuid, pin_name)?;
         if session
             .backend
             .head(&session.aws.bucket, &pin_key)?
@@ -133,13 +128,10 @@ fn cmd_pin_add(ctx: &CtxArgs, name: &str, version: Option<&str>, as_pin: Option<
         registry::append_record(
             &registry_path,
             &registry::PinWriteRecord {
-                schema: 1,
+                schema: 2,
                 record_type: "pin_write".into(),
                 recorded_at: recorded_at.clone(),
-                name: entry.name.clone(),
-                category: entry.category.clone(),
-                rel_path: entry.rel_path.clone(),
-                folder: entry.folder.clone(),
+                uuid: entry.uuid.clone(),
                 pin: pin_name.to_string(),
                 pin_s3_key: pin_key.clone(),
                 source_s3_key: v.s3_key.clone(),
@@ -155,6 +147,7 @@ fn cmd_pin_add(ctx: &CtxArgs, name: &str, version: Option<&str>, as_pin: Option<
             },
         )?;
         rebuild_and_upload_index(&session, &registry_path, "pin-add")?;
+        sync_metadata(&session, &registry_path, &entry.uuid)?;
         println!("ok: pin {pin_name} -> {pin_key}");
         Ok(0)
     })();
@@ -191,7 +184,7 @@ fn cmd_pin_rm(ctx: &CtxArgs, name: &str, pin_name: &str) -> i32 {
             .find(|p| p.pin == pin_name)
             .ok_or_else(|| {
                 BackupError::Target(format!(
-                    "pin名({pin_name})はname={name} の索引にありません(list pinsで確認してください)"
+                    "pin名({pin_name})はtitle/uuid={name} の索引にありません(list pinsで確認してください)"
                 ))
             })?;
         // DA配置のpinも復元jobなしで削除できる(deleteはarchive objectへ可能)。
@@ -223,10 +216,10 @@ fn cmd_pin_rm(ctx: &CtxArgs, name: &str, pin_name: &str) -> i32 {
         registry::append_record(
             &registry_path,
             &registry::PinRemoveRecord {
-                schema: 1,
+                schema: 2,
                 record_type: "pin_remove".into(),
                 recorded_at: now_jst(),
-                name: name.to_string(),
+                uuid: entry.uuid.clone(),
                 pin: pin_name.to_string(),
                 pin_s3_key: pin.s3_key.clone(),
                 s3_bucket: session.aws.bucket.clone(),
@@ -238,6 +231,7 @@ fn cmd_pin_rm(ctx: &CtxArgs, name: &str, pin_name: &str) -> i32 {
             ))
         })?;
         rebuild_and_upload_index(&session, &registry_path, "pin-rm")?;
+        sync_metadata(&session, &registry_path, &entry.uuid)?;
         println!("ok: pin {pin_name} を削除しました ({})", pin.s3_key);
         Ok(0)
     })();
@@ -273,6 +267,25 @@ pub(crate) fn rebuild_and_upload_index(
         run_tag,
         &now_jst(),
         registry_path,
+    )?;
+    Ok(())
+}
+
+/// 索引再構築後の当該entityのmetadata sync(pins一覧の変化を反映・TASK-18 5.8)。
+fn sync_metadata(session: &super::Session, registry_path: &Path, uuid: &str) -> BackupResult<()> {
+    let cfg = session
+        .cfg
+        .as_ref()
+        .ok_or_else(|| BackupError::Config("pipeline.tomlが必要です".to_string()))?;
+    let records = registry::load_registry(registry_path)?;
+    let reduced = registry::reduce_records(&records);
+    crate::metadata::sync_entity_metadata(
+        session.backend.as_ref(),
+        &session.aws,
+        &session.canonical_bucket,
+        cfg,
+        &reduced,
+        uuid,
     )?;
     Ok(())
 }

@@ -4,92 +4,84 @@
 #   manage系実装はcli.rs+lifecycle構成生成(s3.rs put_lifecycle)+索引/ListObjectVersions(prune対象計算)に跨る。
 #   実装前のため条件に対応するテストコードは未作成(網羅検査は警告のみの段階)。
 # 2026-10-15: TASK-11(Phase B)でPhase A実装済み・未条件化の振る舞い2件を事後条件化(回帰テスト)。
-#   新規2件: retention.prune-dry-run-apply-exclusive(L-8: --dry-run/--apply併置はusage 64)・
-#   retention.prune-category-guard-early(M-2: prune冒頭のcategory guard。予約語・形式違反・
-#   未定義categoryはListObjectVersions前に設定エラー2)。出典はtmp/tasks/tm-10/design_s3_storage.md 12章。
+#   新規2件: retention.prune-dry-run-apply-exclusive(L-8)・retention.prune-category-guard-early(M-2)。
 # 2026-10-15: TASK-11(Phase B)コードレビュー指摘対応(L-2・L-4)でテスト先行の更新。
-#   新規2件: retention.prune-partial-failure-records-deleted(L-2: prune削除loopの部分失敗でも
-#   削除済み版をPruneRecordへ記録)・retention.prune-order-uses-epoch(L-4: pruneの版順sortは
-#   last_modified_epoch数値比較)。
+#   新規2件: retention.prune-partial-failure-records-deleted(L-2)・retention.prune-order-uses-epoch(L-4)。
+# 2026-10-22: TASK-18(S3キー設計: UUID+versioning)対応でテスト先行の更新
+#   (tmp/tasks/tm-18/design_key-uuid-versioning.md 7章・5.12・6.4/6.5・10章)。
+#   廃止3件: retention.lifecycle-rules-per-category(category毎rule→data/一括3ruleへ置換。
+#     後継=retention.lifecycle-data-ncve-and-sweep-rules)・retention.prune-category-required
+#     (--category必須廃止)・retention.prune-category-guard-early(category guard自体の消滅)。
+#   文言改訂3件(id不変): mpu-abort-rule(日数をaws.toml mpu_abort_days値へ・ハードコード廃止)・
+#   prune-dry-run-default(data/一括へ)・prune-apply-deletes-versions(keep=aws.toml keep_versions・
+#   --keep廃止)。
+#   新規1件: lifecycle-data-ncve-and-sweep-rules。
+#   excludedへdev bucket初期化手順(設計8章)を追加。
+#   実装前のため新規条件のテストは未作成・改訂期待値のテストは実行failを許容。
 
 [meta]
 feature = "retention"
 source_file = "src/cli.rs"
-verified = false
+verified = true
+verified_at = "2026-10-22"
+verified_by = "claude"
 test_command = "cargo test"
-note = "TASK-10(9章素案+設計3.2/5.2本文)の条件化。区分別保持数はbucketのlifecycle(NCVE)で自動化し、manage pruneは即時適用としてNCVEと同一の削除条件式を使用(5.2)。source_fileはエリア主対象としてcli.rs(manage系コマンド)を指し、lifecycle構成のS3 API実体(src/s3.rs)と対象計算(src/index.rs)はtarget_functionで特定(config.tomlのCONF-005と同一運用)"
+source_hash = "8b520f49e8b55d87c115f5f5c1a68f40f6bc6d85"
+note = "TASK-10(9章素案+設計3.2/5.2本文)の条件化。TASK-18で保持数管理がaws.toml [aws.lifecycle](noncurrent_days・keep_versions・mpu_abort_days)へ一元化(ハードコード禁止・承認事項7)し、lifecycleはdata/一括3rule(NCVE+MPU abort+DeleteMarkerSweep)、pruneはdata/一括(keep=aws.toml値)。source_fileはエリア主対象としてcli.rs(manage系コマンド)を指し、lifecycle構成のS3 API実体(src/s3.rs)と対象計算(src/index.rs)はtarget_functionで特定(config.tomlのCONF-005と同一運用)"
 
 [[condition]]
-id = "retention.lifecycle-rules-per-category"
+id = "retention.lifecycle-data-ncve-and-sweep-rules"
 target_function = "manage lifecycle apply(lifecycle構成生成) / s3 put_lifecycle"
-source = "tmp/tasks/tm-10/design_s3_storage.md 5.2(lifecycle)"
-description = "category毎rule(prefix <prefix>/<category>/): NoncurrentVersionExpiration {NoncurrentDays: 180, NewerNoncurrentVersions: <category.keep>} で区分別保持数がbucket設定のみで自動化される。sys(索引・manifestの予約領域)はprefix filterで構造的に対象外。Expiration(現行version削除)とSTANDARD→DA移行ruleは設定しない(唯一の版保護・直接DA投入)。applyはput-bucket-lifecycle-configurationでrule一式を置換(冪等) (integration, fake seam)"
-given = "categories(main keep=5・volatile keep=2・unfiled keep=5)での manage lifecycle apply 実行と、同コマンドの再実行"
-expect_return_shape = "PutBucketLifecycleConfigurationのrule一式に各categoryのNCVE rule(prefix=<prefix>/<category>/・NoncurrentDays=180・NewerNoncurrentVersions=keep値)が含まれ、sys prefixのrule・Expiration・移行ruleは含まれず、再実行は同一構成を置換する(冪等)"
-source_lines = "tests/retention.rs:337; tests/retention.rs:34"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 7章(lifecycle設定詳細)・5.12・6.4・10章(manage)"
+description = "lifecycleはdata/一括の3rule構成(値はすべてconfigs/aws.toml [aws.lifecycle]から・ハードコード禁止・承認事項7): 1) data-ncve: Filter Prefix={prefix}data/・NoncurrentVersionExpiration{NoncurrentDays=noncurrent_days, NewerNoncurrentVersions=keep_versions}(最新10版+現行を保持・Deep Archive最低保存180日との整合) 2) mpu-abort: Filter Prefix={prefix}・AbortIncompleteMultipartUpload{DaysAfterInitiation=mpu_abort_days} 3) delete-marker-sweep: Filter Prefix={prefix}data/・Expiration{ExpiredObjectDeleteMarker=true}(title変更時の旧metadataキーdelete marker・metadata非現行版の掃除)。category毎ruleは廃止。sys/は{prefix}data/外のためNCVE対象外(現行どおり)。applyはput-bucket-lifecycle-configurationでrule一式を置換(冪等) (integration, fake seam)"
+given = "[aws.lifecycle]{noncurrent_days=180, keep_versions=10, mpu_abort_days=7}での manage lifecycle apply 実行と、同コマンドの再実行"
+expect_return_shape = "PutBucketLifecycleConfigurationのrule一式に上記3rule(prefix・NoncurrentDays・NewerNoncurrentVersions・DaysAfterInitiation・ExpiredObjectDeleteMarkerの各値はaws.toml値)が含まれ、category毎ruleは含まれず、再実行は同一構成を置換する(冪等)"
+source_lines = "tests/retention.rs:334"
 
 [[condition]]
 id = "retention.mpu-abort-rule"
 target_function = "manage lifecycle apply(lifecycle構成生成)"
-source = "tmp/tasks/tm-10/design_s3_storage.md 5.2(MPU abort rule)"
-description = "MPU abort rule(prefix <prefix>/): AbortIncompleteMultipartUpload 7日(本ツールが設定管理) (integration, fake seam)"
-given = "manage lifecycle apply 実行"
-expect_return_shape = "lifecycle構成に AbortIncompleteMultipartUpload(日数=7)・prefix=<prefix>/ のruleが含まれる"
-source_lines = "tests/retention.rs:99"
-
-[[condition]]
-id = "retention.prune-category-required"
-target_function = "cli::cmd_manage_prune(引数検査)"
-source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(manage prune・--category必須)"
-description = "manage pruneは--categoryが必須。未指定はusage error 64 (unit)"
-given = "--categoryなしの manage prune 実行"
-expect_return = "exit 64(usage error)"
-source_lines = "tests/retention.rs:119"
+source = "tmp/tasks/tm-10/design_s3_storage.md 5.2(MPU abort rule)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 7章): 日数をaws.toml [aws.lifecycle] mpu_abort_days値へ改訂(ハードコード廃止)"
+description = "MPU abort rule(prefix <prefix>/): AbortIncompleteMultipartUploadの日数はaws.toml [aws.lifecycle]のmpu_abort_days値(本ツールが設定管理・コード内defaultなし) (integration, fake seam)"
+given = "[aws.lifecycle] mpu_abort_days=7のaws.tomlでの manage lifecycle apply 実行"
+expect_return_shape = "lifecycle構成に AbortIncompleteMultipartUpload(日数=mpu_abort_days値)・prefix=<prefix>/ のruleが含まれる"
+source_lines = "tests/retention.rs:97"
 
 [[condition]]
 id = "retention.prune-dry-run-default"
 target_function = "cli::cmd_manage_prune"
-source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(manage prune)"
-description = "pruneは--dry-runが既定: --applyなき実行は削除を行わず、索引+ListObjectVersionsから計算した削除対象を報告して exit 0 (integration, fake seam)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(manage prune)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 5.12・6.5): pruneのdata/一括化に伴い改訂"
+description = "pruneは--dry-runが既定: --applyなき実行は削除を行わず、ListObjectVersions({prefix}data/配下一括)から計算した削除対象を報告して exit 0 (integration, fake seam)"
 given = "削除対象が存在する状態での、--dry-run明示とオプション省略の manage prune 実行"
 expect_return_shape = "いずれもDeleteObjectVersionは呼ばれず、削除対象の報告表示が出て exit 0"
-source_lines = "tests/retention.rs:138"
+source_lines = "tests/retention.rs:133"
 
 [[condition]]
 id = "retention.prune-protects-current-and-pins"
 target_function = "cli::cmd_manage_prune(対象計算)"
 source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(manage prune)"
-description = "pruneの対象計算では現行version・pin key(<pin名>.age)は対象外(構造的保護) (integration, fake seam)"
-given = "現行versionとpin objectが存在するkeyを含む状態での manage prune --apply 実行"
-expect_return_shape = "現行versionとpin keyへの削除は行われず、default.ageのnoncurrent版のみが削除対象となる"
-source_lines = "tests/retention.rs:182"
+description = "pruneの対象計算では現行version・pin key(<pin名>.age)は対象外(構造的保護。data/一括でも`/default.age`終端のみが対象のためmetadata_{title}.jsonも対象外) (integration, fake seam)"
+given = "現行versionとpin objectとmetadata objectが存在するkeyを含む状態での manage prune --apply 実行"
+expect_return_shape = "現行version・pin key・metadata keyへの削除は行われず、default.ageのnoncurrent版のみが削除対象となる"
+source_lines = "tests/retention.rs:177"
 
 [[condition]]
 id = "retention.prune-apply-deletes-versions"
 target_function = "cli::cmd_manage_prune(削除条件式)"
-source = "tmp/tasks/tm-10/design_s3_storage.md 3.2・5.2(削除条件の単一定義・11章S3-4)"
-description = "削除条件(NCVEとprune共通の単一定義): 削除対象=同一keyのnoncurrent版を新しい順に並べたとき、newer noncurrent版の数がkeep以上となった版(境界=ちょうどkeep番目に新しいnoncurrent版は残す)。--apply時はDeleteObjectVersion。--keep N は当該実行のみ[categories].keepを上書きし、未指定時は設定値 (integration, fake seam)"
-given = "同一keyにnoncurrent版6件ある状態で、keep=5(設定値)での--apply・--keep 2での--apply・--keep未指定での--apply"
-expect_return_shape = "keep=5では最古の1件のみ(newer noncurrent数5以上)削除され境界(5番目に新しいnoncurrent版)は残る。--keep 2ではnewer noncurrent数2以上の版(古い4件)が削除され、以降の実行でも[categories].keep設定値は不変。削除はDeleteObjectVersionで行われる"
-source_lines = "tests/retention.rs:222"
+source = "tmp/tasks/tm-10/design_s3_storage.md 3.2・5.2(削除条件の単一定義・11章S3-4)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 5.12・6.5): --keep廃止・keep値のaws.toml [aws.lifecycle] keep_versions一元化へ改訂"
+description = "削除条件(NCVEとprune共通の単一定義): 削除対象=同一keyのnoncurrent版を新しい順に並べたとき、newer noncurrent版の数がkeep以上となった版(境界=ちょうどkeep番目に新しいnoncurrent版は残す)。keep値はaws.toml [aws.lifecycle] keep_versions(--keepオプションは廃止・当該実行での上書きは不可)。--apply時はDeleteObjectVersion (integration, fake seam)"
+given = "同一keyにnoncurrent版6件ある状態で、keep_versions=5のaws.tomlでの--apply実行"
+expect_return_shape = "keep=5では最古の1件のみ(newer noncurrent数5以上)削除され境界(5番目に新しいnoncurrent版)は残る。削除はDeleteObjectVersionで行われる"
+source_lines = "tests/retention.rs:227"
 
 [[condition]]
 id = "retention.prune-dry-run-apply-exclusive"
 target_function = "cli::cmd_manage_prune(実行mode検査)"
 source = "tmp/tasks/tm-10/design_s3_storage.md 12章レビューL-8(Phase A実装済み・事後条件化)"
 description = "manage pruneの--dry-runと--applyは併置不可: 両方指定した場合はusage error 64(dry-runが既定のため併置は指定として矛盾する。対象計算の前に判定される) (integration, fake seam)"
-given = "manage prune --category C --dry-run --apply 実行"
+given = "manage prune --dry-run --apply 実行"
 expect_return_shape = "exit 64で、S3 API呼び出し(ListObjectVersions)は行われない"
-source_lines = "tests/retention.rs:380"
-
-[[condition]]
-id = "retention.prune-category-guard-early"
-target_function = "cli::cmd_manage_prune(category guard)"
-source = "tmp/tasks/tm-10/design_s3_storage.md 12章レビューM-2(Phase A実装済み・事後条件化)・1.2(category名規則)"
-description = "prune冒頭のcategory guard: --categoryの値がcategory名規則(^[a-z0-9][a-z0-9-]{0,63}$)違反・予約領域(sys・旧表記_sys)・pipeline.tomlの[categories]に未定義のいずれかの場合は、ListObjectVersions等のS3 API呼び出し前に設定エラー2で拒否する(guard bypassして意図しないprefixへ対する操作を行わない) (integration, fake seam)"
-given = "manage prune --category sys / --category _sys / --category BadName(規則違反) / --category ghost(未定義) の各実行"
-expect_return_shape = "いずれも exit 2(設定エラー)で、fake backendの呼び出し記録不存在(ListObjectVersions前に検出)"
-source_lines = "tests/retention.rs:406"
+source_lines = "tests/retention.rs:447"
 
 [[condition]]
 id = "retention.prune-partial-failure-records-deleted"
@@ -98,16 +90,16 @@ source = "TASK-11(Phase B)コードレビュー指摘L-2+tmp/tasks/tm-10/design_
 description = "prune --applyの削除loopは削除成功分をその都度PruneRecordへ記録する(削除完了後の一括記録だと、loop途中の失敗で中断した場合に削除済み版が記録に載らず、以降の索引再構築で幽霊版が復活しうるため)。途中失敗した場合もそれまでの削除成功分の記録は残り、冪等な再実行で残対象の削除・記録が継続される (integration, fake seam)"
 given = "同一keyにnoncurrent版複数(削除対象3版)のある状態で、2版目のDeleteObjectVersionから失敗する注入(FAKE_S3_FAIL_DELVER_FOR)での manage prune --apply 実行と、注入なしの再実行"
 expect_return_shape = "初回は転送エラー5で中断するが、registryのPruneRecordに削除成功済みの1版が記録されている。再実行はexit 0で残りの版を削除・記録し、索引再構築後に削除済み版がversionsへ復活しない"
-source_lines = "tests/retention.rs:454"
+source_lines = "tests/retention.rs:495"
 
 [[condition]]
 id = "retention.prune-order-uses-epoch"
 target_function = "cli::cmd_manage_prune(版順sort)"
 source = "TASK-11(Phase B)コードレビュー指摘L-4+tmp/tasks/tm-10/design_s3_storage.md 3.2(newer noncurrent数の定義)"
 description = "pruneの対象計算における同一key内の版順sort(新しい順)はVersionInfo.last_modified_epochの数値比較で行う(文字列last_modified比較は表記形式混在(RFC3339のtimezone表記差等)で順序が崩れるため)。newer noncurrent数の数え上げ・現行version判定は実時刻順に正しく行われる (integration, fake seam)"
-given = "noncurrent 2版のlast_modifiedを文字列辞書順と実時刻が逆転する組(timezone表記違い)へ書き換えたversions stateでの manage prune --apply --keep 1 実行"
+given = "noncurrent 2版のlast_modifiedを文字列辞書順と実時刻が逆転する組(timezone表記違い)へ書き換えたversions stateでの manage prune --apply --keep 1 相当(keep_versions=1)実行"
 expect_return_shape = "実時刻で古い版(辞書順では新しい方)が削除対象となり、実時刻で新しい版は残る(削除DeleteObjectVersionのversion_idが実時刻順の期待と一致)"
-source_lines = "tests/retention.rs:514"
+source_lines = "tests/retention.rs:560"
 
 [[excluded]]
 item = "IAM policy案(principal A: 全操作 / principal B: 復元専用最小権限)"
@@ -121,4 +113,11 @@ item = "Object Lockの採用(5.4)"
 source = "tmp/tasks/tm-10/design_s3_storage.md 5.4"
 reason = "不採用の設計判断(versioning+IAM分離で十分・compliance modeの誤設定復旧不能リスク等の根拠は5.4)。実装・検証対象が存在しない。将来要件が出た場合の拡張点としてのみ記録"
 decided_at = "2026-10-14"
+decided_by = "claude"
+
+[[excluded]]
+item = "dev bucket(your-dev-bucket)初期化手順(旧形式オブジェクト・索引・manifest・ローカルregistryの全消去。aws CLIによる一度限り手作業)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(dev初期化手順)"
+reason = "実行はユーザーの明示承認後・一度限りの手順(恒久コマンド・繰り返し可能な全消去コマンドは作らない設計)であり検証対象コードの振る舞い条件が存在しない(TASK-10 7.1の除外と同様)"
+decided_at = "2026-10-22"
 decided_by = "claude"

@@ -6,17 +6,25 @@ mod common;
 
 use common::*;
 
-/// 同一fileを内容を変えながらn回pushし(n版のversioning模擬)、registry記録順
-/// (古い順)のversion_id列を返す。
+/// 同一entity(a.zip)へn版重ね(n版のversioning模擬)、registry記録順
+/// (古い順)のversion_id列を返す。TASK-18では同一entityの複数版はcrash残存
+/// re-put経路(設計4.4・各版のfile_upload記録を保持)で構築する。
 fn push_versions(fx: &StorageFixture, n: usize) -> Vec<String> {
     let a = fx.data_root.join("a.zip");
-    let key = fx.file_key("unfiled", None, "a.zip");
-    for i in 0..n {
-        write_file(&a, format!("retention-version-{i}").as_bytes());
-        let (code, stdout, stderr) = fx.push(&[&a], &[], &[]);
-        assert_eq!(code, 0, "push({i}): {stdout}{stderr}");
+    write_file(&a, b"retention-version-plain");
+    let Some((code, stdout)) = push_titled_pty(fx, &[&a], "retention-a", &[]) else {
+        return Vec::new();
+    };
+    assert_eq!(code, 0, "初回発行(pty promptでtitle付与): {stdout}");
+    let mut ids = Vec::new();
+    for i in 1..n {
+        ids = add_version_via_reput(fx, &a, &[]);
+        assert_eq!(ids.len(), i + 1, "re-put({i})後の版数: {ids:?}");
     }
-    let ids = registry_upload_version_ids(&fx.registry_values(), &key);
+    if ids.is_empty() {
+        let key = fx.data_key(&uuid_of_path(fx, &a));
+        ids = registry_upload_version_ids(&fx.registry_values(), &key);
+    }
     assert_eq!(ids.len(), n, "file_upload記録は{n}件: {ids:?}");
     ids
 }
@@ -26,81 +34,80 @@ fn clear_calls(fx: &StorageFixture) {
     let _ = std::fs::remove_file(fx.state.join("calls.log"));
 }
 
+/// TASK-18向けprune系testの共通setup: 1実体(default.age 1 key)へn版重ねた状態を作る。
+/// TASK-18では通常runは1実体1版(mtime変化は合流・内容変化は別uuid)のため、
+/// crash残存(file_upload記録の除去)→再pushのre-put経路(4.1 2.5)で同一keyへ版を
+/// 重ねる(現行実装でもskip不成立=同key再PUTで同様に版が増える)。
+/// 戻り値のidsは時系列順(古い方から)のversion_id。titleの初回発行のみprompt。
+fn reput_setup(tag: &str, n: usize, keep_versions: u32) -> Option<(StorageFixture, Vec<String>)> {
+    let fx = StorageFixture::new(
+        tag,
+        StorageOpts {
+            no_categories: true,
+            aws_lifecycle: aws_lifecycle_toml(180, keep_versions, 7),
+            ..StorageOpts::default()
+        },
+    )?;
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"retention-reput-plain");
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "retention-a", &[]) else {
+        return None;
+    };
+    assert_eq!(code, 0, "初回発行(pty promptでtitle付与): {stdout}");
+    let mut ids = vec![last_upload_version_id(&fx)];
+    for i in 1..n {
+        rewrite_registry_lines(&fx.registry, |r| {
+            r.get("record_type").and_then(|t| t.as_str()) != Some("file_upload")
+        });
+        let (code, stdout, stderr) = fx.push(&[&a], &[], &[]);
+        assert_eq!(code, 0, "re-put({i}): {stdout}{stderr}");
+        ids.push(last_upload_version_id(&fx));
+    }
+    Some((fx, ids))
+}
+
+/// registryの末尾のfile_upload記録のversion_id。
+fn last_upload_version_id(fx: &StorageFixture) -> String {
+    fx.registry_values()
+        .into_iter()
+        .filter(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload"))
+        .filter_map(|r| {
+            r.get("version_id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .next_back()
+        .expect("file_upload記録のversion_id")
+}
+
+/// registryのfile_upload記録から実key(schema問わず記録値が正本)。
+fn reput_key_of(fx: &StorageFixture) -> String {
+    fx.registry_values()
+        .into_iter()
+        .filter(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload"))
+        .find_map(|r| r.get("s3_key").and_then(|k| k.as_str()).map(String::from))
+        .expect("file_upload記録のs3_key")
+}
+
 /// DeleteObjectVersion呼び出しのversion_id列(calls.logから)。
 fn deleted_versions(fx: &StorageFixture, key: &str) -> Vec<String> {
     version_ids_in_calls(&fx.calls(), "s3 DeleteObjectVersion", key)
 }
 
-/// [covers:retention.lifecycle-rules-per-category]
-/// category毎NCVE rule(設計5.2): prefix <prefix>/<category>/へ
-/// NoncurrentVersionExpiration {NoncurrentDays: 180, NewerNoncurrentVersions: keep}。
-/// sys(予約領域)は対象外・Expiration(現行version削除)・STANDARD→DA移行ruleは設定しない。
-/// applyはrule一式を置換(冪等・再実行で同一構成)。
+/// [covers:retention.mpu-abort-rule]
+/// MPU abort rule(TASK-18 7章): prefix <prefix>/へAbortIncompleteMultipartUpload。
+/// 日数はaws.toml [aws.lifecycle]のmpu_abort_days値(ハードコード無し。
+/// 設定値9日を与えてコード内default(7)と区別して観測する)。
 #[test]
-fn lifecycle_apply_generates_per_category_ncve_rules() {
+fn lifecycle_applies_mpu_abort_rule() {
     let Some(fx) = StorageFixture::new(
-        "ret-life",
+        "ret-mpu",
         StorageOpts {
-            categories: "[categories.main]\nkeep = 5\n[categories.volatile]\nkeep = 2\n".into(),
+            no_categories: true,
+            aws_lifecycle: aws_lifecycle_toml(180, 10, 9),
             ..StorageOpts::default()
         },
     ) else {
-        return;
-    };
-    let (code, stdout1, stderr) = fx.manage("lifecycle", &["apply"]);
-    assert_eq!(code, 0, "manage lifecycle applyはexit 0: {stdout1}{stderr}");
-    assert!(
-        fx.calls()
-            .lines()
-            .any(|l| l.starts_with("s3 PutBucketLifecycleConfiguration")),
-        "PutBucketLifecycleConfiguration呼び出し: {}",
-        fx.calls()
-    );
-    for (category, keep) in [("main", "5"), ("volatile", "2"), ("unfiled", "5")] {
-        let prefix_line = format!("backup-remote/{category}/");
-        assert!(
-            stdout1.contains(&prefix_line),
-            "category毎ruleのprefix({prefix_line}): {stdout1}"
-        );
-        assert!(
-            stdout1.contains("NoncurrentDays") && stdout1.contains("180"),
-            "NoncurrentDays=180: {stdout1}"
-        );
-        assert!(
-            stdout1.contains("NewerNoncurrentVersions") && stdout1.contains(keep),
-            "NewerNoncurrentVersions={keep}({category}): {stdout1}"
-        );
-    }
-    assert!(
-        !stdout1.contains("backup-remote/sys/"),
-        "sys(索引・manifestの予約領域)はprefix filterで構造的に対象外: {stdout1}"
-    );
-    assert!(
-        !stdout1.contains("Transition") && !stdout1.contains("STANDARD_IA"),
-        "STANDARD→DA移行ruleは設定しない: {stdout1}"
-    );
-
-    // 再実行は同一構成を置換する(冪等)
-    clear_calls(&fx);
-    let (code, stdout2, stderr) = fx.manage("lifecycle", &["apply"]);
-    assert_eq!(code, 0, "再実行もexit 0: {stdout2}{stderr}");
-    assert_eq!(stdout2, stdout1, "再実行は同一構成を置換(冪等)");
-    assert_eq!(
-        fx.calls()
-            .lines()
-            .filter(|l| l.starts_with("s3 PutBucketLifecycleConfiguration"))
-            .count(),
-        1,
-        "再実行もrule一式を置換(PutBucketLifecycleConfiguration 1回): {}",
-        fx.calls()
-    );
-}
-
-/// [covers:retention.mpu-abort-rule]
-/// MPU abort rule(設計5.2): prefix <prefix>/へAbortIncompleteMultipartUpload 7日。
-#[test]
-fn lifecycle_applies_mpu_abort_rule() {
-    let Some(fx) = StorageFixture::new("ret-mpu", StorageOpts::default()) else {
         return;
     };
     let (code, stdout, stderr) = fx.manage("lifecycle", &["apply"]);
@@ -109,50 +116,38 @@ fn lifecycle_applies_mpu_abort_rule() {
         stdout.contains("AbortIncompleteMultipartUpload"),
         "MPU abort ruleの表示: {stdout}"
     );
-    assert!(stdout.contains("7"), "MPU abortは7日: {stdout}");
+    assert!(
+        stdout.contains("9"),
+        "MPU abort日数はaws.toml値(9): {stdout}"
+    );
+    assert!(
+        !stdout.contains("mpu-abort 7") && !stdout.contains("7日"),
+        "ハードコード値(7)は使われない: {stdout}"
+    );
     assert!(
         stdout.contains("backup-remote/"),
         "MPU abort ruleのprefix(<prefix>/): {stdout}"
     );
 }
 
-/// [covers:retention.prune-category-required]
-/// manage pruneは--categoryが必須(設計3.2): 未指定はusage error 64。
-#[test]
-fn prune_requires_category_option() {
-    let Some(fx) = StorageFixture::new("ret-catreq", StorageOpts::default()) else {
-        return;
-    };
-    let a = fx.data_root.join("a.zip");
-    write_file(&a, b"prune-category");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    let (code, _, _) = fx.manage("prune", &[]);
-    assert_eq!(code, 64, "--categoryなしのmanage pruneはusage error 64");
-    let (code, stdout, stderr) = fx.manage("prune", &["--category", "unfiled"]);
-    assert_ne!(
-        code, 64,
-        "--category指定はusage errorとならない: {stdout}{stderr}"
-    );
-}
-
 /// [covers:retention.prune-dry-run-default]
-/// pruneは--dry-runが既定(設計3.2): --applyなき実行(オプション省略・--dry-run明示)は
-/// 削除を行わず、索引+ListObjectVersionsから計算した削除対象を報告してexit 0。
+/// pruneは--dry-runが既定(TASK-18 5.12: {prefix}data/配下一括): --applyなき実行
+/// (オプション省略・--dry-run明示)は削除を行わず、ListObjectVersionsから計算した
+/// 削除対象を報告してexit 0。
 #[test]
 fn prune_dry_run_is_default_and_reports_without_deleting() {
-    let Some(fx) = StorageFixture::new("ret-dry", StorageOpts::default()) else {
+    let Some((fx, ids)) = reput_setup("ret-dry", 7, 5) else {
         return;
     };
-    let key = fx.file_key("unfiled", None, "a.zip");
-    let ids = push_versions(&fx, 7);
     assert_eq!(ids.len(), 7);
+    let key = reput_key_of(&fx);
     clear_calls(&fx);
 
     for label in ["オプション省略", "--dry-run明示"] {
         let extra: &[&str] = if label == "オプション省略" {
-            &["--category", "unfiled"]
+            &[]
         } else {
-            &["--category", "unfiled", "--dry-run"]
+            &["--dry-run"]
         };
         let (code, stdout, stderr) = fx.manage("prune", extra);
         assert_eq!(code, 0, "prune({label})はexit 0: {stdout}{stderr}");
@@ -180,25 +175,35 @@ fn prune_dry_run_is_default_and_reports_without_deleting() {
 }
 
 /// [covers:retention.prune-protects-current-and-pins]
-/// pruneの対象計算では現行version・pin key(<pin名>.age)は対象外(構造的保護・設計3.2)。
+/// pruneの対象計算では現行version・pin key(<pin名>.age)は対象外(構造的保護・
+/// TASK-18 5.12: data/一括でも`/default.age`終端のみが対象)。
 #[test]
 fn prune_protects_current_version_and_pin_keys() {
-    let Some(fx) = StorageFixture::new("ret-protect", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new(
+        "ret-protect",
+        StorageOpts {
+            no_categories: true,
+            aws_lifecycle: aws_lifecycle_toml(180, 5, 7),
+            ..StorageOpts::default()
+        },
+    ) else {
         return;
     };
-    let key = fx.file_key("unfiled", None, "a.zip");
+    let a = fx.data_root.join("a.zip");
     let ids = push_versions(&fx, 7);
+    let key = fx.data_key(&uuid_of_path(&fx, &a));
     let current = ids.last().expect("現行version").clone();
     // pinを付与(pin keyは保護対象)
     assert_eq!(
-        fx.pin("add", "a.zip", &["--latest", "--as", "pre-migration"])
+        fx.pin("add", "retention-a", &["--latest", "--as", "pre-migration"])
             .0,
         0
     );
-    let pm_key = fx.pin_key("unfiled", None, "a.zip", "pre-migration");
+    let pm_key = fx.data_pin_key(&uuid_of_path(&fx, &a), "pre-migration");
     clear_calls(&fx);
 
-    let (code, stdout, stderr) = fx.manage("prune", &["--category", "unfiled", "--apply"]);
+    // TASK-18 5.12/6.5: pruneはdata/一括(--category/--keepは廃止・keep=aws.toml値)
+    let (code, stdout, stderr) = fx.manage("prune", &["--apply"]);
     assert_eq!(code, 0, "prune --applyはexit 0: {stdout}{stderr}");
     let deleted = deleted_versions(&fx, &key);
     // keep=5(設定値): noncurrent 6件のうち境界(5番目に新しい)まで残し最古の1件のみ削除
@@ -220,66 +225,61 @@ fn prune_protects_current_version_and_pin_keys() {
 }
 
 /// [covers:retention.prune-apply-deletes-versions]
-/// 削除条件(NCVEとprune共通の単一定義・設計3.2・5.2): 削除対象=同一keyのnoncurrent版を
-/// 新しい順に並べたときnewer noncurrent版の数がkeep以上となった版(境界=ちょうどkeep番目は残す)。
-/// --apply時はDeleteObjectVersion。--keep Nは当該実行のみ[categories].keepを上書きし
-/// 未指定時は設定値(実行後も設定値は不変)。
+/// 削除条件(NCVEとprune共通の単一定義・TASK-18 5.12・7章): 削除対象=同一keyの
+/// noncurrent版を新しい順に並べたときnewer noncurrent版の数がkeep以上となった版
+/// (境界=ちょうどkeep番目は残す)。keep値はaws.toml [aws.lifecycle] keep_versions
+/// (--keepオプションは廃止・当該実行での上書き不可)。--apply時はDeleteObjectVersion。
 #[test]
 fn prune_apply_deletes_by_newer_noncurrent_count() {
-    // (1) keep=5(設定値・未指定): 最古の1件のみ削除。境界は残る。再実行で追加削除なし
-    let Some(fx) = StorageFixture::new("ret-apply5", StorageOpts::default()) else {
+    // (1) keep_versions=5(aws.toml値): 最古の1件のみ削除。境界は残る。再実行で追加削除なし
+    let Some((fx, ids)) = reput_setup("ret-apply5", 7, 5) else {
         return;
     };
-    let key = fx.file_key("unfiled", None, "a.zip");
-    let ids = push_versions(&fx, 7);
-    let body_before = fx.pipeline_body();
-    let (code, stdout, stderr) = fx.manage("prune", &["--category", "unfiled", "--apply"]);
-    assert_eq!(code, 0, "prune --apply(keep=5)はexit 0: {stdout}{stderr}");
+    let key = reput_key_of(&fx);
+    let body_before = fx.aws_toml_body();
+    let (code, stdout, stderr) = fx.manage("prune", &["--apply"]);
+    assert_eq!(
+        code, 0,
+        "prune --apply(keep_versions=5)はexit 0: {stdout}{stderr}"
+    );
     // noncurrent 6件(id[0]..id[5])を新しい順: id5(新)…id0(最古)。
     // newer noncurrent数が5以上となるのはid0のみ(境界=id1は残る)
     assert_eq!(
         deleted_versions(&fx, &key),
         vec![ids[0].clone()],
-        "keep=5は最古の1件のみ削除"
+        "keep_versions=5は最古の1件のみ削除"
     );
     assert_eq!(
-        fx.pipeline_body(),
+        fx.aws_toml_body(),
         body_before,
         "設定ファイルは変更されない"
     );
 
-    let (code, stdout, stderr) = fx.manage("prune", &["--category", "unfiled", "--apply"]);
+    let (code, stdout, stderr) = fx.manage("prune", &["--apply"]);
     assert_eq!(code, 0, "再実行もexit 0: {stdout}{stderr}");
     assert_eq!(
         deleted_versions(&fx, &key),
         vec![ids[0].clone()],
-        "keep=5の再実行で追加削除なし(境界=5番目に新しいnoncurrent版は残る)"
+        "keep_versions=5の再実行で追加削除なし(境界=5番目に新しいnoncurrent版は残る)"
     );
 
-    // (2) --keep 2: newer noncurrent数2以上の版(古い4件)が削除される。設定値は不変
-    let Some(fx) = StorageFixture::new("ret-apply2", StorageOpts::default()) else {
+    // (2) keep_versions=2(aws.toml値): newer noncurrent数2以上の版(古い4件)が削除される
+    let Some((fx, ids)) = reput_setup("ret-apply2", 7, 2) else {
         return;
     };
-    let key = fx.file_key("unfiled", None, "a.zip");
-    let ids = push_versions(&fx, 7);
-    let body_before = fx.pipeline_body();
-    let (code, stdout, stderr) = fx.manage(
-        "prune",
-        &["--category", "unfiled", "--apply", "--keep", "2"],
+    let key = reput_key_of(&fx);
+    let (code, stdout, stderr) = fx.manage("prune", &["--apply"]);
+    assert_eq!(
+        code, 0,
+        "prune --apply(keep_versions=2)はexit 0: {stdout}{stderr}"
     );
-    assert_eq!(code, 0, "prune --apply --keep 2はexit 0: {stdout}{stderr}");
     let mut deleted = deleted_versions(&fx, &key);
     let mut expected: Vec<String> = ids[..4].to_vec();
     deleted.sort();
     expected.sort();
     assert_eq!(
         deleted, expected,
-        "--keep 2は古い4件(newer noncurrent数>=2)を削除"
-    );
-    assert_eq!(
-        fx.pipeline_body(),
-        body_before,
-        "--keepは当該実行のみの上書き(設定値は不変)"
+        "keep_versions=2は古い4件(newer noncurrent数>=2)を削除"
     );
     // 削除はDeleteObjectVersionで行われる(deleted_versionsがcalls.logの
     // DeleteObjectVersion行由来であること自体が検証)
@@ -290,37 +290,34 @@ fn prune_apply_deletes_by_newer_noncurrent_count() {
 /// build_entriesがprune記録で版を除外する。get --version-idで幽霊版を選ばない)。
 #[test]
 fn prune_deleted_versions_stay_excluded_after_rebuild() {
-    let Some(fx) = StorageFixture::new("ret-ghost", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new(
+        "ret-ghost",
+        StorageOpts {
+            no_categories: true,
+            aws_lifecycle: aws_lifecycle_toml(180, 1, 7),
+            ..StorageOpts::default()
+        },
+    ) else {
         return;
     };
     let a = fx.data_root.join("a.zip");
-    let key = fx.file_key("unfiled", None, "a.zip");
-    for i in 0..3 {
-        write_file(&a, format!("ghost-version-{i}").as_bytes());
-        assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    }
-    let ids = registry_upload_version_ids(&fx.registry_values(), &key);
+    let ids = push_versions(&fx, 3);
+    let key = fx.data_key(&uuid_of_path(&fx, &a));
     assert_eq!(ids.len(), 3);
-    // keep=1で最古版を削除(v3=現行・noncurrentはv2,v1 → i>=1のv1を削除)
-    assert_eq!(
-        fx.manage(
-            "prune",
-            &["--category", "unfiled", "--apply", "--keep", "1"]
-        )
-        .0,
-        0
-    );
+    // keep_versions=1で最古版を削除(v3=現行・noncurrentはv2,v1 → i>=1のv1を削除)
+    assert_eq!(fx.manage("prune", &["--apply"]).0, 0);
     let deleted = &ids[0];
-    let vids = index_version_ids(index_file_entry(&fx.read_index(), "a.zip"));
+    let vids = index_version_ids(index_entity_by(&fx.read_index(), "title", "retention-a"));
     assert!(
         !vids.contains(deleted),
         "prune直後の索引に削除版は無い: {vids:?}"
     );
 
-    // 内容変更のpushで索引が再構築されても削除版は復活しない
-    write_file(&a, b"ghost-version-3");
+    // 索引が再構築されても削除版は復活しない(mtime touch合流runでrun末尾再構築を駆動)
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    write_file(&a, b"retention-version-plain");
     assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    let vids2 = index_version_ids(index_file_entry(&fx.read_index(), "a.zip"));
+    let vids2 = index_version_ids(index_entity_by(&fx.read_index(), "title", "retention-a"));
     assert!(
         !vids2.contains(deleted),
         "再構築後も削除版(幽霊)は復活しない: {vids2:?}"
@@ -328,53 +325,123 @@ fn prune_deleted_versions_stay_excluded_after_rebuild() {
     // 幽霊版はget --version-idで選べない(対象エラー3)
     let out = fx.elsewhere.join("ghost-out");
     let (code, _, _) = fx.get(
-        "a.zip",
+        "retention-a",
         &["--version-id", deleted, "--out", &out.display().to_string()],
     );
     assert_eq!(code, 3, "削除済みversion_idの選択は対象エラー3");
 }
 
-/// [covers:retention.lifecycle-rules-per-category]
-/// lifecycle applyのfake実payload(lifecycle.json)検証: category毎NCVE rule+
-/// MPU abort ruleのみ(Expiration・移行ruleなし・rule総数=category数+1)。
+/// [covers:retention.lifecycle-data-ncve-and-sweep-rules]
+/// lifecycleはdata/一括の3rule構成(TASK-18 7章・値はすべてaws.toml [aws.lifecycle]から。
+/// ハードコード禁止・承認事項7):
+/// 1) data-ncve: Prefix={prefix}data/・NoncurrentVersionExpiration{NoncurrentDays=
+///    noncurrent_days, NewerNoncurrentVersions=keep_versions}
+/// 2) mpu-abort: Prefix={prefix}・AbortIncompleteMultipartUpload{DaysAfterInitiation=
+///    mpu_abort_days}
+/// 3) delete-marker-sweep: Prefix={prefix}data/・Expiration{ExpiredObjectDeleteMarker=true}
+///    (title変更時の旧metadataキーdelete marker・metadata非現行版の掃除)
+/// category毎ruleは廃止。sys/は{prefix}data/外のためNCVE対象外。applyはrule一式を
+/// 置換(冪等・再実行で同一構成)。
 #[test]
-fn lifecycle_apply_payload_matches_expected_rules() {
+fn lifecycle_apply_generates_data_area_three_rules() {
     let Some(fx) = StorageFixture::new(
-        "ret-payload",
+        "ret-life3",
         StorageOpts {
-            categories: "[categories.main]\nkeep = 5\n[categories.volatile]\nkeep = 2\n".into(),
+            no_categories: true,
+            aws_lifecycle: aws_lifecycle_toml(180, 10, 7),
             ..StorageOpts::default()
         },
     ) else {
         return;
     };
-    assert_eq!(fx.manage("lifecycle", &["apply"]).0, 0);
+    let (code, stdout1, stderr) = fx.manage("lifecycle", &["apply"]);
+    assert_eq!(code, 0, "manage lifecycle applyはexit 0: {stdout1}{stderr}");
+    assert!(
+        fx.calls()
+            .lines()
+            .any(|l| l.starts_with("s3 PutBucketLifecycleConfiguration")),
+        "PutBucketLifecycleConfiguration呼び出し: {}",
+        fx.calls()
+    );
+
+    // fake実payload(lifecycle.json)のrule一式検証
     let payload =
         std::fs::read_to_string(fx.state.join("lifecycle.json")).expect("fake lifecycle.json");
     let specs: Vec<serde_json::Value> =
         serde_json::from_str(&payload).unwrap_or_else(|e| panic!("lifecycle payload parse: {e}"));
-    assert_eq!(
-        specs.len(),
-        4,
-        "rule総数=category数(3)+MPU abort(1)・Expiration/移行ruleなし: {payload}"
+    assert_eq!(specs.len(), 3, "3rule構成(category毎ruleは廃止): {payload}");
+    let ncve = serde_json::json!({
+        "Noncurrent": {
+            "prefix": "backup-remote/data/",
+            "noncurrent_days": 180,
+            "newer_noncurrent_versions": 10,
+        }
+    });
+    assert!(
+        specs.contains(&ncve),
+        "data-ncve rule: 期待={ncve} payload={payload}"
     );
-    for (category, keep) in [("main", 5), ("volatile", 2), ("unfiled", 5)] {
-        let expected = serde_json::json!({
-            "Noncurrent": {
-                "prefix": format!("backup-remote/{category}/"),
-                "noncurrent_days": 180,
-                "newer_noncurrent_versions": keep,
-            }
-        });
-        assert!(
-            specs.contains(&expected),
-            "NCVE rule({category}): 期待={expected} payload={payload}"
-        );
-    }
     let mpu = serde_json::json!({
         "MpuAbort": { "prefix": "backup-remote/", "days_after_initiation": 7 }
     });
-    assert!(specs.contains(&mpu), "MPU abort rule: {payload}");
+    assert!(
+        specs.contains(&mpu),
+        "mpu-abort rule: 期待={mpu} payload={payload}"
+    );
+    // delete-marker-sweep rule: {prefix}data/のExpiredObjectDeleteMarker
+    let sweep = specs
+        .iter()
+        .find(|s| {
+            serde_json::to_string(s)
+                .unwrap_or_default()
+                .contains("DeleteMarker")
+        })
+        .unwrap_or_else(|| panic!("delete-marker-sweep rule: {payload}"));
+    let sweep_s = serde_json::to_string(sweep).unwrap();
+    assert!(
+        sweep_s.contains("backup-remote/data/"),
+        "delete-marker-sweepのprefix(backup-remote/data/): {sweep_s}"
+    );
+    assert!(
+        sweep_s.contains("true"),
+        "ExpiredObjectDeleteMarker=true: {sweep_s}"
+    );
+
+    // stdoutにも3ruleの構成(値はaws.toml値)が現れる
+    for want in [
+        "backup-remote/data/",
+        "NoncurrentDays",
+        "180",
+        "NewerNoncurrentVersions",
+        "10",
+        "AbortIncompleteMultipartUpload",
+        "7",
+    ] {
+        assert!(stdout1.contains(want), "apply表示に{want}: {stdout1}");
+    }
+    assert!(
+        !stdout1.contains("backup-remote/unfiled/"),
+        "category毎ruleのprefixは現れない: {stdout1}"
+    );
+    assert!(
+        !stdout1.contains("backup-remote/sys/"),
+        "sys(索引・manifestの予約領域)はNCVE対象外: {stdout1}"
+    );
+
+    // 再実行は同一構成を置換する(冪等)
+    clear_calls(&fx);
+    let (code, stdout2, stderr) = fx.manage("lifecycle", &["apply"]);
+    assert_eq!(code, 0, "再実行もexit 0: {stdout2}{stderr}");
+    assert_eq!(stdout2, stdout1, "再実行は同一構成を置換(冪等)");
+    assert_eq!(
+        fx.calls()
+            .lines()
+            .filter(|l| l.starts_with("s3 PutBucketLifecycleConfiguration"))
+            .count(),
+        1,
+        "再実行もrule一式を置換(PutBucketLifecycleConfiguration 1回): {}",
+        fx.calls()
+    );
 }
 
 /// [covers:retention.prune-dry-run-apply-exclusive]
@@ -387,10 +454,12 @@ fn prune_rejects_dry_run_and_apply_together() {
     };
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"prune-exclusive");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "prune-excl", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
     clear_calls(&fx);
-    let (code, stdout, stderr) =
-        fx.manage("prune", &["--category", "unfiled", "--dry-run", "--apply"]);
+    let (code, stdout, stderr) = fx.manage("prune", &["--dry-run", "--apply"]);
     assert_eq!(
         code, 64,
         "--dry-run/--apply併置はusage error 64: {stdout}{stderr}"
@@ -399,34 +468,6 @@ fn prune_rejects_dry_run_and_apply_together() {
         fx.calls(),
         "",
         "S3 API呼び出し(ListObjectVersions)は行われない: {}",
-        fx.calls()
-    );
-}
-
-/// [covers:retention.prune-category-guard-early]
-/// prune冒頭のcategory guard(M-2・12章レビュー): --categoryの値がcategory名規則違反・
-/// 予約領域(sys・旧表記_sys)・pipeline.tomlの[categories]未定義のいずれかの場合は
-/// ListObjectVersions等のS3 API呼び出し前に設定エラー2で拒否する。
-#[test]
-fn prune_category_guard_rejects_before_s3_calls() {
-    let Some(fx) = StorageFixture::new("ret-guard", StorageOpts::default()) else {
-        return;
-    };
-    let a = fx.data_root.join("a.zip");
-    write_file(&a, b"prune-guard");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    clear_calls(&fx);
-    for category in ["sys", "_sys", "BadName", "ghost"] {
-        let (code, stdout, stderr) = fx.manage("prune", &["--category", category, "--apply"]);
-        assert_eq!(
-            code, 2,
-            "--category {category}は設定エラー2: {stdout}{stderr}"
-        );
-    }
-    assert_eq!(
-        fx.calls(),
-        "",
-        "S3 API呼び出し(ListObjectVersions前): {}",
         fx.calls()
     );
 }
@@ -457,18 +498,26 @@ fn rewrite_version_mtimes(fx: &StorageFixture, key: &str, map: &[(String, String
 /// (以降の索引再構築で幽霊版が復活しない)、注入なしの再実行で残対象の削除が継続される。
 #[test]
 fn prune_partial_failure_records_deleted_versions() {
-    let Some(fx) = StorageFixture::new("ret-ptlfail", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new(
+        "ret-ptlfail",
+        StorageOpts {
+            no_categories: true,
+            aws_lifecycle: aws_lifecycle_toml(180, 1, 7),
+            ..StorageOpts::default()
+        },
+    ) else {
         return;
     };
-    let key = fx.file_key("unfiled", None, "a.zip");
-    // 5版(現行1+noncurrent4)。keep=1の削除対象はnoncurrentの古い順に3版
+    // 5版(現行1+noncurrent4)。keep_versions=1の削除対象はnoncurrentの古い順に3版
     let ids = push_versions(&fx, 5);
+    let a = fx.data_root.join("a.zip");
+    let key = fx.data_key(&uuid_of_path(&fx, &a));
 
     // 1版目の削除は成功させ2版目以降を失敗させる(FAKE_S3_FAIL_DELVER_FOR=<key>:<ok回数>)。
     // 削除順はnoncurrentの新しい方から(keep=1の削除対象は ids[2]→ids[1]→ids[0] の順)
     let (code, _, stderr) = fx.manage_env(
         "prune",
-        &["--category", "unfiled", "--apply", "--keep", "1"],
+        &["--apply"],
         &[("FAKE_S3_FAIL_DELVER_FOR", format!("{key}:1").as_str())],
     );
     assert_eq!(code, 5, "削除loop途中の失敗は転送エラー5: {stderr}");
@@ -497,12 +546,9 @@ fn prune_partial_failure_records_deleted_versions() {
     );
 
     // 注入なし再実行: 残りを削除してexit 0(冪等)
-    let (code, stdout, stderr) = fx.manage(
-        "prune",
-        &["--category", "unfiled", "--apply", "--keep", "1"],
-    );
+    let (code, stdout, stderr) = fx.manage("prune", &["--apply"]);
     assert_eq!(code, 0, "再実行はexit 0: {stdout}{stderr}");
-    let vids = index_version_ids(index_file_entry(&fx.read_index(), "a.zip"));
+    let vids = index_version_ids(index_entity_by(&fx.read_index(), "title", "retention-a"));
     for deleted in [&ids[0], &ids[1], &ids[2]] {
         assert!(
             !vids.contains(deleted),
@@ -517,12 +563,20 @@ fn prune_partial_failure_records_deleted_versions() {
 /// newer noncurrent数の数え上げは実時刻順に行われる(実時刻で古い版が削除対象)。
 #[test]
 fn prune_orders_versions_by_epoch() {
-    let Some(fx) = StorageFixture::new("ret-epoch", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new(
+        "ret-epoch",
+        StorageOpts {
+            no_categories: true,
+            aws_lifecycle: aws_lifecycle_toml(180, 1, 7),
+            ..StorageOpts::default()
+        },
+    ) else {
         return;
     };
-    let key = fx.file_key("unfiled", None, "a.zip");
+    let a = fx.data_root.join("a.zip");
     // 3版(現行=ids[2]・noncurrent=ids[0](古い)/ids[1](新しい))
     let ids = push_versions(&fx, 3);
+    let key = fx.data_key(&uuid_of_path(&fx, &a));
     // noncurrent 2版のlast_modifiedを書き換え:
     //   ids[0](実時刻=2026-10-14T16:00:00Z相当): "2026-10-15T01:00:00+09:00"(辞書順は新しい)
     //   ids[1](実時刻=2026-10-14T20:00:00Z相当): "2026-10-14T20:00:00Z"(辞書順は古い)
@@ -535,11 +589,11 @@ fn prune_orders_versions_by_epoch() {
             (ids[1].clone(), "2026-10-14T20:00:00Z".to_string()),
         ],
     );
-    let (code, stdout, stderr) = fx.manage(
-        "prune",
-        &["--category", "unfiled", "--apply", "--keep", "1"],
+    let (code, stdout, stderr) = fx.manage("prune", &["--apply"]);
+    assert_eq!(
+        code, 0,
+        "prune --apply(keep_versions=1)はexit 0: {stdout}{stderr}"
     );
-    assert_eq!(code, 0, "prune --apply --keep 1はexit 0: {stdout}{stderr}");
     assert_eq!(
         deleted_versions(&fx, &key),
         vec![ids[0].clone()],

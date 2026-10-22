@@ -5,11 +5,11 @@
 [meta]
 feature = "fingerprint"
 source_file = "src/fingerprint.rs"
-verified = false
-verified_at = "2026-10-09"
+verified = true
+verified_at = "2026-10-22"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "fff55fb643921e6e90eaa225e979495b9258e0d9"
+source_hash = "58986e88f493e50bfe8d925357268d4d17e6c848"
 note = "FPR-001はssh-keygen外部コマンドとの一致検証だが実ageを要しないためunit扱い(設計8章の種別定義は『実ageバイナリを要するものはintegration』)。FPR-004のChaCha20は src/fingerprint.rs 内private module chacha20 の純Rust実装(設計0章・4.4)"
 
 [[condition]]

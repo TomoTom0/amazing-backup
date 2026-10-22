@@ -1,8 +1,8 @@
-//! TASK-10物理配置の純関数群(分類解決・key生成・名前規則検証)。
-//! 設計書 tmp/tasks/tm-10/design_s3_storage.md 1章・条件書 tests/design/layout.toml。
-//! key構造: `<prefix>/<category>[/<rel_path>]/<name>/default.age`(versioning)・
-//! `<prefix>/<category>[/<rel_path>]/<name>/<pin>.age`(write-once)・
-//! 予約領域 `<prefix>sys/`(索引・manifest)。
+//! TASK-18キー構成の純関数群(UUID発行・key生成・名前規則検証・分類解決)。
+//! 設計書 tmp/tasks/tm-18/design_key-uuid-versioning.md 1章・5.1・条件書 tests/design/layout.toml。
+//! key構造: `<prefix>data/{uuid}/default.age`(versioning)・
+//! `<prefix>data/{uuid}/{pin}.age`(write-once)・`<prefix>data/{uuid}/metadata_{title}.json`(平文)・
+//! 予約領域 `<prefix>sys/`(索引・manifest)。キーはpathにも内容にも依存しない発行ID(uuid)基準。
 
 use crate::errors::{BackupError, BackupResult};
 use std::collections::BTreeMap;
@@ -14,9 +14,8 @@ pub const KEY_MAX_BYTES: usize = 1024;
 /// category名としての使用は拒否される(名前規則 `[a-z0-9][a-z0-9-]` と合わせ、
 /// 第1階層の衝突を構造的に防ぐ)
 pub const RESERVE_SEGMENT: &str = "sys";
-/// 予約領域の旧設計表記(`_sys`)。現行では使わないが、旧表記での誤入力を
-/// category名・files写像path先頭として弾くために拒否リストへ残す
-const RESERVE_REJECTED_LEGACY: &str = "_sys";
+/// 実体領域の第1階層名(`<prefix>data/`)
+pub const DATA_SEGMENT: &str = "data";
 /// pin名として予約されている語(default.ageとの衝突防止)
 pub const RESERVED_PIN_NAME: &str = "default";
 
@@ -54,8 +53,9 @@ pub fn validate_prefix(prefix: &str) -> BackupResult<()> {
     Ok(())
 }
 
-/// category名規則(設計1.2): `^[a-z0-9][a-z0-9-]{0,63}$`・予約語(sys/_sys)拒否。
-/// 違反は設定エラー2。
+/// category名規則: `^[a-z0-9][a-z0-9-]{0,63}$`・予約語(sys)拒否。
+/// TASK-18: [categories]定義は廃止され、categoryは所在記録値として自由化
+/// (文字列検証のみ・5.15)。違反は設定エラー2。
 pub fn validate_category_name(name: &str) -> BackupResult<()> {
     let invalid =
         |detail: &str| BackupError::Config(format!("category名が不正です({detail}): {name:?}"));
@@ -73,13 +73,13 @@ pub fn validate_category_name(name: &str) -> BackupResult<()> {
     if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
         return Err(invalid("使えるのは小文字英数字と-のみです"));
     }
-    if name == RESERVE_SEGMENT || name == RESERVE_REJECTED_LEGACY {
+    if name == RESERVE_SEGMENT {
         return Err(invalid("予約領域名(sys)は使えません"));
     }
     Ok(())
 }
 
-/// pin名規則(設計1.3): `^[a-z0-9][a-z0-9-]{0,62}$`(全体63文字以内)・`default`予約。
+/// pin名規則: `^[a-z0-9][a-z0-9-]{0,62}$`(全体63文字以内)・`default`予約。
 /// CLI引数形式検証として使う場合の違反は使用法エラー64。
 pub fn validate_pin_name(pin: &str) -> BackupResult<()> {
     let invalid = |detail: &str| BackupError::Usage(format!("pin名が不正です({detail}): {pin:?}"));
@@ -103,8 +103,32 @@ pub fn validate_pin_name(pin: &str) -> BackupResult<()> {
     Ok(())
 }
 
-/// rel_path正規化(設計1.2): 先頭`/`禁止・`./`/`../`要素と空要素の拒否・
-/// 末尾`/`の除去。空文字列は「rel_pathなし」を表す正当値。
+/// title規則(TASK-18 5.1): 空拒否・64文字(char)超過拒否・`\n`/`\r`拒否・`/`拒否
+/// (key階層の誤読とdiff除外判定の確実性のため)・制御文字拒否。違反はUsage 64
+/// (validate_pin_nameと同一区分)。UTF-8(日本語等)は許容。
+pub fn validate_title(title: &str) -> BackupResult<()> {
+    let invalid =
+        |detail: &str| BackupError::Usage(format!("titleが不正です({detail}): {title:?}"));
+    if title.is_empty() {
+        return Err(invalid("空です"));
+    }
+    if title.chars().count() > 64 {
+        return Err(invalid("64文字を超えています"));
+    }
+    if title.contains('\n') || title.contains('\r') {
+        return Err(invalid("改行を含みます"));
+    }
+    if title.contains('/') {
+        return Err(invalid("スラッシュを含みます"));
+    }
+    if title.chars().any(|c| c.is_control()) {
+        return Err(invalid("制御文字を含みます"));
+    }
+    Ok(())
+}
+
+/// rel_path正規化: 先頭`/`禁止・`./`/`../`要素と空要素の拒否・末尾`/`の除去。
+/// 空文字列は「rel_pathなし」を表す正当値。
 /// 違反は呼び出し側の区分(設定値は設定エラー2・対象解決由来は対象エラー3)に
 /// 帰着させるため、ここではmessage付きエラーのみ返す。
 pub fn normalize_rel_path(path: &str) -> BackupResult<String> {
@@ -123,15 +147,8 @@ pub fn normalize_rel_path(path: &str) -> BackupResult<String> {
     Ok(segments.join("/"))
 }
 
-/// pathの第1階層が予約領域に衝突するか(files写像の設定検証用)。
-pub fn path_collides_reserve(path: &str) -> bool {
-    path.split('/')
-        .next()
-        .is_some_and(|first| first == RESERVE_SEGMENT || first == RESERVE_REJECTED_LEGACY)
-}
-
-/// identity_hash: sha256(realpath文字列)先頭8hex(設計1.2・2.1)。
-/// realpathはcanonicalize済み絶対pathを想定する(衝突folder名と同一規則)。
+/// identity_hash: sha256(realpath文字列)先頭8hex。所在(location)の突合キー。
+/// realpathはcanonicalize済み絶対pathを想定する。
 pub fn identity_hash(realpath: &Path) -> String {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(realpath.to_string_lossy().as_bytes());
@@ -139,11 +156,11 @@ pub fn identity_hash(realpath: &Path) -> String {
     hex[..8].to_string()
 }
 
-/// 対象の分類解決結果(設計1.2の3段)。
+/// 対象の分類解決結果(所在記録値。key構成には関与しない)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Classification {
     pub category: String,
-    /// 正規化済み。空文字列=rel_pathなし(category直下)
+    /// 正規化済み。空文字列=rel_pathなし
     pub rel_path: String,
 }
 
@@ -154,9 +171,11 @@ pub struct FileMapping {
     pub path: String,
 }
 
-/// 分類解決(設計1.2の優先順位): ①files写像 ②auto_path_roots相対化(最初に一致したroot)
+/// 分類解決(優先順位): ①files写像 ②auto_path_roots相対化(最初に一致したroot)
 /// ③fallback(category=unfiled・rel_pathなし)。
 /// source_canonicalはrealpath解決済み絶対path。source_nameはbasename(拡張子付き)。
+/// 解決結果はIndexLocation・manifest file recordの所在記録値として記録される
+/// (TASK-18: キーはUUID体系のため分類はキー構成に影響しない)。
 pub fn classify(
     source_canonical: &Path,
     source_name: &str,
@@ -172,8 +191,8 @@ pub fn classify(
     }
     for root in auto_path_roots {
         if let Ok(rel) = source_canonical.strip_prefix(root) {
-            // rel_pathは「root配下のdirectory側path」(末尾のファイル名はfolder segmentが
-            // 担うため除去。root直下のfileはrel_pathなし)
+            // rel_pathは「root配下のdirectory側path」(末尾のファイル名は除く。
+            // root直下のfileはrel_pathなし)
             let rel_path = rel
                 .parent()
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -190,94 +209,60 @@ pub fn classify(
     })
 }
 
-/// 衝突時のfolder名(設計1.2): primary(無hash保持者)は`<name>`、それ以外は
-/// 拡張子を除いたstemへ`--<identity_hash>`を付ける(`<name>.zip` → `<name>--<hash8>`)。
-pub fn folder_name(name: &str, identity_hash: &str, primary: bool) -> String {
-    if primary {
-        return name.to_string();
-    }
-    let stem = match name.rfind('.') {
-        Some(pos) if pos > 0 => &name[..pos],
-        _ => name,
-    };
-    format!("{stem}--{identity_hash}")
+/// UUIDv7の発行(TASK-18 5.1): hyphenated lowercase 36字・時刻由来の単調増加傾向。
+pub fn generate_uuid() -> String {
+    uuid::Uuid::now_v7().to_string()
 }
 
-/// key長検証(S3仕様の1024 byte上限。超過は対象エラー3・設計1.2)。
+/// key長検証(S3仕様の1024 byte上限。超過は対象エラー3)。
 pub fn check_key_length(key: &str) -> BackupResult<()> {
     if key.len() > KEY_MAX_BYTES {
         return Err(BackupError::Target(format!(
-            "生成keyがS3のkey長上限({KEY_MAX_BYTES} byte)を超えています({} byte): {key}。files写像のpath縮約またはauto_path_rootsの見直しで対応してください",
+            "生成keyがS3のkey長上限({KEY_MAX_BYTES} byte)を超えています({} byte): {key}。prefix長またはtitle長を確認してください",
             key.len()
         )));
     }
     Ok(())
 }
 
-fn object_dir(prefix: &str, category: &str, rel_path: &str, folder: &str) -> String {
-    let mut key = format!("{prefix}{category}/");
-    if !rel_path.is_empty() {
-        key.push_str(rel_path);
-        key.push('/');
-    }
-    key.push_str(folder);
-    key
+/// 実体領域のprefix: `{prefix}data/`。
+pub fn data_prefix(prefix: &str) -> String {
+    format!("{prefix}{DATA_SEGMENT}/")
 }
 
-/// file objectのkey: `<prefix>/<category>[/<rel_path>]/<folder>/default.age`。
-pub fn file_object_key(
-    prefix: &str,
-    category: &str,
-    rel_path: &str,
-    folder: &str,
-) -> BackupResult<String> {
-    let key = format!(
-        "{}/default.age",
-        object_dir(prefix, category, rel_path, folder)
-    );
+/// 実体本体のkey: `{prefix}data/{uuid}/default.age`(versioningで版蓄積)。
+pub fn data_object_key(prefix: &str, uuid: &str) -> BackupResult<String> {
+    let key = format!("{}{uuid}/default.age", data_prefix(prefix));
     check_key_length(&key)?;
     Ok(key)
 }
 
-/// pin objectのkey: `<prefix>/<category>[/<rel_path>]/<folder>/<pin>.age`。
-pub fn pin_object_key(
-    prefix: &str,
-    category: &str,
-    rel_path: &str,
-    folder: &str,
-    pin: &str,
-) -> BackupResult<String> {
-    let key = format!(
-        "{}/{pin}.age",
-        object_dir(prefix, category, rel_path, folder)
-    );
+/// pin objectのkey: `{prefix}data/{uuid}/{pin}.age`(write-once)。
+/// validate_pin_nameは呼び出し側で実施済み(現行どおり)。
+pub fn pin_object_key(prefix: &str, uuid: &str, pin: &str) -> BackupResult<String> {
+    let key = format!("{}{uuid}/{pin}.age", data_prefix(prefix));
     check_key_length(&key)?;
     Ok(key)
 }
 
-/// 索引objectのkey: `<prefix>sys/index.jsonl.age`(設計1.1・2.1)。
+/// metadata objectのkey: `{prefix}data/{uuid}/metadata_{title}.json`(平文JSON)。
+/// validate_titleは呼び出し側で実施済み。
+pub fn metadata_object_key(prefix: &str, uuid: &str, title: &str) -> BackupResult<String> {
+    let key = format!("{}{uuid}/metadata_{title}.json", data_prefix(prefix));
+    check_key_length(&key)?;
+    Ok(key)
+}
+
+/// 索引objectのkey: `{prefix}sys/index.jsonl.age`。
 pub fn index_object_key(prefix: &str) -> String {
     format!("{prefix}{RESERVE_SEGMENT}/index.jsonl.age")
 }
 
-/// manifest objectのkey: `<prefix>sys/manifests/<batch_id>.jsonl.age`(設計1.1)。
+/// manifest objectのkey: `{prefix}sys/manifests/<batch_id>.jsonl.age`。
 pub fn manifest_object_key(prefix: &str, batch_id: &str) -> BackupResult<String> {
     let key = format!("{prefix}{RESERVE_SEGMENT}/manifests/{batch_id}.jsonl.age");
     check_key_length(&key)?;
     Ok(key)
-}
-
-/// 同一slot(category+rel_path+name)に既存identity保持者がいる場合の無hash帰属
-/// (設計1.2(a)): 既存identityが自identityと一致するなら自らがprimary。
-pub fn existing_holder_primary(existing_identity: &str, own_identity: &str) -> bool {
-    existing_identity == own_identity
-}
-
-/// 同一run内で同時新規の衝突の場合の無hash帰属(設計1.2(b)):
-/// realpath辞書順最小の1つがprimary。candidatesが空ならNone(全員hash付きには
-/// ならない運用上、呼び出し側は1件以上を渡す)。
-pub fn lexicographic_primary<'a>(candidates: &[&'a str]) -> Option<&'a str> {
-    candidates.iter().min().copied()
 }
 
 #[cfg(test)]
@@ -315,13 +300,6 @@ mod tests {
         .expect("写像優先で解決");
         assert_eq!(c.category, "photos");
         assert_eq!(c.rel_path, "2020-2023/travel");
-
-        let key = file_object_key("backup-remote/", &c.category, &c.rel_path, "travel.zip")
-            .expect("key生成");
-        assert_eq!(
-            key,
-            "backup-remote/photos/2020-2023/travel/travel.zip/default.age"
-        );
     }
 
     /// [covers:layout.key-generation-auto-relativize]
@@ -351,48 +329,69 @@ mod tests {
         .expect("fallback");
         assert_eq!(c.category, "unfiled");
         assert_eq!(c.rel_path, "", "roots不一致はrel_pathなし");
-
-        let key = file_object_key("backup-remote/", "unfiled", "", "travel.zip").expect("key");
-        assert_eq!(key, "backup-remote/unfiled/travel.zip/default.age");
     }
 
-    /// [covers:layout.key-generation-collision-hash-suffix]
-    /// 衝突folder名と無hash帰属の決定論的規則(既存保持者維持・同時新規は辞書順最小)。
+    /// [covers:layout.uuid-v7-generation]
+    /// generate_uuid: UUIDv7のhyphenated lowercase 36字(8-4-4-4-12・version nibble=7)・
+    /// 連続呼び出しの辞書順は呼び出し順と一致(単調増加傾向)。
     #[test]
-    fn collision_folder_and_primary_rules() {
-        let a = Path::new("/data/a/travel.zip");
-        let b = Path::new("/data/b/travel.zip");
-        let ha = identity_hash(a);
-        let hb = identity_hash(b);
-        assert_ne!(ha, hb);
-        assert_eq!(ha.len(), 8);
+    fn generated_uuid_is_v7_and_monotonic() {
+        let mut prev: Option<String> = None;
+        for _ in 0..5 {
+            let u = generate_uuid();
+            assert_eq!(u.len(), 36, "36字: {u}");
+            let parts: Vec<&str> = u.split('-').collect();
+            assert_eq!(
+                parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+                vec![8, 4, 4, 4, 12],
+                "8-4-4-4-12形式: {u}"
+            );
+            assert!(u.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+            assert!(u.chars().all(|c| !c.is_ascii_uppercase()), "lowercase: {u}");
+            assert!(parts[2].starts_with('7'), "version nibble=7: {u}");
+            if let Some(p) = prev {
+                assert!(u >= p, "単調増加: prev={p} cur={u}");
+            }
+            prev = Some(u);
+        }
+    }
 
-        // 既存保持者(a)がいる: aは無hash維持・bはhash付き
-        assert!(existing_holder_primary(&ha, &ha));
-        assert!(!existing_holder_primary(&ha, &hb));
-        assert_eq!(folder_name("travel.zip", &ha, true), "travel.zip");
+    /// [covers:layout.data-area-object-keys]
+    /// data領域key生成: data/pin/metadata object keyのuuid体系構成。
+    #[test]
+    fn data_area_keys_follow_uuid_layout() {
+        let uuid = "0192a4f0-3c1b-7a2e-9f10-112233445566";
         assert_eq!(
-            folder_name("travel.zip", &hb, false),
-            format!("travel--{hb}")
+            data_object_key("backup-remote/", uuid).unwrap(),
+            "backup-remote/data/0192a4f0-3c1b-7a2e-9f10-112233445566/default.age"
         );
+        assert_eq!(
+            pin_object_key("backup-remote/", uuid, "keep-1").unwrap(),
+            "backup-remote/data/0192a4f0-3c1b-7a2e-9f10-112233445566/keep-1.age"
+        );
+        assert_eq!(
+            metadata_object_key("backup-remote/", uuid, "旅のしおり2026").unwrap(),
+            "backup-remote/data/0192a4f0-3c1b-7a2e-9f10-112233445566/metadata_旅のしおり2026.json"
+        );
+        assert_eq!(
+            data_prefix("backup-remote/"),
+            "backup-remote/data/",
+            "data領域prefix"
+        );
+    }
 
-        // 同時新規: 辞書順最小(/data/a/...)が無hash
-        assert_eq!(
-            lexicographic_primary(&[b.to_string_lossy().as_ref(), a.to_string_lossy().as_ref()]),
-            Some(a.to_string_lossy().as_ref())
-        );
-
-        let key = file_object_key(
-            "backup-remote/",
-            "unfiled",
-            "",
-            &format!("travel.zip--{hb}"),
-        )
-        .expect("key");
-        assert_eq!(
-            key,
-            format!("backup-remote/unfiled/travel.zip--{hb}/default.age")
-        );
+    /// [covers:layout.title-validation]
+    /// validate_title: 空/65文字超過/改行/スラッシュ/制御文字は拒否(Usage 64)。
+    /// 64文字ちょうど・UTF-8日本語は許容。
+    #[test]
+    fn title_validation() {
+        validate_title("旅のしおり2026").expect("日本語は許容");
+        validate_title(&"t".repeat(64)).expect("64文字ちょうどは許容");
+        validate_title(&"あ".repeat(64)).expect("日本語64文字も許容(char数基準)");
+        for ng in ["", &"t".repeat(65), "a\nb", "a\rb", "a/b", "a\u{1}b"] {
+            let e = validate_title(ng).unwrap_err();
+            assert_eq!(e.exit_code(), 64, "{ng:?}は拒否(Usage 64): {e}");
+        }
     }
 
     /// [covers:layout.category-name-validation]
@@ -449,19 +448,29 @@ mod tests {
     }
 
     /// [covers:layout.key-length-limit-1024]
-    /// 生成keyの1024 byte上限(超過は対象エラー3)。
+    /// 生成keyの1024 byte上限(超過は対象エラー3)。境界内(1024 byteちょうど)は通る。
+    /// metadata key = prefix長 + 5 + 36 + 1 + 9 + title長 + 5。
     #[test]
     fn key_length_limit() {
-        let long_name = "x".repeat(1100);
-        let e = file_object_key("backup-remote/", "unfiled", "", &long_name).unwrap_err();
-        assert_eq!(e.exit_code(), 3, "key長超過は対象エラー3: {e}");
-        // 境界内(1024 byteちょうど)は通る
-        let folder: String =
-            "y".repeat(KEY_MAX_BYTES - "backup-remote/unfiled/".len() - "/default.age".len());
-        file_object_key("backup-remote/", "unfiled", "", &folder).expect("境界内は通る");
+        let uuid = generate_uuid();
+        let title64 = "t".repeat(64);
+        // metadata key = prefix + "data/" + uuid + "/" + "metadata_" + title + ".json"
+        let meta_fixed = "data/".len() + uuid.len() + 1 + "metadata_".len() + ".json".len();
+        let just_prefix = format!("{}/", "a".repeat(1024 - meta_fixed - title64.len() - 1));
+        validate_prefix(&just_prefix).expect("prefix形式は適正");
+        let key = metadata_object_key(&just_prefix, &uuid, &title64).expect("境界内は通る");
+        assert_eq!(key.len(), 1024, "境界内(1024 byteちょうど)は受理");
+        let over_prefix = format!("{}/", "a".repeat(1024 - meta_fixed - title64.len()));
+        let e = metadata_object_key(&over_prefix, &uuid, &title64).unwrap_err();
+        assert_eq!(e.exit_code(), 3, "metadata key長超過は対象エラー3: {e}");
+        // data key = prefix + "data/" + uuid + "/" + "default.age"
+        let data_fixed = "data/".len() + uuid.len() + 1 + "default.age".len();
+        let data_over = format!("{}/", "a".repeat(1024 - data_fixed + 1));
+        let e2 = data_object_key(&data_over, &uuid).unwrap_err();
+        assert_eq!(e2.exit_code(), 3, "data key長超過も対象エラー3: {e2}");
     }
 
-    /// 予約領域key・rel_path正規化・reserve衝突の単位確認。
+    /// 予約領域key・rel_path正規化の単位確認。
     #[test]
     fn reserve_keys_and_rel_path_normalization() {
         assert_eq!(
@@ -472,25 +481,11 @@ mod tests {
             manifest_object_key("backup-remote/", "20261014-abcd0001").unwrap(),
             "backup-remote/sys/manifests/20261014-abcd0001.jsonl.age"
         );
-        assert_eq!(
-            pin_object_key(
-                "backup-remote/",
-                "photos",
-                "t",
-                "travel.zip",
-                "pre-migration"
-            )
-            .unwrap(),
-            "backup-remote/photos/t/travel.zip/pre-migration.age"
-        );
         assert_eq!(normalize_rel_path("a/b/").unwrap(), "a/b");
         assert_eq!(normalize_rel_path("a/./b/").unwrap(), "a/b");
         assert_eq!(normalize_rel_path("a//b").unwrap(), "a/b");
         assert_eq!(normalize_rel_path("../a").unwrap(), "a");
         assert_eq!(normalize_rel_path("").unwrap(), "");
         assert!(normalize_rel_path("/abs").is_err());
-        assert!(path_collides_reserve("_sys/x"));
-        assert!(path_collides_reserve("sys/x"));
-        assert!(!path_collides_reserve("a/sys"));
     }
 }

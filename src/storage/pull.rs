@@ -76,10 +76,13 @@ pub(crate) fn cmd_backup_pull(
                 return Ok(0);
             }
         } else {
+            // TASK-18 5.10: --categoryは「いずれかのlocation.category一致」
             let want_category = category;
             let want_all = all;
             for e in &entries {
-                if !want_all && !want_category.is_some_and(|c| e.category == c) {
+                if !want_all
+                    && !want_category.is_some_and(|c| e.locations.iter().any(|l| l.category == c))
+                {
                     continue;
                 }
                 if let Some(v) = e.versions.first() {

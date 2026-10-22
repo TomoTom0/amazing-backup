@@ -39,24 +39,31 @@ pub struct VersionInfo {
     pub is_delete_marker: bool,
 }
 
-/// lifecycle ruleのrepo中立表現(TASK-10設計5.2。`manage lifecycle apply`が構成)。
-/// 削除条件はNCVEとpruneの単一定義(設計5.2)。Expiration(現行版削除)と
-/// STANDARD→DA移行ruleは構成しない。
+/// lifecycle ruleのrepo中立表現(TASK-18 7章。`manage lifecycle apply`が構成:
+/// data/一括の3rule=NCVE+MPU abort+DeleteMarkerSweep)。
+/// 削除条件はNCVEとpruneの単一定義。STANDARD→DA移行ruleは構成しない。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LifecycleSpec {
-    /// category毎のNoncurrentVersionExpiration(prefix `<prefix>/<category>/`。
-    /// 予約領域(sys)はprefix filterで構造的に対象外)
+    /// data/一括のNoncurrentVersionExpiration(prefix `<prefix>data/`。
+    /// 予約領域(sys)・metadataの非現行版も同prefix配下で掃除される)
     Noncurrent {
         prefix: String,
         /// noncurrent版が削除可能になるまでの日数(180=Deep Archive最小保存期間)
         noncurrent_days: i32,
-        /// 残すnoncurrent版数(NewerNoncurrentVersions・category keep値)
+        /// 残すnoncurrent版数(NewerNoncurrentVersions・[aws.lifecycle] keep_versions)
         newer_noncurrent_versions: i32,
     },
     /// AbortIncompleteMultipartUpload(不完全MPU掃除・prefix `<prefix>/`)
     MpuAbort {
         prefix: String,
         days_after_initiation: i32,
+    },
+    /// Expiration ExpiredObjectDeleteMarker(prefix `<prefix>data/`。
+    /// title変更時の旧metadataキーdelete marker・単独delete markerの掃除)
+    DeleteMarkerSweep {
+        prefix: String,
+        /// Expiration.ExpiredObjectDeleteMarker(常にtrue)
+        expired_object_delete_marker: bool,
     },
 }
 
@@ -71,6 +78,9 @@ pub trait S3Backend {
     -> BackupResult<String>;
     /// download方向。dest(`.part`)へstream書込(呼び出し側が`.part`→rename規則を維持)。
     fn get_to_file(&self, bucket: &str, key: &str, dest: &Path) -> BackupResult<()>;
+    /// download方向の不在許容版。`Ok(false)`=404(Key不在)・他の失敗はエラー伝播。
+    /// head→get二段のAPI呼び出し増を避けるため、不在を許容する読込で使用する。
+    fn get_to_file_checked(&self, bucket: &str, key: &str, dest: &Path) -> BackupResult<bool>;
     /// ListObjectsV2(paginator内包)。key昇順・重複除去済みを返す。
     fn list_keys(&self, bucket: &str, prefix: &str) -> BackupResult<Vec<String>>;
     /// RestoreObject。days/tierはrepo側allowlist検査済み文字列。
@@ -405,6 +415,17 @@ impl S3Backend for RealS3 {
     }
 
     fn get_to_file(&self, bucket: &str, key: &str, dest: &Path) -> BackupResult<()> {
+        if self.get_to_file_checked(bucket, key, dest)? {
+            Ok(())
+        } else {
+            // GetObjectのkey不在はdownload側のkey不在案内を維持(設計8章)
+            Err(BackupError::Transfer(format!(
+                "対象keyがS3に存在しない(key={key})"
+            )))
+        }
+    }
+
+    fn get_to_file_checked(&self, bucket: &str, key: &str, dest: &Path) -> BackupResult<bool> {
         self.rt.block_on(async {
             let output = match self
                 .client
@@ -417,14 +438,11 @@ impl S3Backend for RealS3 {
             {
                 Ok(out) => out,
                 Err(err) => {
-                    // GetObjectのkey不在はdownload側のkey不在案内を維持(設計8章)
                     let no_such_key = err.as_service_error().is_some_and(
                         aws_sdk_s3::operation::get_object::GetObjectError::is_no_such_key,
                     );
                     if no_such_key {
-                        return Err(BackupError::Transfer(format!(
-                            "対象keyがS3に存在しない(key={key})"
-                        )));
+                        return Ok(false);
                     }
                     return Err(map_sdk_error("GetObject", bucket, key, err));
                 }
@@ -452,7 +470,7 @@ impl S3Backend for RealS3 {
                     "S3 GetObject失敗(key={key}): 取得先fileへの書込完了に失敗: {e}"
                 )));
             }
-            Ok(())
+            Ok(true)
         })
     }
 
@@ -890,6 +908,20 @@ impl S3Backend for RealS3 {
                                 .days_after_initiation(*days_after_initiation)
                                 .build(),
                         ),
+                    LifecycleSpec::DeleteMarkerSweep {
+                        prefix,
+                        expired_object_delete_marker,
+                    } => rule
+                        .filter(
+                            aws_sdk_s3::types::builders::LifecycleRuleFilterBuilder::default()
+                                .prefix(prefix.clone())
+                                .build(),
+                        )
+                        .expiration(
+                            aws_sdk_s3::types::LifecycleExpiration::builder()
+                                .expired_object_delete_marker(*expired_object_delete_marker)
+                                .build(),
+                        ),
                 };
                 let rule = rule
                     .build()
@@ -950,6 +982,13 @@ impl S3Backend for RealS3 {
                     specs.push(LifecycleSpec::MpuAbort {
                         prefix,
                         days_after_initiation: mpu.days_after_initiation().unwrap_or(0),
+                    });
+                } else if let Some(exp) = rule.expiration()
+                    && exp.expired_object_delete_marker().unwrap_or(false)
+                {
+                    specs.push(LifecycleSpec::DeleteMarkerSweep {
+                        prefix,
+                        expired_object_delete_marker: true,
                     });
                 }
             }
@@ -1419,6 +1458,16 @@ impl S3Backend for FakeS3 {
     }
 
     fn get_to_file(&self, bucket: &str, key: &str, dest: &Path) -> BackupResult<()> {
+        if self.get_to_file_checked(bucket, key, dest)? {
+            Ok(())
+        } else {
+            Err(BackupError::Transfer(format!(
+                "対象keyがS3に存在しない(key={key})"
+            )))
+        }
+    }
+
+    fn get_to_file_checked(&self, bucket: &str, key: &str, dest: &Path) -> BackupResult<bool> {
         self.record(&format!(
             "s3 GetObject bucket={bucket} key={key} dest={} checksum_mode=ENABLED",
             dest.display()
@@ -1430,11 +1479,7 @@ impl S3Backend for FakeS3 {
         }
         let bytes = match std::fs::read(self.object_path(key)) {
             Ok(b) => b,
-            Err(_) => {
-                return Err(BackupError::Transfer(format!(
-                    "対象keyがS3に存在しない(key={key})"
-                )));
-            }
+            Err(_) => return Ok(false),
         };
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -1444,7 +1489,8 @@ impl S3Backend for FakeS3 {
                 "S3 GetObject失敗(key={key}, dest={}): 取得先fileの書込に失敗: {e}",
                 dest.display()
             ))
-        })
+        })?;
+        Ok(true)
     }
 
     fn list_keys(&self, bucket: &str, prefix: &str) -> BackupResult<Vec<String>> {

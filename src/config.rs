@@ -18,12 +18,41 @@ pub struct PipelineConfig {
     pub decrypt_key: Option<std::path::PathBuf>,
     /// data/out配下の.age保持policy(TASK-10設計4.1・8.3)。既定Run(成功run後に掃除)
     pub keep_artifacts: KeepArtifacts,
-    /// 物理配置の設定(TASK-10設計4.1)
+    /// 物理配置の設定(所在記録値の分類解決用。TASK-18 5.15維持前提)
     pub layout: LayoutConfig,
-    /// 管理区分(名前→保持数)。常にunfiled_category分を含む
-    pub categories: std::collections::BTreeMap<String, CategoryConfig>,
+    /// metadataのlatest_source_path掲載形式(TASK-18 2.2)
+    pub metadata: MetadataConfig,
     /// 手動写像(basename → category/path)。省略時はauto_path_roots相対化へ
     pub files: std::collections::BTreeMap<String, FileMapping>,
+}
+
+/// `[metadata]`相当(TASK-18 2.2・5.15)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetadataConfig {
+    /// latest_source_pathの掲載形式(既定Plain)
+    pub latest_source_path: PathMode,
+}
+
+/// latest_source_pathの3形態(TASK-18 2.2・承認事項11)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathMode {
+    /// path文字列そのまま(既定)
+    Plain,
+    /// age暗号化object{format,recipients,sha256,data}
+    Encrypted,
+    /// null(掲載しない)
+    None,
+}
+
+/// [aws.lifecycle]相当(TASK-18 7章・5.15)。3キーとも必須(コード内defaultなし)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LifecycleConfig {
+    /// NCVE NoncurrentDays(Deep Archive最低保存180日と整合)
+    pub noncurrent_days: u32,
+    /// NCVE NewerNoncurrentVersions(保持noncurrent版数・1..=100)
+    pub keep_versions: u32,
+    /// AbortIncompleteMultipartUpload DaysAfterInitiation
+    pub mpu_abort_days: u32,
 }
 
 /// data/out配下の.age保持policy(TASK-10設計4.1)。
@@ -54,12 +83,6 @@ pub struct LayoutConfig {
     pub auto_path_roots: Vec<std::path::PathBuf>,
 }
 
-/// `[categories.<name>]`相当。keepはNewerNoncurrentVersions適用値(1..=100)。
-#[derive(Debug, Clone)]
-pub struct CategoryConfig {
-    pub keep: u32,
-}
-
 /// `[files."<name>"]`手動写像相当(TASK-10設計4.1)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileMapping {
@@ -84,6 +107,9 @@ pub struct AwsConfig {
     pub storage_class: String,
     /// 名前空間root prefix(TASK-10設計1.1・4.2)。`/`終端。既定"backup-remote/"
     pub prefix: String,
+    /// lifecycle設定(TASK-18 7章。[aws.lifecycle]はprofile横断で同一構成のため
+    /// [aws]直下に一元化)
+    pub lifecycle: LifecycleConfig,
 }
 
 /// credentialファイルの内容(TASK-9設計3章)。`RealS3`構築(明示API key)へ渡す。
@@ -118,10 +144,20 @@ struct PipelineFile {
     verify: VerifyFile,
     #[serde(default)]
     layout: LayoutFile,
+    /// [categories]はTASK-18で廃止(存在したら未知キー拒否・静的に廃止を確定させる)
     #[serde(default)]
-    categories: std::collections::BTreeMap<String, CategoryFile>,
+    metadata: Option<MetadataFile>,
     #[serde(default)]
     files: std::collections::BTreeMap<String, FileMappingFile>,
+}
+
+/// `[metadata]`のschema(TASK-18 2.2)。
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataFile {
+    /// "plain"|"encrypted"|"none"(省略時plain)
+    #[serde(default)]
+    latest_source_path: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -148,13 +184,6 @@ struct LayoutFile {
     unfiled_category: String,
     #[serde(default)]
     auto_path_roots: Vec<String>,
-}
-
-/// `[categories.<name>]`のschema(keep必須)。
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CategoryFile {
-    keep: u32,
 }
 
 /// `[files."<name>"]`のschema(category必須・path省略可=category直下)。
@@ -215,6 +244,17 @@ struct AwsSection {
     active_profile: String,
     /// profile名 -> profile定義。最低1つ必須。
     profiles: std::collections::BTreeMap<String, AwsProfile>,
+    /// lifecycle設定(TASK-18 7章。3キーとも必須・省略は設定エラー2)
+    lifecycle: LifecycleFile,
+}
+
+/// `[aws.lifecycle]`のschema(TASK-18 7章)。
+#[derive(serde::Deserialize, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+struct LifecycleFile {
+    noncurrent_days: u32,
+    keep_versions: u32,
+    mpu_abort_days: u32,
 }
 
 /// credentialファイルのschema(TASK-9設計3.1・3.2。[credentials]テーブル配下は
@@ -316,31 +356,25 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
         auto_path_roots.push(p);
     }
 
-    let mut categories = std::collections::BTreeMap::new();
-    if parsed.categories.is_empty() {
-        // 旧config(セクションなし)との併存のため、未指定時は既定{unfiled: keep 5}を
-        // 束ねる(TASK-10設計4.1。旧サブコマンドはこの値を使用しない)
-        categories.insert(unfiled_category.clone(), CategoryConfig { keep: 5 });
-    } else {
-        for (name, cat) in &parsed.categories {
-            crate::layout::validate_category_name(name).map_err(|e| {
-                BackupError::Config(format!("[categories.{name}]の名前が不正です: {e}"))
-            })?;
-            if !(1..=100).contains(&cat.keep) {
-                return Err(BackupError::Config(format!(
-                    "[categories.{name}].keepは1以上100以下で指定してください: {}",
-                    cat.keep
-                )));
-            }
-            categories.insert(name.clone(), CategoryConfig { keep: cat.keep });
-        }
-        if !categories.contains_key(&unfiled_category) {
+    // [metadata](TASK-18 2.2): latest_source_pathは3値。省略時plain
+    let latest_source_path = match parsed
+        .metadata
+        .as_ref()
+        .and_then(|m| m.latest_source_path.as_deref())
+    {
+        None => PathMode::Plain,
+        Some("plain") => PathMode::Plain,
+        Some("encrypted") => PathMode::Encrypted,
+        Some("none") => PathMode::None,
+        Some(v) => {
             return Err(BackupError::Config(format!(
-                "[categories.{unfiled_category}]が必須です(fallback先のcategory。定義してください)"
+                "[metadata].latest_source_pathが不正です: {v:?}(許容値: plain/encrypted/none)"
             )));
         }
-    }
+    };
 
+    // TASK-18 5.15: files.categoryの定義存在検証は廃止(category語彙は記録値として
+    // 自由化)しvalidate_category_nameによる文字列検証のみへ置換
     let mut files = std::collections::BTreeMap::new();
     for (name, mapping) in &parsed.files {
         if name.is_empty() || name.contains('/') {
@@ -348,20 +382,10 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
                 "[files]のkeyはbasename(拡張子付き・/を含まない)を指定してください: {name:?}"
             )));
         }
-        if !categories.contains_key(&mapping.category) {
-            return Err(BackupError::Config(format!(
-                "[files.{name}].category({})は[categories]に定義されていません",
-                mapping.category
-            )));
-        }
+        crate::layout::validate_category_name(&mapping.category)
+            .map_err(|e| BackupError::Config(format!("[files.{name}].categoryが不正です: {e}")))?;
         let rel = crate::layout::normalize_rel_path(&mapping.path)
             .map_err(|e| BackupError::Config(format!("[files.{name}].pathが不正です: {e}")))?;
-        if crate::layout::path_collides_reserve(&mapping.path) {
-            return Err(BackupError::Config(format!(
-                "[files.{name}].pathの第1階層は予約領域(sys)と衝突するため使えません: {}",
-                mapping.path
-            )));
-        }
         files.insert(
             name.clone(),
             FileMapping {
@@ -382,7 +406,7 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
             unfiled_category,
             auto_path_roots,
         },
-        categories,
+        metadata: MetadataConfig { latest_source_path },
         files,
     })
 }
@@ -475,8 +499,8 @@ pub fn load_aws_profile(
                         .aws
                         .profiles
                         .keys()
-                        .cloned()
                         .next()
+                        .cloned()
                         .unwrap_or_default()
                 }
             })
@@ -489,8 +513,8 @@ pub fn load_aws_profile(
             .aws
             .profiles
             .keys()
-            .cloned()
             .next()
+            .cloned()
             .unwrap_or_default()
     };
 
@@ -551,6 +575,34 @@ pub fn load_aws_profile(
     };
     crate::layout::validate_prefix(&prefix)
         .map_err(|e| BackupError::Config(format!("[aws.profiles.{selected_name}].prefix: {e}")))?;
+    // TASK-18 7章: [aws.lifecycle]の検証(3キーとも必須=parse時に強制・範囲検証。
+    // DEEP_ARCHIVE profileでnoncurrent_days<180はDeep Archive最低保存180日未満の
+    // 早期削除となるため構造的に排除)
+    let lc = parsed.aws.lifecycle;
+    if !(1..=100).contains(&lc.keep_versions) {
+        return Err(BackupError::Config(format!(
+            "[aws.lifecycle].keep_versionsは1以上100以下で指定してください: {}",
+            lc.keep_versions
+        )));
+    }
+    if lc.noncurrent_days < 1 {
+        return Err(BackupError::Config(format!(
+            "[aws.lifecycle].noncurrent_daysは1以上で指定してください: {}",
+            lc.noncurrent_days
+        )));
+    }
+    if lc.mpu_abort_days < 1 {
+        return Err(BackupError::Config(format!(
+            "[aws.lifecycle].mpu_abort_daysは1以上で指定してください: {}",
+            lc.mpu_abort_days
+        )));
+    }
+    if storage_class == "DEEP_ARCHIVE" && lc.noncurrent_days < 180 {
+        return Err(BackupError::Config(format!(
+            "DEEP_ARCHIVE profileの[aws.lifecycle].noncurrent_daysは180以上必要です(Deep Archive最低保存180日): {}",
+            lc.noncurrent_days
+        )));
+    }
     Ok(AwsConfig {
         profile: selected_name,
         bucket: prof.bucket.clone(),
@@ -558,6 +610,11 @@ pub fn load_aws_profile(
         credentials_file: std::path::PathBuf::from(credentials_file.clone()),
         storage_class,
         prefix,
+        lifecycle: LifecycleConfig {
+            noncurrent_days: lc.noncurrent_days,
+            keep_versions: lc.keep_versions,
+            mpu_abort_days: lc.mpu_abort_days,
+        },
     })
 }
 
@@ -901,7 +958,7 @@ mod tests {
         let p = tmp.path().join("aws.toml");
         write_file(
             &p,
-            b"[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"configs/secret/aws-credentials.toml\"\naws_access_key_id = \"AKIAxxxxxxxxxxxxxxxx\"\n",
+            b"[aws]\nactive_profile = \"default\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"configs/secret/aws-credentials.toml\"\naws_access_key_id = \"AKIAxxxxxxxxxxxxxxxx\"\n",
         );
         let e = load_aws(&p).unwrap_err();
         let msg = config_error(&e);
@@ -917,7 +974,7 @@ mod tests {
         let p = tmp.path().join("aws.toml");
         write_file(
             &p,
-            b"[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"my-bucket\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"configs/secret/aws-credentials.toml\"\nstorage_class = \"DEEP_ARCHIVE\"\n",
+            b"[aws]\nactive_profile = \"default\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.default]\nbucket = \"my-bucket\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"configs/secret/aws-credentials.toml\"\nstorage_class = \"DEEP_ARCHIVE\"\n",
         );
         let cfg = load_aws(&p).expect("有効なaws.tomlは読み込める");
         assert_eq!(cfg.bucket, "my-bucket");
@@ -935,7 +992,7 @@ mod tests {
     fn load_aws_requires_credentials_file_key() {
         let tmp = TempDir::new("conf-aws-credreq");
         let p = tmp.path().join("aws.toml");
-        write_file(&p, b"[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"ap-northeast-1\"\n");
+        write_file(&p, b"[aws]\nactive_profile = \"default\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"ap-northeast-1\"\n");
         let e = load_aws(&p).unwrap_err();
         config_error(&e);
         assert_eq!(e.exit_code(), 2);
@@ -952,7 +1009,7 @@ mod tests {
         let typo = tmp.path().join("typo.toml");
         write_file(
             &typo,
-            b"[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"DEEP_ARCHIV\"\n",
+            b"[aws]\nactive_profile = \"default\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"DEEP_ARCHIV\"\n",
         );
         let e = load_aws(&typo).unwrap_err();
         let msg = config_error(&e);
@@ -973,7 +1030,7 @@ mod tests {
                 .join(format!("ok-{}.toml", ok_value.to_lowercase()));
             write_file(
                 &p,
-                format!("[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"{ok_value}\"\n").as_bytes(),
+                format!("[aws]\nactive_profile = \"default\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"{ok_value}\"\n").as_bytes(),
             );
             let cfg = load_aws(&p).unwrap_or_else(|e| panic!("{ok_value}は許容値: {e}"));
             assert_eq!(cfg.storage_class, ok_value);
@@ -981,7 +1038,7 @@ mod tests {
 
         // 3. 空文字は既定DEEP_ARCHIVE
         let empty = tmp.path().join("empty-sc.toml");
-        write_file(&empty, b"[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"\"\n");
+        write_file(&empty, b"[aws]\nactive_profile = \"default\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.default]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"\"\n");
         let cfg = load_aws(&empty).expect("空文字は既定値扱い");
         assert_eq!(cfg.storage_class, "DEEP_ARCHIVE");
     }
@@ -1011,6 +1068,11 @@ mod tests {
             credentials_file: creds.clone(),
             storage_class: "DEEP_ARCHIVE".into(),
             prefix: "backup-remote/".into(),
+            lifecycle: LifecycleConfig {
+                noncurrent_days: 180,
+                keep_versions: 10,
+                mpu_abort_days: 7,
+            },
         };
         let e = require_ready(&empty_both).unwrap_err();
         let msg = config_error(&e);
@@ -1032,6 +1094,11 @@ mod tests {
             credentials_file: creds,
             storage_class: "DEEP_ARCHIVE".into(),
             prefix: "backup-remote/".into(),
+            lifecycle: LifecycleConfig {
+                noncurrent_days: 180,
+                keep_versions: 10,
+                mpu_abort_days: 7,
+            },
         };
         require_ready(&ready).expect("bucket/region・credentialファイルがあれば準備完了");
     }
@@ -1139,11 +1206,11 @@ mod tests {
         for (name, body) in [
             (
                 "bucket",
-                "[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \" my-bucket \"\nregion = \"ap-northeast-1\"\ncredentials_file = \"c.toml\"\n",
+                "[aws]\nactive_profile = \"default\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.default]\nbucket = \" my-bucket \"\nregion = \"ap-northeast-1\"\ncredentials_file = \"c.toml\"\n",
             ),
             (
                 "region",
-                "[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"my-bucket\"\nregion = \" ap-northeast-1\"\ncredentials_file = \"c.toml\"\n",
+                "[aws]\nactive_profile = \"default\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.default]\nbucket = \"my-bucket\"\nregion = \" ap-northeast-1\"\ncredentials_file = \"c.toml\"\n",
             ),
         ] {
             let p = tmp.path().join(format!("ws-{}.toml", name));
@@ -1156,7 +1223,7 @@ mod tests {
 
         // 2. 空白なしの値はそのまま読み込まれる(trimされない)
         let p = tmp.path().join("ws-ok.toml");
-        write_file(&p, b"[aws]\nactive_profile = \"default\"\n\n[aws.profiles.default]\nbucket = \"my-bucket\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"c.toml\"\n");
+        write_file(&p, b"[aws]\nactive_profile = \"default\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.default]\nbucket = \"my-bucket\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"c.toml\"\n");
         let cfg = load_aws(&p).expect("空白なしは読み込める");
         assert_eq!(cfg.bucket, "my-bucket");
         assert_eq!(cfg.region, "ap-northeast-1");
@@ -1182,7 +1249,7 @@ mod tests {
              [behavior]\nkeep_going = false\n\
              [verify]\ndecrypt_key = \"{}\"\n\
              [layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [\"/home/tomo/data\"]\n\
-             [categories.unfiled]\nkeep = 5\n{extra}",
+             {extra}",
             dir.join("out").display(),
             dir.join("registry.jsonl").display(),
             dir.join("nokey").display(),
@@ -1190,10 +1257,10 @@ mod tests {
     }
 
     /// [covers:config.layout-and-categories-validation]
-    /// [layout]/[categories]/[files]の検証(設計4.2): keepは1以上100以下・
-    /// [categories.unfiled]必須・files.categoryはcategoriesに存在するもの・
-    /// auto_path_rootsは絶対path・filesのpath先頭の_sys衝突・category名規則は設定エラー2。
-    /// 適正な拡張schemaは読み込める(未知キー扱いにならない)。
+    /// [layout]/[files]の検証(TASK-18 5.15改訂): auto_path_rootsは絶対path・
+    /// files.categoryと[layout].unfiled_categoryはvalidate_category_nameによる
+    /// 文字列検証のみ([categories]定義存在検証は廃止・category語彙は記録値として自由化)。
+    /// files写像path先頭のsys衝突検証は廃止。適正な拡張schemaは読み込める。
     #[test]
     fn load_pipeline_validates_layout_and_categories() {
         let tmp = TempDir::new("conf-t10-layout");
@@ -1205,52 +1272,19 @@ mod tests {
             p
         };
 
-        // 適正: 拡張schema([files]写像・複数category込み)は読み込める
+        // 適正: 拡張schema([files]写像込み)は読み込める
         let valid = write_cfg(
             "t10-valid.toml",
             task10_pipeline_toml(
                 tmp.path(),
                 &pub_s,
                 "run",
-                "[categories.photos]\nkeep = 3\n\n[files.\"travel.zip\"]\ncategory = \"photos\"\npath = \"2020-2023/travel\"\n",
+                "[files.\"travel.zip\"]\ncategory = \"photos\"\npath = \"2020-2023/travel\"\n",
             ),
         );
         load_pipeline(&valid).expect("適正な拡張schemaは読み込める");
 
-        // keep=0 / keep=101(1以上100以下の境界外)
-        for (name, keep) in [("keep0", "0"), ("keep101", "101")] {
-            let p = write_cfg(
-                &format!("t10-{name}.toml"),
-                task10_pipeline_toml(
-                    tmp.path(),
-                    &pub_s,
-                    "run",
-                    &format!("[categories.main]\nkeep = {keep}\n"),
-                ),
-            );
-            let e = load_pipeline(&p).unwrap_err();
-            config_error(&e);
-            assert_eq!(e.exit_code(), 2, "{name}は設定エラー2");
-        }
-
-        // [categories.unfiled]欠落(unfiledのみ削除・mainはある)
-        let body = format!(
-            "[recipients]\npublic_keys = [\"{pub_s}\"]\n\
-             [output]\ndir = \"{}\"\nregistry = \"{}\"\nkeep_artifacts = \"run\"\n\
-             [behavior]\nkeep_going = false\n\
-             [verify]\ndecrypt_key = \"{}\"\n\
-             [layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [\"/home/tomo/data\"]\n\
-             [categories.main]\nkeep = 5\n",
-            tmp.path().join("out").display(),
-            tmp.path().join("registry.jsonl").display(),
-            tmp.path().join("nokey").display(),
-        );
-        let p = write_cfg("t10-nounfiled.toml", body);
-        let e = load_pipeline(&p).unwrap_err();
-        config_error(&e);
-        assert_eq!(e.exit_code(), 2, "[categories.unfiled]欠落は設定エラー2");
-
-        // files.categoryに未定義category
+        // files.categoryの[categories]未定義値は受理される(記録値として自由化)
         let p = write_cfg(
             "t10-undefined.toml",
             task10_pipeline_toml(
@@ -1260,24 +1294,30 @@ mod tests {
                 "[files.\"x.zip\"]\ncategory = \"ghost\"\npath = \"a\"\n",
             ),
         );
-        let e = load_pipeline(&p).unwrap_err();
-        config_error(&e);
-        assert_eq!(e.exit_code(), 2, "files.category未定義は設定エラー2");
+        load_pipeline(&p).expect("未定義category値は文字列検査のみで受理");
 
-        // auto_path_rootsに相対path
-        let body = task10_pipeline_toml(tmp.path(), &pub_s, "run", "").replace(
-            "auto_path_roots = [\"/home/tomo/data\"]",
-            "auto_path_roots = [\"relative/path\"]",
-        ) + "";
-        let p = write_cfg("t10-relroot.toml", body);
-        let e = load_pipeline(&p).unwrap_err();
-        config_error(&e);
-        assert_eq!(e.exit_code(), 2, "auto_path_roots相対pathは設定エラー2");
+        // files写像path先頭の_sys(旧予約衝突検査)は受理される(検証廃止)
+        let p = write_cfg(
+            "t10-sysprefix.toml",
+            task10_pipeline_toml(
+                tmp.path(),
+                &pub_s,
+                "run",
+                "[files.\"x.zip\"]\ncategory = \"unfiled\"\npath = \"_sys/x\"\n",
+            ),
+        );
+        load_pipeline(&p).expect("_sys先頭のfiles写像pathは受理される");
 
-        // category名規則違反(大文字開始)と_sys予約
+        // files.categoryの名前規則違反(_sys・BadName)は設定エラー2
         for (name, extra) in [
-            ("category-uppercase", "[categories.\"BadName\"]\nkeep = 5\n"),
-            ("category-sys", "[categories._sys]\nkeep = 5\n"),
+            (
+                "cat-sys",
+                "[files.\"x.zip\"]\ncategory = \"_sys\"\npath = \"a\"\n",
+            ),
+            (
+                "cat-uppercase",
+                "[files.\"x.zip\"]\ncategory = \"BadName\"\npath = \"a\"\n",
+            ),
         ] {
             let p = write_cfg(
                 &format!("t10-{name}.toml"),
@@ -1288,19 +1328,80 @@ mod tests {
             assert_eq!(e.exit_code(), 2, "category名違反({name})は設定エラー2");
         }
 
-        // filesのpath先頭が_sys/へ衝突(予約領域)
+        // [categories]セクション自体の存在は設定エラー2(廃止・未知キー拒否)
         let p = write_cfg(
-            "t10-sysprefix.toml",
+            "t10-categories.toml",
             task10_pipeline_toml(
                 tmp.path(),
                 &pub_s,
                 "run",
-                "[files.\"x.zip\"]\ncategory = \"unfiled\"\npath = \"_sys/x\"\n",
+                "[categories.unfiled]\nkeep = 5\n",
             ),
         );
         let e = load_pipeline(&p).unwrap_err();
         config_error(&e);
-        assert_eq!(e.exit_code(), 2, "files写像pathの_sys衝突は設定エラー2");
+        assert_eq!(e.exit_code(), 2, "[categories]存在は設定エラー2");
+
+        // auto_path_rootsに相対path
+        let body = task10_pipeline_toml(tmp.path(), &pub_s, "run", "").replace(
+            "auto_path_roots = [\"/home/tomo/data\"]",
+            "auto_path_roots = [\"relative/path\"]",
+        );
+        let p = write_cfg("t10-relroot.toml", body);
+        let e = load_pipeline(&p).unwrap_err();
+        config_error(&e);
+        assert_eq!(e.exit_code(), 2, "auto_path_roots相対pathは設定エラー2");
+
+        // unfiled_categoryの名前規則違反
+        let body = task10_pipeline_toml(tmp.path(), &pub_s, "run", "").replace(
+            "unfiled_category = \"unfiled\"",
+            "unfiled_category = \"Unfiled\"",
+        );
+        let p = write_cfg("t10-badunfiled.toml", body);
+        let e = load_pipeline(&p).unwrap_err();
+        config_error(&e);
+        assert_eq!(e.exit_code(), 2, "unfiled_category規則違反は設定エラー2");
+    }
+
+    /// [covers:config.metadata-latest-source-path-values]
+    /// [metadata].latest_source_pathは列挙値 plain(既定)|encrypted|none。
+    /// その他の値・キー・セクション省略時の挙動。
+    #[test]
+    fn load_pipeline_validates_metadata_section() {
+        let tmp = TempDir::new("conf-t18-meta");
+        let pubkey = write_test_ed25519_pub(tmp.path());
+        let pub_s = pubkey.display().to_string();
+        let write_cfg = |name: &str, extra: &str| {
+            let p = tmp.path().join(name);
+            write_file(
+                &p,
+                task10_pipeline_toml(tmp.path(), &pub_s, "run", extra).as_bytes(),
+            );
+            p
+        };
+        // セクション・キー省略はplain既定
+        let cfg = load_pipeline(&write_cfg("meta-default.toml", "")).expect("省略はplain");
+        assert_eq!(cfg.metadata.latest_source_path, PathMode::Plain);
+        for (v, want) in [
+            ("plain", PathMode::Plain),
+            ("encrypted", PathMode::Encrypted),
+            ("none", PathMode::None),
+        ] {
+            let cfg = load_pipeline(&write_cfg(
+                &format!("meta-{v}.toml"),
+                &format!("[metadata]\nlatest_source_path = \"{v}\"\n"),
+            ))
+            .unwrap_or_else(|e| panic!("{v}は許容: {e}"));
+            assert_eq!(cfg.metadata.latest_source_path, want);
+        }
+        // 不正値
+        let e = load_pipeline(&write_cfg(
+            "meta-monthly.toml",
+            "[metadata]\nlatest_source_path = \"monthly\"\n",
+        ))
+        .unwrap_err();
+        config_error(&e);
+        assert_eq!(e.exit_code(), 2, "不正値は設定エラー2");
     }
 
     /// [covers:config.aws-profile-prefix]
@@ -1309,7 +1410,7 @@ mod tests {
     #[test]
     fn load_aws_validates_profile_prefix() {
         let tmp = TempDir::new("conf-t10-prefix");
-        let base = "[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\nbucket = \"b\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"c.toml\"\n";
+        let base = "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\nbucket = \"b\"\nregion = \"ap-northeast-1\"\ncredentials_file = \"c.toml\"\n";
 
         // 適正なprefixは読み込める
         let p = tmp.path().join("prefix-ok.toml");
@@ -1334,6 +1435,75 @@ mod tests {
             config_error(&e);
             assert_eq!(e.exit_code(), 2, "prefix形式違反({name})は設定エラー2");
         }
+    }
+
+    /// [covers:config.aws-lifecycle-required-and-ranged]
+    /// [aws.lifecycle]の3キーは必須(欠落はparseエラー)・範囲検証
+    /// (keep_versions 1..=100・noncurrent_days>=1・mpu_abort_days>=1)・
+    /// DEEP_ARCHIVEでnoncurrent_days<180は設定エラー2。
+    #[test]
+    fn load_aws_validates_lifecycle() {
+        let tmp = TempDir::new("conf-t18-lyf");
+        let base = |lc: &str, sc: &str| {
+            format!(
+                "[aws]\nactive_profile = \"dev\"\n{lc}\n[aws.profiles.dev]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\nstorage_class = \"{sc}\"\n"
+            )
+        };
+        let lifecycle = |n: &str, k: &str, m: &str| {
+            format!(
+                "[aws.lifecycle]\nnoncurrent_days = {n}\nkeep_versions = {k}\nmpu_abort_days = {m}\n"
+            )
+        };
+        let write = |name: &str, body: String| {
+            let p = tmp.path().join(name);
+            write_file(&p, body.as_bytes());
+            p
+        };
+
+        // 適正値(STANDARD・DEEP_ARCHIVEとも180以上は可)
+        for (name, sc) in [("ok-std", "STANDARD"), ("ok-da", "DEEP_ARCHIVE")] {
+            let p = write(name, base(&lifecycle("180", "10", "7"), sc));
+            load_aws(&p).unwrap_or_else(|e| panic!("{name}は許容: {e}"));
+        }
+        // 欠落(キー・セクション)
+        for (name, lc) in [
+            (
+                "no-keep",
+                "[aws.lifecycle]\nnoncurrent_days = 180\nmpu_abort_days = 7\n",
+            ),
+            (
+                "no-ncd",
+                "[aws.lifecycle]\nkeep_versions = 10\nmpu_abort_days = 7\n",
+            ),
+            (
+                "no-mpu",
+                "[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\n",
+            ),
+            ("no-section", ""),
+        ] {
+            let p = write(name, base(lc, "STANDARD"));
+            let e = load_aws(&p).unwrap_err();
+            config_error(&e);
+            assert_eq!(e.exit_code(), 2, "{name}の欠落は設定エラー2");
+        }
+        // 範囲外
+        for (name, lc) in [
+            ("keep0", &lifecycle("180", "0", "7")),
+            ("keep101", &lifecycle("180", "101", "7")),
+            ("ncd0", &lifecycle("0", "10", "7")),
+            ("mpu0", &lifecycle("180", "10", "0")),
+        ] {
+            let p = write(name, base(lc, "STANDARD"));
+            let e = load_aws(&p).unwrap_err();
+            config_error(&e);
+            assert_eq!(e.exit_code(), 2, "{name}は設定エラー2");
+        }
+        // DEEP_ARCHIVEでnoncurrent_days<180
+        let p = write("da179", base(&lifecycle("179", "10", "7"), "DEEP_ARCHIVE"));
+        let e = load_aws(&p).unwrap_err();
+        let msg = config_error(&e);
+        assert_eq!(e.exit_code(), 2);
+        assert!(msg.contains("180"), "Deep Archive最低保存の案内: {msg}");
     }
 
     /// [covers:config.keep-artifacts-enum]

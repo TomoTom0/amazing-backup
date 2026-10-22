@@ -16,11 +16,11 @@
 [meta]
 feature = "plan"
 source_file = "src/targets.rs"
-verified = false
-verified_at = "2026-10-09"
+verified = true
+verified_at = "2026-10-22"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "cf64f3391629340ed7cdf8d276df8c90ed8cd117"
+source_hash = "8f2760f80a5de9b3f8b811f924943201d1ba28d0"
 note = "対象解決(targets.rs)の条件群。TASK-11(Phase B)で旧planサブコマンドが削除され、対象解決はbackup push(push解決+--dry-run)経路で検証する(旧plan表示経路は消滅)。各条件のdescription末尾 (unit)/(integration) は階層の目安"
 
 [[condition]]
@@ -30,7 +30,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-001(表示・集計
 description = "位置引数のみで対象解決され、各対象のpath・サイズ・mtime・合計サイズが表示される(backup push --dry-runの対象解決表示) (unit)"
 given = "存在する .zip と .7z の2件を位置引数に指定して backup push --dry-run を実行"
 expect_return_shape = "解決対象2件のpath・size・mtimeと合計サイズを含む表示と exit code 0"
-source_lines = "src/targets.rs:272"
+source_lines = "src/targets.rs:281"
 
 [[condition]]
 id = "plan.from-list-union"
@@ -39,7 +39,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-002(--from-list仕�
 description = "--from-list と位置引数の和集合が解決される(backup pushの対象解決) (unit)"
 given = "位置引数1件と、別の1件を含む from-list toml を同時に指定した backup push --dry-run 実行"
 expect_return_shape = "和集合の2件が解決・表示され exit code 0"
-source_lines = "src/targets.rs:298"
+source_lines = "src/targets.rs:307"
 
 [[condition]]
 id = "plan.missing-or-dir-target-error"
@@ -48,7 +48,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-003(解決規則は
 description = "対象不在・directory指定は対象エラー。解決段階のエラーは全件列挙後に一度に失敗する(backup pushの対象解決) (unit)"
 given = "存在しないpathとdirectory pathを対象に指定した backup push 実行"
 expect_throw = "TargetError(exit code 3)"
-source_lines = "src/targets.rs:317"
+source_lines = "src/targets.rs:326"
 
 [[condition]]
 id = "plan.extension-whitelist"
@@ -57,7 +57,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-004(解決規則は
 description = "拡張子は .zip/.7z のみ許容(大文字小文字無視)。.tar.gz・.7z.001 分割等は対象エラー(backup pushの対象解決) (unit)"
 given = "対象候補に .tar.gz・.7z.001(対象外)と大文字 .ZIP(許容)を含む backup push 実行"
 expect_throw = "TargetError(exit code 3)。大文字 .ZIP のみ解決される"
-source_lines = "src/targets.rs:334"
+source_lines = "src/targets.rs:343"
 
 [[condition]]
 id = "plan.realpath-duplicate-error"
@@ -66,4 +66,4 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-005(解決規則は
 description = "解決後realpathの重複(位置引数×from-list間含む)は対象エラー(backup pushの対象解決) (unit)"
 given = "同一ファイルを相対path・絶対path・from-list entryで重複指定した backup push 実行"
 expect_throw = "TargetError(exit code 3)"
-source_lines = "src/targets.rs:357"
+source_lines = "src/targets.rs:366"

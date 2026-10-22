@@ -3,6 +3,7 @@
 # 相対pathはrepo root(cwd)基準。1つ以上必須。ed25519形式のみ許容
 public_keys = [
   "configs/secret/keys/private/backup_ed25519.pub",
+  "configs/secret/keys/private/backup_ed25519_2nd.pub",
 ]
 
 [output]
@@ -18,3 +19,8 @@ keep_going = false
 [verify]
 # --roundtrip検証で使う秘密鍵path(秘密そのものではなくpath参照。configs/secret/はgitignore済み)
 decrypt_key = "configs/secret/keys/private/backup_ed25519"
+
+[metadata]
+# metadata_{title}.jsonのlatest_source_path掲載形式(TASK-18 2.2)
+# plain: path文字列そのまま / encrypted: age暗号化object / none: null(掲載しない)
+latest_source_path = "plain"

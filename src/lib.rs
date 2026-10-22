@@ -8,6 +8,7 @@ pub mod fingerprint;
 pub mod index;
 pub mod layout;
 pub mod manifest;
+pub mod metadata;
 pub mod registry;
 pub mod s3;
 pub mod storage;

@@ -62,16 +62,55 @@ fn clear_calls(fx: &StorageFixture) {
     let _ = std::fs::remove_file(fx.state.join("calls.log"));
 }
 
+/// TASK-18結合test用: title付きの新規発行push(pty prompt)。
+fn idx_push_titled(
+    fx: &StorageFixture,
+    paths: &[&std::path::Path],
+    titles: &str,
+) -> Option<(i32, String)> {
+    push_titled_pty(fx, paths, titles, &[])
+}
+
+/// registryのfile_write記録からsource_pathでuuidを引く。
+fn idx_uuid_of(fx: &StorageFixture, path: &std::path::Path) -> String {
+    let canonical = std::fs::canonicalize(path).expect("realpath");
+    fx.registry_values()
+        .into_iter()
+        .find(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some("file_write")
+                && r.get("source_path").and_then(|p| p.as_str())
+                    == Some(canonical.to_string_lossy().as_ref())
+        })
+        .and_then(|r| r.get("uuid").and_then(|u| u.as_str()).map(String::from))
+        .unwrap_or_else(|| panic!("file_write.uuid({})", canonical.display()))
+}
+
+/// 同一entityへ2版目を重ねる(crash残存re-put経路・設計4.4(ii)(iii)。共通helperは
+/// 除去したfile_upload記録を復元するため、registryには各版の記録が残る)。
+fn idx_add_second_version(fx: &StorageFixture, path: &std::path::Path) {
+    let _ = add_version_via_reput(fx, path, &[]);
+}
+
+/// TASK-18新体系のStorageOpts([categories]廃止・[aws.lifecycle]必須)。
+fn idx_opts() -> StorageOpts {
+    StorageOpts {
+        no_categories: true,
+        aws_lifecycle: aws_lifecycle_toml(180, 10, 7),
+        ..StorageOpts::default()
+    }
+}
+
 /// [covers:index.schema-and-serialization]
-/// 索引JSONL schema(設計2.1): index_header(schema=1・updated_at・run_id・tool_version・
-/// entries=N)+file entry(name・category・rel_path・source_path・identity_hash・versions[]・
-/// pins[])。versionsはdate降順(先頭=最新)で各versionはdate・version_ts・batch_id・s3_key・
-/// version_id・source_sha256・age_sha256・source_size・age_sizeを持ち、pins[]はpin・s3_key・
-/// created_at・date・source_sha256・age_sha256・source_sizeを持つ。
-/// identity_hash=sha256(realpath)先頭8hex。次コマンドでの索引parseが全fieldを保つ。
+/// 索引JSONL schema(TASK-18 3.1・5.4のschema=2・実体単位entity構造):
+/// index_header(schema=2・updated_at・run_id・tool_version・entries=N)+file entity
+/// (record_type=file維持・uuid・title・versions[]・pins[]・locations[])。
+/// versionsはdate降順で各versionのfield構成は不変(s3_key=data/{uuid}/default.age記録値)。
+/// IndexLocation(新設): source_path・category・rel_path・identity_hash・last_backup。
+/// locationsの並びはsource_path辞書順。旧entryのname/category等はlocationsへ移行・
+/// folder廃止。直列化→parseの往復で全fieldが保たれる。
 #[test]
 fn index_jsonl_schema_and_field_roundtrip() {
-    let Some(fx) = StorageFixture::new("idx-schema", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new("idx-schema", idx_opts()) else {
         return;
     };
     let a = fx
@@ -79,15 +118,16 @@ fn index_jsonl_schema_and_field_roundtrip() {
         .join("2020-2023")
         .join("travel")
         .join("travel.zip");
-    write_file(&a, b"index-schema-v1");
+    write_file(&a, b"index-schema-plain");
     let b = fx.elsewhere.join("x.zip");
     write_file(&b, b"index-schema-b");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    write_file(&a, b"index-schema-v2");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    assert_eq!(fx.push(&[&b], &[], &[]).0, 0);
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a, &b], "旅のしおり\nx-title") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    idx_add_second_version(&fx, &a);
     assert_eq!(
-        fx.pin("add", "travel.zip", &["--latest", "--as", "pre-migration"])
+        fx.pin("add", "旅のしおり", &["--latest", "--as", "pre-migration"])
             .0,
         0
     );
@@ -96,8 +136,8 @@ fn index_jsonl_schema_and_field_roundtrip() {
     let header = index_header(&lines);
     assert_eq!(
         header.get("schema").and_then(|v| v.as_i64()),
-        Some(1),
-        "schema=1: {header}"
+        Some(2),
+        "schema=2: {header}"
     );
     for field in ["updated_at", "run_id", "tool_version"] {
         assert!(
@@ -112,43 +152,64 @@ fn index_jsonl_schema_and_field_roundtrip() {
     assert_eq!(
         header.get("entries").and_then(|v| v.as_i64()),
         Some(file_entries as i64),
-        "entries=Nはfile entry数と一致"
+        "entries=Nはentity数と一致"
     );
 
-    let entry = index_file_entry(&lines, "travel.zip");
+    let uuid = idx_uuid_of(&fx, &a);
+    let entry = index_entity_by(&lines, "uuid", &uuid);
+    assert_eq!(
+        entry.get("title").and_then(|t| t.as_str()),
+        Some("旅のしおり"),
+        "entityのtitle: {entry}"
+    );
+    // 旧entryのfieldはlocationsへ移行(entry直下には無い)
     for field in [
         "name",
         "category",
         "rel_path",
         "source_path",
         "identity_hash",
-        "versions",
-        "pins",
+        "folder",
     ] {
         assert!(
-            entry.get(field).is_some(),
-            "file entryに{field}がある: {entry}"
+            entry.get(field).is_none(),
+            "entity直下に{field}は無い(locationsへ移行・folder廃止): {entry}"
         );
     }
+    // IndexLocation: source_path・category・rel_path・identity_hash・last_backup
+    let locations = entity_locations(entry);
+    assert_eq!(locations.len(), 1, "所在1件: {locations:?}");
+    let loc = &locations[0];
     assert_eq!(
-        entry.get("rel_path").and_then(|v| v.as_str()),
-        Some("2020-2023/travel"),
-        "rel_pathはauto相対化値"
+        loc.get("source_path").and_then(|v| v.as_str()),
+        Some(a.canonicalize().unwrap().to_string_lossy().as_ref()),
+        "source_pathはrealpath絶対path: {loc}"
     );
     assert_eq!(
-        entry.get("identity_hash").and_then(|v| v.as_str()),
+        loc.get("category").and_then(|v| v.as_str()),
+        Some("unfiled"),
+        "categoryは分類解決結果の記録値: {loc}"
+    );
+    assert_eq!(
+        loc.get("rel_path").and_then(|v| v.as_str()),
+        Some("2020-2023/travel"),
+        "rel_pathは正規化済み記録値: {loc}"
+    );
+    assert_eq!(
+        loc.get("identity_hash").and_then(|v| v.as_str()),
         Some(hash8_of_path(&a).as_str()),
-        "identity_hash=sha256(realpath)先頭8hex"
+        "identity_hash=sha256(realpath)先頭8hex: {loc}"
+    );
+    assert!(
+        loc.get("last_backup").is_some(),
+        "last_backup(YYYY-MM-DD)がある: {loc}"
     );
 
     let versions = entry_versions(entry);
-    assert_eq!(versions.len(), 2, "travel.zipは2版: {versions:?}");
-    let reg_ids = registry_upload_version_ids(
-        &fx.registry_values(),
-        &fx.file_key("unfiled", Some("2020-2023/travel"), "travel.zip"),
-    );
+    assert_eq!(versions.len(), 2, "当該entityは2版: {versions:?}");
+    let reg_ids = registry_upload_version_ids(&fx.registry_values(), &fx.data_key(&uuid));
     assert_eq!(reg_ids.len(), 2, "registryのfile_upload記録は2件");
-    // versionsは新しい順(先頭=最新=最後のpush)
+    // versionsは新しい順(先頭=最新)
     assert_eq!(
         index_version_ids(entry),
         reg_ids.iter().rev().cloned().collect::<Vec<_>>(),
@@ -168,12 +229,14 @@ fn index_jsonl_schema_and_field_roundtrip() {
         ] {
             assert!(v.get(field).is_some(), "versionに{field}がある: {v}");
         }
+        assert_eq!(
+            v.get("s3_key").and_then(|k| k.as_str()),
+            Some(fx.data_key(&uuid).as_str()),
+            "s3_keyはdata/{uuid}/default.age記録値: {v}"
+        );
     }
 
-    let pins = entry
-        .get("pins")
-        .and_then(|p| p.as_array())
-        .expect("pins配列");
+    let pins = entity_pins(entry);
     assert_eq!(pins.len(), 1, "pin add後のpinsは1件: {pins:?}");
     for field in [
         "pin",
@@ -192,7 +255,7 @@ fn index_jsonl_schema_and_field_roundtrip() {
 
     // 直列化→parseの往復: 次のコマンド(list versions)が当該索引をparseして
     // 2版とも表示できる=fieldが失われていない
-    let (code, stdout, stderr) = fx.list("versions", &["--name", "travel.zip"]);
+    let (code, stdout, stderr) = fx.list("versions", &["--title", "旅のしおり"]);
     assert_eq!(code, 0, "list versionsはexit 0: {stdout}{stderr}");
     for vid in index_version_ids(entry) {
         assert!(
@@ -206,23 +269,28 @@ fn index_jsonl_schema_and_field_roundtrip() {
 /// 索引の更新単位はrun毎+索引に影響する操作後(設計2.2): ローカルregistry(reduce後)から
 /// 全entryを再構築し、versions[].version_id・s3_keyはregistryのfile_upload記録値。
 /// 再構築は冪等(影響操作を挟んでもregistryから再構築された内容は同一)。
+/// TASK-18: 同一entityの2版はcrash残存re-put経路(設計4.4)で構築する。
 #[test]
 fn index_rebuilt_from_registry_each_run() {
-    let Some(fx) = StorageFixture::new("idx-rebuild", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new("idx-rebuild", idx_opts()) else {
         return;
     };
     let a = fx.data_root.join("a.zip");
     let b = fx.elsewhere.join("b.zip");
-    let a_key = fx.file_key("unfiled", None, "a.zip");
-    write_file(&a, b"rebuild-a-v1");
+    write_file(&a, b"rebuild-a");
     write_file(&b, b"rebuild-b");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    write_file(&a, b"rebuild-a-v2");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    assert_eq!(fx.push(&[&b], &[], &[]).0, 0);
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a, &b], "a.zip\nb.zip") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    // 同一entityへの2版目(crash残存re-put経路・記録は復元して両版を保持)
+    let ids = add_version_via_reput(&fx, &a, &[]);
+    assert_eq!(ids.len(), 2, "a.zipのfile_upload記録は2件");
 
     let lines = fx.read_index();
-    let entry = index_file_entry(&lines, "a.zip");
+    let uuid = idx_uuid_of(&fx, &a);
+    let a_key = fx.data_key(&uuid);
+    let entry = index_entity_by(&lines, "uuid", &uuid);
     let reg_ids = registry_upload_version_ids(&fx.registry_values(), &a_key);
     assert_eq!(reg_ids.len(), 2, "a.zipのfile_upload記録は2件");
     let versions = entry_versions(entry);
@@ -241,7 +309,9 @@ fn index_rebuilt_from_registry_each_run() {
         );
     }
     assert!(
-        index_file_entry(&lines, "b.zip").get("versions").is_some(),
+        index_entity_by(&lines, "uuid", &idx_uuid_of(&fx, &b))
+            .get("versions")
+            .is_some(),
         "b.zip entryも再構築される"
     );
 
@@ -254,17 +324,13 @@ fn index_rebuilt_from_registry_each_run() {
     );
     assert_eq!(fx.pin("rm", "a.zip", &["--pin", "keep-check"]).0, 0);
     let lines2 = fx.read_index();
-    let entry2 = index_file_entry(&lines2, "a.zip");
+    let entry2 = index_entity_by(&lines2, "uuid", &uuid);
     assert_eq!(
         entry_versions(entry2),
         &versions_before,
         "再構築後のversionsは1回目と同一内容(冪等)"
     );
-    let pins2 = entry2
-        .get("pins")
-        .and_then(|p| p.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let pins2 = entity_pins(entry2);
     assert!(pins2.is_empty(), "pin rm後はpinsが空: {pins2:?}");
 }
 
@@ -284,8 +350,10 @@ fn index_put_uses_standard_storage_class() {
     };
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"index-hot");
-    let (code, stdout, stderr) = fx.push(&[&a], &[], &[]);
-    assert_eq!(code, 0, "DEEP_ARCHIVE profileでのpush: {stdout}{stderr}");
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a], "a.zip") else {
+        return;
+    };
+    assert_eq!(code, 0, "DEEP_ARCHIVE profileでのpush: {stdout}");
     let calls = fx.calls();
     let index_key = fx.index_key();
     let index_put = calls
@@ -296,8 +364,8 @@ fn index_put_uses_standard_storage_class() {
         index_put.contains("storage_class=STANDARD"),
         "索引PUTはSTORAGE CLASS STANDARD固定: {index_put}"
     );
-    // file objectはprofile値(DEEP_ARCHIVE)のまま
-    let file_key = fx.file_key("unfiled", None, "a.zip");
+    // 実体objectはprofile値(DEEP_ARCHIVE)のまま(data/{uuid}/default.age)
+    let file_key = fx.data_key(&idx_uuid_of(&fx, &a));
     let file_put = calls
         .lines()
         .find(|l| l.starts_with("s3 PutObject") && l.contains(&format!("key={file_key}")))
@@ -325,8 +393,10 @@ fn index_encrypted_with_all_configured_recipients() {
     ));
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"index-recipients");
-    let (code, stdout, stderr) = fx.push(&[&a], &[], &[]);
-    assert_eq!(code, 0, "2鍵構成でのpush: {stdout}{stderr}");
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a], "a.zip") else {
+        return;
+    };
+    assert_eq!(code, 0, "2鍵構成でのpush: {stdout}");
 
     let index_obj = fx.object_path(&fx.index_key());
     for (tag, secret) in [("第1鍵", fx.secret.clone()), ("第2鍵", secret2)] {
@@ -360,11 +430,13 @@ fn index_version_ids_come_from_put_responses_via_registry() {
     write_file(&small, b"index-version-id-small");
     let big = fx.data_root.join("big.zip");
     make_archive(&big, THRESHOLD + 1024 * 1024);
-    let (code, stdout, stderr) = fx.push(&[&small, &big], &[], &[]);
-    assert_eq!(code, 0, "単発+multipartのpush: {stdout}{stderr}");
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&small, &big], "small.zip\nbig.zip") else {
+        return;
+    };
+    assert_eq!(code, 0, "単発+multipartのpush: {stdout}");
 
     let calls = fx.calls();
-    let big_key = fx.file_key("unfiled", None, "big.zip");
+    let big_key = fx.data_key(&idx_uuid_of(&fx, &big));
     assert!(
         calls
             .lines()
@@ -383,10 +455,10 @@ fn index_version_ids_come_from_put_responses_via_registry() {
     let lines = fx.read_index();
     let registry = fx.registry_values();
     for (name, key) in [
-        ("small.zip", fx.file_key("unfiled", None, "small.zip")),
+        ("small.zip", fx.data_key(&idx_uuid_of(&fx, &small))),
         ("big.zip", big_key),
     ] {
-        let entry = index_file_entry(&lines, name);
+        let entry = index_entity_by(&lines, "title", name);
         let vids = index_version_ids(entry);
         assert_eq!(vids.len(), 1, "{name}は1版: {vids:?}");
         assert!(!vids[0].is_empty(), "{name}のversion_idは空でない");
@@ -408,36 +480,51 @@ fn index_version_ids_come_from_put_responses_via_registry() {
 }
 
 /// [covers:index.rebuild-from-manifests]
-/// manage index rebuild(設計2.3): (1)ListObjectsV2でmanifest一覧 (2)未復元のmanifestへ
-/// 復元job発行(Bulk既定・進行中は再実行で継続) (3)取得・復号・parse→file recordから
-/// entry再構築 (4)version_id欠損manifestはListObjectVersionsでkey+LastModifiedから補完
-/// (5)sys/index.jsonl.ageへPUT。開始時にtier別単価で区別した費用・所要の概算を表示。
+/// manage index rebuild(TASK-18 5.12・3.3): manifest(V2・schema=2: uuid/title入り)から
+/// entity単位へentry再構築。locationsはfile recordsのsource_path単位(最新)から復元。
+/// prunes/sweepsの除外集合を適用(prune除去版の索引への復活防止)。
+/// pin復元はuuid照合。version_id欠損manifestはListObjectVersionsで補完。
+/// 完了時は続けてのmanage index reconcile実行を案内表示。開始時にtier別単価で
+/// 区別した費用・所要の概算を表示。
 #[test]
 fn manage_index_rebuild_rebuilds_entries_from_manifests() {
     let Some(fx) = StorageFixture::new(
         "idx-mreb",
         StorageOpts {
             storage_class: "DEEP_ARCHIVE",
-            ..StorageOpts::default()
+            ..idx_opts()
         },
     ) else {
         return;
     };
     let a = fx.data_root.join("a.zip");
-    write_file(&a, b"rebuild-manifests-v1");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    write_file(&a, b"rebuild-manifests-v2");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    let reg_ids = registry_upload_version_ids(
-        &fx.registry_values(),
-        &fx.file_key("unfiled", None, "a.zip"),
-    );
-    assert_eq!(reg_ids.len(), 2, "2 run分のfile_upload記録");
+    write_file(&a, b"rebuild-manifests-plain");
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a], "rebuild-title") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    // 同一entityへ3版(各版のfile_upload記録を保持するre-put経路・設計4.4)。
+    // keep_versions=1のpruneで削除対象が生じる構成(境界=keep番目は残るため
+    // 2版では削除0件となる・設計5.12)
+    idx_add_second_version(&fx, &a);
+    idx_add_second_version(&fx, &a);
+    let uuid = idx_uuid_of(&fx, &a);
+    let reg_ids = registry_upload_version_ids(&fx.registry_values(), &fx.data_key(&uuid));
+    assert_eq!(reg_ids.len(), 3, "3 run分のfile_upload記録");
 
-    // 1件のmanifestを旧式(version_id欠損)へ書き換える
+    // 最古版をprune --applyで削除(除外集合適用の検証用。keep_versions=1)
+    fx.rewrite_aws_toml(
+        &fx.aws_toml_body()
+            .replace("keep_versions = 10", "keep_versions = 1"),
+    );
+    let (code, stdout, stderr) = fx.manage("prune", &["--apply"]);
+    assert_eq!(code, 0, "prune --apply: {stdout}{stderr}");
+    let pruned = &reg_ids[0];
+
+    // 最新版(3版目)のmanifestを旧式(version_id欠損)へ書き換える
     let manifests = manifest_objects(&fx);
-    assert_eq!(manifests.len(), 2, "manifestは2件: {manifests:?}");
-    let old_manifest = manifests[0].clone();
+    assert_eq!(manifests.len(), 3, "manifestは3件: {manifests:?}");
+    let old_manifest = manifests[2].clone();
     let plain = age_decrypt(&fx.age, &old_manifest, &fx.secret);
     let text = String::from_utf8(plain).expect("manifest平文はUTF-8");
     let mut rewritten = String::new();
@@ -507,22 +594,38 @@ fn manage_index_rebuild_rebuilds_entries_from_manifests() {
             .any(|l| l.starts_with("s3 ListObjectVersions")),
         "version_id欠損manifestの補完にListObjectVersions: {calls}"
     );
-    // 開始時のtier別費用・所要の概算表示
+    // 開始時のtier別費用・所要の概算表示とreconcile案内
     assert!(
         all_stdout.contains("Bulk") && all_stdout.contains("Standard"),
         "tier別(Standard/Bulk)の費用・所要概算表示: {all_stdout}"
     );
+    assert!(
+        all_stdout.contains("reconcile"),
+        "完了時のmanage index reconcile実行案内: {all_stdout}"
+    );
 
-    // 再構築された索引: 2版ともversion_idが入る(欠損分はListObjectVersionsで補完)
+    // 再構築された索引: entity(uuid/title/locations)・prune済み版は復活しない
     let lines = fx.read_index();
-    let entry = index_file_entry(&lines, "a.zip");
-    let mut vids = index_version_ids(entry);
-    vids.sort();
-    let mut expected = reg_ids.clone();
-    expected.sort();
+    let entry = index_entity_by(&lines, "uuid", &uuid);
     assert_eq!(
-        vids, expected,
-        "再構築されたversion_idはmanifest記録値+補完値: {entry}"
+        entry.get("title").and_then(|t| t.as_str()),
+        Some("rebuild-title"),
+        "manifest由来のtitle: {entry}"
+    );
+    let locations = entity_locations(entry);
+    assert_eq!(
+        locations.len(),
+        1,
+        "locationsはfile recordsのsource_path単位で復元: {locations:?}"
+    );
+    let vids = index_version_ids(entry);
+    assert!(
+        !vids.contains(pruned),
+        "prune済み版({pruned})はversionsへ復活しない: {vids:?}"
+    );
+    assert!(
+        vids.contains(&reg_ids[2]),
+        "現行版(version_id欠損manifest分はListObjectVersionsで補完)が載る: {vids:?}"
     );
 }
 
@@ -538,7 +641,10 @@ fn index_pin_entries_reflect_pin_add_and_rm() {
     let a = fx.data_root.join("a.zip");
     let plain = b"index-pin-entries";
     write_file(&a, plain);
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a], "a.zip") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
     assert_eq!(
         fx.pin("add", "a.zip", &["--latest", "--as", "pre-migration"])
             .0,
@@ -546,7 +652,7 @@ fn index_pin_entries_reflect_pin_add_and_rm() {
     );
 
     let lines = fx.read_index();
-    let entry = index_file_entry(&lines, "a.zip");
+    let entry = index_entity_by(&lines, "title", "a.zip");
     let pins = entry
         .get("pins")
         .and_then(|p| p.as_array())
@@ -554,7 +660,7 @@ fn index_pin_entries_reflect_pin_add_and_rm() {
     assert_eq!(pins.len(), 1, "pin add後のpinsは1件: {pins:?}");
     let p = &pins[0];
     assert_eq!(p.get("pin").and_then(|v| v.as_str()), Some("pre-migration"));
-    let pin_key = fx.pin_key("unfiled", None, "a.zip", "pre-migration");
+    let pin_key = fx.data_pin_key(&idx_uuid_of(&fx, &a), "pre-migration");
     assert_eq!(
         p.get("s3_key").and_then(|v| v.as_str()),
         Some(pin_key.as_str())
@@ -590,7 +696,7 @@ fn index_pin_entries_reflect_pin_add_and_rm() {
     // pin rmで該当pin entryが除去される
     assert_eq!(fx.pin("rm", "a.zip", &["--pin", "pre-migration"]).0, 0);
     let lines2 = fx.read_index();
-    let entry2 = index_file_entry(&lines2, "a.zip");
+    let entry2 = index_entity_by(&lines2, "title", "a.zip");
     let pins2 = entry2
         .get("pins")
         .and_then(|p| p.as_array())
@@ -604,104 +710,54 @@ fn index_pin_entries_reflect_pin_add_and_rm() {
     );
 }
 
-/// [covers:index.rebuild-preserves-folder-and-pins]
-/// manage index rebuildはfolderを落とさず(H-3: manifest V2のfolder記録を使用)、
-/// registryのpin記録からpins[]を復元する。rebuild後のpin addが正しいpin keyへ写る。
-#[test]
-fn rebuild_preserves_folder_and_restores_pins() {
-    let Some(fx) = StorageFixture::new("idx-rebfolder", StorageOpts::default()) else {
-        return;
-    };
-    let a = fx.data_root.join("a.zip");
-    write_file(&a, b"rebuild-folder");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    assert_eq!(fx.pin("add", "a.zip", &["--latest", "--as", "pm1"]).0, 0);
-
-    // 索引objectを喪失させて再構築
-    std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
-    let _ = std::fs::remove_file(fx.state.join("calls.log"));
-    let mut last = String::new();
-    let mut code = 0;
-    for _ in 0..2 {
-        let (c, stdout, stderr) = fx.manage("index", &["rebuild"]);
-        code = c;
-        last = format!("{stdout}{stderr}");
-        if fx.object_path(&fx.index_key()).is_file() {
-            break;
-        }
-    }
-    assert_eq!(code, 0, "manage index rebuildはexit 0: {last}");
-
-    // pins[]が復元されている(registryのpin_write由来)
-    let lines = fx.read_index();
-    let entry = index_file_entry(&lines, "a.zip");
-    let pins = entry
-        .get("pins")
-        .and_then(|p| p.as_array())
-        .cloned()
-        .unwrap_or_default();
-    assert_eq!(pins.len(), 1, "pm1が復元される: {pins:?}");
-    assert_eq!(pins[0].get("pin").and_then(|v| v.as_str()), Some("pm1"));
-
-    // rebuild後のpin addがfolder付きの正しいpin keyへ写る(二重/なし)
-    assert_eq!(fx.pin("add", "a.zip", &["--latest", "--as", "pm2"]).0, 0);
-    let pm2_key = fx.pin_key("unfiled", None, "a.zip", "pm2");
-    assert!(
-        fx.object_path(&pm2_key).is_file(),
-        "rebuild後のpin addが正しいkeyへ写る: {pm2_key}"
-    );
-    let lines2 = fx.read_index();
-    let entry2 = index_file_entry(&lines2, "a.zip");
-    let pins2 = entry2
-        .get("pins")
-        .and_then(|p| p.as_array())
-        .cloned()
-        .unwrap_or_default();
-    assert_eq!(pins2.len(), 2, "pm1・pm2の2件: {pins2:?}");
-}
-
 /// [covers:index.version-ts-from-file-write]
-/// 索引versions[].version_tsの時刻源は暗号化時刻(TASK-11 Phase B): registryの当該版
-/// file_write記録recorded_atと一致する(file_upload記録の時刻ではなく・file_writeと同一時刻)。
+/// 索引versions[].version_tsの時刻源(TASK-18 5.4・付記): registryのfile_upload記録自身の
+/// version_tsとする(旧write_ts_by_group対応付けは廃止・簡素化)。
 /// 同一日内複数版の一意化(getの--version-id特定・候補表示)はこの時刻で行う。
 #[test]
 fn version_ts_comes_from_file_write_recorded_at() {
-    let Some(fx) = StorageFixture::new("idx-vts", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new("idx-vts", idx_opts()) else {
         return;
     };
     let a = fx.data_root.join("a.zip");
-    write_file(&a, b"version-ts-v1");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
-    // 同一日内2版目(mtimeを変えるためsleep)
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    write_file(&a, b"version-ts-v2-longer");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    write_file(&a, b"version-ts-plain");
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a], "vts-title") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    idx_add_second_version(&fx, &a);
 
-    // registryのfile_write記録(recorded_at)と索引versions[].version_tsの対応
-    let writes: Vec<serde_json::Value> = fx
+    // registryのfile_upload記録(version_ts)と索引versions[].version_tsの対応
+    let uuid = idx_uuid_of(&fx, &a);
+    let uploads: Vec<serde_json::Value> = fx
         .registry_values()
         .into_iter()
-        .filter(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_write"))
+        .filter(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload"))
         .collect();
-    assert_eq!(writes.len(), 2, "2版分のfile_write記録: {writes:?}");
+    assert_eq!(uploads.len(), 2, "2版分のfile_upload記録: {uploads:?}");
     let lines = fx.read_index();
-    let entry = index_file_entry(&lines, "a.zip");
+    let entry = index_entity_by(&lines, "uuid", &uuid);
     let versions = entry_versions(entry);
     assert_eq!(versions.len(), 2, "索引は2版: {versions:?}");
     for v in versions.iter() {
+        let vid = v
+            .get("version_id")
+            .and_then(|t| t.as_str())
+            .expect("version_id");
         let vts = v
             .get("version_ts")
             .and_then(|t| t.as_str())
             .expect("version_ts");
-        assert!(
-            writes
-                .iter()
-                .any(|w| w["recorded_at"].as_str() == Some(vts)),
-            "version_ts({vts})は当該版file_write記録のrecorded_atと一致: {writes:?}"
+        let up = uploads
+            .iter()
+            .find(|u| u["version_id"].as_str() == Some(vid))
+            .unwrap_or_else(|| panic!("当該版のfile_upload記録({vid}): {uploads:?}"));
+        assert_eq!(
+            up["version_ts"].as_str(),
+            Some(vts),
+            "version_tsは当該版file_upload記録自身のversion_tsと一致"
         );
     }
-    // file_writeとfile_uploadの記録時刻は独立に記録されるが、version_tsは
-    // file_write側(暗号化時刻)に等しい(全version_tsがいずれかのfile_write記録に対応することで検証)
 }
 
 /// [covers:index.unknown-record-warning-plain-format]
@@ -715,7 +771,10 @@ fn unknown_record_warning_uses_plain_format() {
     };
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"unknown-record-plain");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a], "a.zip") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
 
     // 索引へ未知record_type行を混入
     let mut lines = fx.read_index();
@@ -754,7 +813,10 @@ fn pin_readd_after_remove_wins_in_index() {
     };
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"pin-readd-plain");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a], "a.zip") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
     // pin add(pm1)→pin rm(pm1)→同一pm1再付与(write-onceの正規フロー)
     assert_eq!(fx.pin("add", "a.zip", &["--latest", "--as", "pm1"]).0, 0);
     assert_eq!(fx.pin("rm", "a.zip", &["--pin", "pm1"]).0, 0);
@@ -763,7 +825,7 @@ fn pin_readd_after_remove_wins_in_index() {
         code, 0,
         "rm後の同一pin名再付与はwrite-once違反にならずexit 0: {stdout}{stderr}"
     );
-    let pin_key = fx.pin_key("unfiled", None, "a.zip", "pm1");
+    let pin_key = fx.data_pin_key(&idx_uuid_of(&fx, &a), "pm1");
     assert!(
         fx.object_path(&pin_key).is_file(),
         "再付与でpin objectが再作成される: {pin_key}"
@@ -771,7 +833,7 @@ fn pin_readd_after_remove_wins_in_index() {
 
     // 索引当該entry pins[]へpm1が載る(created_atは再付与のpin_write記録時刻)
     let lines = fx.read_index();
-    let entry = index_file_entry(&lines, "a.zip");
+    let entry = index_entity_by(&lines, "title", "a.zip");
     let pins = entry
         .get("pins")
         .and_then(|p| p.as_array())
@@ -831,12 +893,8 @@ fn pin_readd_after_remove_wins_in_index() {
     }
     assert_eq!(code, 0, "manage index rebuildはexit 0: {last}");
     let lines2 = fx.read_index();
-    let entry2 = index_file_entry(&lines2, "a.zip");
-    let pins2 = entry2
-        .get("pins")
-        .and_then(|p| p.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let entry2 = index_entity_by(&lines2, "title", "a.zip");
+    let pins2 = entry_pins(entry2);
     assert_eq!(pins2.len(), 1, "rebuild復元後のpinsにもpm1: {pins2:?}");
     assert_eq!(pins2[0].get("pin").and_then(|v| v.as_str()), Some("pm1"));
 
@@ -863,7 +921,7 @@ fn entry_pins(entry: &serde_json::Value) -> Vec<serde_json::Value> {
 /// 結合testの各ファイルは独立crateのため局部helperとして置く)。
 fn same_prefix_diff_bucket_aws_toml(fx: &StorageFixture) -> String {
     format!(
-        "[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"bucket-dev\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n[aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"bucket-prod\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n",
+        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"bucket-dev\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n[aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"bucket-prod\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n",
         creds = fx.credentials.display()
     )
 }
@@ -894,16 +952,22 @@ fn setup_both_bucket_same_name_pin(
     fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));
     let a = fx.data_root.join("a.zip");
     write_file(&a, plain);
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0, "dev(既定profile) push");
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
+        return None;
+    };
+    assert_eq!(code, 0, "dev(既定profile) push: {stdout}");
     assert_eq!(
         fx.pin("add", "a.zip", &["--latest", "--as", "pm1"]).0,
         0,
         "dev側(先付け)pin add pm1"
     );
+    // prod側はbucket分離で別entity発行(設計4.3: skipしない)のためtitle指定でpush
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &["--profile", "prod"]) else {
+        return None;
+    };
     assert_eq!(
-        fx.push(&[&a], &["--profile", "prod"], &[]).0,
-        0,
-        "prod側push(prod bucketへfile_upload記録)"
+        code, 0,
+        "prod側push(prod bucketへfile_upload記録): {stdout}"
     );
 
     // dev側pin_write実記録を取得し、prod側(後付け)記録を組み立ててregistryへ追記する
@@ -923,10 +987,9 @@ fn setup_both_bucket_same_name_pin(
         .expect("recorded_at")
         .to_string();
     // prod側付与時刻はdev側より後(後付け)で区別可能な値(+1時間)
-    let prod_created_at =
-        chrono::DateTime::parse_from_rfc3339(&dev_created_at)
-            .map(|dt| (dt + chrono::Duration::hours(1)).to_rfc3339())
-            .unwrap_or_else(|e| panic!("dev側recorded_atのparse: {e}"));
+    let prod_created_at = chrono::DateTime::parse_from_rfc3339(&dev_created_at)
+        .map(|dt| (dt + chrono::Duration::hours(1)).to_rfc3339())
+        .unwrap_or_else(|e| panic!("dev側recorded_atのparse: {e}"));
     let prod_vid = registry
         .iter()
         .find(|r| {
@@ -949,7 +1012,7 @@ fn setup_both_bucket_same_name_pin(
             .expect("registry.jsonlへ追記");
         writeln!(f, "{prod_write}").expect("prod側pin_write記録の追記");
     }
-    let pin_key = fx.pin_key("unfiled", None, "a.zip", "pm1");
+    let pin_key = fx.data_pin_key(&uuid_of_path(&fx, &a), "pm1");
     Some((
         fx,
         BothBucketPin {
@@ -982,7 +1045,7 @@ fn pins_multi_bucket_same_name_kept_in_each_index() {
     // (1) dev側(先付けbucket)索引の再構築(all-skip push): pm1が載る
     // (後付けprodのpin_writeがdev側のmap entryを上書きしない=片寄りなし)
     assert_eq!(fx.push(&[&a], &[], &[]).0, 0, "dev all-skip push");
-    let pins = entry_pins(index_file_entry(&fx.read_index(), "a.zip"));
+    let pins = entry_pins(index_entity_by(&fx.read_index(), "title", "a.zip"));
     assert_eq!(
         pins.len(),
         1,
@@ -1001,7 +1064,10 @@ fn pins_multi_bucket_same_name_kept_in_each_index() {
     // dev側のlist pins・get --pinが参照できる
     let (code, stdout, stderr) = fx.list("pins", &[]);
     assert_eq!(code, 0, "list pins(dev)はexit 0: {stdout}{stderr}");
-    assert!(stdout.contains("pm1"), "list pins(dev)にpm1が現れる: {stdout}");
+    assert!(
+        stdout.contains("pm1"),
+        "list pins(dev)にpm1が現れる: {stdout}"
+    );
     let out = fx.elsewhere.join("pmbkt-dev-out");
     let out_s = out.display().to_string();
     let (code, stdout, stderr) = fx.get("a.zip", &["--pin", "pm1", "--out", &out_s]);
@@ -1017,7 +1083,7 @@ fn pins_multi_bucket_same_name_kept_in_each_index() {
         0,
         "prod all-skip push"
     );
-    let pins = entry_pins(index_file_entry(&fx.read_index(), "a.zip"));
+    let pins = entry_pins(index_entity_by(&fx.read_index(), "title", "a.zip"));
     assert_eq!(
         pins.len(),
         1,
@@ -1062,7 +1128,7 @@ fn pins_multi_bucket_same_name_kept_in_each_index() {
         }
     }
     assert_eq!(code, 0, "manage index rebuild(dev)はexit 0: {last}");
-    let pins = entry_pins(index_file_entry(&fx.read_index(), "a.zip"));
+    let pins = entry_pins(index_entity_by(&fx.read_index(), "title", "a.zip"));
     assert_eq!(
         pins.len(),
         1,
@@ -1102,9 +1168,11 @@ fn pin_rm_multi_bucket_independent() {
     );
     let calls = fx.calls();
     assert!(
-        calls.lines().any(|l| l.starts_with("s3 DeleteObjectVersion")
-            && l.contains("bucket=bucket-dev")
-            && l.contains(&format!("key={}", st.pin_key))),
+        calls
+            .lines()
+            .any(|l| l.starts_with("s3 DeleteObjectVersion")
+                && l.contains("bucket=bucket-dev")
+                && l.contains(&format!("key={}", st.pin_key))),
         "dev側rmのpin object削除はdev bucketへ向かう: {calls}"
     );
     assert!(
@@ -1113,8 +1181,11 @@ fn pin_rm_multi_bucket_independent() {
     );
     assert!(!pin_obj.is_file(), "dev bucketのpin objectは削除される");
     // dev側索引pins[]からpm1が除かれる(rm実行が索引を再構築する)
-    let pins = entry_pins(index_file_entry(&fx.read_index(), "a.zip"));
-    assert!(pins.is_empty(), "dev側索引pins[]からpm1が除かれる: {pins:?}");
+    let pins = entry_pins(index_entity_by(&fx.read_index(), "title", "a.zip"));
+    assert!(
+        pins.is_empty(),
+        "dev側索引pins[]からpm1が除かれる: {pins:?}"
+    );
 
     // fakeのS3 stateはbucket分離を持たないためdev側rmで共有実体が消えている。
     // 実S3ではprod bucketのpin objectは独立に存在し続けるため、prod側写しの生存を
@@ -1136,12 +1207,8 @@ fn pin_rm_multi_bucket_independent() {
         0,
         "prod all-skip push"
     );
-    let pins = entry_pins(index_file_entry(&fx.read_index(), "a.zip"));
-    assert_eq!(
-        pins.len(),
-        1,
-        "prod側索引pins[]はpm1を保持する: {pins:?}"
-    );
+    let pins = entry_pins(index_entity_by(&fx.read_index(), "title", "a.zip"));
+    assert_eq!(pins.len(), 1, "prod側索引pins[]はpm1を保持する: {pins:?}");
     assert_eq!(
         pins[0].get("created_at").and_then(|v| v.as_str()),
         Some(st.prod_created_at.as_str()),
@@ -1162,20 +1229,23 @@ fn pin_rm_multi_bucket_independent() {
 
     // 続くprod側rmもexit 0でprod側索引から除去される
     clear_calls(&fx);
-    let (code, stdout, stderr) = fx.pin_env("rm", "a.zip", &["--pin", "pm1", "--profile", "prod"], &[]);
+    let (code, stdout, stderr) =
+        fx.pin_env("rm", "a.zip", &["--pin", "pm1", "--profile", "prod"], &[]);
     assert_eq!(code, 0, "prod側pin rmもexit 0: {stdout}{stderr}");
     let calls = fx.calls();
     assert!(
-        calls.lines().any(|l| l.starts_with("s3 DeleteObjectVersion")
-            && l.contains("bucket=bucket-prod")
-            && l.contains(&format!("key={}", st.pin_key))),
+        calls
+            .lines()
+            .any(|l| l.starts_with("s3 DeleteObjectVersion")
+                && l.contains("bucket=bucket-prod")
+                && l.contains(&format!("key={}", st.pin_key))),
         "prod側rmのpin object削除はprod bucketへ向かう: {calls}"
     );
     assert!(
         !calls.lines().any(|l| l.contains("bucket=bucket-dev")),
         "prod側rmのS3 API呼び出しにdev bucketは無い: {calls}"
     );
-    let pins = entry_pins(index_file_entry(&fx.read_index(), "a.zip"));
+    let pins = entry_pins(index_entity_by(&fx.read_index(), "title", "a.zip"));
     assert!(
         pins.is_empty(),
         "prod側索引pins[]からpm1が除かれる: {pins:?}"
@@ -1183,26 +1253,31 @@ fn pin_rm_multi_bucket_independent() {
 }
 
 /// [covers:index.parse-failure-guides-rebuild]
-/// 索引parse失敗(schema違反JSON)のerror文には`manage index rebuild`による索引再構築の
-/// 案内を含める(L-6。終了コードは検証エラー4のまま)。
+/// 索引parse失敗のerror文には`manage index rebuild`による索引再構築の案内を含める
+/// (L-6)。schema違反平文は検証エラー4のまま。TASK-18の索引schema=2化に伴い、
+/// 旧schema=1索引の読込はschema不一致として設定エラー2+rebuild案内で拒否される
+/// (旧索引の誤読防止)。
 #[test]
 fn parse_failure_error_guides_index_rebuild() {
-    let Some(fx) = StorageFixture::new("idx-parseguide", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new("idx-parseguide", idx_opts()) else {
         return;
     };
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"parse-guide");
-    assert_eq!(fx.push(&[&a], &[], &[]).0, 0);
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a], "parse-guide") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
 
-    // 索引objectをschema違反へ書き換える(file entryから必須field(versions)を除去)
+    // (1) 索引objectをschema違反へ書き換える(entityから必須field(versions)を除去)
     let mut broken: Vec<serde_json::Value> = fx.read_index();
     let entry = broken
         .iter_mut()
         .find(|v| v.get("record_type").and_then(|r| r.as_str()) == Some("file"))
-        .expect("file entry");
+        .expect("file entity");
     entry
         .as_object_mut()
-        .expect("file entryはobject")
+        .expect("file entityはobject")
         .remove("versions");
     fx.rewrite_index(&broken);
 
@@ -1211,5 +1286,493 @@ fn parse_failure_error_guides_index_rebuild() {
     assert!(
         stderr.contains("manage index rebuild"),
         "manage index rebuildの案内: {stderr}"
+    );
+
+    // (2) 旧schema=1索引(schema=1のindex_header)は設定エラー2+rebuild案内で拒否
+    let mut v1: Vec<serde_json::Value> = fx.read_index();
+    if let Some(header) = v1
+        .iter_mut()
+        .find(|v| v.get("record_type").and_then(|r| r.as_str()) == Some("index_header"))
+    {
+        if let Some(obj) = header.as_object_mut() {
+            obj.insert("schema".into(), serde_json::Value::from(1));
+        }
+    }
+    fx.rewrite_index(&v1);
+    let (code, _, stderr) = fx.list("files", &[]);
+    assert_eq!(code, 2, "旧schema=1索引は設定エラー2: {stderr}");
+    assert!(
+        stderr.contains("manage index rebuild"),
+        "manage index rebuildの案内(schema=1拒否時): {stderr}"
+    );
+}
+
+/// [covers:index.entity-grouping-by-uuid]
+/// entity組立(TASK-18 5.4・4.2): 所在単位reduce済みfile_writesをuuidでgroupingし
+/// locationsを組立(並びはsource_path辞書順)。entityのtitleはentity_title導出=
+/// uuid一致file_write群のうちrecorded_at最大(同形式文字列比較・同値ならVec後方=後勝ち)の
+/// title。同一内容2箇所以上所在は実体1つ(uuid)+locations複数。
+#[test]
+fn entities_grouped_by_uuid_with_sorted_locations() {
+    let Some(fx) = StorageFixture::new("idx-egrp", idx_opts()) else {
+        return;
+    };
+    let p1 = fx.data_root.join("b-dir").join("dup.zip");
+    let p2 = fx.data_root.join("a-dir").join("dup.zip");
+    write_file(&p1, b"entity-group-plain");
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&p1], "group-title") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    // 同一内容を別pathへ(b-dirより辞書順で先になるa-dir)→ 合流で同一entityに所在2件
+    std::fs::create_dir_all(&p2.parent().expect("parent")).expect("a-dir作成");
+    write_file(&p2, b"entity-group-plain");
+    let (code, stdout, stderr) = fx.push(&[&p2], &[], &[]);
+    assert_eq!(code, 0, "合流push: {stdout}{stderr}");
+
+    let uuid = idx_uuid_of(&fx, &p1);
+    let lines = fx.read_index();
+    let same_uuid_entities = lines
+        .iter()
+        .filter(|v| {
+            v.get("record_type").and_then(|r| r.as_str()) == Some("file")
+                && v.get("uuid").and_then(|u| u.as_str()) == Some(uuid.as_str())
+        })
+        .count();
+    assert_eq!(same_uuid_entities, 1, "同一uuidのentityは1件(grouping)");
+    let entry = index_entity_by(&lines, "uuid", &uuid);
+    let locations = entity_locations(entry);
+    assert_eq!(locations.len(), 2, "所在2件: {locations:?}");
+    let paths: Vec<&str> = locations
+        .iter()
+        .filter_map(|l| l.get("source_path").and_then(|p| p.as_str()))
+        .collect();
+    let mut sorted = paths.clone();
+    sorted.sort();
+    assert_eq!(
+        paths, sorted,
+        "locationsはsource_path辞書順(冪等担保): {locations:?}"
+    );
+
+    // 同一recorded_atのfile_write 2件(記録順で後方が新title)→ Vec後方が勝つ
+    let mut cloned = fx
+        .registry_values()
+        .into_iter()
+        .filter(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some("file_write")
+                && r.get("uuid").and_then(|u| u.as_str()) == Some(uuid.as_str())
+        })
+        .last()
+        .expect("直近のfile_write記録")
+        .clone();
+    cloned["title"] = serde_json::json!("group-title-2");
+    append_registry_line(&fx.registry, &cloned);
+    // all-skip push(run末尾の索引再構築で反映)
+    let (code, stdout, stderr) = fx.push(&[&p1], &[], &[]);
+    assert_eq!(code, 0, "all-skip再構築push: {stdout}{stderr}");
+    let lines_after = fx.read_index();
+    let entry2 = index_entity_by(&lines_after, "uuid", &uuid);
+    assert_eq!(
+        entry2.get("title").and_then(|t| t.as_str()),
+        Some("group-title-2"),
+        "同一recorded_atはVec後方(後勝ち)のtitle: {entry2}"
+    );
+}
+
+/// [covers:index.location-remove-excludes-and-revives]
+/// location_removeの反映規則(TASK-18 3.2・6.2): build_entriesでfile_write(w)を除外する
+/// 条件は「同identity_hashのlocation_remove(lr)が存在し lr.recorded_at >= w.recorded_at」。
+/// 除去後に同pathを再backup(mtime変化でfile_write新記録・時刻が後)すると所在が復活する。
+#[test]
+fn location_remove_excludes_and_revives_on_rebackup() {
+    let Some(fx) = StorageFixture::new("idx-locrm", idx_opts()) else {
+        return;
+    };
+    let p1 = fx.data_root.join("loc1").join("a.zip");
+    let p2 = fx.data_root.join("loc2").join("a.zip");
+    std::fs::create_dir_all(&p1.parent().expect("parent")).expect("loc1");
+    std::fs::create_dir_all(&p2.parent().expect("parent")).expect("loc2");
+    write_file(&p1, b"location-remove-plain");
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&p1], "loc-title") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    write_file(&p2, b"location-remove-plain");
+    let (code, stdout, stderr) = fx.push(&[&p2], &[], &[]);
+    assert_eq!(code, 0, "合流push(所在2件): {stdout}{stderr}");
+    let uuid = idx_uuid_of(&fx, &p1);
+
+    // location_remove記録(p1側)を直接追記し索引を再構築(all-skip push)。
+    // recorded_atは既存file_writeの記録時刻(除外条件 lr.recorded_at >= w.recorded_at が
+    // 既存記録に対して成立し、後から再backupする新file_write(recorded_atが後)には
+    // 負ける値・設計3.2)
+    let p1_write_at = fx
+        .registry_values()
+        .into_iter()
+        .filter(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some("file_write")
+                && r.get("source_path").and_then(|p| p.as_str())
+                    == Some(p1.canonicalize().unwrap().to_string_lossy().as_ref())
+        })
+        .last()
+        .and_then(|r| {
+            r.get("recorded_at")
+                .and_then(|a| a.as_str())
+                .map(String::from)
+        })
+        .expect("p1のfile_write記録");
+    let lr = serde_json::json!({
+        "schema": 1,
+        "record_type": "location_remove",
+        "recorded_at": p1_write_at,
+        "uuid": uuid,
+        "identity_hash": hash8_of_path(&p1),
+        "source_path": p1.canonicalize().unwrap().to_string_lossy(),
+    });
+    append_registry_line(&fx.registry, &lr);
+    let (code, stdout, stderr) = fx.push(&[&p2], &[], &[]);
+    assert_eq!(code, 0, "再構築push: {stdout}{stderr}");
+    let locations = entity_locations(index_entity_by(&fx.read_index(), "uuid", &uuid));
+    assert_eq!(
+        locations.len(),
+        1,
+        "location_removeで当該pathの所在が除外: {locations:?}"
+    );
+    assert!(
+        locations
+            .iter()
+            .all(|l| l.get("source_path").and_then(|p| p.as_str())
+                != Some(p1.canonicalize().unwrap().to_string_lossy().as_ref())),
+        "除外されるのはp1側: {locations:?}"
+    );
+
+    // 除去後に同path(p1)を再backup(mtimeを変える=recorded_atが後の新file_write)で復活
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    write_file(&p1, b"location-remove-plain");
+    let (code, stdout, stderr) = fx.push(&[&p1], &[], &[]);
+    assert_eq!(code, 0, "再backup(合流): {stdout}{stderr}");
+    let locations = entity_locations(index_entity_by(&fx.read_index(), "uuid", &uuid));
+    assert_eq!(
+        locations.len(),
+        2,
+        "新file_writeが勝って所在が復活: {locations:?}"
+    );
+}
+
+/// [covers:index.swept-versions-not-revived]
+/// sweep記録(TASK-18 3.2・6.3)に含まれる{s3_key, version_id}は、以降の索引再構築
+/// (backup push等のbuild_entries)・manage index rebuildのいずれでもversions/pinsへ
+/// 復活しない(prune除外と同じ除外集合。reconcileの効果がrebuildで失われるのを防ぐ)。
+#[test]
+fn swept_versions_not_revived_on_rebuilds() {
+    let Some(fx) = StorageFixture::new("idx-sweep", idx_opts()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"swept-plain");
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a], "sweep-title") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    idx_add_second_version(&fx, &a);
+    idx_add_second_version(&fx, &a);
+    let uuid = idx_uuid_of(&fx, &a);
+    let key = fx.data_key(&uuid);
+    let reg_ids = registry_upload_version_ids(&fx.registry_values(), &key);
+    assert_eq!(reg_ids.len(), 3, "3版: {reg_ids:?}");
+    let swept = &reg_ids[0];
+
+    // sweep記録(manage index reconcileの実行記録相当)を直接追記
+    let sweep = serde_json::json!({
+        "schema": 1,
+        "record_type": "sweep",
+        "recorded_at": "2999-01-01T00:00:00+09:00",
+        "reason": "lifecycle",
+        "deleted": [{"s3_key": key, "version_id": swept}],
+    });
+    append_registry_line(&fx.registry, &sweep);
+
+    // (1) backup push(all-skip)の索引再構築で復活しない
+    let (code, stdout, stderr) = fx.push(&[&a], &[], &[]);
+    assert_eq!(code, 0, "all-skip push: {stdout}{stderr}");
+    let vids = index_version_ids(index_entity_by(&fx.read_index(), "uuid", &uuid));
+    assert!(
+        !vids.contains(swept),
+        "sweep済みversion_idはversionsへ復活しない: {vids:?}"
+    );
+    // 幽霊版はget --version-idで選べない(対象エラー3)
+    let out = fx.elsewhere.join("swept-out");
+    let (code, _, _) = fx.get(
+        "sweep-title",
+        &["--version-id", swept, "--out", &out.display().to_string()],
+    );
+    assert_eq!(code, 3, "sweep済みversion_idの選択は対象エラー3");
+
+    // (2) manage index rebuildでも復活しない
+    std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
+    let mut last = String::new();
+    let mut code = 0;
+    for _ in 0..2 {
+        let (c, stdout, stderr) = fx.manage("index", &["rebuild"]);
+        code = c;
+        last = format!("{stdout}{stderr}");
+        if fx.object_path(&fx.index_key()).is_file() {
+            break;
+        }
+    }
+    assert_eq!(code, 0, "manage index rebuildはexit 0: {last}");
+    let vids = index_version_ids(index_entity_by(&fx.read_index(), "uuid", &uuid));
+    assert!(
+        !vids.contains(swept),
+        "rebuild後もsweep済み版は復活しない: {vids:?}"
+    );
+}
+
+/// [covers:index.pins-connect-by-uuid]
+/// 索引pins[]への接続はuuid照合のみ(TASK-18 5.4): pin_writeのuuidがentityのuuidと一致
+/// すれば接続される(旧name+category+rel_path+folder完全一致は廃止。所在記録値の変化が
+/// あっても同一uuidなら接続)。bucket一致規則・並びのs3_key sort・pin_remove反映は維持。
+#[test]
+fn pins_connect_by_uuid_across_location_changes() {
+    let Some(fx) = StorageFixture::new("idx-pinuuid", idx_opts()) else {
+        return;
+    };
+    let p1 = fx.data_root.join("sub1").join("a.zip");
+    std::fs::create_dir_all(&p1.parent().expect("parent")).expect("sub1");
+    write_file(&p1, b"pin-uuid-plain");
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&p1], "pin-uuid-title") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    let uuid = idx_uuid_of(&fx, &p1);
+    assert_eq!(
+        fx.pin("add", "pin-uuid-title", &["--latest", "--as", "pm1"])
+            .0,
+        0
+    );
+
+    // 所在を移動(rel_path=sub1→sub2へ変化)して合流: 旧照合(name+category+rel_path)なら
+    // pinが外れる構成だが、uuid照合なら接続が維持される
+    let p2 = fx.data_root.join("sub2").join("a.zip");
+    std::fs::create_dir_all(&p2.parent().expect("parent")).expect("sub2");
+    write_file(&p2, b"pin-uuid-plain");
+    let (code, stdout, stderr) = fx.push(&[&p2], &[], &[]);
+    assert_eq!(code, 0, "合流push: {stdout}{stderr}");
+
+    let lines = fx.read_index();
+    let entry = index_entity_by(&lines, "uuid", &uuid);
+    let pins = entity_pins(entry);
+    assert_eq!(
+        pins.len(),
+        1,
+        "所在記録値が変化してもpins[]はuuid照合で接続: {pins:?}"
+    );
+    assert_eq!(pins[0].get("pin").and_then(|v| v.as_str()), Some("pm1"));
+    assert_eq!(
+        pins[0].get("s3_key").and_then(|v| v.as_str()),
+        Some(fx.data_pin_key(&uuid, "pm1").as_str()),
+        "pinのs3_keyはdata/<uuid>/<pin>.age"
+    );
+    // get --pinで参照できる
+    let out = fx.elsewhere.join("pinuuid-out");
+    let (code, stdout, stderr) = fx.get(
+        "pin-uuid-title",
+        &["--pin", "pm1", "--out", &out.display().to_string()],
+    );
+    assert_eq!(code, 0, "get --pin pm1はexit 0: {stdout}{stderr}");
+}
+
+/// [covers:index.location-rm-command]
+/// manage location rm(TASK-18 6.2・新設): 索引からsource_path完全一致の所在を探し
+/// (--uuid指定でentity絞込)、不在は対象エラー3。実行はlocation_remove記録(registry)→
+/// 索引再構築+upload→当該entityのmetadata sync。S3・実体(default.age・pin object)には
+/// 触れない。再backupすると所在が復活する。
+#[test]
+fn manage_location_rm_updates_index_and_metadata() {
+    let Some(fx) = StorageFixture::new("idx-loccmd", idx_opts()) else {
+        return;
+    };
+    let p1 = fx.data_root.join("loc1").join("a.zip");
+    let p2 = fx.data_root.join("loc2").join("a.zip");
+    std::fs::create_dir_all(&p1.parent().expect("parent")).expect("loc1");
+    std::fs::create_dir_all(&p2.parent().expect("parent")).expect("loc2");
+    write_file(&p1, b"location-rm-plain");
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&p1], "loc-rm-title") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    write_file(&p2, b"location-rm-plain");
+    let (code, stdout, stderr) = fx.push(&[&p2], &[], &[]);
+    assert_eq!(code, 0, "合流push(所在2件): {stdout}{stderr}");
+    let uuid = idx_uuid_of(&fx, &p1);
+    clear_calls(&fx);
+
+    // 不在pathは対象エラー3
+    let (code, _, stderr) = fx.manage("location", &["rm", "/tmp/ghost-location/a.zip"]);
+    assert_eq!(code, 3, "不在pathのlocation rmは対象エラー3: {stderr}");
+
+    // 2所在を持つentityからp1を除去
+    let p1_real = p1.canonicalize().unwrap().to_string_lossy().into_owned();
+    let (code, stdout, stderr) = fx.manage("location", &["rm", &p1_real]);
+    assert_eq!(code, 0, "location rmはexit 0: {stdout}{stderr}");
+    let locations = entity_locations(index_entity_by(&fx.read_index(), "uuid", &uuid));
+    assert_eq!(
+        locations.len(),
+        1,
+        "rm後の索引locationsから当該pathが除外: {locations:?}"
+    );
+    // location_remove記録がregistryへ追記される
+    assert_eq!(
+        registry_count(&fx.registry_values(), "location_remove"),
+        1,
+        "location_remove記録"
+    );
+    // metadataのlatest_source_pathが残所在(p2)へ更新される
+    let doc = fx
+        .read_metadata_doc(&uuid, "loc-rm-title")
+        .expect("metadata doc");
+    assert_eq!(
+        doc.get("latest_source_path"),
+        Some(&serde_json::json!(
+            p2.canonicalize().unwrap().to_string_lossy().into_owned()
+        )),
+        "latest_source_pathは残所在へ更新: {doc}"
+    );
+    // S3の実体(default.age)には触れない(呼び出し記録にdata keyへの変更系APIが無い)
+    let data_key = fx.data_key(&uuid);
+    let calls = fx.calls();
+    assert!(
+        !calls.lines().any(|l| {
+            (l.starts_with("s3 PutObject")
+                || l.starts_with("s3 CopyObject")
+                || l.starts_with("s3 DeleteObject"))
+                && l.contains(&format!("key={data_key}"))
+        }),
+        "default.ageへの変更系APIは無い: {calls}"
+    );
+    assert!(
+        fx.object_path(&data_key).is_file(),
+        "default.age objectは不変(存在維持)"
+    );
+
+    // 1所在のみのentityからのrmはlocationsが空になる
+    let solo = fx.data_root.join("solo").join("s.zip");
+    std::fs::create_dir_all(&solo.parent().expect("parent")).expect("solo");
+    write_file(&solo, b"location-rm-solo");
+    let list = write_from_list(
+        fx.cfg.parent().expect("tmp dir"),
+        &[(&solo, Some("solo-title"))],
+    );
+    let Some((code, stdout)) = push_titled_pty(
+        &fx,
+        &[&p2],
+        "",
+        &["--from-list", &list.display().to_string()],
+    ) else {
+        return;
+    };
+    assert_eq!(code, 0, "soloの発行push: {stdout}");
+    let solo_uuid = idx_uuid_of(&fx, &solo);
+    let solo_real = solo.canonicalize().unwrap().to_string_lossy().into_owned();
+    let (code, stdout, stderr) = fx.manage("location", &["rm", &solo_real, "--uuid", &solo_uuid]);
+    assert_eq!(code, 0, "--uuid付きのlocation rmはexit 0: {stdout}{stderr}");
+    let locations = entity_locations(index_entity_by(&fx.read_index(), "uuid", &solo_uuid));
+    assert!(
+        locations.is_empty(),
+        "1所在のみのentityはlocationsが空: {locations:?}"
+    );
+
+    // 再backup(mtime変化)で所在が復活する
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    write_file(&p1, b"location-rm-plain");
+    let (code, stdout, stderr) = fx.push(&[&p1], &[], &[]);
+    assert_eq!(code, 0, "再backup: {stdout}{stderr}");
+    let locations = entity_locations(index_entity_by(&fx.read_index(), "uuid", &uuid));
+    assert_eq!(locations.len(), 2, "再backupで所在が復活: {locations:?}");
+}
+
+/// [covers:index.reconcile-swept-versions]
+/// manage index reconcile(TASK-18 6.3・新設): 既定dry-run(件数表示)・--applyで実行。
+/// read_index → ListObjectVersions(bucket, {prefix}data/)のpresent集合と突合し、
+/// 索引versions[]のうちS3に存在しないもの(lifecycle消滅版)を特定 → sweep記録(registry)→
+/// 索引再構築+upload。apply後のmanage index rebuildでも当該版は復活しない。
+#[test]
+fn manage_index_reconcile_removes_vanished_versions() {
+    let Some(fx) = StorageFixture::new("idx-recon", idx_opts()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"reconcile-plain");
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a], "reconcile-title") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    idx_add_second_version(&fx, &a);
+    let uuid = idx_uuid_of(&fx, &a);
+    let key = fx.data_key(&uuid);
+    let reg_ids = registry_upload_version_ids(&fx.registry_values(), &key);
+    assert_eq!(reg_ids.len(), 2, "2版: {reg_ids:?}");
+    let vanished = &reg_ids[0];
+
+    // 旧版がlifecycleで消滅した状態を模擬(versions stateから版行を除去)
+    drop_version_state(&fx.state, &key, vanished);
+    let vids = index_version_ids(index_entity_by(&fx.read_index(), "uuid", &uuid));
+    assert!(
+        vids.contains(vanished),
+        "模擬直後の索引には消滅版が残っている前提: {vids:?}"
+    );
+    clear_calls(&fx);
+
+    // dry-run(既定・--applyなし): 件数表示のみで索引不変・S3削除なし
+    let (code, stdout, stderr) = fx.manage("index", &["reconcile"]);
+    assert_eq!(code, 0, "reconcile(dry-run)はexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.contains("1") && (stdout.contains("件") || stdout.contains("dry-run")),
+        "消滅版の件数表示: {stdout}"
+    );
+    let vids = index_version_ids(index_entity_by(&fx.read_index(), "uuid", &uuid));
+    assert!(vids.contains(vanished), "dry-runでは索引は不変: {vids:?}");
+    assert!(
+        !fx.calls().lines().any(|l| l.starts_with("s3 DeleteObject")),
+        "dry-runではS3削除は行わない: {}",
+        fx.calls()
+    );
+    assert_eq!(
+        registry_count(&fx.registry_values(), "sweep"),
+        0,
+        "dry-runではsweep記録なし"
+    );
+
+    // --apply: 索引versionsから除去されsweep記録がregistryへ追記される
+    let (code, stdout, stderr) = fx.manage("index", &["reconcile", "--apply"]);
+    assert_eq!(code, 0, "reconcile --applyはexit 0: {stdout}{stderr}");
+    let vids = index_version_ids(index_entity_by(&fx.read_index(), "uuid", &uuid));
+    assert!(
+        !vids.contains(vanished),
+        "applyで索引versionsから消滅版が除去: {vids:?}"
+    );
+    assert_eq!(
+        registry_count(&fx.registry_values(), "sweep"),
+        1,
+        "sweep記録がregistryへ追記される"
+    );
+
+    // apply後のmanage index rebuildでも当該版は復活しない
+    std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
+    let mut last = String::new();
+    let mut code = 0;
+    for _ in 0..2 {
+        let (c, stdout, stderr) = fx.manage("index", &["rebuild"]);
+        code = c;
+        last = format!("{stdout}{stderr}");
+        if fx.object_path(&fx.index_key()).is_file() {
+            break;
+        }
+    }
+    assert_eq!(code, 0, "manage index rebuildはexit 0: {last}");
+    let vids = index_version_ids(index_entity_by(&fx.read_index(), "uuid", &uuid));
+    assert!(
+        !vids.contains(vanished),
+        "apply後のrebuildでも消滅版は復活しない: {vids:?}"
     );
 }
