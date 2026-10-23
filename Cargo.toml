@@ -2,6 +2,12 @@
 name = "amazing-backup"
 version = "0.1.0"
 edition = "2024"
+description = "Encrypt backup archives with age and store them in S3 versioned buckets with issued-UUID keys, indexing, pinning and lifecycle management"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/TomoTom0/amazing-backup"
+keywords = ["backup", "s3", "age", "encryption", "archive"]
+categories = ["command-line-utilities", "backup"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
