@@ -150,7 +150,7 @@ decided_at = "2026-10-14"
 decided_by = "claude"
 
 [[excluded]]
-item = "TASK-10設計7.2: 開発検証用bucket(backup-remote-dev)の新設手順(create-bucket・put-bucket-versioning)"
+item = "TASK-10設計7.2: 開発検証用bucketの新設手順(create-bucket・put-bucket-versioning)"
 source = "tmp/tasks/tm-10/design_s3_storage.md 7.2"
 reason = "aws cliによる手作業+docs記載の手順書(環境構築)。lifecycle適用はmanage lifecycle(retention.lifecycle-rules-per-category)として条件化済み"
 decided_at = "2026-10-14"
