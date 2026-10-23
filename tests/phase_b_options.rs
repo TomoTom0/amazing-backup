@@ -128,10 +128,11 @@ fn profile_option_does_not_write_back_to_aws_toml() {
 }
 
 /// [covers:cli.aws-config-default-path]
-/// --aws-config省略時の既定pathは configs/aws.toml(cwd基準の相対path・L-10)。
-/// 作業dirに配置した場合は読み込まれて動作し、配置しない作業dirでは設定エラー2。
+/// --aws-config省略時の既定pathはXDG規定(TASK-19): AMAZING_BACKUP_HOME指定時は
+/// $ABH/aws.toml・未指定時は$XDG_CONFIG_HOME/amazing-backup/aws.toml。
+/// 規定pathにaws.tomlが無い場合は設定エラー2+template(configs/aws.example.toml)copy案内。
 #[test]
-fn aws_config_default_path_is_configs_aws_toml() {
+fn aws_config_default_path_is_xdg() {
     let Some(fx) = StorageFixture::new("pb-awsdef", StorageOpts::default()) else {
         return;
     };
@@ -141,57 +142,77 @@ fn aws_config_default_path_is_configs_aws_toml() {
         return;
     };
     assert_eq!(code, 0, "初回push: {stdout}");
-
-    // 作業dirへ configs/aws.toml を配置(fake stateとcredentialを共用)
-    let work = fx.elsewhere.join("awsdef-work");
-    let configs_dir = work.join("configs");
-    std::fs::create_dir_all(&configs_dir).expect("configs dir");
-    std::fs::copy(&fx.aws_toml, configs_dir.join("aws.toml")).expect("aws.toml配置");
     let state_s = fx.state.display().to_string();
     let key_s = fx.secret.display().to_string();
-    let env = [("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())];
 
-    // --aws-config未指定のlist files: configs/aws.tomlを読み込んで索引参照まで動作
-    let (code, stdout, stderr) = run_bin_cwd(&["list", "files", "--key", &key_s], &env, &work);
+    // (1) AMAZING_BACKUP_HOME配下にaws.toml: --aws-config未指定のlist filesが動作
+    let abh = fx.elsewhere.join("awsdef-abh");
+    std::fs::create_dir_all(&abh).expect("ABH dir");
+    std::fs::copy(&fx.aws_toml, abh.join("aws.toml")).expect("aws.toml配置");
+    let work = fx.elsewhere.join("awsdef-work");
+    std::fs::create_dir_all(&work).expect("work dir");
+    let (code, stdout, stderr) = run_bin_cwd(
+        &["list", "files", "--key", &key_s],
+        &[
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+            ("AMAZING_BACKUP_HOME", abh.display().to_string().as_str()),
+        ],
+        &work,
+    );
     assert_eq!(
         code, 0,
-        "--aws-config省略時はconfigs/aws.tomlを読み込む: {stdout}{stderr}"
+        "--aws-config省略時は$ABH/aws.tomlを読み込む: {stdout}{stderr}"
     );
     assert!(
         stdout.contains("a.zip") || stdout.contains("unfiled"),
         "索引の内容が表示される: {stdout}"
     );
 
-    // --aws-config未指定のbackup push(配置した作業dir側。新規発行のtitle必須のため
-    // from-listのtitle欄で与え、positionalにはskip対象のa.zipを添える・設計6.1)
-    let b_src = work.join("b.zip");
-    write_file(&b_src, b"aws-default-b");
-    let list = write_from_list(&work, &[(&b_src, Some("b-title"))]);
+    // (2) XDG_CONFIG_HOME配下のamazing-backup/aws.tomlも既定解決される
+    //     (AMAZING_BACKUP_HOMEは空値=未指定扱いでshield)
+    let xdg = fx.elsewhere.join("awsdef-xdg");
+    let xdg_cfg = xdg.join("amazing-backup");
+    std::fs::create_dir_all(&xdg_cfg).expect("xdg config dir");
+    std::fs::copy(&fx.aws_toml, xdg_cfg.join("aws.toml")).expect("aws.toml配置(xdg)");
     let (code, stdout, stderr) = run_bin_cwd(
+        &["list", "files", "--key", &key_s],
         &[
-            "backup",
-            "push",
-            "--config",
-            fx.cfg.display().to_string().as_str(),
-            a.display().to_string().as_str(),
-            "--from-list",
-            list.display().to_string().as_str(),
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+            ("AMAZING_BACKUP_HOME", ""),
+            ("XDG_CONFIG_HOME", xdg.display().to_string().as_str()),
         ],
-        &env,
         &work,
     );
     assert_eq!(
         code, 0,
-        "backup pushもconfigs/aws.tomlで動作: {stdout}{stderr}"
+        "--aws-config省略時は$XDG_CONFIG_HOME/amazing-backup/aws.tomlを読み込む: {stdout}{stderr}"
+    );
+    assert!(
+        stdout.contains("a.zip") || stdout.contains("unfiled"),
+        "xdg配置でも索引の内容が表示される: {stdout}"
     );
 
-    // configs/aws.tomlを配置しない作業dirでは設定エラー2
-    let bare = fx.elsewhere.join("awsdef-bare");
-    std::fs::create_dir_all(&bare).expect("bare dir");
-    let (code, _, stderr) = run_bin_cwd(&["list", "files", "--key", &key_s], &env, &bare);
+    // (3) 規定pathにaws.tomlが無い場合は設定エラー2+copy案内
+    let empty_abh = fx.elsewhere.join("awsdef-empty");
+    std::fs::create_dir_all(&empty_abh).expect("empty ABH dir");
+    let (code, stdout, stderr) = run_bin_cwd(
+        &["list", "files", "--key", &key_s],
+        &[
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+            (
+                "AMAZING_BACKUP_HOME",
+                empty_abh.display().to_string().as_str(),
+            ),
+        ],
+        &work,
+    );
     assert_eq!(
         code, 2,
-        "configs/aws.toml不在の作業dirは設定エラー2: {stderr}"
+        "規定pathにaws.tomlが無い場合は設定エラー2: {stdout}{stderr}"
+    );
+    assert!(
+        stderr.contains("configs/aws.example.toml"),
+        "template copyの案内表示: {stderr}"
     );
 }
 
@@ -634,7 +655,8 @@ fn entries_without_bucket_versions_excluded_from_query() {
     assert_eq!(code, 0, "prod側queryはexit 0: {stdout}{stderr}");
     assert!(stdout.contains("0件"), "prod側queryはb.zipに0件: {stdout}");
 
-    let (code, _, stderr) = fx.get_env("b.zip", &["--profile", "prod"], &[]);
+    let out_s = fx.elsewhere.join("l-r1-out").display().to_string();
+    let (code, _, stderr) = fx.get_env("b.zip", &["--profile", "prod", "--out", &out_s], &[]);
     assert_eq!(code, 3, "prod側get b.zipはtitle不在の対象エラー3: {stderr}");
     assert!(
         stderr.contains("索引にtitle/uuid=b.zip がありません"),

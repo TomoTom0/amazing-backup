@@ -180,7 +180,7 @@ source = "TASK-11(Phase B)再レビュー指摘M-R1+tmp/tasks/tm-10/design_s3_st
 description = "索引pins[]の構築・復元はregistry記録のs3_bucket一致(registry::record_bucket_matchedと同一規則。欠損空文字は正本bucket相当)を伴う: (a) pin_write記録はs3_bucketが当該実行の実効bucketと一致するもののみ採用(同一prefix・別bucket構成で他方bucketのみのpinが当方bucketの索引へ混入せず、get --pinが当方bucketでNoSuchKeyの転送エラー5にならない) (b) pin_remove記録はs3_bucket一致するもののみ削除済み扱い(pin_s3_key一致のみでは照合しない。誤ったprofileでのpin rm等・他方bucketでの解除が正bucket側の索引からpinを消さない=pin object残留を防ぐ)。manage index rebuildのローカルregistryからのpins復元も同一規則 (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成での、(1)dev push+pin add(pm1)後のprod側pushで再構築されたprod側索引 (2)get --pin pm1 --profile prod と pin rm --pin pm1 --profile prod の各実行 (3)registryへ他方bucket(bucket-prod)のs3_bucketを持つpin_remove記録を混入した状態と正bucket(bucket-dev)のs3_bucketを持つpin_remove記録を混入した状態での、dev側索引再構築(all-skip push)と manage index rebuild"
 expect_return_shape = "(1)prod側索引の当該entry pins[]は空(dev側pm1は混入しない。dev側索引はpm1を保持) (2)いずれも exit 3(pin名は当該索引に無し)でpin objectへのS3 API呼び出し(取得・削除)を行わず、dev側索引pins[]・pin objectは不変 (3)他方bucketのpin_removeではpinは索引に残り、正bucketのpin_removeでは除去される。manage index rebuildの復元も同一結果"
-source_lines = "src/index.rs:614; tests/phase_b_options.rs:503; tests/pin.rs:656"
+source_lines = "src/index.rs:614; tests/phase_b_options.rs:524; tests/pin.rs:656"
 
 [[condition]]
 id = "index.entries-without-bucket-versions-excluded"
@@ -189,7 +189,7 @@ source = "TASK-11(Phase B)再レビュー指摘L-R1+tmp/tasks/tm-10/design_s3_st
 description = "file_write記録にs3_bucket字段が無いためentry組立はbucket不関だが、索引の意味論は「当該namespace(bucket)で管理されるfile」: 当該実効bucketと一致するfile_upload記録によるversions[]もbucket一致するpin_write記録によるpins[]も持たないentry(同一prefix・別bucket構成で他方bucketにしかuploadされていないfile等)は索引entriesへ載せない(list/query/diffの表示・getのname解決から除外。版が無いentryがgetで版なしエラーになる表示面の混入を防ぐ。データ破壊は無い) (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成でa.zipを両bucketへ・b.zipをdevのみへpushした状態での、prod側(--profile)からの list files・query・get・diff の各実行と、dev側(正本bucket)での list files 実行"
 expect_return_shape = "prod側はいずれもa.zipのみが現れb.zipは現れない(list files表示・query一致・getはname不在の対象エラー3・diffのentries数)。dev側は従来どおりa.zip・b.zip双方が現れる"
-source_lines = "src/index.rs:615; tests/phase_b_options.rs:596"
+source_lines = "src/index.rs:615; tests/phase_b_options.rs:617"
 
 [[condition]]
 id = "index.pin-readd-after-remove-wins"

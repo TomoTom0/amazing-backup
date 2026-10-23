@@ -29,20 +29,24 @@ fn tier_days_validation_before_s3_calls() {
     };
     assert_eq!(code, 0, "初回push: {stdout}");
     clear_calls(&fx);
+    let out = fx.elsewhere.join("tier-out");
+    let out_s = out.display().to_string();
 
     for (tag, extra, want) in [
         ("tier Expedited", vec!["--tier", "Expedited"], 64),
         ("days 0", vec!["--days", "0"], 2),
         ("days 366", vec!["--days", "366"], 2),
     ] {
-        // get側
-        let (code, stdout, stderr) = fx.get("a.zip", &extra);
+        // get側(--outは必須のため常に添える)
+        let mut get_extra: Vec<&str> = vec!["--out", &out_s];
+        get_extra.extend(extra.iter().copied());
+        let (code, stdout, stderr) = fx.get("a.zip", &get_extra);
         assert_eq!(
             code, want,
             "get {tag}は事前検査でexit {want}: {stdout}{stderr}"
         );
         // backup pull側(--all --yes付き=確認より後・S3 APIより前に検出)
-        let mut pull_extra: Vec<&str> = vec!["--all", "--yes"];
+        let mut pull_extra: Vec<&str> = vec!["--all", "--yes", "--out", &out_s];
         pull_extra.extend(extra.iter().copied());
         let (code, stdout, stderr) = fx.backup_pull(&pull_extra);
         assert_eq!(
@@ -124,13 +128,23 @@ fn get_preflight_key_and_age_errors() {
     let aws_s = fx.aws_toml.display().to_string();
     let cfg_s = fx.cfg.display().to_string();
 
-    // (a) --key未指定・pipeline.toml不在の作業dir(default解決不能。
-    // --configも渡さない=decrypt_keyの解決先が無い)
+    // (a) --key未指定・規定pathにもpipeline.tomlが無い状態(default解決不能。
+    // --configも渡さない=decrypt_keyの解決先が無い。XDG配置のためAMAZING_BACKUP_HOMEに
+    // pipeline.tomlの無いdirを指定して規定path解決を固定)
     let empty_cwd = fx.elsewhere.join("empty-cwd");
     std::fs::create_dir_all(&empty_cwd).expect("empty cwd");
+    let empty_abh = fx.elsewhere.join("empty-abh");
+    std::fs::create_dir_all(&empty_abh).expect("empty ABH dir");
+    let out_s = fx.elsewhere.join("preflight-out").display().to_string();
     let (code, _, stderr) = run_bin_cwd(
-        &["get", "a.zip", "--aws-config", &aws_s],
-        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_dir.as_str())],
+        &["get", "a.zip", "--out", &out_s, "--aws-config", &aws_s],
+        &[
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_dir.as_str()),
+            (
+                "AMAZING_BACKUP_HOME",
+                empty_abh.display().to_string().as_str(),
+            ),
+        ],
         &empty_cwd,
     );
     assert_eq!(
@@ -144,6 +158,8 @@ fn get_preflight_key_and_age_errors() {
         &[
             "get",
             "a.zip",
+            "--out",
+            &out_s,
             "--config",
             &cfg_s,
             "--aws-config",
@@ -151,12 +167,22 @@ fn get_preflight_key_and_age_errors() {
             "--key",
             bad_key,
         ],
-        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_dir.as_str())],
+        &[
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_dir.as_str()),
+            (
+                "AMAZING_BACKUP_HOME",
+                fx.home.display().to_string().as_str(),
+            ),
+        ],
     );
     assert_eq!(code, 2, "鍵ファイル不在は設定エラー2: {stderr}");
 
     // (c) ageバイナリ不在(PATHからageを除外)
-    let (code, _, stderr) = fx.get_env("a.zip", &[], &[("PATH", "/nonexistent-bin-dir")]);
+    let (code, _, stderr) = fx.get_env(
+        "a.zip",
+        &["--out", &out_s],
+        &[("PATH", "/nonexistent-bin-dir")],
+    );
     assert_eq!(code, 2, "ageバイナリ不在は設定エラー2: {stderr}");
 
     assert_eq!(
@@ -334,6 +360,7 @@ fn plain_conflict_unreadable_existing_file_protected_get_and_pull() {
     // pull --yesなし(確認はTTY入力で通す・範囲はv3 run): 読込失敗=検証不能でも上書きしない
     make_unreadable();
     let state_s = fx.state.display().to_string();
+    let home_s = fx.home.display().to_string();
     let cfg_s = fx.cfg.display().to_string();
     let aws_s = fx.aws_toml.display().to_string();
     let key_s = fx.secret.display().to_string();
@@ -352,7 +379,10 @@ fn plain_conflict_unreadable_existing_file_protected_get_and_pull() {
             "--out",
             &out_s,
         ],
-        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())],
+        &[
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+            ("AMAZING_BACKUP_HOME", home_s.as_str()),
+        ],
         "yes",
     ) else {
         eprintln!("skipping: script(pty)が利用できない");

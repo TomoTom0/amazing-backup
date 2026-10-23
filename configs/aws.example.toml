@@ -1,5 +1,6 @@
-# aws.tomlのtemplate。このfileをconfigs/aws.tomlへcopyして実際の値を記述する。
-# configs/aws.tomlは.gitignore済み(実bucket名等の個人情報をcommitしない)。
+# aws.tomlのtemplate。このfileを~/.config/amazing-backup/aws.tomlへcopyして実際の値を
+# 記述する(XDG配置・TASK-19。$XDG_CONFIG_HOME設定時は $XDG_CONFIG_HOME/amazing-backup/aws.toml)。
+# credentialファイル(credentials_file)の相対pathは実行時のcwd基準。
 # 各keyの意味は docs/usage_backup.md 3.2 を参照。
 
 [aws]

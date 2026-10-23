@@ -3,7 +3,7 @@
 //! reset(dev bucket初期化の全消去・8.1)。
 
 use super::get::{RestoreCheck, ensure_restored, restore_guidance};
-use super::{CtxArgs, now_jst, open_session, resolve_key, sha256_hex};
+use super::{CtxArgs, now_jst, open_session, open_session_with_pipeline, resolve_key, sha256_hex};
 use crate::errors::{BackupError, BackupResult};
 use crate::index::{INDEX_SCHEMA, IndexFileEntry, IndexLocation, IndexPin, IndexVersion};
 use crate::layout;
@@ -177,10 +177,11 @@ fn cmd_manage_prune(ctx: &CtxArgs, dry_run: bool, apply: bool) -> i32 {
                 "--dry-runと--applyは併用できません(既定はdry-run・実行は--apply)".to_string(),
             ));
         }
-        let session = open_session(ctx)?;
-        let cfg = session.cfg.as_ref().ok_or_else(|| {
-            BackupError::Config("manage pruneには--config(pipeline.toml)が必要です".to_string())
-        })?;
+        let session = open_session_with_pipeline(ctx)?;
+        let cfg = session
+            .cfg
+            .as_ref()
+            .expect("pipeline.toml必須経路(open_session_with_pipeline)");
         let keep = session.aws.lifecycle.keep_versions as usize;
         // 対象計算: ListObjectVersions(data/一括)。同一keyのnoncurrent版を新しい順に並べ、
         // newer noncurrent数がkeep以上となった版を削除対象とする(NCVEと同一定義)。
@@ -375,12 +376,11 @@ fn rebuild_and_upload(
 /// 既定dry-run(件数表示)・--applyで実行。
 fn cmd_manage_index_reconcile(ctx: &CtxArgs, apply: bool) -> i32 {
     let run = (|| -> BackupResult<i32> {
-        let session = open_session(ctx)?;
-        let cfg = session.cfg.as_ref().ok_or_else(|| {
-            BackupError::Config(
-                "manage index reconcileには--config(pipeline.toml)が必要です".to_string(),
-            )
-        })?;
+        let session = open_session_with_pipeline(ctx)?;
+        let cfg = session
+            .cfg
+            .as_ref()
+            .expect("pipeline.toml必須経路(open_session_with_pipeline)");
         let key_path = resolve_key(ctx, session.cfg.as_ref())?;
         let (_h, entries) = super::read_index(session.backend.as_ref(), &session.aws, &key_path)?;
         // present集合(key, version_id・delete marker除外)。version_id空の索引記録は
@@ -469,12 +469,11 @@ fn cmd_manage_index_reconcile(ctx: &CtxArgs, apply: bool) -> i32 {
 /// 再backupすると所在が復活する(recorded_at比較規則)。
 fn cmd_manage_location_rm(ctx: &CtxArgs, source_path: &str, uuid_filter: Option<&str>) -> i32 {
     let run = (|| -> BackupResult<i32> {
-        let session = open_session(ctx)?;
-        let cfg = session.cfg.as_ref().ok_or_else(|| {
-            BackupError::Config(
-                "manage location rmには--config(pipeline.toml)が必要です".to_string(),
-            )
-        })?;
+        let session = open_session_with_pipeline(ctx)?;
+        let cfg = session
+            .cfg
+            .as_ref()
+            .expect("pipeline.toml必須経路(open_session_with_pipeline)");
         let key_path = resolve_key(ctx, session.cfg.as_ref())?;
         let (_h, entries) = super::read_index(session.backend.as_ref(), &session.aws, &key_path)?;
         // 索引からsource_path完全一致の所在を探す(uuid指定でentity絞込)
@@ -550,12 +549,11 @@ fn cmd_manage_location_rm(ctx: &CtxArgs, source_path: &str, uuid_filter: Option<
 /// manage index reconcile実行を案内表示する。
 fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
     let run = (|| -> BackupResult<i32> {
-        let session = open_session(ctx)?;
-        let cfg = session.cfg.as_ref().ok_or_else(|| {
-            BackupError::Config(
-                "manage index rebuildには--config(pipeline.toml)が必要です".to_string(),
-            )
-        })?;
+        let session = open_session_with_pipeline(ctx)?;
+        let cfg = session
+            .cfg
+            .as_ref()
+            .expect("pipeline.toml必須経路(open_session_with_pipeline)");
         let key_path = resolve_key(ctx, session.cfg.as_ref())?;
         println!("索引をmanifest(sys/manifests/)から再構築します");
         println!("復元費用の目安: Standard ≈$0.10/GB(最大12時間) / Bulk ≈$0.02/GB(最大48時間)");
@@ -895,15 +893,16 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
 /// 2) ローカルregistryに当該bucketと異なるbucket宛のfile_upload記録(prod由来。
 /// registry.jsonlはprofile共用の1ファイル)があれば実行拒否(案内: prod記録の退避・協議)。
 /// apply操作: registry退避→list_versions(root prefix)でVersions・DeleteMarkers全件を
-/// delete_object_version→ローカルregistry削除(data/outは対象外・手動掃除)→
+/// delete_object_version→ローカルregistry削除(cache dirは対象外・手動掃除)→
 /// 再list_versionsで0件確認。S3Backend操作は既存のlist_versions・
 /// delete_object_versionのみ(新API追加なし)。
 fn cmd_manage_reset(ctx: &CtxArgs, apply: bool) -> i32 {
     let run = (|| -> BackupResult<i32> {
-        let session = open_session(ctx)?;
-        let cfg = session.cfg.as_ref().ok_or_else(|| {
-            BackupError::Config("manage resetには--config(pipeline.toml)が必要です".to_string())
-        })?;
+        let session = open_session_with_pipeline(ctx)?;
+        let cfg = session
+            .cfg
+            .as_ref()
+            .expect("pipeline.toml必須経路(open_session_with_pipeline)");
         // 安全弁1: purpose=dev限定
         if session.aws.purpose != "dev" {
             return Err(BackupError::Config(format!(
@@ -984,7 +983,7 @@ fn cmd_manage_reset(ctx: &CtxArgs, apply: bool) -> i32 {
                 .delete_object_version(&session.aws.bucket, &v.key, &v.version_id)?;
             println!("delete {} version_id={}", v.key, v.version_id);
         }
-        // 3. ローカルregistry削除(data/outはreset対象外・手動掃除)
+        // 3. ローカルregistry削除(cache dirはreset対象外・手動掃除)
         if registry_path.is_file() {
             std::fs::remove_file(&registry_path).map_err(|e| {
                 BackupError::Process(format!(

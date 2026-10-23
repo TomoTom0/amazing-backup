@@ -23,15 +23,18 @@
 #   title/uuidへ)・push-pin-on-skip-targets(merged/skipped統合のcopy+restore経路へ)。
 #   廃止・新規なし(write-once・bucket分離系は継続。metadata pins反映はmetadata.toml側で担保)。
 #   実装前のため改訂期待値のテストは実行failを許容。
+# 2026-10-23: TASK-19(XDG配置移行)対応でテスト先行の更新(TASK-19 body)。
+#   文言改訂1件(id不変): add-requires-config-early(--config省略時はXDG規定path読込へ。
+#   M-4の本質=pipeline解決がS3変更より前、は維持)。
 
 [meta]
 feature = "pin"
 source_file = "src/cli.rs"
 verified = true
-verified_at = "2026-10-22"
+verified_at = "2026-10-23"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "8b520f49e8b55d87c115f5f5c1a68f40f6bc6d85"
+source_hash = "aaf662f8bd555a9b0b5bc73e72573822a20a683d"
 note = "TASK-10(9章素案+設計1.3/3.2本文)の条件化。pin objectは <prefix>/<category>[/<rel_path>]/<name>/<pin-name>.age(別key写し・6章確定)。source_fileはエリア主対象としてcli.rs(pin add/rmコマンド)を指し、写し・削除のS3 API実体(src/s3.rs・src/uploader.rs)と索引更新(src/index.rs)はtarget_functionで特定(config.tomlのCONF-005と同一運用)"
 
 [[condition]]
@@ -82,11 +85,11 @@ source_lines = "tests/pin.rs:383"
 [[condition]]
 id = "pin.add-requires-config-early"
 target_function = "pin add(起動時検査)"
-source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(pin add)・レビューM-4"
-description = "pin add/rmはregistryへの記録を要するため--config(pipeline.toml)必須。S3変更(copy_object等)より前に設定エラー2で拒否されS3 API呼び出しは行われない(copy後にregistry解決失敗するとwrite-once滞留で手詰まりになるのを防ぐ) (integration, fake seam)"
-given = "--aws-configのみで--config/--keyなしのpin add実行"
+source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(pin add)・レビューM-4。TASK-19(XDG配置): --config省略時はXDG規定path読込へ改訂(旧「--config省略は即エラー」は廃止)"
+description = "pin add/rmはregistryへの記録を要するためpipeline.toml解決が必須。--config省略時はXDG規定path(config::resolve_app_paths)のpipeline.tomlを読む(不在はcopy案内付き設定エラー2)。pipeline.toml解決はS3変更(copy_object等)より前に行われ、解決失敗時はS3 API呼び出しを行わない(copy後にregistry解決失敗するとwrite-once滞留で手詰まりになるのを防ぐ=旧M-4の本質は維持) (integration, fake seam)"
+given = "--aws-configのみで--config/--keyなし(規定pathにもpipeline.tomlが無い)のpin add実行"
 expect_return_shape = "exit 2(設定エラー)かつS3 API呼び出しなし(calls.log空)"
-source_lines = "tests/storage_backup.rs:840"
+source_lines = "tests/storage_backup.rs:875"
 
 [[condition]]
 id = "pin.push-pin-on-skip-targets"
@@ -122,4 +125,4 @@ source = "TASK-11(Phase B)再レビュー指摘M-R1+tmp/tasks/tm-10/design_s3_st
 description = "get --pin・pin rmのpin解決は当該実行の実効bucketの索引pins[](bucket一致規則で構築されたもの=index.pins-bucket-isolated)に限る: 誤ったprofileでの実行は当方索引にpinが無いためpin名不在の対象エラー3で拒否され、pin objectへのS3 API呼び出し(取得・削除)は行われない(共有registryの他方bucket記録を経由して正bucket側のpin object・索引が変更されない) (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成でdev側にのみpin(pm1)が付与済みの状態での、get --pin pm1 --profile prod と pin rm --pin pm1 --profile prod の各実行"
 expect_return_shape = "いずれも exit 3(pin名は当該索引に無しの表示)でpin objectへのS3 API呼び出しは行われず、dev側索引のpins[]・pin objectは不変"
-source_lines = "tests/phase_b_options.rs:502"
+source_lines = "tests/phase_b_options.rs:523"

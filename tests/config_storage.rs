@@ -282,3 +282,77 @@ fn from_list_schema_with_title_field() {
         assert_eq!(code, *want, "from-list({tag})はexit {want}: {stderr}");
     }
 }
+
+/// [covers:config.output-section-rejected]
+/// [output]sectionは廃止(TASK-19 XDG配置): pipeline.tomlに[output]が存在したら
+/// 設定エラー2(deny_unknown_fieldsによる未知キー扱い。registry・cache dirのpathは
+/// XDG規定path固定で設定fileからは指定不可)。
+#[test]
+fn output_section_is_rejected() {
+    for (tag, section) in [
+        (
+            "dir/registry",
+            "[output]\ndir = \"out\"\nregistry = \"reg.jsonl\"\n",
+        ),
+        ("keep_artifacts", "[output]\nkeep_artifacts = \"run\"\n"),
+    ] {
+        let Some(fx) = StorageFixture::new("cfg-out-reject", StorageOpts::default()) else {
+            return;
+        };
+        fx.rewrite_pipeline_toml(&format!("{}{}", fx.pipeline_body(), section));
+        let a = fx.data_root.join("a.zip");
+        write_file(&a, b"output-reject-plain");
+        let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
+        assert_eq!(code, 2, "[output]存在({tag})は設定エラー2: {stderr}");
+        assert!(
+            stderr.contains("output"),
+            "{tag}: 未知キー名がmessageに含まれる: {stderr}"
+        );
+    }
+}
+
+/// [covers:config.default-config-missing-guidance]
+/// 設定fileが規定pathに無い場合(--config/--aws-config省略時)は設定エラー2+案内表示
+/// (TASK-19 XDG配置: repoのconfigs/*.example.tomlを規定pathへcopyする案内)。
+/// 明示指定pathの不在は従来どおりpathのみの設定エラー2(案内無し)。
+#[test]
+fn default_config_missing_shows_copy_guidance() {
+    let Some(fx) = StorageFixture::new("cfg-guidance", StorageOpts::default()) else {
+        return;
+    };
+    let state_s = fx.state.display().to_string();
+    let empty_abh = fx.elsewhere.join("guidance-abh");
+    std::fs::create_dir_all(&empty_abh).expect("empty ABH dir");
+    let abh_s = empty_abh.display().to_string();
+    let env = [
+        ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+        ("AMAZING_BACKUP_HOME", abh_s.as_str()),
+    ];
+
+    // (a) 規定pathにpipeline.tomlが無い: backup verifyの--config省略は案内付き設定エラー2
+    let (code, _stdout, stderr) = run_bin_env(&["backup", "verify"], &env);
+    assert_eq!(code, 2, "規定pipeline.toml不在は設定エラー2: {stderr}");
+    assert!(
+        stderr.contains("configs/pipeline.example.toml"),
+        "pipeline template copyの案内: {stderr}"
+    );
+
+    // (b) 規定pathにaws.tomlが無い: --aws-config省略は案内付き設定エラー2
+    let (code, _stdout, stderr) = run_bin_env(&["list", "files", "--key", "k"], &env);
+    assert_eq!(code, 2, "規定aws.toml不在は設定エラー2: {stderr}");
+    assert!(
+        stderr.contains("configs/aws.example.toml"),
+        "aws template copyの案内: {stderr}"
+    );
+
+    // (c) 明示指定pathの不在は案内無しの設定エラー2
+    let (code, _stdout, stderr) = run_bin_env(
+        &["backup", "verify", "--config", "/nonexistent/pipeline.toml"],
+        &env,
+    );
+    assert_eq!(code, 2, "明示指定の不在は設定エラー2: {stderr}");
+    assert!(
+        !stderr.contains("example.toml"),
+        "明示指定にはcopy案内を出さない: {stderr}"
+    );
+}

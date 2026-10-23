@@ -20,12 +20,14 @@
 #   新規1件: verify.swept-run-artifacts-excluded(keep_artifacts="run"掃除済みrunの検査対象外)。
 # 2026-10-15: TASK-11(Phase B)再レビュー指摘対応(L-R2): verify.swept-run-artifacts-excludedの
 #   description誤記を修正(keep_artifacts="all"→"always"。src/config.rsの列挙値はrun/always)。
+# 2026-10-23: TASK-19(XDG配置移行)対応でテスト先行の更新(TASK-19 body)。
+#   文言改訂1件(id不変): swept-run-artifacts-excluded(成果物dirをdata/out→XDG cache dirへ)。
 
 [meta]
 feature = "verify"
 source_file = "src/storage.rs"
 verified = true
-verified_at = "2026-10-22"
+verified_at = "2026-10-23"
 verified_by = "claude"
 test_command = "cargo test"
 source_hash = "1d7f20aba295cdb1b6862bd14605958ca4ccde61"
@@ -47,7 +49,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-002(2.4-1・7.1のex
 description = "構造検査で .age 欠損・age_sizeと実sizeの不一致を検出し、検証エラー4(欠損も不一致と同じく4に統一)。age_sizeは実ファイルsizeと完全一致を要求し、実sizeが記録値未満(切り詰め)・超過(追記)のいずれも不一致としてexit 4となる(記録値未満を警告継続にしない) (unit)"
 given = ".age を削除したcaseと、age_size と異なる実sizeの .age のcase(実sizeが記録値を超過するcaseと未満に切り詰めるcaseの両方)の backup verify 実行"
 expect_return = "exit code 4(該当recordのsource_pathと期待/実測の詳細表示)"
-source_lines = "src/cli.rs:818"
+source_lines = "src/cli.rs:820"
 
 [[condition]]
 id = "verify.torn-write-and-bad-json-lines"
@@ -65,7 +67,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-004(2.4-2)。TASK-11
 description = "--checksum で .age の改変(byte追加)をsha256再計算により検出する (unit)"
 given = ".age へ1byte追加した状態で backup verify --checksum 実行"
 expect_return = "exit code 4(期待age_sha256と実測の不一致表示)"
-source_lines = "src/cli.rs:924"
+source_lines = "src/cli.rs:936"
 
 [[condition]]
 id = "verify.roundtrip-sha256-match"
@@ -101,7 +103,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-008(2.4)。TASK-11(P
 description = "backup verify はローカル整合検査であり aws設定(aws.toml)が一切なくても完結する (unit)"
 given = "aws.toml不在の環境で backup verify 実行"
 expect_return = "exit code 0"
-source_lines = "src/cli.rs:961"
+source_lines = "src/cli.rs:976"
 
 [[condition]]
 id = "verify.unknown-record-type-skipped"
@@ -128,7 +130,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-011(2026-10-08レビ
 description = "backup verify --roundtrip はroundtrip開始前に秘密鍵ファイルの存在とageバイナリを事前検査し、不在なら設定・環境エラー2で即終了する(対象ファイルごとの復号失敗に紛れて検証エラー4とならない) (unit)"
 given = "秘密鍵ファイルが不在の状態、およびageバイナリがPATH上に無い状態での backup verify --roundtrip 実行"
 expect_return = "exit code 2(設定・環境エラー)"
-source_lines = "src/cli.rs:1032"
+source_lines = "src/cli.rs:1050"
 
 [[condition]]
 id = "verify.decrypt-error-includes-age-stderr"
@@ -146,13 +148,13 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-013(2.4-1・4.4。20
 description = "構造検査(既定段階)は各暗号化記録のage_pathの.age(manifestの.ageは含まない)のヘッダをparseし、ssh-ed25519 stanza識別子がregistry記録recipients指紋から導出したv1.2形式指紋prefix集合(記録指紋SHA256:<b64>のb64部をdecodeした32byteの先頭4byteをb64(paddingなし)符号化)と全単射で対応することを照合する。誤recipient鍵で作られた.age・stanza数不一致・識別子が指紋prefix形式(decode結果4byte)でない場合・記録指紋からprefixを導出できない場合(b64 decode不能・decode結果が32byte未満)・旧形式tagのみでv1.2形式stanzaを1つも持たない.ageは、いずれも検証エラー4(fail-closed。照合skipではなく) (unit)"
 given = "合成ageヘッダ(v1.2形式ssh-ed25519 stanza+`--- `終端)の.ageとrecipients記録をSHA256:<b64(32byte)>実形式の指紋で構成した、(a)正recipient(全単射一致)・(b)誤recipient指紋(stanzaは鍵Aのprefix・記録は鍵Bの指紋)・(c)stanza数不一致(ヘッダ2 stanza vs 記録1指紋)の3caseでの backup verify 実行"
 expect_return = "(a)はexit code 0、(b)(c)はexit code 4(recipient照合不一致の該当record特定表示)"
-source_lines = "src/cli.rs:867; tests/verify_roundtrip.rs:161"
+source_lines = "src/cli.rs:873; tests/verify_roundtrip.rs:161"
 
 [[condition]]
 id = "verify.swept-run-artifacts-excluded"
 target_function = "backup verify(掃除済みrunの検査対象外判定)"
 source = "TASK-11(Phase B)コードレビュー指摘M-1+tmp/tasks/tm-10/design_s3_storage.md 4.1([output].keep_artifacts=run掃除)・2.2(run末尾の索引更新)"
-description = "backup verifyはkeep_artifacts=\"run\"の既定動作で成功run直後にdata/out/<batch_id>/を掃除されたrun(file_write記録のage_path実ファイル・run manifest実ファイルが不在)を検証失敗扱いにしない: 当該batchのindex_upload成功記録(成功run末尾の索引更新が完了した事実)があり・run成果物dirが不在のbatchは「掃除済み・検査対象外」として構造検査(.age不在・manifest不在)・--checksum・--roundtripの対象から除外し、掃除済みrun件数を報告する。run成果物が残っているbatch(keep_artifacts=\"always\"・失敗run残り・掃除済み判定を満たさないbatch)は従来どおり検査対象(実ファイル欠損は検証エラー4のまま) (integration, fake seam)"
+description = "backup verifyはkeep_artifacts=\"run\"の既定動作で成功run直後にXDG cache dir(規定$XDG_CACHE_HOME/amazing-backup/)配下の<batch_id>/を掃除されたrun(file_write記録のage_path実ファイル・run manifest実ファイルが不在)を検証失敗扱いにしない: 当該batchのindex_upload成功記録(成功run末尾の索引更新が完了した事実)があり・run成果物dirが不在のbatchは「掃除済み・検査対象外」として構造検査(.age不在・manifest不在)・--checksum・--roundtripの対象から除外し、掃除済みrun件数を報告する。run成果物が残っているbatch(keep_artifacts=\"always\"指定run・失敗run残り・掃除済み判定を満たさないbatch)は従来どおり検査対象(実ファイル欠損は検証エラー4のまま) (integration, fake seam)"
 given = "keep_artifacts=\"run\"既定でbackup push成功後(当該batchのrun成果物dirが掃除済み)の backup verify・backup verify --checksum・backup verify --roundtrip の各実行"
 expect_return_shape = "いずれも exit 0(掃除済みrunは検査対象外の報告表示あり)。.age・manifestの不在は検証エラー4として報告されない"
-source_lines = "tests/storage_backup.rs:878"
+source_lines = "tests/storage_backup.rs:926"

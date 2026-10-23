@@ -5,7 +5,7 @@ NASバックアップアーカイブ(zip/7z)をageで暗号化し、S3(versionin
 - 対象読者: バックアップの書き込み・照会・復元を行う運用者(災害時の復旧担当を含む)
 - 正本参照: S3ストレージ構成・CLI体系の設計は `tmp/tasks/tm-10/design_s3_storage.md`。S3キー設計(UUID発行キー+versioning・実体/所在/title語彙・索引schema=2・lifecycle・manage reset)の正本は `tmp/tasks/tm-18/design_key-uuid-versioning.md`。旧パイプライン(暗号化経路・registry・終了コード)の設計は `tmp/tasks/tm-1/design_backup_pipeline.md`、AWS SDK移行の設計は `tmp/tasks/tm-9/design_sdk_migration.md`。実装挙動の正本は `tests/design/`の条件書
 - 実装バージョン: 0.1.0
-- 最終確認: 2026-10-22(TASK-18 S3キー設計実装・manage reset追加後の実装に基づく)
+- 最終確認: 2026-10-23(TASK-19 XDG配置移行・get/pull --out必須化後の実装に基づく)
 
 ## 1. 概要
 
@@ -32,18 +32,18 @@ NASバックアップアーカイブ(zip/7z)をageで暗号化し、S3(versionin
 
 | 場所 | 内容 |
 |---|---|
-| `data/out/<batch_id>/` | run毎の暗号化成果物(`.age`・manifest。既定はrun成功後に自動削除) |
-| `data/registry.jsonl` | ローカル累積registry(append-onlyのJSONLイベントログ) |
-| `data/restore/` | get/pullの復元先(既定) |
+| `~/.cache/amazing-backup/<batch_id>/` | run毎の暗号化一時物(`.age`・manifest。TASK-19 XDG配置。既定はrun成功後に自動削除) |
+| `~/.local/state/amazing-backup/registry.jsonl` | ローカル累積registry(append-onlyのJSONLイベントログ) |
+| `--out`で指定したdir | get/pullの復元先(**`--out`は必須**) |
 | `s3://<bucket>/<prefix>data/<uuid>/default.age` | 実体本体(uuidはUUIDv7発行キー。版ごと上書き・versioningで版管理) |
 | `s3://<bucket>/<prefix>data/<uuid>/<pin>.age` | ピン留め版(write-once) |
 | `s3://<bucket>/<prefix>data/<uuid>/metadata_<title>.json` | 実体の身元票(平文JSON) |
 | `s3://<bucket>/<prefix>sys/index.jsonl.age` | 索引(照会系の正本・STORAGE CLASS STANDARD固定) |
 | `s3://<bucket>/<prefix>sys/manifests/<batch_id>.jsonl.age` | run毎manifest |
 
-暗号化はSSH ed25519公開鍵の1-of-N(全鍵で暗号化し、いずれか1鍵で復号可能)。S3接続は**AWS SDK(aws-sdk-s3)をbinary内蔵**しておりaws CLIは不要。credential(access key)は`configs/secret/`配下の明示的なAPI keyファイル(2.2)から与え、`~/.aws`や環境変数のcredential chainには依存しない(fail-closed)。
+暗号化はSSH ed25519公開鍵の1-of-N(全鍵で暗号化し、いずれか1鍵で復号可能)。S3接続は**AWS SDK(aws-sdk-s3)をbinary内蔵**しておりaws CLIは不要。credential(access key)は`configs/secret/`配下の明示的なAPI keyファイル(2.3)から与え、`~/.aws`や環境変数のcredential chainには依存しない(fail-closed)。
 
-照会系(list/query/get/diff)は**aws.toml(bucket/region/prefix)と復号用秘密鍵のみで動作する**(索引をS3から取得するため。災害時にローカルregistry・data/outは不要。9章)。
+照会系(list/query/get/diff)は**aws.toml(bucket/region/prefix)と復号用秘密鍵のみで動作する**(索引をS3から取得するため。災害時にローカルregistry・cache dirは不要。9章)。
 
 ## 2. セットアップ
 
@@ -58,7 +58,30 @@ ageはv1.2形式のstanza識別子(指紋prefix)によるヘッダ照合の前�
 
 **aws CLIは不要**: S3接続はSDKをamazing-backupが内蔵する。aws CLIがあるとS3側の確認・手動復元(9.3)に使えるが任意である。
 
-### 2.2 AWS credential(API keyファイル)の作成
+### 2.2 設定ファイルの配置(XDG配置・TASK-19)
+
+設定ファイルはXDG Base Directory準拠の規定pathから読まれる。初回はrepo付属のtemplateを規定pathへcopyして記述する:
+
+| file | 規定path | template |
+|---|---|---|
+| pipeline.toml | `$XDG_CONFIG_HOME/amazing-backup/pipeline.toml`(未設定なら`~/.config/amazing-backup/pipeline.toml`) | `configs/pipeline.example.toml` |
+| aws.toml | `$XDG_CONFIG_HOME/amazing-backup/aws.toml`(同上) | `configs/aws.example.toml` |
+| registry.jsonl | `$XDG_STATE_HOME/amazing-backup/registry.jsonl`(未設定なら`~/.local/state/amazing-backup/registry.jsonl`。dirは自動作成) | -(自動生成) |
+| cache dir | `$XDG_CACHE_HOME/amazing-backup/`(未設定なら`~/.cache/amazing-backup/`) | -(run毎の暗号化一時物) |
+
+```console
+$ mkdir -p ~/.config/amazing-backup
+$ cp configs/pipeline.example.toml ~/.config/amazing-backup/pipeline.toml
+$ cp configs/aws.example.toml ~/.config/amazing-backup/aws.toml
+$ # 規定pathにfileが無い場合、copy案内がエラー表示される
+```
+
+- 規定pathに設定fileが無い状態でコマンドを実行すると設定エラー2+copy案内が表示される
+- `--config PATH` / `--aws-config PATH` で明示指定した場合はcwd基準の相対pathも可(規定pathより優先)
+- `AMAZING_BACKUP_HOME`環境変数(テスト/CI用)を指定すると規定pathをすべて`$ABH/`配下へ統合できる(`$ABH/pipeline.toml`・`$ABH/aws.toml`・`$ABH/registry.jsonl`・`$ABH/cache/`)
+- pipeline.toml内の相対path(public_keys・decrypt_key)とaws.tomlの`credentials_file`の相対pathは**実行時のcwd基準**で解決される(XDG配置後も維持)
+
+### 2.3 AWS credential(API keyファイル)の作成
 
 credential(access key)は**明示的なAPI keyファイル** `configs/secret/aws-credentials/<profile>.toml`(gitignore済み領域)へ置く。SDKへはこのファイルの値を明示渡しし、credential chainへのfallbackは**行わない**(ファイルが無い・不正なら設定エラー2で即終了するfail-closed構成)。
 
@@ -73,20 +96,20 @@ secret_access_key = "<secret access key>" # 必須
 ```
 
 - 作成後`chmod 600`を推奨(秘密情報を含むファイルのため)
-- このファイルのpathを `configs/aws.toml` の各profile `credentials_file` へ記述する(3.2)。運用上は`dev.toml`と`prod.toml`の2種類(prod系3profileは同一AWS account運用を想定し`prod.toml`共通1本)
+- このファイルのpathを aws.toml(規定path)の各profile `credentials_file` へ記述する(3.2)。運用上は`dev.toml`と`prod.toml`の2種類(prod系3profileは同一AWS account運用を想定し`prod.toml`共通1本)
 - 空値・前後空白付き値・未知キーは設定エラー2(値そのものはerror文に表示されない)
 - 値を直接aws.tomlへ書くことはできない(`credentials_file`を除くcredential系キーは未知キーとして拒否)
 
-### 2.3 ビルドと実行形式
+### 2.4 ビルドと実行形式
 
 ```console
 $ cargo build --release          # target/release/amazing-backup
 $ cargo install --path .         # PATHへ導入する場合(cargo bin)
 ```
 
-実行形式は `amazing-backup <command> [options]`。`cargo run --quiet -- <command>` でも同一挙動。設定・出力の相対pathはrepo root(cwd)基準で解決されるため、**repo rootで実行する**のが前提。
+実行形式は `amazing-backup <command> [options]`。`cargo run --quiet -- <command>` でも同一挙動。設定file本体はXDG規定path(2.2)から読まれるが、設定内の相対path(public_keys・decrypt_key・credentials_file)は**実行時のcwd基準**で解決される(`--config`/`--aws-config`明示指定もcwd基準の相対path可)。
 
-### 2.4 検証用bucket(dev: your-dev-bucket)の準備手順
+### 2.5 検証用bucket(dev: your-dev-bucket)の準備手順
 
 dev profileは既存bucket `your-dev-bucket` を使用する(2026-10-16確定・新設しない)。versioning有効が必須・lifecycleなし:
 
@@ -100,32 +123,27 @@ $ aws s3api put-bucket-versioning --bucket your-dev-bucket \
 
 ## 3. 設定ファイル
 
-### 3.1 `configs/pipeline.toml`
+### 3.1 `pipeline.toml`(規定path: `~/.config/amazing-backup/pipeline.toml`)
 
-暗号化・出力・分類・metadataの設定(秘密を含まない)。全項目を掲げる(`[layout]`/`[files]`/`[metadata]`/`keep_artifacts`は省略時に既定で動く。現行の`configs/pipeline.toml`は`[metadata]`のみ明示し、他は既定運用のため省略している)。`[categories]`はTASK-18で廃止(保持数はaws.toml `[aws.lifecycle]`へ移管・3.2):
+暗号化・分類・metadataの設定(秘密を含まない)。全項目を掲げる(`[layout]`/`[files]`/`[metadata]`/`keep_artifacts`は省略時に既定で動く)。**`[output]`sectionはTASK-19(XDG配置)で廃止**(存在したら設定エラー2。registry・暗号化一時物dirのpathはXDG規定path固定・2.2)。`[categories]`はTASK-18で廃止(保持数はaws.toml `[aws.lifecycle]`へ移管・3.2):
 
 ```toml
 [recipients]
 # SSH ed25519公開鍵のpath列挙(1-of-N。全鍵で暗号化し、いずれか1鍵で復号可能)
-# 相対pathはrepo root(cwd)基準。1つ以上必須。ed25519形式のみ許容
+# 相対pathは実行時cwd基準。1つ以上必須。ed25519形式のみ許容
 public_keys = [
   "configs/secret/keys/private/backup_ed25519.pub",
 ]
 
-[output]
-# 暗号化成果物の集約dir。配下に <batch_id>/<name>.age と <batch_id>/manifest.jsonl.age
-# ができる(run単位。旧仕様の <date>/ から変更)
-dir = "data/out"
-# ローカル累積registry(JSONL)
-registry = "data/registry.jsonl"
-# .ageの保持policy。 "run"(run成功後に当該run分を掃除・既定) | "always"(全保持)
-
 [behavior]
 # per-file失敗時も継続する既定値(backup pushの--keep-goingで上書きon)
 keep_going = false
+# 暗号化一時物(cache dir配下の.age)の保持policy。
+# "run"(run成功後に当該run分を掃除・既定) | "always"(全保持)
+# keep_artifacts = "run"
 
 [verify]
-# 復号検証で使う秘密鍵path(秘密そのものではなくpath参照。configs/secret/はgitignore済み)
+# 復号検証で使う秘密鍵path(秘密そのものではなくpath参照。相対pathは実行時cwd基準)
 decrypt_key = "configs/secret/keys/private/backup_ed25519"
 
 [metadata]
@@ -149,28 +167,26 @@ path = "2020-2023/travel" # rel_path(""でrel_pathなし)
 | キー | 意味 |
 |---|---|
 | `[recipients].public_keys` | recipient公開鍵(SSH ed25519)のpath列挙。1-of-N。鍵の追加手順は8.3 |
-| `[output].dir` | 暗号化成果物の集約dir。配下に `<batch_id>/` ができる |
-| `[output].registry` | ローカルregistry(JSONL・append-only)のpath |
-| `[output].keep_artifacts` | `.age`保持policy。`run`(既定: run成功後に当該run分を掃除)/`always`(全保持) |
 | `[behavior].keep_going` | per-file失敗時も継続する既定値。`--keep-going`でonに上書き |
+| `[behavior].keep_artifacts` | cache dir(`~/.cache/amazing-backup/`)配下の`.age`保持policy。`run`(既定: run成功後に当該run分を掃除)/`always`(全保持)。TASK-19で`[output]`廃止に伴い`[behavior]`へ移設 |
 | `[verify].decrypt_key` | 復号用秘密鍵のpath参照。get/pull/verifyの`--key`省略時の既定 |
 | `[metadata].latest_source_path` | metadata_<title>.jsonの最新所在掲載形式。`plain`(既定)/`encrypted`/`none` |
 | `[layout].unfiled_category` | 分類解決のfallback先category(既定`unfiled`) |
 | `[layout].auto_path_roots` | source_pathを相対化するroot列挙(最初に一致したrootを採用) |
 | `[files."<basename>"]` | 手動写像。`category`(必須・category名規則の文字列検査のみ)と`path`(rel_path) |
 
-省略時の既定: `[layout]`全体省略時はunfiled_category="unfiled"+auto_path_roots=[]・`[metadata]`省略時はlatest_source_path="plain"・`keep_artifacts`省略時は"run"。`[categories]`セクションの存在は未知キーとして設定エラー2(静的に廃止を確定)。
+省略時の既定: `[layout]`全体省略時はunfiled_category="unfiled"+auto_path_roots=[]・`[metadata]`省略時はlatest_source_path="plain"・`keep_artifacts`省略時は"run"。`[categories]`・`[output]`セクションの存在は未知キーとして設定エラー2(静的に廃止を確定。registry・cache dirのpathはXDG規定path固定)。
 
 検証規則(違反はすべて設定エラー・終了コード2):
 
 - ファイル不在・TOML parseエラー・未知キー・型不一致
 - `public_keys`空配列・鍵ファイル不在・`ssh-ed25519`以外の形式・指紋の重複
 - category名規則違反(`^[a-z0-9][a-z0-9-]{0,63}$`。予約領域`sys`・旧表記`_sys`は拒否。files写像とunfiled_categoryに適用)
-- auto_path_rootsが絶対pathでない・keep_artifacts列挙値外・latest_source_path列挙値外
+- auto_path_rootsが絶対pathでない・keep_artifacts列挙値外・latest_source_path列挙値外・`[output]`sectionの存在
 
-### 3.2 `configs/aws.toml`
+### 3.2 `aws.toml`(規定path: `~/.config/amazing-backup/aws.toml`)
 
-S3接続設定(credential値そのものは不含)。profile構成(dev=開発検証1profile + prod=実運用3bucket使い分け)。`[aws.lifecycle]`はlifecycle 3ruleの値(全profile共通・3.2表末尾と4.4)。現行の実物:
+S3接続設定(credential値そのものは不含)。profile構成(dev=開発検証1profile + prod=実運用3bucket使い分け)。`[aws.lifecycle]`はlifecycle 3ruleの値(全profile共通・表末尾と4.4)。repoの`configs/aws.example.toml`を規定pathへcopyして記述する(2.2)。`credentials_file`の相対pathは実行時cwd基準。現行の実物:
 
 ```toml
 [aws]
@@ -223,7 +239,7 @@ credentials_file = "configs/secret/aws-credentials/prod.toml"
 | `bucket` / `region` | 接続先S3 bucket・region |
 | `prefix` | 名前空間root prefix。`/`終端・空でない・先頭`/`禁止・`[a-z0-9-]`と`/`区切り。省略時は`amazing-backup/` |
 | `storage_class` | file objectのstorage class。`STANDARD`/`DEEP_ARCHIVE`等(allowlist検証) |
-| `credentials_file` | credentialファイル(2.2)のpath。必須 |
+| `credentials_file` | credentialファイル(2.3)のpath。必須(cwd基準の相対path可) |
 | `[aws.lifecycle].noncurrent_days` | NCVE NoncurrentDays。DEEP_ARCHIVE profileでは180以上必須 |
 | `[aws.lifecycle].keep_versions` | NCVE NewerNoncurrentVersions(保持するnoncurrent版数。1〜100) |
 | `[aws.lifecycle].mpu_abort_days` | AbortIncompleteMultipartUploadの日数 |
@@ -293,13 +309,13 @@ s3://<bucket>/<prefix>/
 
 ### 4.3 versioningと索引
 
-- bucketのversioningは必須(2.4)。`default.age`への上書きuploadごとに新VersionIdが払い出され、索引に版として記録される(date・version_ts・version_id・sha256×2・size)
+- bucketのversioningは必須(2.5)。`default.age`への上書きuploadごとに新VersionIdが払い出され、索引に版として記録される(date・version_ts・version_id・sha256×2・size)
 - 索引のversions[]はdate降順(先頭=最新)。同一日内の複数版はversion_ts(暗号化時刻)で一意化される
 - 誤DELETE対策: 読み取り系はlist-object-versionsで実体を把握するためdelete markerの影響を受けない
 
 ### 4.4 世代管理(lifecycle・prune)
 
-保持は`configs/aws.toml`の`[aws.lifecycle]`(`noncurrent_days`・`keep_versions`・`mpu_abort_days`)で制御される。削除条件の定義はlifecycle(NCVE)とpruneで共通: **同一keyのnoncurrent版を新しい順に並べたとき、newer noncurrent版の数が`keep_versions`以上となった版を削除**(境界のちょうど`keep_versions`番目は残す)。
+保持はaws.toml(規定path)の`[aws.lifecycle]`(`noncurrent_days`・`keep_versions`・`mpu_abort_days`)で制御される。削除条件の定義はlifecycle(NCVE)とpruneで共通: **同一keyのnoncurrent版を新しい順に並べたとき、newer noncurrent版の数が`keep_versions`以上となった版を削除**(境界のちょうど`keep_versions`番目は残す)。
 
 - **`manage lifecycle apply`**(bucket側・自動): `{prefix}data/`一括の3rule(1) NCVE(`NoncurrentDays=noncurrent_days`・`NewerNoncurrentVersions=keep_versions`) 2) MPU abort(`mpu_abort_days`日) 3) 期限切れdelete marker掃除)をbucketへ適用(rule一式の置換・冪等。値はすべてaws.tomlから)。Deep Archive最小保存期間(early deletion課金)との整合のため、DEEP_ARCHIVE profileで`noncurrent_days<180`は設定エラー2
 - **`manage prune`**(即時実行・dry-run既定): 同一条件で即時にDeleteObjectVersion(`{prefix}data/`一括・`/default.age`終端のみ)。現行version・pin key・metadata keyは構造的保護で対象外
@@ -312,8 +328,8 @@ s3://<bucket>/<prefix>/
 
 | option | 既定 | 意味 |
 |---|---|---|
-| `--config PATH` | なし | pipeline.toml。**照会系は省略可**(getの`--key`既定解決に使う場合は指定)。backup push・pin・manageの一部(prune/index/location rm/reset)は必須(省略は設定エラー2) |
-| `--aws-config PATH` | `configs/aws.toml` | aws.toml |
+| `--config PATH` | XDG規定path(2.2) | pipeline.toml。省略時は`~/.config/amazing-backup/pipeline.toml`(在れば読む)。照会系は規定pathに無くても動作(9章)。backup push・pin・manageの一部(prune/index/location rm/reset)・backup verify・editは規定path読込が必須(不在はcopy案内付き設定エラー2) |
+| `--aws-config PATH` | XDG規定path(2.2) | aws.toml。省略時は`~/.config/amazing-backup/aws.toml` |
 | `--key PATH` | pipeline.toml `[verify].decrypt_key` | 復号用SSH ed25519秘密鍵(get/pull・pinの索引読込等)。どちらにも無ければ設定エラー2 |
 | `--profile NAME` | aws.toml `[aws].active_profile` | 当該実行限りprofileを上書き(aws.tomlへの書戻しはしない) |
 | `--format human|json` | `human` | 照会系8コマンド(list 5種・query・get・diff)の出力形式。`json`はstdout全体が単一JSON(人間向け通知はstderr) |
@@ -363,7 +379,7 @@ amazing-backup get <title|uuid> [--path P] [--version V] [--version-id ID] [--pi
 | `--version` | なし(最新) | 版の日付(YYYY-MM-DD。形式不正はusage 64)。同日に複数版がhitしたら候補表示+`--version-id`指定要求(対象エラー3) |
 | `--version-id` | なし | 版のS3 VersionId指定(最優先) |
 | `--pin` | なし | ピン留め版の取得(pin名) |
-| `--out` | `data/restore` | 出力dir。`<out>/<title>`へ配置(拡張子が必要ならtitleに含める運用) |
+| `--out` | -(**必須**) | 出力dir。`<out>/<title>`へ配置(拡張子が必要ならtitleに含める運用)。省略はusage 64(旧既定`data/restore`はTASK-19で廃止) |
 | `--tier` | `Standard` | 復元Tier(`Standard`/`Bulk`。allowlist外はusage 64) |
 | `--days` | `7` | 復元コピー保持日数(1〜365。範囲外は設定エラー2) |
 | `--yes` | なし | sha不一致の既存平文への上書きを許可(7.4) |
@@ -409,18 +425,18 @@ amazing-backup backup push [--from-list FILE] [--dry-run] [--pin <版名>] [--ke
 5. `--pin`指定時: 新規発行・再PUT対象は手元の`.age`をpin keyへ直接upload。skip・合流対象は最新版からCopyObjectでpin付与(未復元版なら復元job発行で案内)。write-once違反(既存pin名への再付与)はrunを中断せずWARNING表示+当該fileのみpin付与をskipしてrunを完結する(manifest・索引更新は実行される。pin rm後に再付与)
 6. run manifest(V2)を暗号化生成して`sys/manifests/<batch_id>.jsonl.age`へupload
 7. 索引を全体再構築してPUT(常時・冪等。全skipの再実行でも未反映分が拾われる)+ 当該runで触れた実体のmetadata sync(変更時のみPUT・title変更時は旧metadata keyを掃除)
-8. `keep_artifacts="run"`(既定)なら`data/out/<batch_id>/`を掃除(run成功時のみ)
+8. `keep_artifacts="run"`(既定)ならcache dir(`~/.cache/amazing-backup/`)の`<batch_id>/`を掃除(run成功時のみ)
 
 再実行は冪等: 変更の無いfileはskipされ、失敗時の再実行で残りが処理される(crash残存のuuid再利用再PUTも同じ)。終了コード: 成功0 / 設定・環境2 / 対象3(不在・拡張子・key長超過・新規発行のtitle無し等) / 処理4 / 転送5 / 使用法64。
 
 ### 5.7 backup pull — 一括復元
 
 ```
-amazing-backup backup pull (--all | --category C | --run ID) [--tier T] [--days N]
-                          [--out DIR] [--dry-run] [--yes]
+amazing-backup backup pull (--all | --category C | --run ID) --out DIR [--tier T] [--days N]
+                          [--dry-run] [--yes]
 ```
 
-- `--all` / `--category C` / `--run ID` の**いずれか1つが必須**(指定なし・併用はusage 64)。`--all`と`--category`(いずれかの所在のcategory一致)は索引の全実体の最新版+全pin対象、`--run`は当該run(batch_id)の全版
+- `--all` / `--category C` / `--run ID` の**いずれか1つが必須**(指定なし・併用はusage 64)。`--out DIR`(出力dir)も**必須**(省略はusage 64)`--all`と`--category`(いずれかの所在のcategory一致)は索引の全実体の最新版+全pin対象、`--run`は当該run(batch_id)の全版
 - **確認ガード**(一括復元の事故防止): `--yes`なしならTTYでyes/no確認(非TTY実行で`--yes`なしはusage 64。noなら中止で終了0)
 - 各対象についてgetと同一の取得・検証・復号・平文衝突保護を行う(7.4。出力先は`<out>/<title>`)。未復元対象は復元jobを発行してpending扱い(案内表示。約12〜48h後に再実行)
 - `--dry-run`は対象一覧の表示のみ
@@ -432,7 +448,7 @@ amazing-backup backup pull (--all | --category C | --run ID) [--tier T] [--days 
 amazing-backup backup verify [--config PATH] [--checksum] [--roundtrip] [--key PATH]
 ```
 
-registryと`data/out`のrun成果物(`.age`)の整合を検証する(S3接続なし・aws不要)。旧経路(encrypt記録)と新経路(file_write記録)の両方を検査する。
+registryとcache dir(`~/.cache/amazing-backup/`)のrun成果物(`.age`)の整合を検証する(S3接続なし・aws不要)。旧経路(encrypt記録)と新経路(file_write記録)の両方を検査する。
 
 | option | 意味 |
 |---|---|
@@ -477,7 +493,7 @@ amazing-backup manage reset [--apply]
 | `index reconcile` | lifecycle消滅版の索引整合。**dry-runが既定**(件数表示)。`--apply`でsweep記録+索引再構築(S3実在集合へ整合)。`--config`必須 |
 | `location rm` | 旧所在の明示除去(`--uuid`でentity絞込可。不在・複数hitは対象エラー3)。location_remove記録+索引再構築+metadata sync。S3・実体には触れない(再backupで所在は復活) |
 | `jobs reissue` | 復元jobの再発行(tier変更可。Tierのallowlist外はusage 64)。対象はobject keyで指定 |
-| `reset` | dev bucketの初期化(全消去・冪等)。**dry-runが既定**(消去対象version数=Versions・DeleteMarkers別とregistry退避先pathを表示)。`--apply`で 1) ローカルregistryを`./tmp/<yyyymmdd>_registry_before_reset.jsonl`へ退避(不在ならskip) 2) root prefix配下の全object version(Versions・DeleteMarkers)をDeleteObjectVersionで削除(`{prefix}data/`配下に留まらず`sys/`索引・manifestも消去) 3) ローカルregistry削除(`data/out`は対象外・手動掃除) 4) 再list_versionsで0件確認。安全弁(違反は設定エラー2+案内・S3 API呼び出しなし): 実効profileのpurpose=dev限定・ローカルregistryに当該bucketと異なるbucket宛のfile_upload記録があれば拒否。`--config`必須 |
+| `reset` | dev bucketの初期化(全消去・冪等)。**dry-runが既定**(消去対象version数=Versions・DeleteMarkers別とregistry退避先pathを表示)。`--apply`で 1) ローカルregistryを`./tmp/<yyyymmdd>_registry_before_reset.jsonl`へ退避(不在ならskip) 2) root prefix配下の全object version(Versions・DeleteMarkers)をDeleteObjectVersionで削除(`{prefix}data/`配下に留まらず`sys/`索引・manifestも消去) 3) ローカルregistry削除(cache dirは対象外・手動掃除) 4) 再list_versionsで0件確認。安全弁(違反は設定エラー2+案内・S3 API呼び出しなし): 実効profileのpurpose=dev限定・ローカルregistryに当該bucketと異なるbucket宛のfile_upload記録があれば拒否。`--config`必須 |
 
 `prune`/`index`/`location rm`/`reset`は`--config`必須。`lifecycle`/`jobs reissue`はconfig不要。
 
@@ -487,7 +503,7 @@ amazing-backup manage reset [--apply]
 amazing-backup edit metadata|files|layout|policy
 ```
 
-対応設定sectionの現在値を表示する(検証付き読込)。`metadata`は`[metadata].latest_source_path`の掲載形式、`policy`は`[output].keep_artifacts`(保持数はaws.toml `[aws.lifecycle]`側で管理)。編集自体はpipeline.tomlの直接編集で行う(保存時に検証される)。対象外の指定はusage 64。
+対応設定sectionの現在値を表示する(検証付き読込)。`metadata`は`[metadata].latest_source_path`の掲載形式、`policy`は`[behavior].keep_artifacts`(cache dirの掃除policy。保持数はaws.toml `[aws.lifecycle]`側で管理)。編集自体はpipeline.tomlの直接編集で行う(保存時に検証される)。対象外の指定はusage 64。
 
 ### 5.12 終了コード一覧
 
@@ -507,11 +523,11 @@ fail-fastが既定(最初のエラーで中止。ただし対象解決段階の�
 
 初回の一通りの流れ。repo rootで実行する。`<PATH>`は対象アーカイブ(拡張子`.zip`/`.7z`)。
 
-1. **設定準備**: pipeline.toml(3.1)・aws.toml(3.2)・credentialファイル(2.2)を用意する
+1. **設定準備**: 規定pathへpipeline.toml(2.2・3.1)・aws.toml(2.2・3.2)を配置しcredentialファイル(2.3)を用意する
 2. **予定確認(dry-run)**:
 
    ```console
-   $ amazing-backup backup push --dry-run --from-list targets.toml --config configs/pipeline.toml
+   $ amazing-backup backup push --dry-run --from-list targets.toml   # 設定は規定path(2.2)
    ```
 
    対象ごとの`skip`/`re-put`/`merge`(合流先uuid)/`new`(新規発行・title必須状態を含む)予測と合計sizeを確認する(旧plan相当。エラーはこの段階で全件出る)
@@ -519,7 +535,7 @@ fail-fastが既定(最初のエラーで中止。ただし対象解決段階の�
 3. **書き込み実行**:
 
    ```console
-   $ amazing-backup backup push --from-list targets.toml --config configs/pipeline.toml
+   $ amazing-backup backup push --from-list targets.toml
    ```
 
    per-fileの`ok`/`skip`/`merge`/`re-put`行とrun summary(`run <batch_id>: ok=N skip=N failed=N`)が出る。大容量(数十GiB以上)では時間がかかる(進捗はper-file完了行単位)。中断した場合は再実行で再開(skip判定・crash残存のuuid再利用により二重暗号化・二重uploadは起きない)
@@ -530,7 +546,7 @@ fail-fastが既定(最初のエラーで中止。ただし対象解決段階の�
    $ amazing-backup backup verify --roundtrip
    ```
 
-   `keep_artifacts="run"`(既定)で掃除済みのrun(当該batchのindex_upload成功記録があり成果物dirが不在)は構造検査・`--checksum`・`--roundtrip`の対象外となり、「verify: 掃除済みrun N件(構造検査対象外)」と報告される(成功run直後のverifyが必ず検証エラー4にならないようにするため。成果物が残っているrunは従来どおり検査対象)
+   `keep_artifacts="run"`(既定)で掃除済みのrun(当該batchのindex_upload成功記録があり成果物dirが不在)は構造検査・`--checksum`・`--roundtrip`の対象外となり、「verify: 掃除済みrun N件(keep_artifacts=\"run\"の成功run成果物のため構造検査対象外)」と報告される(成功run直後のverifyが必ず検証エラー4にならないようにするため。成果物が残っているrunは従来どおり検査対象)
 
 5. **照会**:
 
@@ -545,23 +561,23 @@ fail-fastが既定(最初のエラーで中止。ただし対象解決段階の�
 ### 7.1 単一実体の復元(get)
 
 ```console
-$ amazing-backup get 旅のしおり2026        # title(またはuuid)で指定
+$ amazing-backup get 旅のしおり2026 --out ~/restore   # title(またはuuid)で指定
 ```
 
 - DEEP_ARCHIVE配置の対象は、初回実行で復元jobを発行して案内表示+終了0(この時点で取り出し費用が発生)。**約12〜48時間後に同じcommandを再実行**すると取得・検証・復号まで行う
 - 版指定: `--version 2026-10-02`(日付)または`--version-id <ID>`(list versionsで確認)。省略時は最新版。ピン留め版は`--pin <版名>`
-- 出力は`data/restore/<title>`(拡張子が必要ならtitleに含める運用)
+- 出力は`--out`で指定した`<out>/<title>`(拡張子が必要ならtitleに含める運用。`--out`は必須)
 - 復元jobの状況は `list jobs` で確認できる(全objectの現行/非現行版ごと)
 
 ### 7.2 一括復元(backup pull)
 
 ```console
-$ amazing-backup backup pull --category main     # category単位(最新版+pin)
-$ amazing-backup backup pull --run 20261015-abcd1234   # run単位
-$ amazing-backup backup pull --all              # 全対象(最新版+全pin)
+$ amazing-backup backup pull --category main --out ~/restore        # category単位(最新版+pin)
+$ amazing-backup backup pull --run 20261015-abcd1234 --out ~/restore # run単位
+$ amazing-backup backup pull --all --out ~/restore                   # 全対象(最新版+全pin)
 ```
 
-確認ガードあり(5.7)。大量対象では復元job発行 -> 待ち -> 再実行の2段階になる点はgetと同じ(pending分は再実行で取得される)。
+確認ガードあり(5.7)。`--out`は必須。大量対象では復元job発行 -> 待ち -> 再実行の2段階になる点はgetと同じ(pending分は再実行で取得される)。
 
 ### 7.3 Tierと費用・時間の目安
 
@@ -599,7 +615,7 @@ get/pullは出力先の既存平文を保護する:
   - `atara` -> `your-atara-bucket`
 - 切替は`active_profile`の書換え(恒久)または`--profile <name>`(当該実行限り)。**誤投入防止のため、prod系への書き込みは`--profile family`等を明示した実行を推奨**(active_profileはdev固定運用)
 - **backup pushは実行開始時に接続先(実効profile・bucket・prefix)を表示**する(5.6。dry-runでも表示)。表示を確認してから書き込みを続けることで誤bucketへの投入に気づける
-- **名前空間の分離はbucket単位で働く(混同防止)**。prod系3bucketは同一prefix(`amazing-backup/`)を共有するが、ローカルregistry(data/registry.jsonl)は単一でも記録の参照(skip判定・索引versions/pins構築・未書込namespace判定・pin解決)はすべて**bucket一致で分離**される。他bucketの書込実績では誤ってskipしない・索引へ他bucketの版やpinが混入しない・未書込救済判定に他bucket実績が採用されない、が構造的に保証される(bucket横断で1byteもuploadされないrunは作れない)
+- **名前空間の分離はbucket単位で働く(混同防止)**。prod系3bucketは同一prefix(`amazing-backup/`)を共有するが、ローカルregistry(`~/.local/state/amazing-backup/registry.jsonl`)は単一でも記録の参照(skip判定・索引versions/pins構築・未書込namespace判定・pin解決)はすべて**bucket一致で分離**される。他bucketの書込実績では誤ってskipしない・索引へ他bucketの版やpinが混入しない・未書込救済判定に他bucket実績が採用されない、が構造的に保証される(bucket横断で1byteもuploadされないrunは作れない)
 
 ### 8.3 recipient鍵の管理
 
@@ -609,7 +625,7 @@ get/pullは出力先の既存平文を保護する:
    $ ssh-keygen -t ed25519 -f configs/secret/keys/private/backup_ed25519_2 -N ""
    ```
 
-2. `configs/pipeline.toml` の `[recipients].public_keys` へ公開鍵(.pub)を追加する
+2. pipeline.toml(規定path)の `[recipients].public_keys` へ公開鍵(.pub)を追加する
 3. `amazing-backup backup push --dry-run` を実行して設定エラーが出ないことを確認する(鍵ファイルの不在・形式違い・指紋の重複は設定読込時の設定エラー2で検出される。dry-runは暗号化しないため指紋そのものの表示は無い)
 
 追加以降の書き込みは新recipient構成で暗号化される(索引・manifestも同様)。
@@ -622,9 +638,9 @@ get/pullは出力先の既存平文を保護する:
 
 ### 9.1 前提(作成環境の資産は不要)
 
-照会・復元(list/query/get/diff/backup pull)は**aws.toml(bucket/region/prefix/credentials_file)とAPI keyファイルといずれか1本の秘密鍵のみ**で動作する。最初に`sys/index.jsonl.age`を取得・復号し、以降の操作は索引+S3 APIで完結する(ローカルregistry・data/out・pipeline.tomlは不要。getの`--key`は必須になる)。
+照会・復元(list/query/get/diff/backup pull)は**aws.toml(bucket/region/prefix/credentials_file)とAPI keyファイルといずれか1本の秘密鍵のみ**で動作する。最初に`sys/index.jsonl.age`を取得・復号し、以降の操作は索引+S3 APIで完結する(ローカルregistry・cache dir・pipeline.tomlは不要。getの`--key`は必須になる)。
 
-新環境での必要資産: binary(または`cargo build`可能なrepo)・aws.toml・credentialファイル・秘密鍵。
+新環境での必要資産: binary(または`cargo build`可能なrepo)・aws.toml(規定path`~/.config/amazing-backup/aws.toml`へ配置・`--aws-config`での明示指定も可)・credentialファイル・秘密鍵。
 
 ### 9.2 索引が読めない場合
 
@@ -633,7 +649,7 @@ get/pullは出力先の既存平文を保護する:
 索引を復旧する:
 
 ```console
-$ amazing-backup manage index rebuild --config configs/pipeline.toml
+$ amazing-backup manage index rebuild   # pipeline.tomlは規定path(2.2)
 ```
 
 `sys/manifests/`のmanifest(DEEP_ARCHIVE)から索引を再構築する。未復元manifestへはBulk復元jobを発行する(発行したら案内+終了0。**最大48時間の待ちの後に再実行**で継続)。開始時に費用の目安(7.3)が表示される。完了すると索引がPUTされ、以降の照会が復旧する(完了時に続けての`manage index reconcile`実行が案内される・5.10)。
@@ -698,4 +714,4 @@ amazing-backupを使わない環境での復元手順。対象のkey配置(4.1)�
 - **旧サブコマンドとの併用は構造的に不可能**(旧commandがbinaryから削除されたため)
 - 旧`encrypt`のskip判定(.ageファイル存在基準)はregistry基準へ変更(.age不在でもregistry記録+指紋一致ならskip)
 - name override(`--name`・対象リストの`name`キー)は廃止(basenameは常に元ファイル名)。実体のラベルはtitle、同名衝突のfolder分離も廃止(sha一致は合流・別内容は別entity)
-- 旧配置object(旧形式`<date>/<name>.age`・旧`<category>/`階層)は新構成へ変換せず`manage reset --apply`(5.10・registry退避付きの全消去)で削除する。your-dev-bucketは引き続きdev profileのbucketとして使用する(2.4)
+- 旧配置object(旧形式`<date>/<name>.age`・旧`<category>/`階層)は新構成へ変換せず`manage reset --apply`(5.10・registry退避付きの全消去)で削除する。your-dev-bucketは引き続きdev profileのbucketとして使用する(2.5)

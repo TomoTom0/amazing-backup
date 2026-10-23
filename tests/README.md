@@ -252,12 +252,29 @@ tests/index_storage.rs rebuild folder・tests/storage_query.rs list categories�
   cargo test全件pass・verify-conditions.py PASS
 - 条件数195(excluded 32件)
 
+2026-10-23: TASK-19(XDG配置移行+get/pull --out必須化)対応でテスト先行の更新
+(TASK-19 body+本README。詳細はtests/design/各ファイルのヘッダコメント)。
+- 条件書: 新規5件(config 4件: xdg-default-paths・abh-home-override・
+  default-config-missing-guidance・output-section-rejected・cli 1件:
+  restore-out-required-usage-error)+文言改訂13件(id不変: [output]廃止に伴う
+  keep_artifactsの[behavior]移設・data/out→XDG cache dir・--out必須化・
+  --aws-config既定pathのXDG規定化・pin addの--config省略時規定path読込等)。
+  条件数195→200(excluded 32件のまま)
+- 実装(src/config.rsへresolve_app_paths新設・[output]廃止・get/pullの--out必須化・
+  backup push/pin/manageの--config省略時XDG規定path読込)後にcargo test全件pass
+  (242test)・verify-conditions.py PASS
+- tests/common/mod.rs: StorageFixtureはAMAZING_BACKUP_HOME=<fixture home>で規定path
+  (pipeline.toml・aws.toml・registry.jsonl・cache/)を$ABH配下へ統合する構成へ変更
+  (bin()実行に常時ABH envを渡す・直接run_bin_*呼出しのtest側にもABH envを追加)。
+  src/lib.rs testutilへconfig_env_lock/set_amazing_backup_homeを追加(env書換えunit
+  testの直列化・PATH_ENV_LOCKと同一lockで順序deadlockを構造的に排除)
+
 ## 構成
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(14ファイル・195条件・excluded 32件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)反映済み。TASK-18分もテスト作成済み(195条件すべてcover) |
-| tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(新schema組立・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(14ファイル・200条件・excluded 32件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)反映済み。TASK-19分もテスト作成済み(200条件すべてcover) |
+| tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(新schema組立・AMAZING_BACKUP_HOMEによるXDG規定path統合・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
 | tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
 | tests/verify_roundtrip.rs | backup verify --roundtrip系(結合) | 作成済み(TASK-11 Phase Bでbackup verify経路へ書換。実装前fail許容) |
@@ -302,12 +319,12 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | ファイル | feature | source_file(主対象) | 条件数 | 設計対応 |
 |---|---|---|---|---|
 | plan.toml | plan | src/targets.rs | 5 | PLAN-001〜009のうち対象解決共通経路5件(TASK-11でname override系等4件廃止→layout.*へ) |
-| config.toml | config | src/config.rs | 19 | CONF-001〜008 + TASK-9 credential系4件 + TASK-10 layout/prefix/keep_artifacts系4件 + TASK-18 3件([metadata]値・[categories]拒否・[aws.lifecycle]必須/範囲) |
+| config.toml | config | src/config.rs | 23 | CONF-001〜008 + TASK-9 credential系4件 + TASK-10 layout/prefix/keep_artifacts系4件 + TASK-18 3件([metadata]値・[categories]拒否・[aws.lifecycle]必須/範囲) + TASK-19 4件(XDG規定path解決・ABH一括上書き・規定path不在案内・[output]拒否) |
 | encrypt.toml | encrypt | src/crypto.rs | 16 | ENC系のうち共通暗号化経路16件(TASK-11で旧encrypt固有6件廃止。backup push経路で検証。TASK-18でschema2化等4件を文言改訂) |
 | fingerprint.toml | fingerprint | src/fingerprint.rs | 5 | FPR-001〜005 |
 | upload.toml | upload | src/s3.rs | 7 | UPL系のうちS3転送共通経路7件(TASK-11で旧upload固有16件廃止。backup push経路で検証) |
 | verify.toml | verify | src/storage.rs | 14 | VER-001〜013+M-1掃除済みrun(TASK-11でbackup verify経路へ文言改訂・id不変) |
-| cli.toml | cli | src/cli.rs | 58 | CLI-001〜006 + TASK-9/10系 + TASK-11 Phase B(旧サブコマンド削除・--format/--profile・manage jobs reissue・pull範囲排他等)+prod 3bucket構成(3bucket分離・push接続先表示)+TASK-18(探索語彙/復元先/pushフロー12新規・list categories廃止) |
+| cli.toml | cli | src/cli.rs | 59 | CLI-001〜006 + TASK-9/10系 + TASK-11 Phase B(旧サブコマンド削除・--format/--profile・manage jobs reissue・pull範囲排他等)+prod 3bucket構成(3bucket分離・push接続先表示)+TASK-18(探索語彙/復元先/pushフロー12新規・list categories廃止)+TASK-19(--out必須・--aws-config既定XDG化・data/out→cache) |
 | restore.toml | restore | src/storage.rs | 5 | 復元job系共通経路5件(TASK-11で旧restore固有19件廃止。get/pull/list jobs経路で検証。平文衝突保護含む) |
 | layout.toml | layout | src/layout.rs | 11 | TASK-10設計1章(分類解決・検証。9章素案+rel_path正規化) + TASK-18(UUIDv7・data領域key・validate_title。folder衝突廃止) |
 | index.toml | index | src/index.rs | 22 | TASK-10設計2章 + H-1/H-3 + TASK-11(version_ts供給源・未知record_type警告) + 再レビューM-R1(pins bucket分離)・L-R1(版・pin無しentry除外) + TASK-12(pin rm後の再付与) + TASK-15(別bucket同名pinの両bucket索引保持・bucket独立pin rm) + TASK-18(entity組立・location_remove・sweep除外・reconcile・location rm) |

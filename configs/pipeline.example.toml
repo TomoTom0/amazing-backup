@@ -1,0 +1,43 @@
+# pipeline.tomlのtemplate。このfileを~/.config/amazing-backup/pipeline.tomlへ
+# copyして実際の値を記述する(XDG配置・TASK-19)。
+# $XDG_CONFIG_HOME設定時は $XDG_CONFIG_HOME/amazing-backup/pipeline.toml。
+# AMAZING_BACKUP_HOME指定時(テスト/CI用)は $ABH/pipeline.toml。
+# 相対path(public_keys・decrypt_key)は実行時のcwd基準。
+# 各keyの意味は docs/usage_backup.md 3.1 を参照。
+
+[recipients]
+# SSH ed25519公開鍵のpath列挙(1-of-N。全鍵で暗号化し、いずれか1鍵で復号可能)
+# 1つ以上必須。ed25519形式のみ許容
+public_keys = [
+  "configs/secret/keys/private/backup_ed25519.pub",
+]
+
+[behavior]
+# per-file失敗時も継続する既定値(CLIの--keep-goingで上書きon)
+keep_going = false
+# 暗号化一時物(cache dir=~/.cache/amazing-backup/配下の.age)の保持policy
+# "run"(run成功後に当該run分を掃除・既定) | "always"(全保持)
+# keep_artifacts = "run"
+
+[verify]
+# --roundtrip検証で使う秘密鍵path(秘密そのものではなくpath参照)
+decrypt_key = "configs/secret/keys/private/backup_ed25519"
+
+[metadata]
+# metadata_{title}.jsonのlatest_source_path掲載形式
+# "plain"(path文字列そのまま・既定) | "encrypted"(age暗号化object) | "none"(null・掲載しない)
+latest_source_path = "plain"
+
+[layout]
+# 写像/roots不一致時のcategory(既定"unfiled")
+unfiled_category = "unfiled"
+# source_path相対化のroot列挙(順序優先・絶対path。省略可)
+auto_path_roots = ["/home/yourname/data"]
+
+# [files."travel.zip"]     # 手動写像(省略可)
+# category = "photos"      # category名規則を満たす任意の文字列(記録値として自由化)
+# path = "2020-2023/travel" # rel_path(""でrel_pathなし)
+
+# 廃止section(存在したら設定エラー2):
+#   [output]   registry・暗号化一時物dirのpathはXDG規定path固定(TASK-19)
+#   [categories] 保持数はaws.toml [aws.lifecycle]へ移管(TASK-18)

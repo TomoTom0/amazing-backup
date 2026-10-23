@@ -24,15 +24,18 @@
 #   (manifest V2 schema2)・skip-by-registry-record(skip条件へfile_upload uuid照合を追加。
 #   crash残存の再PUT分岐はcli.backup-push-crash-reput-same-uuidで担保)。
 #   実装前のため改訂期待値のテストは実行failを許容。
+# 2026-10-23: TASK-19(XDG配置移行)対応でテスト先行の更新(TASK-19 body)。
+#   文言改訂2件(id不変): reencrypt-without-registry-record・skip-by-registry-record
+#   (data/out→XDG cache dir(暗号化一時物dir)の語彙へ)。
 
 [meta]
 feature = "encrypt"
 source_file = "src/crypto.rs"
 verified = true
-verified_at = "2026-10-22"
+verified_at = "2026-10-23"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "0712bbb08827852396aedebdfa512dbeae24e2b7"
+source_hash = "b06e73e581cb55ea8d886a5a3edfa802d0f60b11"
 note = "暗号化経路(crypto.rs)・registry記録・manifest構築の条件群。TASK-11(Phase B)で旧encryptサブコマンドが削除され、暗号化はbackup push(暗号化→upload→manifest→索引更新の統合run)経路で検証する。(integration)は実ageバイナリ前提(設計8章)"
 
 [[condition]]
@@ -112,7 +115,7 @@ id = "encrypt.reencrypt-without-registry-record"
 target_function = "backup push(skip判定)/ registry(file_write記録)"
 source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-010(規則は2.2-2)。TASK-11(Phase B): 旧encrypt削除によりbackup push経路へ文言改訂"
 description = "registryに成功記録(file_write)がない対象は再暗号化される(.age等の産物のみ残る書込途中crash等の状態。skipはregistry基準のため記録がなければskipしない) (integration)"
-given = "data/outに.ageファイルのみ存在し registry にfile_write記録がない状態での backup push 実行"
+given = "XDG cache dir(暗号化一時物dir)に.ageファイルのみ存在し registry にfile_write記録がない状態での backup push 実行"
 expect_return_shape = "上書き再暗号化され registry へ新記録がappend・exit code 0"
 source_lines = "tests/encrypt_batch.rs:132"
 
@@ -174,10 +177,10 @@ source_lines = "tests/age_roundtrip.rs:292"
 id = "encrypt.skip-by-registry-record"
 target_function = "registry基準skip判定(backup pushの所在skip)"
 source = "tmp/tasks/tm-10/design_s3_storage.md 8.1(registry.rs行)・8.3・9章素案。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 4.1(1)(所在skip/uuid再利用判定)・10章): skip条件のuuid照合置換へ改訂"
-description = "encrypt skip判定のregistry基準化: skip条件はfile_write成功記録一致(identity_hash+size+mtime)かつfile_upload記録が存在(u.uuid == w.uuid照合+bucket一致。現行のs3_key==p.s3_key比較の置換=所在skipはuuid解決を要しないregistry側uuid照合)。.age不在でもskipされる(data/out掃除(keep_artifacts=\"run\")後の再実行で重複暗号化が起きない)。file_write一致でもfile_upload無し(crash残存)はskipせず(2.5)再PUT分岐へ進む(振る舞いはcli.backup-push-crash-reput-same-uuidで担保) (unit)"
-given = "file_write成功記録+file_upload記録(uuid一致・bucket一致)がありdata/outの当該.ageが削除済みの状態でのbackup push再実行"
+description = "encrypt skip判定のregistry基準化: skip条件はfile_write成功記録一致(identity_hash+size+mtime)かつfile_upload記録が存在(u.uuid == w.uuid照合+bucket一致。現行のs3_key==p.s3_key比較の置換=所在skipはuuid解決を要しないregistry側uuid照合)。.age不在でもskipされる(cache dir掃除(keep_artifacts=\"run\")後の再実行で重複暗号化が起きない)。file_write一致でもfile_upload無し(crash残存)はskipせず(2.5)再PUT分岐へ進む(振る舞いはcli.backup-push-crash-reput-same-uuidで担保) (unit)"
+given = "file_write成功記録+file_upload記録(uuid一致・bucket一致)がありcache dirの当該.ageが削除済みの状態でのbackup push再実行"
 expect_return_shape = "当該対象はskip表示され、平文read・age実行・registry追記なし"
-source_lines = "tests/storage_backup.rs:736"
+source_lines = "tests/storage_backup.rs:771"
 
 [[excluded]]
 item = "8章末尾注記: integrationはage実バイナリ前提(実行環境に無ければ当該testをskip扱い)"

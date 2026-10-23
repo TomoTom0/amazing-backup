@@ -29,16 +29,14 @@ use crate::errors::BackupResult;
 use crate::s3::S3Backend;
 use std::path::{Path, PathBuf};
 
-/// 既定のaws設定path(2.3)。
-const DEFAULT_AWS_CONFIG: &str = "configs/aws.toml";
-
 /// 新体系コマンド共通の設定option群(各subcommandの末尾に置かれる)。
 #[derive(clap::Args, Debug)]
 pub struct CtxArgs {
-    /// pipeline設定(照会系は省略可)
+    /// pipeline設定(照会系は省略可。省略時はXDG規定path・TASK-19)
     #[arg(long)]
     pub config: Option<PathBuf>,
-    /// aws設定(既定 configs/aws.toml)
+    /// aws設定(省略時はXDG規定path: AMAZING_BACKUP_HOME指定時$ABH/aws.toml・
+    /// 未指定時$XDG_CONFIG_HOME/amazing-backup/aws.toml・TASK-19)
     #[arg(long)]
     pub aws_config: Option<PathBuf>,
     /// 復号用SSH ed25519秘密鍵(省略時はpipeline.toml [verify].decrypt_key)
@@ -71,11 +69,38 @@ pub(crate) struct Session {
 }
 
 /// 設定読込+backend構築。cfgは--config指定時のみ読む(照会系はpipeline.toml不要)。
+/// --config省略時はXDG規定path(TASK-19)にpipeline.tomlがあれば読む(不在でも
+/// 照会系は成立=災害時動作保証。規定pathのparse失敗は設定エラー2)。
 /// `--profile`はaws.tomlのactive_profileを当該実行限り上書きする(書戻さない)。
 pub(crate) fn open_session(ctx: &CtxArgs) -> Result<Session, crate::errors::BackupError> {
+    open_session_inner(ctx, false)
+}
+
+/// pipeline.toml必須経路(backup push・pin・manage registry系)の設定読込+backend構築。
+/// --config省略時はXDG規定path(TASK-19)を読む(不在はcopy案内付き設定エラー2)。
+pub(crate) fn open_session_with_pipeline(
+    ctx: &CtxArgs,
+) -> Result<Session, crate::errors::BackupError> {
+    open_session_inner(ctx, true)
+}
+
+fn open_session_inner(
+    ctx: &CtxArgs,
+    require_pipeline: bool,
+) -> Result<Session, crate::errors::BackupError> {
     let cfg = match &ctx.config {
         Some(p) => Some(config::load_pipeline(p)?),
-        None => None,
+        None if require_pipeline => {
+            Some(config::load_pipeline(&pipeline_config_path(&ctx.config))?)
+        }
+        None => {
+            let default_p = config::resolve_app_paths().pipeline_config;
+            if default_p.is_file() {
+                Some(config::load_pipeline(&default_p)?)
+            } else {
+                None
+            }
+        }
     };
     let aws = load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
     let canonical_bucket = config::canonical_bucket(&aws_config_path(&ctx.aws_config))?;
@@ -88,11 +113,19 @@ pub(crate) fn open_session(ctx: &CtxArgs) -> Result<Session, crate::errors::Back
     })
 }
 
-/// --aws-config指定の解決(None=既定path configs/aws.toml)。
+/// --config指定の解決(None=XDG規定path・TASK-19)。pipeline.toml必須経路で使う。
+pub(crate) fn pipeline_config_path(pipeline_config: &Option<PathBuf>) -> PathBuf {
+    pipeline_config
+        .clone()
+        .unwrap_or_else(|| config::resolve_app_paths().pipeline_config)
+}
+
+/// --aws-config指定の解決(None=XDG規定path: AMAZING_BACKUP_HOME指定時$ABH/aws.toml・
+/// 未指定時$XDG_CONFIG_HOME/amazing-backup/aws.toml。TASK-19)。
 pub(crate) fn aws_config_path(aws_config: &Option<PathBuf>) -> PathBuf {
     aws_config
         .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_AWS_CONFIG))
+        .unwrap_or_else(|| config::resolve_app_paths().aws_config)
 }
 
 /// aws.toml読込(共通optionsから。--profileは一時上書き)。

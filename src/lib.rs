@@ -76,6 +76,35 @@ pub(crate) mod testutil {
         PathEnvGuard { original }
     }
 
+    /// 規定path解決(TASK-19 XDG配置)のenv(AMAZING_BACKUP_HOME)を書換えるtest同士の
+    /// 直列化lock(process envは並列test間で共有されるため)。
+    /// PATH_ENV_LOCKと同一のlockを返す(PATH書換えtestとのlock順序deadlockを構造的に
+    /// 排除するため、env書換え系はすべてこの1本で直列化する)。
+    pub(crate) fn config_env_lock() -> MutexGuard<'static, ()> {
+        path_env_lock()
+    }
+
+    /// AMAZING_BACKUP_HOMEを書換え、Dropで元値へ復元するguard。
+    /// 使用側は必ず `config_env_lock()` を先に取得する(並列testとの競合防止)。
+    pub(crate) struct AbhEnvGuard {
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for AbhEnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(v) => unsafe { std::env::set_var("AMAZING_BACKUP_HOME", v) },
+                None => unsafe { std::env::remove_var("AMAZING_BACKUP_HOME") },
+            }
+        }
+    }
+
+    pub(crate) fn set_amazing_backup_home(dir: &Path) -> AbhEnvGuard {
+        let original = std::env::var_os("AMAZING_BACKUP_HOME");
+        unsafe { std::env::set_var("AMAZING_BACKUP_HOME", dir) };
+        AbhEnvGuard { original }
+    }
+
     pub(crate) fn write_file(path: &Path, data: &[u8]) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("parent dir create");

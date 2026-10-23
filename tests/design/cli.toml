@@ -51,15 +51,21 @@
 #   title-input・title-change-on-merge・title-duplicate-warned・registry-loss-new-uuid)・
 #   removed-options-rejected。excludedへe2e統合シナリオ(直列組合せ)を追加。
 #   実装前のため新規条件のテストは未作成・改訂期待値のテストは実行failを許容。
+# 2026-10-23: TASK-19(XDG配置移行+get/pull --out必須化)対応でテスト先行の更新(TASK-19 body)。
+#   新規1件: restore-out-required-usage-error(get/pullの--out省略はusage 64・旧既定data/restore廃止)。
+#   文言改訂6件(id不変): get-output-structure(--out必須化)・aws-config-default-path(既定pathを
+#   XDG規定へ)・disaster-recovery-reads(規定pathにpipeline.tomlが無い状態の語彙へ)・
+#   backup-push-integrated-run(data/out→XDG cache dir)・backup-pull-all-confirmation・
+#   backup-pull-run-scope(--out必須化の追随)。
 
 [meta]
 feature = "cli"
 source_file = "src/cli.rs"
 verified = true
-verified_at = "2026-10-22"
+verified_at = "2026-10-23"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "8b520f49e8b55d87c115f5f5c1a68f40f6bc6d85"
+source_hash = "aaf662f8bd555a9b0b5bc73e72573822a20a683d"
 note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)"
 
 [[condition]]
@@ -69,7 +75,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-001(5章cli.rs・7.1
 description = "使用法誤り(引数誤り)は exit 64(clapのusage error既定 exit 2 を BackupError::Usage へremapし、設定エラー2と区別する) (unit)"
 given = "不明オプション・サブコマンド不足等のusage誤り実行"
 expect_return = "exit code 64"
-source_lines = "src/cli.rs:642"
+source_lines = "src/cli.rs:640"
 
 [[condition]]
 id = "cli.version-flag"
@@ -87,7 +93,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-003(終了コード�
 description = "終了コード区分(0/2/3/4/5)が7.1の仕様表どおりに出る(各サブコマンドの代表case) (unit)"
 given = "成功(対象なし・全skip含む)・設定エラー・対象エラー・処理エラー・転送エラーの各区画の代表ケース"
 expect_return_shape = "0(成功)・2(設定・環境)・3(対象)・4(処理)・5(転送)が各区画の代表ケースで出る"
-source_lines = "src/cli.rs:656; src/errors.rs:56"
+source_lines = "src/cli.rs:654; src/errors.rs:56"
 
 [[condition]]
 id = "cli.module-entrypoint-parity"
@@ -105,7 +111,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-005(2026-10-08レビ
 description = "backup push のPATH位置引数0個はusage error扱いで exit 64。PATHは1個以上必須(--from-listは併用オプション)(旧plan/encryptの対象指定からbackup pushへの文言改訂・id不変) (unit)"
 given = "backup push をPATH無し(オプションのみ、または--from-listのみ)で実行するケースと、PATH 1個(+--from-list併用)のケース"
 expect_return = "PATH 0個は exit 64。PATH 1個(+--from-list併用を含む)はusage errorとならない"
-source_lines = "src/cli.rs:982"
+source_lines = "src/cli.rs:1000"
 
 [[condition]]
 id = "cli.fake-s3-seam"
@@ -182,11 +188,20 @@ source_lines = "tests/storage_query.rs:350"
 [[condition]]
 id = "cli.get-output-structure"
 target_function = "cli::cmd_get"
-source = "tmp/tasks/tm-10/design_s3_storage.md 3.1(get)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 5.9(FetchTarget)・10章): 復元先<out>/<title>へ改訂"
-description = "get出力: 復元先は <out>/<title>(dest_name=entry.title・rel_path廃止。拡張子が必要ならtitleに含める運用。--out既定はdata/restore) (integration, fake seam)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 3.1(get)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 5.9(FetchTarget)・10章): 復元先<out>/<title>へ改訂。TASK-19(XDG配置): --out必須化(旧既定data/restoreは廃止)"
+description = "get出力: 復元先は <out>/<title>(dest_name=entry.title・rel_path廃止。拡張子が必要ならtitleに含める運用)。--outは必須(省略はusage 64=cli.restore-out-required-usage-error。旧既定data/restoreは廃止) (integration, fake seam)"
 given = "title=旅のしおり2026.zip のentityへの get 実行(--out <dir> 指定)"
 expect_return_shape = "<dir>/旅のしおり2026.zip が生成される"
 source_lines = "tests/storage_query.rs:187"
+
+[[condition]]
+id = "cli.restore-out-required-usage-error"
+target_function = "clap定義(GetArgs.out / BackupSub::Pull.out)"
+source = "TASK-19 body(get/pullの--out必須化・省略はusage 64)"
+description = "get/backup pullの--out(出力dir)は必須: 省略時はusage error 64(引数検査は設定読込・S3 API呼び出しより前)。旧既定data/restoreという概念は廃止 (integration)"
+given = "--outなしの get <term> 実行と --outなしの backup pull --all --yes 実行"
+expect_return_shape = "いずれも exit 64で、S3 API呼び出しは行われない"
+source_lines = "tests/cli_bin.rs:147"
 
 [[condition]]
 id = "cli.get-sha-mismatch-error"
@@ -264,9 +279,9 @@ source_lines = "tests/storage_query.rs:778"
 id = "cli.backup-push-integrated-run"
 target_function = "cli::cmd_backup_push"
 source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(backup push)・4.1([output])・2.2(index_upload)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 1.2(データフロー)・5.7・3.2/3.3・10章): schema2 events・metadata sync追記へ改訂"
-description = "backup push統合正常系: 対象解決(+title: from-list欄/対話prompt)→分類解決→暗号化→upload(default.age(data/{uuid}/)・manifest(V2・schema=2)・索引再構築(schema=2)・touched_entitiesのmetadata sync)を1実行で行う(順序処理)。data/outは <out>/<batch_id>/<name>.age と <batch_id>/manifest.jsonl.age のrun単位構造。registryのeventはschema2 record_type(file_write・file_upload(uuid/title入り)・manifest・index_upload)で記録される (integration, fake seam)"
+description = "backup push統合正常系: 対象解決(+title: from-list欄/対話prompt)→分類解決→暗号化→upload(default.age(data/{uuid}/)・manifest(V2・schema=2)・索引再構築(schema=2)・touched_entitiesのmetadata sync)を1実行で行う(順序処理)。暗号化一時物dirはXDG cache dir(規定$XDG_CACHE_HOME/amazing-backup/・AMAZING_BACKUP_HOME指定時は$ABH/cache/)で <cache>/<batch_id>/<name>.age と <batch_id>/manifest.jsonl.age のrun単位構造。registryのeventはschema2 record_type(file_write・file_upload(uuid/title入り)・manifest・index_upload)で記録される (integration, fake seam)"
 given = "2対象(title指定)を含む backup push 実行後のS3・registry・索引・metadataの確認"
-expect_return_shape = "backup pushは exit 0 で data/{uuid}/default.age・manifest・索引・metadata_{title}.jsonが配置・更新され、data/outに <batch_id>/<name>.age が生成される。registryにschema2のfile_write/file_upload/manifest/index_upload記録がappendされる"
+expect_return_shape = "backup pushは exit 0 で data/{uuid}/default.age・manifest・索引・metadata_{title}.jsonが配置・更新され、cache dirに <batch_id>/<name>.age が生成される。registryにschema2のfile_write/file_upload/manifest/index_upload記録がappendされる"
 source_lines = "tests/storage_backup.rs:89"
 
 [[condition]]
@@ -291,7 +306,7 @@ source_lines = "tests/pin.rs:319"
 id = "cli.backup-pull-all-confirmation"
 target_function = "cli::cmd_backup_pull --all"
 source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(backup pull)"
-description = "backup pull --allは索引の全最新版+全pin対象。yes/no確認を伴い(--yesで省略可)、非TTYで--yesなしはusage error 64。確認でnoの場合は実行せず exit 0 (integration, fake seam)"
+description = "backup pull --allは索引の全最新版+全pin対象。yes/no確認を伴い(--yesで省略可)、非TTYで--yesなしはusage error 64。確認でnoの場合は実行せず exit 0(--outは必須=cli.restore-out-required-usage-error) (integration, fake seam)"
 given = "--all実行(--yesなし・非TTY)と、確認プロンプトでnoを選択する実行"
 expect_return_shape = "非TTY --yesなしは exit 64。確認noは復元job発行等を行わず exit 0"
 source_lines = "tests/storage_backup.rs:310"
@@ -303,16 +318,16 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(backup pull)"
 description = "--category C / --run ID 指定でも確認ガードは省略されない(--allと同一の事故防止ガード。--date必須は撤廃し--category/--run/--allのいずれかで範囲指定) (integration, fake seam)"
 given = "--category指定と--run指定の各pull実行(確認でnoを選択)"
 expect_return_shape = "いずれも確認が行われ、noなら復元job発行等を行わず exit 0"
-source_lines = "tests/storage_backup.rs:362"
+source_lines = "tests/storage_backup.rs:370"
 
 [[condition]]
 id = "cli.backup-pull-run-scope"
 target_function = "cli::cmd_backup_pull --run"
 source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(backup pull)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 5.10・10章): --run=versionsのbatch_id一致・復元先<out>/<title>へ改訂"
-description = "backup pull --run ID は当該run(batch)対象へ一括で復元job発行+取得+検証+復号(--tier/--days/--out/--dry-runを伴う。--runはversionsのbatch_id一致の現行語彙維持。復元先は<out>/<title>=getと同一) (integration, fake seam)"
+description = "backup pull --run ID は当該run(batch)対象へ一括で復元job発行+取得+検証+復号(--tier/--days/--out(必須)/--dry-runを伴う。--runはversionsのbatch_id一致の現行語彙維持。復元先は<out>/<title>=getと同一) (integration, fake seam)"
 given = "run(batch_id)にfile 2件+manifestがある状態での backup pull --run <id> --yes 実行(復元済み)"
 expect_return_shape = "当該runの対象が取得・検証・復号され<out>/<title>へ出力される。対象外runのfileは取得されない"
-source_lines = "tests/storage_backup.rs:411"
+source_lines = "tests/storage_backup.rs:426"
 
 [[condition]]
 id = "cli.backup-pull-scope-options-exclusive"
@@ -321,7 +336,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 12章レビューL-7(Phase A実�
 description = "backup pullの--all/--category/--runの範囲指定は排他: 2つ以上の併用はusage error 64(いずれか1つのみ指定可。確認ガード・索引GETの前に判定される) (integration, fake seam)"
 given = "--all --category併用・--all --run併用・--category --run併用の各backup pull実行(--yes付き)"
 expect_return_shape = "いずれも exit 64で、S3 API呼び出し(索引GET)は行われない"
-source_lines = "tests/storage_backup.rs:467"
+source_lines = "tests/storage_backup.rs:482"
 
 [[condition]]
 id = "cli.versioning-disabled-error"
@@ -330,7 +345,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 5.1(versioning)"
 description = "backup push・pin addは起動時にGetBucketVersioningで確認し、無効なら設定エラー2+有効化command表示(専用案内)。読み取り系(get/pull/list/diff)はversioning確認を行わない(障害時の余計なAPIを避ける) (integration, fake seam)"
 given = "versioning無効のbucket(fake)でのbackup push実行・pin add実行、および読み取り系(list files)実行"
 expect_return_shape = "push・pin addはS3書き込み前に exit 2+有効化案内表示。読み取り系はGetBucketVersioningを呼ばずに動作する"
-source_lines = "tests/storage_backup.rs:505"
+source_lines = "tests/storage_backup.rs:523"
 
 [[condition]]
 id = "cli.index-missing-error"
@@ -339,16 +354,16 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 3章(照会系共通規則)・11�
 description = "照会系(list/query/get/diff)の最初の索引GET(sys/index.jsonl.age)が404(不在)または復号失敗の場合は設定・環境エラー2+専用案内(manage index rebuildによる復旧、またはaws.tomlのbucket/prefix確認)。索引なしでのS3 listing直接照会への自動fall backは行わない。索引GET時のS3転送エラーは転送エラー5として分離(cli.index-get-transfer-error・TASK-11 Phase B) (integration, fake seam)"
 given = "索引objectが不在のfake S3での list files・query・get・diff の各実行"
 expect_return_shape = "いずれも exit 2+rebuild/bucket・prefix確認の案内表示。ListObjectsV2等のlisting照会へのfall backは行われない"
-source_lines = "tests/storage_backup.rs:574"
+source_lines = "tests/storage_backup.rs:592"
 
 [[condition]]
 id = "cli.disaster-recovery-reads"
 target_function = "照会系(list/query/get/diff)"
 source = "tmp/tasks/tm-10/design_s3_storage.md 2.4(災害時の動作保証)"
-description = "query/get/list/diffはaws.toml(bucket/region/prefix)と秘密鍵のみで動作: 最初にsys/index.jsonl.ageをGET→復号→以降の操作は索引+s3 APIで完結する(作成環境資産=pipeline.toml・ローカルregistryに非依存。旧restore系の「作成環境資産に非依存」原則を継承) (integration, fake seam)"
-given = "pipeline.toml・registry.jsonl が不在の作業dirでの query・list files 実行(--keyに秘密鍵を指定)"
+description = "query/get/list/diffはaws.toml(bucket/region/prefix)と秘密鍵のみで動作: 最初にsys/index.jsonl.ageをGET→復号→以降の操作は索引+s3 APIで完結する(作成環境資産=pipeline.toml・ローカルregistryに非依存。旧restore系の「作成環境資産に非依存」原則を継承。TASK-19 XDG配置後は--config省略時の規定pathにpipeline.tomlがあれば読むが、不在でも照会は成立する) (integration, fake seam)"
+given = "pipeline.toml未指定(規定pathにも無い)・ローカルregistry不在の状態での query・list files 実行(--keyに秘密鍵を指定)"
 expect_return_shape = "いずれも exit 0 で索引取得・復号・検索結果の表示が完結する"
-source_lines = "tests/storage_backup.rs:614"
+source_lines = "tests/storage_backup.rs:641"
 
 [[excluded]]
 item = "8章末尾注記: conditions.toml側では各idにunit/integration種別・カバー要件(章節参照)を付記する"
@@ -392,7 +407,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 2.2・レビューH-2"
 description = "前回runがregistry記録後に失敗(例: 索引PUTのみ失敗)した場合の全skip再実行でも、成功run末尾の索引再構築・PUTにより索引が最新状態へ更新される(索引staleのままexit 0しない・冪等) (integration, fake seam)"
 given = "索引PUTのみ失敗注入したpush(file upload・registry記録は成功)→同内容の再実行(全skip)"
 expect_return_shape = "再実行はexit 0・skip表示であり、索引versionsはregistryのfile_upload記録全て(失敗run分を含む)へ更新される"
-source_lines = "tests/storage_backup.rs:784"
+source_lines = "tests/storage_backup.rs:819"
 
 [[condition]]
 id = "cli.old-subcommands-removed"
@@ -451,10 +466,10 @@ source_lines = "tests/phase_b_options.rs:106"
 [[condition]]
 id = "cli.aws-config-default-path"
 target_function = "clap定義(--aws-config既定値)"
-source = "TASK-11 body(Phase B低残件L-10: --aws-config既定pathの実装一致)+tmp/tasks/tm-10/design_s3_storage.md 3章(共通options)"
-description = "--aws-config省略時の既定pathは configs/aws.toml(cwd基準の相対path。L-10: 設計3章の旧記載configs/backup/aws.tomlは実装・実配置・docsの configs/aws.toml へ一致させる方向で解消。本条件は一致後の挙動を規定) (integration)"
-given = "--aws-config未指定での list files・backup push 実行(configs/aws.tomlを配置した作業dir・配置しない作業dir)"
-expect_return_shape = "配置した作業dirではconfigs/aws.tomlを読み込んで動作する。配置しない作業dirでは設定エラー2"
+source = "TASK-11 body(Phase B低残件L-10: --aws-config既定pathの実装一致)+tmp/tasks/tm-10/design_s3_storage.md 3章(共通options)。TASK-19(XDG配置): 既定pathをXDG規定へ移行"
+description = "--aws-config省略時の既定pathはXDG規定path(config::resolve_app_paths): AMAZING_BACKUP_HOME指定時は$ABH/aws.toml・未指定時は$XDG_CONFIG_HOME/amazing-backup/aws.toml(未設定なら~/.config/amazing-backup/aws.toml)。旧既定configs/aws.toml(cwd基準)は廃止。規定pathにaws.tomlが無い場合は設定エラー2+template(configs/aws.example.toml)copy案内(config.default-config-missing-guidance) (integration)"
+given = "AMAZING_BACKUP_HOME配下にaws.tomlを配置した環境と配置しない環境での--aws-config未指定の list files・backup push 実行、XDG_CONFIG_HOME配下に配置した環境での--aws-config未指定の list files 実行"
+expect_return_shape = "配置した環境($ABH・XDG_CONFIG_HOMEいずれか)では当該aws.tomlを読み込んで動作する。配置しない環境では設定エラー2+copy案内表示"
 source_lines = "tests/phase_b_options.rs:130"
 
 [[condition]]
@@ -464,7 +479,7 @@ source = "TASK-11 body(Phase B低残件: 索引GET転送エラーの終了コー
 description = "照会系の最初の索引GET(sys/index.jsonl.age)時のS3転送エラー(SDK error・network系等のS3 API失敗)は転送エラー5。索引404(不在)・復号失敗の設定エラー2(cli.index-missing-error)と分離する(索引配置ミスと転送障害の切り分け) (integration, fake seam)"
 given = "索引objectは存在する状態で索引GET(GetObject)へ失敗を注入(FAKE_S3_FAIL_CP_FOR等)した list files・get の各実行"
 expect_return_shape = "いずれも exit 5(転送エラー)。索引不在(404)・復号失敗の exit 2 とは区別される"
-source_lines = "tests/phase_b_options.rs:198"
+source_lines = "tests/phase_b_options.rs:219"
 
 [[condition]]
 id = "cli.manage-jobs-reissue"
@@ -473,7 +488,7 @@ source = "TASK-11 body(Phase B: manage jobs reissue・tier変更可・最小実�
 description = "manage jobs reissue <対象>: 対象objectの復元jobを再発行する(tier変更可。--tier指定時は当該tier・省略時は既定Standard)。tierはStandard/Bulkのallowlist検査(allowlist外はusage error 64)。復元済み・進行中の対象にも再発行できる(保持期間延長・tier切替用途) (integration, fake seam)"
 given = "復元済みobjectと進行中objectがある状態での manage jobs reissue <対象> --tier Bulk 実行と、--tier Expedited(不可値)指定・--tier省略の各実行"
 expect_return_shape = "--tier BulkはRestoreObjectが当該対象へtier=Bulkで再発行され呼び出し記録に残る。--tier Expeditedは exit 64でRestoreObject発行なし。--tier省略はtier=Standardで発行"
-source_lines = "tests/phase_b_options.rs:333"
+source_lines = "tests/phase_b_options.rs:354"
 
 [[condition]]
 id = "cli.profile-namespace-isolated-by-bucket"
@@ -482,7 +497,7 @@ source = "TASK-11(Phase B)コードレビュー指摘H-1+tmp/tasks/tm-10/design_
 description = "registry記録のs3_bucketと当該実行の実効bucketの一致によりnamespaceはbucket単位で分離される(同一prefix・別bucketの複数profile構成でprefix一致のみなら全経路が他方bucketの実績に惑わされるのを防ぐ)。対象は(a) backup pushのskip判定(他方bucket実績ではskipしない=bucket横断で1byteもuploadされないrunを作らない) (b) 索引versions構築(他方bucketのfile_upload記録をversionsへ混入させない) (c) 索引不在時の未書込namespace例外(他方bucketの書込実績では救済せず0件exit 0とする)。bucket一致規則はregistry::record_bucket_matchedと同一(記録s3_bucket欠損の旧記録は正本bucket=aws.toml active_profile相当として扱い、実効bucketが正本と一致する実行でのみ一致扱い) (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成での、(1)devでのbackup push後に同一内容を--profile prodでbackup pushする実行 (2)prod実行後の索引versionsのversion_id確認(registryのbucket別file_upload記録と突合) (3)索引objectを削除した状態での list files --profile prod(他方bucket実績のみ)と list files(正本bucket実績あり)の各実行 (4)file_upload記録のs3_bucketを空文字へ書き換えた旧形式記録での再push(dev=正本と一致する実効bucket・prod=一致しない実効bucket)の各実行"
 expect_return_shape = "(1)prod側pushはskipされずにfile uploadが行われexit 0(ok表示あり・skip表示なし) (2)索引versionsにはprod側bucketのfile_upload記録のversionのみが載る(dev側のversion_idは混入しない) (3)prod照会は未書込namespaceとして0件+exit 0(索引不在でも設定エラー2にならない)。正本bucket(書込実績あり)の照会は設定エラー2+rebuild案内 (4)dev側の再pushはskipされる(旧記録は正本bucket扱い・file keyへのPUTなし)。prod側(--profile)のpushはskipされずuploadされる"
-source_lines = "tests/phase_b_options.rs:261; tests/phase_b_options.rs:429"
+source_lines = "tests/phase_b_options.rs:282; tests/phase_b_options.rs:450"
 
 [[condition]]
 id = "cli.fake-s3-restore-validates-key-and-state"
@@ -491,7 +506,7 @@ source = "TASK-11(Phase B)コードレビュー指摘L-3+cli.fake-s3-seam(fake�
 description = "fakeのRestoreObjectは実S3と同様の事前検査を行う: (1)key(版指定時は当該version)がS3に存在しない場合はNoSuchKey相当の転送エラー5で失敗させる(不在keyへの復元job発行がfakeで成功扱いにならない) (2)対象objectのstorage_classがarchive系(GLACIER/DEEP_ARCHIVE/GLACIER_IR)以外の場合はInvalidObjectState相当の転送エラー5で失敗させる(STANDARD objectへの復元job発行がfakeで成功扱いにならない) (3)archive系objectへの発行は従来どおり成功する (integration, fake seam・manage jobs reissue経由)"
 given = "fake S3での、(1)存在しないkeyへの manage jobs reissue 実行 (2)STORAGE_CLASS=STANDARDでpush済みfile keyへの reissue 実行 (3)STORAGE_CLASS=DEEP_ARCHIVEでpush済みfile keyへの reissue 実行"
 expect_return_shape = "(1)(2)は exit 5でエラー表示に起因(NoSuchKey相当/InvalidObjectState相当)が含まれる。(3)は exit 0でRestoreObjectが発行される"
-source_lines = "tests/s3_backend.rs:456"
+source_lines = "tests/s3_backend.rs:458"
 
 [[condition]]
 id = "cli.profile-multi-bucket-isolation"
@@ -500,7 +515,7 @@ source = "TASK-11 body(ユーザー指示2026-10-15: prodはyour-family-bucket/y
 description = "3つ以上のbucketを含む複数profile構成(dev + prod系の同一prefix・別bucket)でもnamespace分離はbucket単位で機能する(cli.profile-namespace-isolated-by-bucketのbucket一致規則はprofile数に依存しない=一致/不一致の2値判定のため)。prod系profile相互(family/baked等)でも、(a) backup pushのskip判定は他bucket実績ではskipしない(bucket横断で1byteもuploadされないrunを作らない) (b) 索引versions構築には当該bucketのfile_upload記録のみが載る(3bucket分の実績が同一registryに混在していても混入しない) (c) 索引不在時の未書込namespace例外もbucket単位で判定する (integration, fake seam)"
 given = "dev(active_profile)とprod系2profile(同一prefix・別bucket)を含むaws.toml構成での、(1)family profileでのbackup push後に同一内容をbaked profileでbackup pushする実行 (2)3bucketそれぞれへのfile_upload記録(registryのbucket別version_id)と、baked実行後に再構築された索引versionsの突合"
 expect_return_shape = "(1)baked側pushはskipされずにfile uploadが行われexit 0(ok表示あり) (2)索引versionsにはbaked bucketのfile_upload記録のversionのみが載る(dev・family bucketのversion_idは混入しない)"
-source_lines = "tests/phase_b_options.rs:674"
+source_lines = "tests/phase_b_options.rs:696"
 
 [[condition]]
 id = "cli.backup-push-connection-dest-shown"
@@ -509,7 +524,7 @@ source = "TASK-11 body(ユーザー指示2026-10-15: 3prod bucket構成の混同
 description = "backup push(通常実行・--dry-run)は実行開始時に接続先を表示する: 実効profile名・bucket・prefix(3prod bucket構成で誤profile・誤bucketへの書き込みに気づかせるため)。表示は対象解決・S3 API呼び出しに先行して出るため、--dry-run(S3 API呼び出しなし)でも表示される (integration, fake seam)"
 given = "複数profileのaws.tomlでの、(1)--profile prod系指定の backup push --dry-run 実行 (2)--profile prod系指定の通常 backup push 実行 (3)既定(active_profile=dev)での backup push 実行"
 expect_return_shape = "いずれの実行でも接続先行(profile=・bucket=・prefix=を含む)が表示され、表示値は当該実行の実効profile(--profile指定時は指定profile・省略時はactive_profile)の値。(1)ではS3 API呼び出しは行われない"
-source_lines = "tests/phase_b_options.rs:738"
+source_lines = "tests/phase_b_options.rs:760"
 
 [[condition]]
 id = "cli.backup-push-sha-merge-no-upload"
@@ -518,7 +533,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 4.1(3a・合流)・4.3(�
 description = "sha照合合流: 所在skip不成立(移動=identity変化・mtime変化等)→暗号化→平文sha256がrun内mapまたはsha_uuid_lookup(registry)で既存uuidに命中した場合はuploadなしで合流: file_write追記(新所在・sha等)・索引locationsへ新所在追加・版増加なし・merge表示(merge <name> -> data/{uuid}/default.age (所在追加・upload省略))。run_mapへの登録で以降の同一shaも合流 (integration, fake seam)"
 given = "(1)push済み対象を別pathへ移動したもの(内容不変) (2)mtimeのみtouchしたもの、を再pushした実行"
 expect_return_shape = "いずれもdefault.ageへのPUT無し(版増加なし)でexit 0・merge表示が出て、索引の当該entity locationsが2件(移動case)・file_writeが追記され、metadataのlatest_source_pathが更新される"
-source_lines = "tests/storage_backup.rs:943"
+source_lines = "tests/storage_backup.rs:991"
 
 [[condition]]
 id = "cli.backup-push-moved-changed-new-entity"
@@ -527,7 +542,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 4.3(移動+内容変更�
 description = "移動+内容変更同時: sha不一致のため合流せず新規uuid発行(title必須)。旧実体と新実体は別entity(仕様として明記。同一物と思いたければ同titleを付ける=title重複許容) (integration, fake seam)"
 given = "push済み対象を別pathへ移動しつつ内容を変更し(title指定付き)再pushした実行"
 expect_return_shape = "新規uuidが発行されdata/{新uuid}/default.ageへupload(旧uuidのentityは不変)。索引は2entity(旧=旧所在・新=新所在)"
-source_lines = "tests/storage_backup.rs:1016"
+source_lines = "tests/storage_backup.rs:1064"
 
 [[condition]]
 id = "cli.backup-push-new-uuid-record-order"
@@ -536,7 +551,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 4.1(3b)・4.4(crash救�
 description = "新規発行の記録順序は「file_write追記 → PUT → file_upload追記」とregistry記録がS3変更(PUT)に先行する(この順序により「PUT成功後・file_write追記前」のcrash窓が構造的に存在しない=回収不能の孤児uuidを生まない)。uuidはv7・PUT応答のversion_idをfile_uploadに記録・ok表示(ok <name> -> data/{uuid}/default.age (version vid) title=<title>) (integration, fake seam)"
 given = "新規対象(title指定)のbackup push実行後のregistry行順序とS3 stateの確認"
 expect_return_shape = "registryの追記順序がfile_write(uuid/title付き・s3_key=data/{uuid}/default.age)→file_upload(version_id=PUT応答)でfile_writeの記録がPUTに先行し、uuidはUUIDv7形式・ok表示にdata/{uuid}/default.ageとversion_id・titleを含む"
-source_lines = "tests/storage_backup.rs:1067"
+source_lines = "tests/storage_backup.rs:1115"
 
 [[condition]]
 id = "cli.backup-push-crash-reput-same-uuid"
@@ -545,7 +560,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 4.1(2.5)・4.4・4.3(境
 description = "crash救済のuuid再利用: file_write一致・file_upload無し(crash残存)の対象はskipせず、sha照合・新規発行を経ずに同uuidのdefault.ageへ再PUTしfile_uploadを記録(M-1相当の冪等性・孤児uuid不発生)。crash前のPUT版は同キーの非現行版としてprune/NCVEで回収。file_writeは記録済みかつ同一内容のため再追記不要(title変更時のみfile_writeを再追記=新title・新batch_id)。re-put表示 (integration, fake seam)"
 given = "(1)file_write追記後・PUT前crash相当(file_writeのみ存在) (2)PUT成功後・file_upload追記前crash相当(S3に版があるがfile_upload無し)のregistry状態での再実行"
 expect_return_shape = "いずれも同uuidのdefault.ageへPUTが行われfile_upload記録が追記され(新規uuid不発行)、re-put表示。case2ではcrash前版は非現行版として残る(現行版は再PUT分)。title指定なし時のfile_write再追記は行われない"
-source_lines = "tests/storage_backup.rs:1124"
+source_lines = "tests/storage_backup.rs:1172"
 
 [[condition]]
 id = "cli.backup-push-crash-orphan-on-diff"
@@ -554,7 +569,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 4.4(残る限界)・10�
 description = "crash残存(PUT成功後・file_upload追記前)の後に内容が変更されたまま再実行した場合、(1)の所在指紋不一致で(2.5)は発動せず新規uuidへ進み、旧uuidのdefault.age現行版は索引非載載のまま残る。これはdiffのunexpected(索引に無いdata/配下key)として検出可能(回収は手動delete-object-version) (integration, fake seam)"
 given = "file_write+PUT済み・file_upload無しの状態で内容を変更して再push(title指定)した後のdiff実行"
 expect_return_shape = "再pushは新規uuid発行でexit 0し、diffのunexpectedに旧uuidのdata/{旧uuid}/default.ageが報告される(exit 0)"
-source_lines = "tests/storage_backup.rs:1182"
+source_lines = "tests/storage_backup.rs:1230"
 
 [[condition]]
 id = "cli.backup-push-same-sha-in-run"
@@ -563,7 +578,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 4.1(3)・4.3(同一run�
 description = "同一run内の同一sha重複: 1件目のfile_write/file_upload追記が即時に行われるため(順序処理)、2件目はrun_map(run内map優先)→registry lookupで合流する(2件目はuploadなし・merge表示)。位置引数とfrom-listの混在でも成立 (integration, fake seam)"
 given = "同一内容のfileを2箇所へcopyし(片方を位置引数・片方をfrom-listで指定)、1回のbackup pushで両方指定した実行"
 expect_return_shape = "1件目は新規発行(ok表示)・2件目は合流(merge表示・uploadなし)で、索引entityは1件(uuid同一)・locations 2件"
-source_lines = "tests/storage_backup.rs:1231"
+source_lines = "tests/storage_backup.rs:1279"
 
 [[condition]]
 id = "cli.backup-push-run-title-consistency"
@@ -572,7 +587,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 4.2(entity_titleの導�
 description = "run内title一貫: run_entity_titles(run開始時にreducedから一括初期化・file_write追記ごと更新)がrun内の正本で、同一run内で1件目のtitle変更(A→B)が2件目の同一sha合流にも反映される(reduced snapshotが旧title Aを返す非一貫を防ぐ=設計レビュー中1) (integration, fake seam)"
 given = "同一内容file 2件を1runでpushし、1件目(合流経路)で現行title AからBへのtitle変更を指定した実行"
 expect_return_shape = "2件目の合流もtitle Bで処理され(旧title Aにならない)、run後の索引entityのtitleはB・metadataキーはmetadata_B.json"
-source_lines = "tests/storage_backup.rs:1286"
+source_lines = "tests/storage_backup.rs:1334"
 
 [[condition]]
 id = "cli.backup-push-title-input"
@@ -581,7 +596,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 5.6/5.7・6.1(title入�
 description = "title入力: --from-listの[[targets]] title欄(優先)・新規uuid発行が確定した対象でtitle未指定の場合のみ対話prompt(tty時。`title: `表示しstdin 1行読込。空・validate_title違反は再要求)。非ttyでfrom-listにtitleが無い対象が新規発行になった場合は当該対象の失敗(対象エラー3)としてkeep_goingの設定に従って残対象の処理を継続する。元ファイル名からの自動導出はしない (integration, fake seam・pty)"
 given = "(1)from-list title欄指定 (2)非tty+title無し新規対象(--keep-going指定/未指定) (3)tty+title無し(promptで空入力→有効値の再入力)の各実行"
 expect_return_shape = "(1)当該titleで発行。(2)--keep-going時は当該対象のみ失敗扱いで残対象は継続(全体exitは最初のエラー区分3)・未指定時は対象エラー3で停止。(3)空入力は再要求され有効値で発行される"
-source_lines = "tests/storage_backup.rs:1331"
+source_lines = "tests/storage_backup.rs:1379"
 
 [[condition]]
 id = "cli.backup-push-title-change-on-merge"
@@ -590,7 +605,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 4.1(resolve_title)・4.2
 description = "合流・再PUT分岐でのtitle解決: 指定titleが現行titleと異なればtitle変更扱い(新file_writeに新title記録=後勝ちでentity titleが変わる+metadata新キーPUT+旧キーdelete marker)。未指定なら現行titleを継続(prompt不要)。同一title再指定は変更扱いにならない(metadataキー不変) (integration, fake seam)"
 given = "合流対象への再pushで(1)現行titleと異なるtitle指定 (2)title省略 (3)同一title再指定の各実行"
 expect_return_shape = "(1)索引entityのtitleが新titleへ変わりmetadata_{新title}.jsonがPUTされ旧キーへdelete marker (2)現行title継続(内容不変ならmetadata書換なし) (3)title変更扱いにならずmetadataキー不変"
-source_lines = "tests/storage_backup.rs:1428"
+source_lines = "tests/storage_backup.rs:1476"
 
 [[condition]]
 id = "cli.backup-push-title-duplicate-warned"
@@ -599,7 +614,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 4.1・4.2(title重複)�
 description = "title重複(別uuid同title)は許容+警告: 新規発行時のwarn_if_title_duplicateは既存entityとのtitle重複を警告表示するのみで発行は続行(titleは識別子でなくラベル・一意性はuuidが担う) (integration, fake seam)"
 given = "既存entityのtitleと同一titleを指定した新規対象のbackup push実行"
 expect_return_shape = "警告表示(重複titleの旨)が出るがexit 0で発行され、索引に同titleの2entity(uuid違い)が載る"
-source_lines = "tests/storage_backup.rs:1512"
+source_lines = "tests/storage_backup.rs:1560"
 
 [[condition]]
 id = "cli.backup-push-registry-loss-new-uuid"
@@ -608,7 +623,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 4.3(境界条件表 regi
 description = "registry喪失(索引はS3に残る)時の合流不能の許容: 合流正本がregistryのsha_uuid_lookupのため、同内容のbackupは合流できず重複uuidを発行する(許容。実害は内容重複=保存料重複と索引上の2entity。データ損失なし。以後の合流は新registry記録に対して働く) (integration, fake seam)"
 given = "push済み対象の内容・mtimeを不変のままローカルregistry.jsonlを削除して再pushした実行"
 expect_return_shape = "skipされず新規uuidが発行され(合流しない)exit 0。索引には旧・新の2entityが載り、旧entityのdefault.ageは不変"
-source_lines = "tests/storage_backup.rs:1556"
+source_lines = "tests/storage_backup.rs:1604"
 
 [[condition]]
 id = "cli.removed-options-rejected"
@@ -617,7 +632,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 6.5(廃止・縮小)・5
 description = "TASK-18廃止面の拒否: manage prune --category/--keep・list files --tree・list categories・探索のname(basename)語彙(--name)は廃止され、指定はusage error 64(未知オプション/サブコマンド扱い)。内部toolのため移行措置なし (integration)"
 given = "manage prune --category C --apply・manage prune --keep 2・list files --tree・list categories・list versions --name X の各実行"
 expect_return_shape = "いずれも exit 64(usage error)で、S3 API呼び出しは行われない"
-source_lines = "tests/storage_backup.rs:1604"
+source_lines = "tests/storage_backup.rs:1652"
 
 [[excluded]]
 item = "e2e統合シナリオ(初回push(新規発行→索引・manifest・metadata生成)→再push(skip)→touch再push(合流)→移動push(合流・locations 2)→内容変更push(新規発行)→title変更→pin add/rm→prune→reconcile→location rm→get各形態→diff(clean)の一連流れ)"

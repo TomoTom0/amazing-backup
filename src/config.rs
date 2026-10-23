@@ -1,22 +1,30 @@
 //! toml読込・厳格schema検証・struct化(設計5章config.rs・3章schema)。
+//! TASK-19 XDG配置: 規定path解決(resolve_app_paths)と、[output]廃止に伴う
+//! registry・暗号化一時物dir(旧data/out)のXDG規定path化を担う。
 
 use crate::errors::{BackupError, BackupResult};
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
-/// `configs/pipeline.toml`相当(3.2・TASK-10設計4.1)。
+/// 規定pathのapp名(XDG配置のdir名。TASK-19)。
+pub const APP_DIR_NAME: &str = "amazing-backup";
+
+/// `pipeline.toml`相当(3.2・TASK-10設計4.1)。registry・cache dirのpathはXDG規定
+/// 解決(TASK-19: [output]廃止・設定fileからは指定不可)。
 #[derive(Debug)]
 pub struct PipelineConfig {
     /// SSH ed25519公開鍵path列挙(1-of-N recipient)
     pub public_keys: Vec<std::path::PathBuf>,
-    /// 暗号化成果物の集約dir
+    /// 暗号化一時物の集約dir(XDG cache dir。旧data/out。成功run後に掃除が既定)
     pub output_dir: std::path::PathBuf,
-    /// ローカル累積registry(JSONL)path
+    /// ローカル累積registry(JSONL)path(XDG state dir)
     pub registry_path: std::path::PathBuf,
     /// per-file失敗時も継続する既定値
     pub keep_going: bool,
     /// --roundtrip検証で使う秘密鍵path
     pub decrypt_key: Option<std::path::PathBuf>,
-    /// data/out配下の.age保持policy(TASK-10設計4.1・8.3)。既定Run(成功run後に掃除)
+    /// cache dir配下の.age保持policy(TASK-10設計4.1・8.3。TASK-19で[behavior]へ移設)。
+    /// 既定Run(成功run後に掃除)
     pub keep_artifacts: KeepArtifacts,
     /// 物理配置の設定(所在記録値の分類解決用。TASK-18 5.15維持前提)
     pub layout: LayoutConfig,
@@ -24,6 +32,72 @@ pub struct PipelineConfig {
     pub metadata: MetadataConfig,
     /// 手動写像(basename → category/path)。省略時はauto_path_roots相対化へ
     pub files: std::collections::BTreeMap<String, FileMapping>,
+}
+
+/// XDG配置の規定path一式(TASK-19)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppPaths {
+    /// pipeline.tomlの規定path
+    pub pipeline_config: PathBuf,
+    /// aws.tomlの規定path
+    pub aws_config: PathBuf,
+    /// ローカルregistryの規定path
+    pub registry: PathBuf,
+    /// 暗号化一時物dirの規定path(旧data/out)
+    pub cache_dir: PathBuf,
+}
+
+/// 規定pathの解決(TASK-19 XDG配置)。優先順位:
+/// 1. `AMAZING_BACKUP_HOME`(一括上書き・テスト/CI用・空値は無視): すべて`$ABH/`配下へ
+///    統合(`$ABH/pipeline.toml`・`$ABH/aws.toml`・`$ABH/registry.jsonl`・`$ABH/cache/`)
+/// 2. XDG準拠: 設定dir=`$XDG_CONFIG_HOME/amazing-backup/`(未設定なら
+///    `~/.config/amazing-backup/`)・registry=`$XDG_STATE_HOME/amazing-backup/registry.jsonl`
+///    (未設定なら`~/.local/state/...`)・cache=`$XDG_CACHE_HOME/amazing-backup/`
+///    (未設定なら`~/.cache/...`)。XDG_*_HOMEは絶対pathのみ有効(空値・相対pathは
+///    未指定扱い。XDG base directory仕様準拠)
+pub fn resolve_app_paths() -> AppPaths {
+    resolve_app_paths_from(|k| std::env::var_os(k))
+}
+
+/// 規定path解決の本体(env取得を注入可能=unit testでenv競合なしに検証できる)。
+fn resolve_app_paths_from(getenv: impl Fn(&str) -> Option<OsString>) -> AppPaths {
+    if let Some(abh) = getenv("AMAZING_BACKUP_HOME").filter(|v| !v.is_empty()) {
+        let root = PathBuf::from(abh);
+        return AppPaths {
+            pipeline_config: root.join("pipeline.toml"),
+            aws_config: root.join("aws.toml"),
+            registry: root.join("registry.jsonl"),
+            cache_dir: root.join("cache"),
+        };
+    }
+    let config = xdg_dir_from(&getenv, "XDG_CONFIG_HOME", ".config");
+    let state = xdg_dir_from(&getenv, "XDG_STATE_HOME", ".local/state");
+    let cache = xdg_dir_from(&getenv, "XDG_CACHE_HOME", ".cache");
+    AppPaths {
+        pipeline_config: config.join(APP_DIR_NAME).join("pipeline.toml"),
+        aws_config: config.join(APP_DIR_NAME).join("aws.toml"),
+        registry: state.join(APP_DIR_NAME).join("registry.jsonl"),
+        cache_dir: cache.join(APP_DIR_NAME),
+    }
+}
+
+/// XDG_*_HOMEの解決(絶対pathのみ有効。空値・相対pathはhome配下の既定へ)。
+fn xdg_dir_from(
+    getenv: &impl Fn(&str) -> Option<OsString>,
+    env: &str,
+    fallback_rel: &str,
+) -> PathBuf {
+    match getenv(env) {
+        Some(v) if !v.is_empty() && Path::new(&v).is_absolute() => PathBuf::from(v),
+        _ => home_dir_from(getenv).join(fallback_rel),
+    }
+}
+
+fn home_dir_from(getenv: &impl Fn(&str) -> Option<OsString>) -> PathBuf {
+    getenv("HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// `[metadata]`相当(TASK-18 2.2・5.15)。
@@ -55,7 +129,7 @@ pub struct LifecycleConfig {
     pub mpu_abort_days: u32,
 }
 
-/// data/out配下の.age保持policy(TASK-10設計4.1)。
+/// cache dir配下の.age保持policy(TASK-10設計4.1。TASK-19 XDG配置で[behavior]へ移設)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeepArtifacts {
     /// run成功後に当該run分の.ageを掃除(既定)
@@ -91,7 +165,7 @@ pub struct FileMapping {
     pub path: String,
 }
 
-/// `configs/aws.toml`相当(3.3・TASK-9 9.2・TASK-10設計4.2)。credential値は含まない
+/// `aws.toml`(規定path: XDG配置)相当(3.3・TASK-9 9.2・TASK-10設計4.2)。credential値は含まない
 /// (credentialは`credentials_file`が指す外部ファイル明示参照のみ)。
 #[derive(Debug)]
 pub struct AwsConfig {
@@ -135,13 +209,12 @@ impl std::fmt::Debug for AwsCredentials {
 }
 
 /// pipeline.tomlのschema(3.2・TASK-10設計4.1。未知キー・型不一致拒否の厳格検証)。
-/// TASK-10追加分([output].keep_artifacts・[layout]・[categories]・[files])は
-/// すべて省略可能(旧config・旧サブコマンドとの併存。Phase A案a)。
+/// TASK-10追加分([layout]・[files])は省略可能。TASK-19で[output]は廃止
+/// (存在したら未知キー拒否・registry/cache dir pathはXDG規定path固定)。
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PipelineFile {
     recipients: RecipientsFile,
-    output: OutputFile,
     #[serde(default)]
     behavior: BehaviorFile,
     #[serde(default)]
@@ -170,16 +243,6 @@ struct RecipientsFile {
     public_keys: Vec<String>,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OutputFile {
-    dir: String,
-    registry: String,
-    /// "run"|"always"(省略時run)
-    #[serde(default)]
-    keep_artifacts: Option<String>,
-}
-
 /// `[layout]`のschema(TASK-10設計4.1)。
 #[derive(serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -203,6 +266,10 @@ struct FileMappingFile {
 #[serde(deny_unknown_fields)]
 struct BehaviorFile {
     keep_going: bool,
+    /// .age保持policy "run"|"always"(省略時run)。TASK-19 XDG配置で[output]廃止に伴い
+    /// [behavior]へ移設
+    #[serde(default)]
+    keep_artifacts: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -280,9 +347,19 @@ struct CredentialsSection {
 
 /// pipeline.tomlを読み、厳格schema検証(未知キー・型不一致拒否)・
 /// 空検査・公開鍵の存在とed25519形式検証・指紋重複検査(3.2)を行う。
+/// registry・cache dirのpathはXDG規定解決(TASK-19: [output]廃止・設定fileから指定不可)。
+/// 規定pathにfileが無い場合はcopy案内を添える(config.default-config-missing-guidance)。
 pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
+    let is_default_path = *path == resolve_app_paths().pipeline_config;
     let text = std::fs::read_to_string(path).map_err(|e| {
-        BackupError::Config(format!("pipeline.tomlを読めない ({}): {e}", path.display()))
+        let mut msg = format!("pipeline.tomlを読めない ({}): {e}", path.display());
+        if is_default_path {
+            msg.push_str(&format!(
+                "\n規定path({})にpipeline.tomlがありません。初回セットアップ: repoのconfigs/pipeline.example.tomlをこのpathへcopyして記述してください(--config PATHで別pathの明示指定も可)",
+                path.display()
+            ));
+        }
+        BackupError::Config(msg)
     })?;
     let parsed: PipelineFile = toml::from_str(&text).map_err(|e| {
         BackupError::Config(format!(
@@ -295,11 +372,6 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
         return Err(BackupError::Config(
             "[recipients].public_keysが空です(1つ以上のSSH ed25519公開鍵を指定してください)"
                 .to_string(),
-        ));
-    }
-    if parsed.output.dir.trim().is_empty() || parsed.output.registry.trim().is_empty() {
-        return Err(BackupError::Config(
-            "[output].dir / [output].registryは空にできません".to_string(),
         ));
     }
 
@@ -331,12 +403,12 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
         Some(std::path::PathBuf::from(parsed.verify.decrypt_key))
     };
 
-    // TASK-10設計4.1・4.2: keep_artifacts列挙値
-    let keep_artifacts = match parsed.output.keep_artifacts.as_deref() {
+    // TASK-10設計4.1・4.2: keep_artifacts列挙値(TASK-19 XDG配置で[behavior]へ移設)
+    let keep_artifacts = match parsed.behavior.keep_artifacts.as_deref() {
         None => KeepArtifacts::Run,
         Some(v) => KeepArtifacts::parse(v).ok_or_else(|| {
             BackupError::Config(format!(
-                "[output].keep_artifactsが不正です: {v:?}(許容値: run/always)"
+                "[behavior].keep_artifactsが不正です: {v:?}(許容値: run/always)"
             ))
         })?,
     };
@@ -399,10 +471,12 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
         );
     }
 
+    // registry・cache dirはXDG規定解決(TASK-19: [output]廃止・env上書きのみ)
+    let paths = resolve_app_paths();
     Ok(PipelineConfig {
         public_keys,
-        output_dir: std::path::PathBuf::from(parsed.output.dir),
-        registry_path: std::path::PathBuf::from(parsed.output.registry),
+        output_dir: paths.cache_dir,
+        registry_path: paths.registry,
         keep_going: parsed.behavior.keep_going,
         decrypt_key,
         keep_artifacts,
@@ -443,8 +517,16 @@ pub fn load_aws_profile(
     profile_name: Option<&str>,
     purpose: Option<&str>,
 ) -> BackupResult<AwsConfig> {
+    let is_default_path = *path == resolve_app_paths().aws_config;
     let text = std::fs::read_to_string(path).map_err(|e| {
-        BackupError::Config(format!("aws.tomlを読めない ({}): {e}", path.display()))
+        let mut msg = format!("aws.tomlを読めない ({}): {e}", path.display());
+        if is_default_path {
+            msg.push_str(&format!(
+                "\n規定path({})にaws.tomlがありません。初回セットアップ: repoのconfigs/aws.example.tomlをこのpathへcopyして実際の値(bucket等)を記述してください(--aws-config PATHで別pathの明示指定も可)",
+                path.display()
+            ));
+        }
+        BackupError::Config(msg)
     })?;
     let parsed: AwsFile = toml::from_str(&text).map_err(|e| {
         BackupError::Config(format!("aws.tomlのparseに失敗 ({}): {e}", path.display()))
@@ -798,7 +880,9 @@ pub fn apply_cli_overrides(base: AwsConfig, ovr: &AwsOverrides) -> BackupResult<
 mod tests {
     use super::*;
     use crate::errors::BackupError;
-    use crate::testutil::{TempDir, write_file, write_test_ed25519_pub};
+    use crate::testutil::{
+        TempDir, config_env_lock, set_amazing_backup_home, write_file, write_test_ed25519_pub,
+    };
 
     fn config_error(e: &BackupError) -> &str {
         match e {
@@ -810,11 +894,8 @@ mod tests {
     fn valid_pipeline_toml(dir: &std::path::Path, pub1: &str) -> String {
         format!(
             "[recipients]\npublic_keys = [\"{pub1}\"]\n\
-             [output]\ndir = \"{}\"\nregistry = \"{}\"\n\
              [behavior]\nkeep_going = false\n\
              [verify]\ndecrypt_key = \"{}\"\n",
-            dir.join("out").display(),
-            dir.join("registry.jsonl").display(),
             dir.join("nokey").display(),
         )
     }
@@ -831,10 +912,159 @@ mod tests {
 
         let cfg = load_pipeline(&cfg_path).expect("有効なpipeline.tomlは読み込める");
         assert_eq!(cfg.public_keys, vec![pubkey]);
-        assert_eq!(cfg.output_dir, tmp.path().join("out"));
-        assert_eq!(cfg.registry_path, tmp.path().join("registry.jsonl"));
         assert!(!cfg.keep_going);
         assert_eq!(cfg.decrypt_key, Some(tmp.path().join("nokey")));
+    }
+
+    /// [covers:config.xdg-default-paths]
+    /// 規定path解決(XDG準拠): XDG_*_HOME設定時はその配下のamazing-backup/...へ、
+    /// 未設定・空値・相対path時は~/.config等のhome配下の既定へ解決される。
+    /// registry・cache dirはload_pipelineが解決結果をPipelineConfigへ載せる
+    /// (env注入はclosureで行いprocess envとの競合を避ける)。
+    #[test]
+    fn resolve_app_paths_follows_xdg_envs() {
+        let home = std::path::PathBuf::from("/home/ut");
+        let getenv = |vars: &[(&str, &str)]| {
+            let owned: Vec<(String, String)> = vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            move |k: &str| {
+                owned
+                    .iter()
+                    .find(|(key, _)| key == k)
+                    .map(|(_, v)| std::ffi::OsString::from(v))
+            }
+        };
+
+        // 全XDG設定: 各env配下のamazing-backup/...へ
+        let p = resolve_app_paths_from(getenv(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", "/xdg/cfg"),
+            ("XDG_STATE_HOME", "/xdg/state"),
+            ("XDG_CACHE_HOME", "/xdg/cache"),
+        ]));
+        assert_eq!(
+            p.pipeline_config,
+            PathBuf::from("/xdg/cfg/amazing-backup/pipeline.toml")
+        );
+        assert_eq!(
+            p.aws_config,
+            PathBuf::from("/xdg/cfg/amazing-backup/aws.toml")
+        );
+        assert_eq!(
+            p.registry,
+            PathBuf::from("/xdg/state/amazing-backup/registry.jsonl")
+        );
+        assert_eq!(p.cache_dir, PathBuf::from("/xdg/cache/amazing-backup"));
+
+        // 全XDG未設定: home配下の既定へ
+        let p = resolve_app_paths_from(getenv(&[("HOME", home.to_str().unwrap())]));
+        assert_eq!(
+            p.pipeline_config,
+            home.join(".config/amazing-backup/pipeline.toml")
+        );
+        assert_eq!(p.aws_config, home.join(".config/amazing-backup/aws.toml"));
+        assert_eq!(
+            p.registry,
+            home.join(".local/state/amazing-backup/registry.jsonl")
+        );
+        assert_eq!(p.cache_dir, home.join(".cache/amazing-backup"));
+
+        // 空値・相対pathのXDG_*_HOMEは未指定扱い(絶対pathのみ有効)
+        for (tag, cfg_home) in [("空値", ""), ("相対path", "relative/cfg")] {
+            let p = resolve_app_paths_from(getenv(&[
+                ("HOME", home.to_str().unwrap()),
+                ("XDG_CONFIG_HOME", cfg_home),
+            ]));
+            assert_eq!(
+                p.pipeline_config,
+                home.join(".config/amazing-backup/pipeline.toml"),
+                "XDG_CONFIG_HOME({tag})は未指定扱い"
+            );
+        }
+
+        // load_pipelineは解決結果をregistry/cache dirへ載せる([output]由来ではない)
+        let _lock = config_env_lock();
+        let tmp = TempDir::new("conf-xdg-paths");
+        let _guard = set_amazing_backup_home(tmp.path());
+        let pubkey = write_test_ed25519_pub(tmp.path());
+        let cfg_path = tmp.path().join("p.toml");
+        write_file(
+            &cfg_path,
+            valid_pipeline_toml(tmp.path(), &pubkey.display().to_string()).as_bytes(),
+        );
+        let cfg = load_pipeline(&cfg_path).expect("読み込める");
+        assert_eq!(cfg.registry_path, tmp.path().join("registry.jsonl"));
+        assert_eq!(cfg.output_dir, tmp.path().join("cache"));
+    }
+
+    /// [covers:config.abh-home-override]
+    /// AMAZING_BACKUP_HOME指定時は規定pathをすべて$ABH配下へ統合(XDG_*_HOMEより優先)。
+    /// 空値は未指定扱い。
+    #[test]
+    fn resolve_app_paths_abh_overrides_all() {
+        let getenv = |vars: &[(&str, &str)]| {
+            let owned: Vec<(String, String)> = vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            move |k: &str| {
+                owned
+                    .iter()
+                    .find(|(key, _)| key == k)
+                    .map(|(_, v)| std::ffi::OsString::from(v))
+            }
+        };
+
+        // XDG系envの併設定でもABHが優先する
+        let p = resolve_app_paths_from(getenv(&[
+            ("AMAZING_BACKUP_HOME", "/abh"),
+            ("XDG_CONFIG_HOME", "/xdg/cfg"),
+            ("XDG_STATE_HOME", "/xdg/state"),
+            ("XDG_CACHE_HOME", "/xdg/cache"),
+        ]));
+        assert_eq!(p.pipeline_config, PathBuf::from("/abh/pipeline.toml"));
+        assert_eq!(p.aws_config, PathBuf::from("/abh/aws.toml"));
+        assert_eq!(p.registry, PathBuf::from("/abh/registry.jsonl"));
+        assert_eq!(p.cache_dir, PathBuf::from("/abh/cache"));
+
+        // 空値は未指定扱い(XDG規定へ解決される)
+        let p =
+            resolve_app_paths_from(getenv(&[("AMAZING_BACKUP_HOME", ""), ("HOME", "/home/ut")]));
+        assert_eq!(
+            p.pipeline_config,
+            PathBuf::from("/home/ut/.config/amazing-backup/pipeline.toml")
+        );
+    }
+
+    /// [covers:config.output-section-rejected]
+    /// [output]は廃止: 存在したら未知キー扱いの設定エラー2。
+    #[test]
+    fn load_pipeline_rejects_output_section() {
+        let tmp = TempDir::new("conf-out-reject");
+        let pubkey = write_test_ed25519_pub(tmp.path());
+        let write_cfg = |name: &str, section: &str| {
+            let p = tmp.path().join(name);
+            write_file(
+                &p,
+                (valid_pipeline_toml(tmp.path(), &pubkey.display().to_string()) + section)
+                    .as_bytes(),
+            );
+            p
+        };
+        for (name, section) in [
+            (
+                "out-dir.toml",
+                "[output]\ndir = \"out\"\nregistry = \"reg.jsonl\"\n",
+            ),
+            ("out-keep.toml", "[output]\nkeep_artifacts = \"run\"\n"),
+        ] {
+            let e = load_pipeline(&write_cfg(name, section)).unwrap_err();
+            let msg = config_error(&e);
+            assert_eq!(e.exit_code(), 2, "[output]存在({name})は設定エラー2");
+            assert!(msg.contains("output"), "未知キー名を含む: {msg}");
+        }
     }
 
     /// [covers:config.pipeline-toml-invalid-error]
@@ -1236,9 +1466,9 @@ mod tests {
         assert_eq!(cfg.region, "ap-northeast-1");
     }
 
-    /// TASK-10設計4.1の拡張schema([layout]/[categories]/[files]/keep_artifacts)を
-    /// 含むpipeline.toml本文。[output]配下へkeep_artifactsを置き、以降に[layout]・
-    /// [categories.unfiled]と追加断片(extra)を繋ぐ。
+    /// TASK-10設計4.1の拡張schema([layout]/[files]/keep_artifacts)を含むpipeline.toml
+    /// 本文。keep_artifactsは[behavior]配下(TASK-19 XDG配置で[output]廃止に伴う移設)。
+    /// 以降に[layout]と追加断片(extra)を繋ぐ。
     fn task10_pipeline_toml(
         dir: &std::path::Path,
         pub1: &str,
@@ -1252,13 +1482,10 @@ mod tests {
         };
         format!(
             "[recipients]\npublic_keys = [\"{pub1}\"]\n\
-             [output]\ndir = \"{}\"\nregistry = \"{}\"\n{keep_line}\
-             [behavior]\nkeep_going = false\n\
+             [behavior]\nkeep_going = false\n{keep_line}\
              [verify]\ndecrypt_key = \"{}\"\n\
              [layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [\"/home/tomo/data\"]\n\
              {extra}",
-            dir.join("out").display(),
-            dir.join("registry.jsonl").display(),
             dir.join("nokey").display(),
         )
     }
@@ -1514,8 +1741,8 @@ mod tests {
     }
 
     /// [covers:config.keep-artifacts-enum]
-    /// [output].keep_artifactsは列挙値 "run"|"always"(省略時はrun既定)。
-    /// その他の値は設定エラー2。
+    /// [behavior].keep_artifactsは列挙値 "run"|"always"(省略時はrun既定)。
+    /// TASK-19 XDG配置で[output]廃止に伴い[behavior]へ移設。その他の値は設定エラー2。
     #[test]
     fn load_pipeline_validates_keep_artifacts_enum() {
         let tmp = TempDir::new("conf-t10-keepart");

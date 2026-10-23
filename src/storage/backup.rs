@@ -53,15 +53,16 @@ pub enum BackupSub {
         tier: Option<String>,
         #[arg(long)]
         days: Option<u32>,
+        /// 出力dir(必須: 省略はusage 64。<out>/<title>へ配置)
         #[arg(long)]
-        out: Option<PathBuf>,
+        out: PathBuf,
         #[arg(long)]
         dry_run: bool,
         /// 確認を省略(非TTYでは必須)
         #[arg(long)]
         yes: bool,
     },
-    /// ローカル整合検査(registry・data/outのrun成果物)
+    /// ローカル整合検査(registry・cache dirのrun成果物)
     Verify {
         #[command(flatten)]
         ctx: CtxArgs,
@@ -101,7 +102,7 @@ pub fn cmd_backup(args: &BackupArgs) -> i32 {
             *all,
             tier.as_deref(),
             days.to_owned(),
-            out.as_deref(),
+            out,
             *dry_run,
             *yes,
         ),
@@ -270,14 +271,9 @@ fn cmd_backup_push(
         return e.exit_code();
     }
     let run = (|| -> BackupResult<i32> {
-        let cfg = match &ctx.config {
-            Some(p) => config::load_pipeline(p)?,
-            None => {
-                return Err(BackupError::Config(
-                    "backup pushには--config(pipeline.toml)が必要です".to_string(),
-                ));
-            }
-        };
+        // pipeline.tomlは必須経路。--config省略時はXDG規定path(TASK-19)を読む
+        // (不在はcopy案内付き設定エラー2)
+        let cfg = config::load_pipeline(&super::pipeline_config_path(&ctx.config))?;
         let aws = load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
         // 正本profile(active_profile)のbucket(bucket一致規則の正本側)
         let canonical_bucket = config::canonical_bucket(&super::aws_config_path(&ctx.aws_config))?;
@@ -799,8 +795,9 @@ fn cmd_backup_push(
             }
         }
 
-        // data/out掃除(keep_artifacts="run"・run成功時のみ)。掃除対象は当該run分
-        // (<batch_id> dir)のみ(旧経路産物・失敗runの残りを消さない)
+        // cache dir掃除(keep_artifacts="run"・run成功時のみ。TASK-19 XDG配置の暗号化
+        // 一時物dir)。掃除対象は当該run分(<batch_id> dir)のみ(旧経路産物・失敗runの
+        // 残りを消さない)
         if failed == 0 && matches!(cfg.keep_artifacts, config::KeepArtifacts::Run) {
             let _ = std::fs::remove_dir_all(&run_dir);
         }

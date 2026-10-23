@@ -29,7 +29,7 @@ fn bin_and_lib_entrypoint_parity() {
     let bad_cfg = tmp.path().join("pipeline.toml");
     write_file(
         &bad_cfg,
-        b"[recipients]\npublic_keys = []\n[output]\ndir = \"out\"\nregistry = \"reg.jsonl\"\n[behavior]\nkeep_going = false\n",
+        b"[recipients]\npublic_keys = []\n[behavior]\nkeep_going = false\n",
     );
     // 対象エラー3用の正常pipeline(実在する鍵)とaws.toml
     let (public, _secret) = generate_ed25519_keypair(tmp.path(), "k1");
@@ -37,7 +37,7 @@ fn bin_and_lib_entrypoint_parity() {
     write_file(
         &ok_cfg,
         format!(
-            "[recipients]\npublic_keys = [\"{}\"]\n[output]\ndir = \"out\"\nregistry = \"reg.jsonl\"\n[behavior]\nkeep_going = false\n",
+            "[recipients]\npublic_keys = [\"{}\"]\n[behavior]\nkeep_going = false\n",
             public.display()
         )
         .as_bytes(),
@@ -142,4 +142,25 @@ fn old_subcommands_are_removed() {
         "backupは--helpに現れる: {stdout}"
     );
     assert!(stdout.contains("get"), "getは--helpに現れる: {stdout}");
+}
+
+/// [covers:cli.restore-out-required-usage-error]
+/// get/backup pullの--out(出力dir)は必須(TASK-19 XDG配置): 省略時はusage error 64
+/// (引数検査は設定読込・S3 API呼び出しより前)。旧既定data/restoreは廃止。
+#[test]
+fn restore_out_option_is_required_usage_error() {
+    for (tag, args) in [
+        ("get --outなし", vec!["get", "a.zip"]),
+        (
+            "backup pull --outなし",
+            vec!["backup", "pull", "--all", "--yes"],
+        ),
+    ] {
+        let (code, stdout, stderr) = run_bin(&args);
+        assert_eq!(
+            code, 64,
+            "{tag}はusage error 64(設定読込より前): {stdout}{stderr}"
+        );
+        assert!(stderr.contains("--out"), "{tag}: --out必須の表示: {stderr}");
+    }
 }

@@ -47,15 +47,16 @@
 #     が存続し、CLI一時上書きは--profile(cli.profile-*)へ集約)
 #   文言改訂(廃止しない)7件: 共通経路をbackup push経由へ改訂。
 #   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseのまま。
+# 2026-10-23: TASK-19(XDG配置移行)対応でexcluded記載内のdata/out語彙を修正(旧data/out→現XDG cache dir)。
 
 [meta]
 feature = "upload"
 source_file = "src/s3.rs"
 verified = true
-verified_at = "2026-10-22"
+verified_at = "2026-10-23"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "613bc9596fe66943ccabf1c7bc37d9446b590b4c"
+source_hash = "ffc98d6beef20e34a0f3a021dd1f4c24e52b1f33"
 note = "S3転送(S3Backend::put・multipart・checksum)とbackend選択(seam・env警告)の条件群。TASK-11(Phase B)で旧uploadサブコマンドが削除され、S3転送はbackup push経路で検証する(実APIはsrc/s3.rsのRealS3/FakeS3)。source_fileをsrc/s3.rsへ変更(旧src/uploader.rsの旧CLI統括run_uploadは削除対象)"
 
 [[condition]]
@@ -143,7 +144,7 @@ decided_at = "2026-10-13"
 decided_by = "claude"
 
 [[excluded]]
-item = "TASK-10設計7.1: your-dev-bucket既存object(2026-10-14バッチ1件)の削除による離脱とregistry・data/outの初期化"
+item = "TASK-10設計7.1: your-dev-bucket既存object(2026-10-14バッチ1件)の削除による離脱とregistry・暗号化一時物dir(旧data/out・現XDG cache dir)の初期化"
 source = "tmp/tasks/tm-10/design_s3_storage.md 7.1"
 reason = "aws cli(aws s3 rm)による手作業+docs記載の手順書(移行作業)であり検証対象コードの振る舞い条件ではない"
 decided_at = "2026-10-14"

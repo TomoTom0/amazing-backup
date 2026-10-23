@@ -638,9 +638,13 @@ fn reset_run_cwd(
     args.push(fx.secret.display().to_string());
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let state_s = fx.state.display().to_string();
+    let home_s = fx.home.display().to_string();
     run_bin_cwd(
         &refs,
-        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())],
+        &[
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+            ("AMAZING_BACKUP_HOME", home_s.as_str()),
+        ],
         cwd,
     )
 }

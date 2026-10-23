@@ -3,7 +3,6 @@
 use super::CtxArgs;
 use crate::config;
 use crate::errors::{BackupError, BackupResult};
-use std::path::PathBuf;
 
 #[derive(clap::Args, Debug)]
 pub struct EditArgs {
@@ -14,11 +13,8 @@ pub struct EditArgs {
 
 pub fn cmd_edit(args: &EditArgs) -> i32 {
     let run = (|| -> BackupResult<i32> {
-        let cfg_path = args
-            .ctx
-            .config
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("configs/pipeline.toml"));
+        // --config省略時はXDG規定path(TASK-19)
+        let cfg_path = super::pipeline_config_path(&args.ctx.config);
         let cfg = config::load_pipeline(&cfg_path)?;
         match args.target.as_str() {
             "metadata" => {
@@ -59,13 +55,14 @@ pub fn cmd_edit(args: &EditArgs) -> i32 {
             }
             "policy" => {
                 println!(
-                    "[output] keep_artifacts = {:?}",
+                    "[behavior] keep_artifacts = {:?}(cache dir({})配下のrun成果物)",
                     match cfg.keep_artifacts {
                         config::KeepArtifacts::Run => "run",
                         config::KeepArtifacts::Always => "always",
-                    }
+                    },
+                    cfg.output_dir.display()
                 );
-                println!("保持数(lifecycle)はconfigs/aws.toml [aws.lifecycle]で管理します");
+                println!("保持数(lifecycle)はaws.toml(規定path)の[aws.lifecycle]で管理します");
             }
             other => {
                 return Err(BackupError::Usage(format!(

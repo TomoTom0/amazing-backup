@@ -6,9 +6,6 @@
 use crate::errors::BackupResult;
 use std::path::{Path, PathBuf};
 
-/// 既定のpipeline設定path(2章各表)。
-const DEFAULT_PIPELINE_CONFIG: &str = "configs/pipeline.toml";
-
 /// サブコマンド引数定義(2章各表)。
 #[derive(clap::Parser)]
 #[command(name = "amazing-backup", version)]
@@ -56,10 +53,11 @@ fn parse_date_arg(s: &str) -> Result<String, String> {
 }
 
 /// 設定読込の共通部。失敗時はstderrへ出力してNone。
+/// --config省略時はXDG規定path(TASK-19: resolve_app_paths)を読む。
 fn load_config_or_exit(config: &Option<PathBuf>) -> Option<crate::config::PipelineConfig> {
     let path = config
         .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_PIPELINE_CONFIG));
+        .unwrap_or_else(|| crate::config::resolve_app_paths().pipeline_config);
     match crate::config::load_pipeline(&path) {
         Ok(cfg) => Some(cfg),
         Err(e) => {
@@ -190,12 +188,13 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
         })
         .collect();
 
-    // 掃除済みrunの除外(M-1): keep_artifacts="run"既定では成功run末尾にdata/out/<batch_id>/
-    // が掃除されるため、file_write記録のage_path実ファイル・run manifest実ファイルは
-    // 存在しない。当該batchのindex_upload成功記録(成功run末尾の索引更新が完了した事実)が
-    // あり・run成果物dirが不在のbatchは「掃除済み・検査対象外」として構造検査・
-    // --checksum・--roundtripの対象から除外する(成功run直後のverifyが必ずexit 4に
-    // ならないように。run成果物が残っているbatchは従来どおり検査対象)。
+    // 掃除済みrunの除外(M-1): keep_artifacts="run"既定では成功run末尾にcache dir(TASK-19
+    // XDG配置の暗号化一時物dir)配下の<batch_id>/が掃除されるため、file_write記録の
+    // age_path実ファイル・run manifest実ファイルは存在しない。当該batchのindex_upload
+    // 成功記録(成功run末尾の索引更新が完了した事実)があり・run成果物dirが不在のbatchは
+    // 「掃除済み・検査対象外」として構造検査・--checksum・--roundtripの対象から除外する
+    // (成功run直後のverifyが必ずexit 4にならないように。run成果物が残っているbatchは
+    // 従来どおり検査対象)。
     let index_uploaded_batches: std::collections::HashSet<&str> = records
         .iter()
         .filter_map(|r| match r {
@@ -615,10 +614,12 @@ pub fn run(argv: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
 mod tests {
     use super::*;
     use crate::testutil::{
-        TEST_ED25519_FINGERPRINT, TempDir, path_env_lock, set_path_env, write_file,
-        write_test_ed25519_pub,
+        TEST_ED25519_FINGERPRINT, TempDir, config_env_lock, path_env_lock, set_amazing_backup_home,
+        set_path_env, write_file, write_test_ed25519_pub,
     };
 
+    /// pipeline.toml fixture(TASK-19 XDG配置後のschema: [output]無し。
+    /// registry・cache dirはAMAZING_BACKUP_HOME解決のためtest側でset_amazing_backup_home)。
     fn pipeline_toml(dir: &Path) -> PathBuf {
         let pubkey = write_test_ed25519_pub(dir);
         let p = dir.join("pipeline.toml");
@@ -626,12 +627,9 @@ mod tests {
             &p,
             format!(
                 "[recipients]\npublic_keys = [\"{}\"]\n\
-                 [output]\ndir = \"{}\"\nregistry = \"{}\"\n\
                  [behavior]\nkeep_going = false\n\
                  [verify]\ndecrypt_key = \"{}\"\n",
                 pubkey.display(),
-                dir.join("out").display(),
-                dir.join("registry.jsonl").display(),
                 dir.join("unused-key").display(),
             )
             .as_bytes(),
@@ -659,6 +657,8 @@ mod tests {
     #[test]
     fn exit_code_mapping_representative_cases() {
         let tmp = TempDir::new("cli-codes");
+        let _env_lock = config_env_lock();
+        let _abh = set_amazing_backup_home(tmp.path());
 
         // 2: 設定エラー(不在のpipeline.tomlでbackup push)
         let code = run([
@@ -804,6 +804,8 @@ mod tests {
     #[test]
     fn verify_structure_check_ok() {
         let tmp = TempDir::new("cli-verok");
+        let _env_lock = config_env_lock();
+        let _abh = set_amazing_backup_home(tmp.path());
         let _ = verify_fixture(tmp.path());
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp.path())),
@@ -822,6 +824,8 @@ mod tests {
     #[test]
     fn verify_detects_missing_and_size_mismatch() {
         let tmp = TempDir::new("cli-vermiss");
+        let _env_lock = config_env_lock();
+        let _abh = set_amazing_backup_home(tmp.path());
         // case 1: .age欠損
         let (_, age, _) = verify_fixture(tmp.path());
         std::fs::remove_file(&age).expect("remove");
@@ -836,6 +840,7 @@ mod tests {
 
         // case 2: age_sizeと異なる実sizeの.age(記録値を超過・追記)
         let tmp2 = TempDir::new("cli-versize");
+        let _abh2 = set_amazing_backup_home(tmp2.path());
         let (_, age, _) = verify_fixture(tmp2.path());
         let mut appended = std::fs::read(&age).expect("age read");
         appended.push(b'X');
@@ -851,6 +856,7 @@ mod tests {
 
         // case 3: 実sizeが記録値未満(切り詰め)。ヘッダ部は壊さずpayload末尾を1byte切り詰める
         let tmp3 = TempDir::new("cli-vershort");
+        let _abh3 = set_amazing_backup_home(tmp3.path());
         let (_, age, _) = verify_fixture(tmp3.path());
         let bytes = std::fs::read(&age).expect("age read");
         write_file(&age, &bytes[..bytes.len() - 1]);
@@ -878,6 +884,8 @@ mod tests {
 
         // (a) 正recipient: 記録指紋から導出したprefixと一致するstanza 1つ → exit 0
         let tmp = TempDir::new("cli-verbij-a");
+        let _env_lock = config_env_lock();
+        let _abh = set_amazing_backup_home(tmp.path());
         let _ = verify_fixture(tmp.path());
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp.path())),
@@ -890,6 +898,9 @@ mod tests {
 
         // (b) 誤recipient指紋: .ageのstanzaはrightのprefix・registry記録はwrongの指紋 → exit 4
         let tmp = TempDir::new("cli-verbij-b");
+        // 直列化lockは(a)で取得済み(同一関数内のため再取得するとdeadlockする)。
+        // ABHのみ当該subcaseのtmpへ向け直す(名前を分けてshadowing dropを避ける)。
+        let _abh_b = set_amazing_backup_home(tmp.path());
         let _ = verify_fixture_with(
             tmp.path(),
             &synthetic_age_bytes(&[prefix_of_fingerprint(&right)]),
@@ -906,6 +917,7 @@ mod tests {
 
         // (c) stanza数不一致: ヘッダ2 stanza(right・wrongのprefix) vs 記録1指紋(right) → exit 4
         let tmp = TempDir::new("cli-verbij-c");
+        let _abh_c = set_amazing_backup_home(tmp.path());
         let _ = verify_fixture_with(
             tmp.path(),
             &synthetic_age_bytes(&[prefix_of_fingerprint(&right), prefix_of_fingerprint(&wrong)]),
@@ -928,6 +940,8 @@ mod tests {
         // 同サイズの内容改変(size検査では拾えずchecksum再計算で検出。
         // ヘッダ部は壊さずpayload末尾byteを反転)
         let tmp = TempDir::new("cli-verck");
+        let _env_lock = config_env_lock();
+        let _abh = set_amazing_backup_home(tmp.path());
         let (_, age, _) = verify_fixture(tmp.path());
         let mut flipped = std::fs::read(&age).expect("age read");
         let last = flipped.len() - 1;
@@ -944,6 +958,7 @@ mod tests {
 
         // byte追加(givenのシナリオ)
         let tmp2 = TempDir::new("cli-verck2");
+        let _abh2 = set_amazing_backup_home(tmp2.path());
         let (_, age, _) = verify_fixture(tmp2.path());
         let mut appended = std::fs::read(&age).expect("age read");
         appended.push(b'X');
@@ -962,8 +977,11 @@ mod tests {
     /// verifyはaws CLI不在・aws.toml不在でも完結する(外部バイナリ不要をPATH排除で担保)。
     #[test]
     fn verify_runs_without_aws() {
+        // config_env_lockはpath_env_lockと同一のため1回の取得で足りる
+        // (PATH・AMAZING_BACKUP_HOME両方の書換えをこのlockで直列化)
         let _lock = path_env_lock();
         let tmp = TempDir::new("cli-vernoaws");
+        let _abh = set_amazing_backup_home(tmp.path());
         let _ = verify_fixture(tmp.path());
         let empty_bin = tmp.path().join("empty-bin");
         std::fs::create_dir_all(&empty_bin).expect("empty bin");
@@ -1036,6 +1054,8 @@ mod tests {
     fn verify_roundtrip_env_error_is_exit_2() {
         // 1. 秘密鍵file不在
         let tmp = TempDir::new("cli-verenv");
+        let _env_lock = config_env_lock();
+        let _abh = set_amazing_backup_home(tmp.path());
         let _ = verify_fixture(tmp.path());
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp.path())),
@@ -1046,9 +1066,10 @@ mod tests {
         });
         assert_eq!(code, 2, "秘密鍵file不在は設定・環境エラー2");
 
-        // 2. 秘密鍵fileは在るがageバイナリ不在(空PATH)
-        let _lock = path_env_lock();
+        // 2. 秘密鍵fileは在るがageバイナリ不在(空PATH。lockは上で取得済み=
+        // config_env_lockと同一のため再取得しない)
         let tmp2 = TempDir::new("cli-verenv2");
+        let _abh2 = set_amazing_backup_home(tmp2.path());
         let _ = verify_fixture(tmp2.path());
         let key_file = tmp2.path().join("key-file");
         write_file(&key_file, b"dummy-secret");

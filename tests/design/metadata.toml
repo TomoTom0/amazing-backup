@@ -5,15 +5,17 @@
 #   metadataは data/{uuid}/metadata_{title}.json(平文JSON・STANDARD固定・versioning対象で非現行版は
 #   data/一括NCVEで自動掃除)。sync契機はbackup push run末尾(touched_entities)・pin add/rm・location rm。
 #   実装前のため条件に対応するテストコードは未作成(網羅検査は後段のテスト作成で解消)。
+# 2026-10-23: TASK-19(XDG配置移行)対応で語彙修正(conditions本文のconfigs/pipeline.toml→pipeline.toml。
+#   設定file配置はXDG規定pathへ移行したため。振る舞い条件の変更なし)。
 
 [meta]
 feature = "metadata"
 source_file = "src/metadata.rs"
 verified = true
-verified_at = "2026-10-22"
+verified_at = "2026-10-23"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "5a7c81ec2742575f4a8c5f5a46288f440d016251"
+source_hash = "8558b12c2877e0554ac9d253010fca97b49064fd"
 note = "TASK-18(設計2章・5.5本文)の条件化。metadataはregistry reduceから正規形として導出できる実体の身元票(災害時にS3コンソールだけで実体を同定する目的・平文JSON)。書込観測はfake seamのPutObject/GetObject呼び出し記録で行う。encrypted版latest_source_pathは実ageでの暗号化を要する"
 
 [[condition]]
@@ -38,7 +40,7 @@ source_lines = "tests/metadata_storage.rs:157"
 id = "metadata.latest-source-path-modes"
 target_function = "metadata::build_metadata(latest_source_path) / encrypt_path"
 source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 2.2(latest_source_pathの3形態・承認事項11)・5.5・10章(metadata sync)"
-description = "latest_source_pathはconfigs/pipeline.toml [metadata].latest_source_path設定に従い3形態: \"none\"=null・\"plain\"(既定)=path文字列そのまま・\"encrypted\"=object{format:\"age\", recipients:[指紋列], sha256:暗号文blobのsha256 hex64, data:暗号文blobのbase64}。暗号化はcrypto::encrypt_bytes(tmp経由のage)でpath文字列(UTF-8)を暗号化し、鍵はpipeline.tomlのpublic_keysと同一(recipients指紋列は鍵特定用に一緒に記録)。復号は通常運用では不要(get等の経路では読まない) (integration, 実age・fake seam)"
+description = "latest_source_pathはpipeline.toml [metadata].latest_source_path設定に従い3形態: \"none\"=null・\"plain\"(既定)=path文字列そのまま・\"encrypted\"=object{format:\"age\", recipients:[指紋列], sha256:暗号文blobのsha256 hex64, data:暗号文blobのbase64}。暗号化はcrypto::encrypt_bytes(tmp経由のage)でpath文字列(UTF-8)を暗号化し、鍵はpipeline.tomlのpublic_keysと同一(recipients指紋列は鍵特定用に一緒に記録)。復号は通常運用では不要(get等の経路では読まない) (integration, 実age・fake seam)"
 given = "同一registry・[metadata].latest_source_pathの3設定値それぞれでのbuild_metadata(encryptedは実ageで暗号化)"
 expect_return_shape = "noneはlatest_source_pathがnull。plainはpath文字列。encryptedはformat=ageのobject(recipientsに指紋列・sha256・base64 dataを含み、dataを秘密鍵で復号すると元path文字列に一致)"
 source_lines = "tests/metadata_storage.rs:217"

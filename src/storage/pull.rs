@@ -1,11 +1,12 @@
 //! backup pull(一括復元・設計3.2)。復元job発行+取得+検証+復号。平文衝突保護は
 //! getと同一規則(sha一致skip・不一致は--yesなしで対象エラー3)。
+//! --out(出力dir)は必須(TASK-19 XDG配置: 旧既定data/restoreは廃止)。
 
 use super::get::{FetchTarget, RestoreCheck, ensure_restored, resolve_tier_days, restore_guidance};
 use super::{CtxArgs, open_session, read_index, resolve_key};
 use crate::errors::{BackupError, BackupResult};
 use std::io::IsTerminal as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_backup_pull(
@@ -15,7 +16,7 @@ pub(crate) fn cmd_backup_pull(
     all: bool,
     tier: Option<&str>,
     days: Option<u32>,
-    out: Option<&Path>,
+    out: &Path,
     dry_run: bool,
     yes: bool,
 ) -> i32 {
@@ -104,9 +105,7 @@ pub(crate) fn cmd_backup_pull(
             println!("plan: {}件 (dry-run)", targets.len());
             return Ok(0);
         }
-        let out_dir = out
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("data/restore"));
+        let out_dir = out.to_path_buf();
         let mut pending = 0usize;
         let mut ok = 0usize;
         let mut skipped = 0usize;

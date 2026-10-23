@@ -1,3 +1,7 @@
+# 実運用用のpipeline.toml(XDG配置後の正本は ~/.config/amazing-backup/pipeline.toml。
+# このrepo側のfileは移行時の写し元・configs/pipeline.example.tomlはtemplate)。
+# 相対pathは実行時のcwd基準。
+
 [recipients]
 # SSH ed25519公開鍵のpath列挙(1-of-N。全鍵で暗号化し、いずれか1鍵で復号可能)
 # 相対pathはrepo root(cwd)基準。1つ以上必須。ed25519形式のみ許容
@@ -6,15 +10,11 @@ public_keys = [
   "configs/secret/keys/private/backup_ed25519_2nd.pub",
 ]
 
-[output]
-# 暗号化成果物の集約dir。配下に <batch_id>/<name>.age と <batch_id>/manifest.jsonl.age ができる
-dir = "data/out"
-# ローカル累積registry(JSONL)
-registry = "data/registry.jsonl"
-
 [behavior]
 # per-file失敗時も継続する既定値(CLIの--keep-goingで上書きon)
 keep_going = false
+# 暗号化一時物(cache dir)の保持policy。 "run"(既定) | "always"
+# keep_artifacts = "run"
 
 [verify]
 # --roundtrip検証で使う秘密鍵path(秘密そのものではなくpath参照。configs/secret/はgitignore済み)

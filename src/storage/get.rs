@@ -1,5 +1,6 @@
 //! get <name>(設計3.1・TASK-10/11)。取得(単一file中心。未復元なら復元job発行を内包)。
 //! 事前検査(--key・ageバイナリ)は索引GETより前(restore.download-preflight-errors)。
+//! --out(出力dir)は必須(TASK-19 XDG配置: 旧既定data/restoreは廃止)。
 //! 平文衝突保護(restore.download-plain-conflict): 出力先に既存平文がありsha256が
 //! 取得対象のsource_sha256と一致→skip(冪等)・不一致→上書きせず対象エラー3
 //! (--yes指定時のみ上書き)。既存平文の読込失敗(sha256検証不能)も不一致同様に
@@ -36,9 +37,9 @@ pub struct GetArgs {
     /// ピン留め版の取得
     #[arg(long = "pin")]
     pub pin: Option<String>,
-    /// 取得先dir(既定 data/restore)
+    /// 取得先dir(必須: 省略はusage 64。<out>/<title>へ配置)
     #[arg(long)]
-    pub out: Option<PathBuf>,
+    pub out: PathBuf,
     #[arg(long)]
     pub tier: Option<String>,
     #[arg(long)]
@@ -96,10 +97,8 @@ fn run_get(args: &GetArgs) -> BackupResult<i32> {
     let session = open_session(&args.ctx)?;
     let key_path = resolve_key(&args.ctx, session.cfg.as_ref())?;
     preflight_decrypt_env(&key_path)?;
-    let out_dir = args
-        .out
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("data/restore"));
+    // --outは必須(TASK-19: 旧既定data/restoreは廃止)
+    let out_dir = args.out.clone();
 
     // 平文衝突の事前検査(ローカルregistryで判定できる場合はS3 API呼び出しなしで
     // skip・衝突を確定させる。registryが無い災害時等は通常経路へ続行)

@@ -426,6 +426,7 @@ fn endpoint_url_env_warns_on_stderr() {
         write_file(&a, b"endpoint-plain");
         // 新規発行のtitle必須(設計6.1)のためpty promptで与える(env付き)
         let state_s = fx.state.display().to_string();
+        let home_s = fx.home.display().to_string();
         let Some((code, output)) = run_bin_pty_stdin(
             &[
                 "backup",
@@ -438,6 +439,7 @@ fn endpoint_url_env_warns_on_stderr() {
             ],
             &[
                 ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+                ("AMAZING_BACKUP_HOME", home_s.as_str()),
                 (env_name, "http://127.0.0.1:19000"),
             ],
             "endpoint-title",

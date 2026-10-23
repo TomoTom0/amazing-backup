@@ -2,7 +2,9 @@
 //! uuid完全一致>・pin keyはdata/{uuid}/{pin}.age。実行後に索引再構築+metadata sync。
 
 use super::get::{RestoreCheck, ensure_restored, find_entry, restore_guidance, select_version};
-use super::{CtxArgs, now_jst, open_session, read_index, require_versioning, resolve_key};
+use super::{
+    CtxArgs, now_jst, open_session_with_pipeline, read_index, require_versioning, resolve_key,
+};
 use crate::errors::{BackupError, BackupResult};
 use crate::index::IndexPin;
 use crate::registry;
@@ -62,14 +64,10 @@ fn cmd_pin_add(ctx: &CtxArgs, name: &str, version: Option<&str>, as_pin: Option<
         return e.exit_code();
     }
     let run = (|| -> BackupResult<i32> {
-        // registryへの記録を要するため--config必須。S3変更(copy_object)より前に解決して
-        // おく(M-4: copy後にregistry解決失敗するとwrite-once滞留で手詰まりになる)
-        if ctx.config.is_none() {
-            return Err(BackupError::Config(
-                "pin addには--config(pipeline.toml・registry記録先)が必要です".to_string(),
-            ));
-        }
-        let session = open_session(ctx)?;
+        // registryへの記録を要するためpipeline.toml解決が必須。S3変更(copy_object)より
+        // 前に解決しておく(M-4: copy後にregistry解決失敗するとwrite-once滞留で手詰まりに
+        // なる)。--config省略時はXDG規定path(TASK-19)を読む
+        let session = open_session_with_pipeline(ctx)?;
         let key_path = resolve_key(ctx, session.cfg.as_ref())?;
         let registry_path = session
             .cfg
@@ -162,13 +160,9 @@ fn cmd_pin_add(ctx: &CtxArgs, name: &str, version: Option<&str>, as_pin: Option<
 
 fn cmd_pin_rm(ctx: &CtxArgs, name: &str, pin_name: &str) -> i32 {
     let run = (|| -> BackupResult<i32> {
-        // registryへの記録を要するため--config必須(S3変更より前に解決・M-4)
-        if ctx.config.is_none() {
-            return Err(BackupError::Config(
-                "pin rmには--config(pipeline.toml・registry記録先)が必要です".to_string(),
-            ));
-        }
-        let session = open_session(ctx)?;
+        // registryへの記録を要するためpipeline.toml解決が必須(S3変更より前に解決・M-4。
+        // --config省略時はXDG規定path(TASK-19)を読む)
+        let session = open_session_with_pipeline(ctx)?;
         let key_path = resolve_key(ctx, session.cfg.as_ref())?;
         let registry_path = session
             .cfg

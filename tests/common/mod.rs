@@ -337,7 +337,10 @@ pub struct StorageFixture {
     /// tmp dirの生存保持(Dropで削除されるためパスは各fieldから参照)
     #[allow(dead_code)]
     tmp: TestDir,
-    /// pipeline.toml(新schema: [layout]/[categories]/[files]/keep_artifacts込み)
+    /// AMAZING_BACKUP_HOME(TASK-19 XDG配置: 規定path一括上書きの統合root。
+    /// pipeline.toml・aws.toml・registry.jsonl・cache/がこの配下へ解決される)
+    pub home: PathBuf,
+    /// pipeline.toml(新schema: [layout]/[files]/[metadata]/[behavior]込み)
     pub cfg: PathBuf,
     pub aws_toml: PathBuf,
     /// fake S3 state dir
@@ -348,7 +351,7 @@ pub struct StorageFixture {
     pub secret: PathBuf,
     /// ageバイナリ(read_index/rewrite_indexで使用)
     pub age: PathBuf,
-    /// 暗号化成果物dir(data/out相当)
+    /// 暗号化一時物dir($ABH/cache。XDG配置のcache dir相当・旧data/out)
     pub out_dir: PathBuf,
     pub registry: PathBuf,
     /// auto_path_rootsの既定root
@@ -365,7 +368,7 @@ pub struct StorageFixture {
 pub struct StorageOpts {
     /// profileのstorage_class(既定 STANDARD=get即時可能。DA経路は DEEP_ARCHIVE)
     pub storage_class: &'static str,
-    /// [output].keep_artifacts(既定 "run"=成功後data/out掃除)
+    /// [output].keep_artifacts(既定 "run"=成功後cache dir掃除)
     pub keep_artifacts: &'static str,
     /// [categories]へ追記するtoml断片(unfiledは常に入る)
     pub categories: String,
@@ -410,9 +413,14 @@ impl StorageFixture {
             return None;
         }
         let tmp = TestDir::new(tag);
+        // TASK-19 XDG配置: 規定pathはAMAZING_BACKUP_HOMEで$ABH配下へ統合されるため、
+        // fixtureはhome dirへ pipeline.toml・aws.toml・registry.jsonl・cache/ を配置する
+        // (bin実行には常時AMAZING_BACKUP_HOME=<home>を渡す=registry/cacheの解決先を固定)
+        let home = tmp.path().join("abh");
+        std::fs::create_dir_all(&home).expect("ABH home dir");
         let (public, secret) = generate_ed25519_keypair(tmp.path(), "k1");
-        let out_dir = tmp.path().join("out");
-        let registry = tmp.path().join("registry.jsonl");
+        let out_dir = home.join("cache");
+        let registry = home.join("registry.jsonl");
         let data_root = tmp.path().join("data");
         std::fs::create_dir_all(&data_root).expect("data root dir");
         let elsewhere = tmp.path().join("elsewhere");
@@ -433,26 +441,30 @@ impl StorageFixture {
         } else {
             format!("[categories.unfiled]\nkeep = 5\n{}", opts.categories)
         };
+        // [output]はTASK-19(XDG配置)で廃止(存在時設定エラー2)。registry・暗号化一時物dir
+        // のpathはXDG規定(AMAZING_BACKUP_HOME)解決となりpipeline.tomlからは指定しない。
+        // keep_artifactsは[behavior].keep_artifactsへ移設。
+        let keep_line = if opts.keep_artifacts.is_empty() {
+            String::new()
+        } else {
+            format!("keep_artifacts = \"{}\"\n", opts.keep_artifacts)
+        };
         let cfg_body = format!(
             "[recipients]\npublic_keys = [\"{}\"]\n\
-             [output]\ndir = \"{}\"\nregistry = \"{}\"\nkeep_artifacts = \"{}\"\n\
-             [behavior]\nkeep_going = false\n\
+             [behavior]\nkeep_going = false\n{keep_line}\
              [verify]\ndecrypt_key = \"{}\"\n\
              [layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [{roots_toml}]\n\
              {categories_part}{}{}",
             public.display(),
-            out_dir.display(),
-            registry.display(),
-            opts.keep_artifacts,
             secret.display(),
             opts.files,
             opts.metadata_section,
         );
-        let cfg = tmp.path().join("pipeline.toml");
+        let cfg = home.join("pipeline.toml");
         write_file(&cfg, cfg_body.as_bytes());
 
         let credentials = write_fake_credentials(tmp.path());
-        let aws_toml = tmp.path().join("aws.toml");
+        let aws_toml = home.join("aws.toml");
         let prefix = "amazing-backup/".to_string();
         let mut body =
             storage_aws_toml_body("it-bucket", &prefix, opts.storage_class, &credentials);
@@ -463,6 +475,7 @@ impl StorageFixture {
         std::fs::create_dir_all(&state).expect("state dir");
         Some(Self {
             tmp,
+            home,
             cfg,
             aws_toml,
             state,
@@ -498,9 +511,15 @@ impl StorageFixture {
     }
 
     /// fake seam環境でbinを実行する(共通envに追加envを合わせる)。
+    /// TASK-19 XDG配置: 常にAMAZING_BACKUP_HOME=<home>を渡し規定path解決を固定する
+    /// (registry/cacheがhome配下へ解決される)。
     pub fn bin(&self, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
         let state_s = self.state.display().to_string();
-        let mut envs: Vec<(&str, &str)> = vec![("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())];
+        let home_s = self.home.display().to_string();
+        let mut envs: Vec<(&str, &str)> = vec![
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+            ("AMAZING_BACKUP_HOME", home_s.as_str()),
+        ];
         envs.extend_from_slice(env);
         run_bin_env(args, &envs)
     }
@@ -1037,9 +1056,13 @@ pub fn push_titled_pty(
     args.extend(extra.iter().map(|s| s.to_string()));
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let state_s = fx.state.display().to_string();
+    let home_s = fx.home.display().to_string();
     run_bin_pty_stdin(
         &refs,
-        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())],
+        &[
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+            ("AMAZING_BACKUP_HOME", home_s.as_str()),
+        ],
         stdin_lines,
     )
 }

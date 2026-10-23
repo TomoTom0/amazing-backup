@@ -8,7 +8,7 @@ mod common;
 
 use common::*;
 
-/// dir配下のfileを再帰的に列挙する(data/out掃除の検証用)。
+/// dir配下のfileを再帰的に列挙する(cache dir掃除の検証用)。
 fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -323,7 +323,8 @@ fn backup_pull_all_requires_confirmation() {
     assert_eq!(code, 0, "初回push: {stdout}");
 
     // 非TTY(subprocess pipe)で--yesなしはusage error 64
-    let (code, _, _) = fx.backup_pull(&["--all"]);
+    let out_s = fx.elsewhere.join("pullall-out").display().to_string();
+    let (code, _, _) = fx.backup_pull(&["--all", "--out", &out_s]);
     assert_eq!(code, 64, "非TTYで--yesなしのpull --allはusage error 64");
 
     // 確認プロンプトでno: 実行せずexit 0(pty経由でstdinへno)
@@ -332,11 +333,15 @@ fn backup_pull_all_requires_confirmation() {
     let key_s = fx.secret.display().to_string();
     let state_s = fx.state.display().to_string();
     clear_calls(&fx);
+    let out_s = fx.elsewhere.join("pullall-out").display().to_string();
+    let home_s = fx.home.display().to_string();
     let result = run_bin_pty_stdin(
         &[
             "backup",
             "pull",
             "--all",
+            "--out",
+            &out_s,
             "--config",
             &cfg_s,
             "--aws-config",
@@ -344,7 +349,10 @@ fn backup_pull_all_requires_confirmation() {
             "--key",
             &key_s,
         ],
-        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())],
+        &[
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+            ("AMAZING_BACKUP_HOME", home_s.as_str()),
+        ],
         "no",
     );
     if let Some((code, stdout)) = result {
@@ -376,9 +384,10 @@ fn backup_pull_category_and_run_keep_confirmation_guard() {
     let run_id = run_batch_ids(&fx)[0].clone();
 
     // 非TTYで--yesなしはusage error 64(--category/--runでも同一ガード)
-    let (code, _, _) = fx.backup_pull(&["--category", "unfiled"]);
+    let out_s = fx.elsewhere.join("pullguard-out").display().to_string();
+    let (code, _, _) = fx.backup_pull(&["--category", "unfiled", "--out", &out_s]);
     assert_eq!(code, 64, "--category指定でも非TTY--yesなしはusage error 64");
-    let (code, _, _) = fx.backup_pull(&["--run", &run_id]);
+    let (code, _, _) = fx.backup_pull(&["--run", &run_id, "--out", &out_s]);
     assert_eq!(code, 64, "--run指定でも非TTY--yesなしはusage error 64");
 
     // 確認でnoなら復元job発行等を行わずexit 0
@@ -386,14 +395,20 @@ fn backup_pull_category_and_run_keep_confirmation_guard() {
     let aws_s = fx.aws_toml.display().to_string();
     let key_s = fx.secret.display().to_string();
     let state_s = fx.state.display().to_string();
+    let out_s = fx.elsewhere.join("pullguard-out").display().to_string();
+    let home_s = fx.home.display().to_string();
     for scope_args in [vec!["--category", "unfiled"], vec!["--run", &run_id]] {
         let mut args: Vec<&str> = vec!["backup", "pull"];
         args.extend(scope_args.iter().copied());
+        args.extend(["--out", &out_s]);
         args.extend(["--config", &cfg_s, "--aws-config", &aws_s, "--key", &key_s]);
         clear_calls(&fx);
         if let Some((code, stdout)) = run_bin_pty_stdin(
             &args,
-            &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())],
+            &[
+                ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+                ("AMAZING_BACKUP_HOME", home_s.as_str()),
+            ],
             "no",
         ) {
             assert_eq!(code, 0, "{scope_args:?}の確認noはexit 0: {stdout}");
@@ -486,8 +501,11 @@ fn backup_pull_scope_options_are_exclusive() {
         vec!["--all", "--run", run_id.as_str()],
         vec!["--category", "unfiled", "--run", run_id.as_str()],
     ] {
+        let out_s = fx.elsewhere.join("pullexcl-out").display().to_string();
         let mut extra: Vec<&str> = scope.clone();
         extra.push("--yes");
+        extra.push("--out");
+        extra.push(&out_s);
         let (code, stdout, stderr) = fx.backup_pull(&extra);
         assert_eq!(
             code, 64,
@@ -583,7 +601,16 @@ fn missing_index_is_config_error_for_all_read_commands() {
     for (tag, run) in [
         ("list files", fx.list("files", &[])),
         ("query", fx.query("travel", &[])),
-        ("get", fx.get("a.zip", &[])),
+        (
+            "get",
+            fx.get(
+                "a.zip",
+                &[
+                    "--out",
+                    &fx.elsewhere.join("noidx-out").display().to_string(),
+                ],
+            ),
+        ),
         ("diff", fx.diff(&[])),
     ] {
         let (code, stdout, stderr) = run;
@@ -613,8 +640,8 @@ fn missing_index_is_config_error_for_all_read_commands() {
 
 /// [covers:cli.disaster-recovery-reads]
 /// query/get/list/diffはaws.toml(bucket/region/prefix)と秘密鍵のみで動作(設計2.4):
-/// pipeline.toml・ローカルregistryが不在の作業dirでも、最初に索引をGET→復号→
-/// 以降の操作は索引+s3 APIで完結する。
+/// pipeline.toml(規定pathにも無い)・ローカルregistryが不在の状態でも、最初に索引を
+/// GET→復号→以降の操作は索引+s3 APIで完結する。
 #[test]
 fn read_commands_work_without_pipeline_and_registry() {
     let Some(fx) = StorageFixture::new("sb-disaster", StorageOpts::default()) else {
@@ -627,13 +654,20 @@ fn read_commands_work_without_pipeline_and_registry() {
     };
     assert_eq!(code, 0, "初回push: {stdout}");
 
-    // 作成環境資産(pipeline.toml・registry)が不在の作業dirで実行
+    // 作成環境資産(pipeline.toml・registry)が不在の状態で実行(TASK-19 XDG配置のため
+    // AMAZING_BACKUP_HOMEに何も置かないdirを指定=規定pathにもpipeline.tomlが無い)
     let bare = fx.elsewhere.join("bare-workspace");
     std::fs::create_dir_all(&bare).expect("bare workspace");
+    let bare_abh = fx.elsewhere.join("bare-abh");
+    std::fs::create_dir_all(&bare_abh).expect("bare ABH dir");
     let aws_s = fx.aws_toml.display().to_string();
     let key_s = fx.secret.display().to_string();
     let state_s = fx.state.display().to_string();
-    let env = [("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())];
+    let abh_s = bare_abh.display().to_string();
+    let env = [
+        ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+        ("AMAZING_BACKUP_HOME", abh_s.as_str()),
+    ];
 
     let (code, stdout, stderr) = run_bin_cwd(
         &["query", "travel", "--aws-config", &aws_s, "--key", &key_s],
@@ -642,7 +676,7 @@ fn read_commands_work_without_pipeline_and_registry() {
     );
     assert_eq!(
         code, 0,
-        "不在pipelineの作業dirでqueryはexit 0: {stdout}{stderr}"
+        "規定pathにpipeline.tomlが無い状態でqueryはexit 0: {stdout}{stderr}"
     );
     assert!(stdout.contains("travel.zip"), "検索結果の表示: {stdout}");
 
@@ -662,11 +696,12 @@ fn read_commands_work_without_pipeline_and_registry() {
 }
 
 /// [covers:config.keep-artifacts-run-cleanup]
-/// keep_artifacts="run"(設計4.1・8.3): backup push成功(run完結)後にdata/out配下の
-/// 当該run分(<batch_id>/*.age)を削除。失敗残りは残り、再実行で再利用される。
+/// keep_artifacts="run"(設計4.1・8.3+TASK-19 XDG配置): backup push成功(run完結)後に
+/// cache dir($ABH/cache)配下の当該run分(<batch_id>/*.age)を削除。失敗残りは残り、
+/// 再実行で再利用される。
 #[test]
 fn keep_artifacts_run_cleans_out_dir_after_success() {
-    // 成功後はdata/out配下が掃除される(既定run)
+    // 成功後はcache dir配下が掃除される(既定run)
     let Some(fx) = StorageFixture::new("sb-keepclean", StorageOpts::default()) else {
         return;
     };
@@ -678,7 +713,7 @@ fn keep_artifacts_run_cleans_out_dir_after_success() {
     assert_eq!(code, 0, "push成功: {stdout}");
     assert_no_age_files(
         &fx.out_dir,
-        "成功後はdata/out配下の当該run分.ageが削除される",
+        "成功後はcache dir($ABH/cache)配下の当該run分.ageが削除される",
     );
     // objectはupload済み(掃除はローカル成果物のみ)
     assert!(
@@ -854,6 +889,10 @@ fn pin_add_without_config_fails_before_s3_calls() {
     let _ = std::fs::remove_file(fx.state.join("calls.log"));
     let aws_s = fx.aws_toml.display().to_string();
     let state_s = fx.state.display().to_string();
+    // --config省略時はXDG規定path(TASK-19)を読むため、pipeline.tomlの無いABHを指定して
+    // 規定path解決を固定する(不在=copy案内付き設定エラー2)
+    let empty_abh = fx.elsewhere.join("pinnoconf-abh");
+    std::fs::create_dir_all(&empty_abh).expect("empty ABH dir");
     let (code, _, stderr) = run_bin_env(
         &[
             "pin",
@@ -864,9 +903,18 @@ fn pin_add_without_config_fails_before_s3_calls() {
             "--aws-config",
             &aws_s,
         ],
-        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())],
+        &[
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+            (
+                "AMAZING_BACKUP_HOME",
+                empty_abh.display().to_string().as_str(),
+            ),
+        ],
     );
-    assert_eq!(code, 2, "--configなしpin addは設定エラー2: {stderr}");
+    assert_eq!(
+        code, 2,
+        "--config省略(規定pathにpipeline.toml無し)のpin addは設定エラー2: {stderr}"
+    );
     assert_eq!(
         read_calls(&fx.state),
         "",
