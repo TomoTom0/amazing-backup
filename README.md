@@ -13,8 +13,10 @@ S3(versioning有効bucket・Deep Archive)へ版管理付きで投入・照会・
 ## Install
 
 ```sh
-cargo install amazing-backup            # crates.io
-mise use -g cargo:amazing-backup        # mise(cargo backend)
+cargo install --git https://github.com/TomoTom0/amazing-backup   # GitHubから直接
+mise use -g ubi:TomoTom0/amazing-backup                          # mise(ubi backend・Releases binary)
+cargo install amazing-backup                                     # crates.io(publish後)
+mise use -g cargo:amazing-backup                                 # mise cargo backend(同上)
 ```
 
 ## Quick start
