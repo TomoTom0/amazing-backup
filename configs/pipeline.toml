@@ -23,4 +23,4 @@ decrypt_key = "configs/secret/keys/private/backup_ed25519"
 [metadata]
 # metadata_{title}.jsonのlatest_source_path掲載形式(TASK-18 2.2)
 # plain: path文字列そのまま / encrypted: age暗号化object / none: null(掲載しない)
-latest_source_path = "plain"
+latest_source_path = "encrypted"
