@@ -1,0 +1,32 @@
+# aws.tomlのtemplate。このfileをconfigs/aws.tomlへcopyして実際の値を記述する。
+# configs/aws.tomlは.gitignore済み(実bucket名等の個人情報をcommitしない)。
+# 各keyの意味は docs/usage_backup.md 3.2 を参照。
+
+[aws]
+active_profile = "dev"
+
+# lifecycle(TASK-18 7章・全profile共通。manage lifecycle applyが適用する3ruleの値)
+# noncurrent_days: NCVE NoncurrentDays(DEEP_ARCHIVEは180以上必須)
+# keep_versions:   NCVE NewerNoncurrentVersions(保持するnoncurrent版数)
+# mpu_abort_days:  AbortIncompleteMultipartUpload日数
+[aws.lifecycle]
+noncurrent_days = 180
+keep_versions = 10
+mpu_abort_days = 7
+
+[aws.profiles.dev]
+purpose = "dev"
+bucket = "<dev-bucket>"
+region = "ap-northeast-1"
+prefix = "backup-remote/"
+storage_class = "STANDARD"
+credentials_file = "configs/secret/aws-credentials/dev.toml"
+
+# prod系は用途別bucketの並列profile例(同一credentials_file共用)
+[aws.profiles.family]
+purpose = "prod"
+bucket = "<prod-bucket-1>"
+region = "ap-northeast-1"
+prefix = "backup-remote/"
+storage_class = "DEEP_ARCHIVE"
+credentials_file = "configs/secret/aws-credentials/prod.toml"

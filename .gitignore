@@ -14,3 +14,6 @@ target/
 .venv/
 __pycache__/
 .pytest_cache/
+
+# 実aws設定(個人のbucket名等を含む・templateはconfigs/aws.example.toml)
+configs/aws.toml

@@ -92,7 +92,7 @@ source = "TASK-9 SDK移行設計 5.1〜5.3(tmp/tasks/tm-9/design_sdk_migration.m
 description = "multipart閾値: 対象file sizeがMULTIPART_THRESHOLD_BYTES(64 MiB)超の場合はCreateMultipartUpload→UploadPart×N(part size 64 MiB)→CompleteMultipartUploadでuploadし、閾値未満(manifest・索引等)は単発PutObject(設計5.3) (integration, fake seam)"
 given = "64 MiB超の対象(暗号化済み.age)と閾値未満の対象を含む backup push 実行(fake seam)"
 expect_return_shape = "64 MiB超keyの呼び出し記録はCreateMultipartUpload→UploadPart×N→CompleteMultipartUpload(単発PutObject無し)で、閾値未満keyは単発PutObject(CreateMultipartUpload無し)。完成objectは実体とbyte一致"
-source_lines = "src/s3.rs:1913; tests/s3_backend.rs:265"
+source_lines = "src/s3.rs:1918; tests/s3_backend.rs:265"
 
 [[condition]]
 id = "upload.multipart-checksum-per-part"

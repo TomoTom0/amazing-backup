@@ -114,7 +114,7 @@ source = "TASK-9 SDK移行設計 4.3案1・10.3・12.4(tmp/tasks/tm-9/design_sdk
 description = "fake seam: env BACKUP_REMOTE_FAKE_S3_STATE=<dir>指定時はS3 backendをfakeへ差し替える(gateは#[cfg(debug_assertions)]でrelease build・debug_assertions無効にはseam・FakeS3ともcompileされず実S3経路になる)。fakeはstate dir配下へobjects/<key>とcalls.log相当のAPI呼び出し記録(op名・bucket・key・storage_class・checksum・days・tier等のfield)を書く。fake選択時はstderr冒頭へ「WARNING: FAKE S3 MODE」を必ず表示する(誤用防御)。fakeはcredential値が不正(検出用ダミー値)でも成功する=実network不使用 (integration, fake seam)"
 given = "BACKUP_REMOTE_FAKE_S3_STATEを設定したbackup push実行(state dirを用意・credentialファイルはダミー値)"
 expect_return_shape = "exit 0でstate dirへobjects/<key>と呼び出し記録が書かれ、stderr冒頭にWARNING: FAKE S3 MODE表示。credential値・検出用ダミーは出力に現れない"
-source_lines = "src/s3.rs:1932; src/s3.rs:1996; tests/s3_backend.rs:31"
+source_lines = "src/s3.rs:1937; src/s3.rs:2001; tests/s3_backend.rs:31"
 
 [[condition]]
 id = "cli.query-partial-match"
