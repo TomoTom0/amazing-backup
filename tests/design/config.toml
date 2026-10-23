@@ -1,4 +1,4 @@
-# backup-remote テスト設計条件書(config エリア)
+# amazing-backup テスト設計条件書(config エリア)
 # 出典: tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-001〜CONF-008(詳細は2.5・3.2・3.3)
 # 2026-10-09: テスト全件PASS・verify-conditions.py PASSを確認し[meta]へ検証記録を書いた(レビュー指摘12件対応で条件追加・更新した際)。
 # 2026-10-09: コードレビュー指摘対応でCONF-008(bucket/region前後空白付き値の設定エラー)を追加。

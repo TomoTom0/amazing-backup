@@ -109,7 +109,7 @@ pub struct AwsConfig {
     pub credentials_file: std::path::PathBuf,
     /// 既定DEEP_ARCHIVE
     pub storage_class: String,
-    /// 名前空間root prefix(TASK-10設計1.1・4.2)。`/`終端。既定"backup-remote/"
+    /// 名前空間root prefix(TASK-10設計1.1・4.2)。`/`終端。既定"amazing-backup/"
     pub prefix: String,
     /// lifecycle設定(TASK-18 7章。[aws.lifecycle]はprofile横断で同一構成のため
     /// [aws]直下に一元化)
@@ -234,7 +234,7 @@ struct AwsProfile {
     credentials_file: String,
     #[serde(default)]
     storage_class: String,
-    /// 名前空間root prefix(TASK-10設計4.2。None=省略時の既定"backup-remote/"。
+    /// 名前空間root prefix(TASK-10設計4.2。None=省略時の既定"amazing-backup/"。
     /// 明示空文字は形式違反として拒否)
     #[serde(default)]
     prefix: Option<String>,
@@ -457,15 +457,15 @@ pub fn load_aws_profile(
         )));
     }
 
-    let env_profile = std::env::var("BACKUP_REMOTE_AWS_PROFILE")
+    let env_profile = std::env::var("AMAZING_BACKUP_AWS_PROFILE")
         .ok()
         .filter(|v| !v.trim().is_empty());
-    let env_purpose = std::env::var("BACKUP_REMOTE_AWS_PURPOSE")
+    let env_purpose = std::env::var("AMAZING_BACKUP_AWS_PURPOSE")
         .ok()
         .filter(|v| !v.trim().is_empty());
     // fake seam中(=テスト環境)は dev目的のprofileへ自動解決(手動切替・環境変数設定不要)。
     // TASK-10設計4.2: test profile廃止に伴い自動解決先をdevへ変更。
-    let test_env = std::env::var("BACKUP_REMOTE_FAKE_S3_STATE")
+    let test_env = std::env::var("AMAZING_BACKUP_FAKE_S3_STATE")
         .ok()
         .filter(|v| !v.trim().is_empty());
 
@@ -624,7 +624,7 @@ pub fn load_aws_profile(
 }
 
 /// aws.tomlの正本profile([aws].active_profile。空なら既定選択)のbucket
-/// (TASK-11 Phase BレビューH-1)。--profile一時上書き・BACKUP_REMOTE_AWS_PROFILE等の
+/// (TASK-11 Phase BレビューH-1)。--profile一時上書き・AMAZING_BACKUP_AWS_PROFILE等の
 /// env経路の解決を介さない「正本」のbucketで、registry記録`s3_bucket`欠損の旧記録を
 /// 正本bucket相当と扱うbucket一致規則(registry::record_bucket_matched)の正本側引数。
 pub fn canonical_bucket(path: &Path) -> BackupResult<String> {
@@ -662,7 +662,7 @@ fn canonical_bucket_from(parsed: &AwsFile, path: &Path) -> BackupResult<String> 
 }
 
 /// root prefixの既定値(TASK-10設計4.2)。
-pub const DEFAULT_ROOT_PREFIX: &str = "backup-remote/";
+pub const DEFAULT_ROOT_PREFIX: &str = "amazing-backup/";
 
 /// credentialファイルを読み、厳格schema検証を行う(TASK-9設計3.1〜3.5)。
 /// 不在・TOML parse失敗・`[credentials]`テーブル不在・必須キー欠落・空値・
@@ -1073,7 +1073,7 @@ mod tests {
             region: String::new(),
             credentials_file: creds.clone(),
             storage_class: "DEEP_ARCHIVE".into(),
-            prefix: "backup-remote/".into(),
+            prefix: "amazing-backup/".into(),
             lifecycle: LifecycleConfig {
                 noncurrent_days: 180,
                 keep_versions: 10,
@@ -1100,7 +1100,7 @@ mod tests {
             region: "r".into(),
             credentials_file: creds,
             storage_class: "DEEP_ARCHIVE".into(),
-            prefix: "backup-remote/".into(),
+            prefix: "amazing-backup/".into(),
             lifecycle: LifecycleConfig {
                 noncurrent_days: 180,
                 keep_versions: 10,
@@ -1423,14 +1423,14 @@ mod tests {
         let p = tmp.path().join("prefix-ok.toml");
         write_file(
             &p,
-            (base.to_string() + "prefix = \"backup-remote/\"\n").as_bytes(),
+            (base.to_string() + "prefix = \"amazing-backup/\"\n").as_bytes(),
         );
         load_aws(&p).expect("適正なprefixは読み込める");
 
         for (name, prefix) in [
             ("空", ""),
-            ("末尾スラッシュなし", "backup-remote"),
-            ("先頭スラッシュ", "/backup-remote/"),
+            ("末尾スラッシュなし", "amazing-backup"),
+            ("先頭スラッシュ", "/amazing-backup/"),
             ("使用文字違反", "Backup_Remote/"),
         ] {
             let p = tmp.path().join(format!("prefix-{}.toml", name.len()));

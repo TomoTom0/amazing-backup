@@ -1,4 +1,4 @@
-# backup-remote
+# amazing-backup
 
 ## 開発進行上のルール
 
@@ -9,5 +9,5 @@
 ## S3・AWS操作の経路
 
 - agentはaws CLI(`aws s3api`等)を実行しない。`aws login`/`aws configure`等の認証構築の案内もしない
-- agentがS3に触るのはbackup-remoteのコマンド経由のみ(SDK+`configs/aws.toml`のcredentials_file明示API key。TASK-9構成・credential chain非依存)
+- agentがS3に触るのはamazing-backupのコマンド経由のみ(SDK+`configs/aws.toml`のcredentials_file明示API key。TASK-9構成・credential chain非依存)
 - 経緯: 2026-10-13のSDK移行指摘(TASK-9)後も、2026-10-22にagentがaws CLIを実行し`aws login`案内までしたことで再指摘を受け、記載に至った

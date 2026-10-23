@@ -1,6 +1,6 @@
-# backup-remote 使用手順書
+# amazing-backup 使用手順書
 
-NASバックアップアーカイブ(zip/7z)をageで暗号化し、S3(versioning有効bucket・Deep Archive)へ投入・管理するCLI `backup-remote` の使用手順書。書き込み・照会・復元を含む。
+NASバックアップアーカイブ(zip/7z)をageで暗号化し、S3(versioning有効bucket・Deep Archive)へ投入・管理するCLI `amazing-backup` の使用手順書。書き込み・照会・復元を含む。
 
 - 対象読者: バックアップの書き込み・照会・復元を行う運用者(災害時の復旧担当を含む)
 - 正本参照: S3ストレージ構成・CLI体系の設計は `tmp/tasks/tm-10/design_s3_storage.md`。S3キー設計(UUID発行キー+versioning・実体/所在/title語彙・索引schema=2・lifecycle・manage reset)の正本は `tmp/tasks/tm-18/design_key-uuid-versioning.md`。旧パイプライン(暗号化経路・registry・終了コード)の設計は `tmp/tasks/tm-1/design_backup_pipeline.md`、AWS SDK移行の設計は `tmp/tasks/tm-9/design_sdk_migration.md`。実装挙動の正本は `tests/design/`の条件書
@@ -56,7 +56,7 @@ NASバックアップアーカイブ(zip/7z)をageで暗号化し、S3(versionin
 
 ageはv1.2形式のstanza識別子(指紋prefix)によるヘッダ照合の前提となるため、v1.2系を使用する。
 
-**aws CLIは不要**: S3接続はSDKをbackup-remoteが内蔵する。aws CLIがあるとS3側の確認・手動復元(9.3)に使えるが任意である。
+**aws CLIは不要**: S3接続はSDKをamazing-backupが内蔵する。aws CLIがあるとS3側の確認・手動復元(9.3)に使えるが任意である。
 
 ### 2.2 AWS credential(API keyファイル)の作成
 
@@ -80,11 +80,11 @@ secret_access_key = "<secret access key>" # 必須
 ### 2.3 ビルドと実行形式
 
 ```console
-$ cargo build --release          # target/release/backup-remote
+$ cargo build --release          # target/release/amazing-backup
 $ cargo install --path .         # PATHへ導入する場合(cargo bin)
 ```
 
-実行形式は `backup-remote <command> [options]`。`cargo run --quiet -- <command>` でも同一挙動。設定・出力の相対pathはrepo root(cwd)基準で解決されるため、**repo rootで実行する**のが前提。
+実行形式は `amazing-backup <command> [options]`。`cargo run --quiet -- <command>` でも同一挙動。設定・出力の相対pathはrepo root(cwd)基準で解決されるため、**repo rootで実行する**のが前提。
 
 ### 2.4 検証用bucket(dev: your-dev-bucket)の準備手順
 
@@ -95,7 +95,7 @@ $ aws s3api put-bucket-versioning --bucket your-dev-bucket \
     --versioning-configuration Status=Enabled
 ```
 
-- lifecycleは `backup-remote manage lifecycle apply` が行う(任意・5.10)
+- lifecycleは `amazing-backup manage lifecycle apply` が行う(任意・5.10)
 - **全profileのbucketでversioning有効が必須**。書き込み系(backup push・pin add/rm・manage)は起動時に確認し、無効なら設定エラー2(有効化commandを表示)
 
 ## 3. 設定ファイル
@@ -187,7 +187,7 @@ purpose = "dev"
 # dev bucketは既存your-dev-bucketを流用(2026-10-16確定)
 bucket = "your-dev-bucket"
 region = "ap-northeast-1"
-prefix = "backup-remote/"
+prefix = "amazing-backup/"
 storage_class = "STANDARD"
 credentials_file = "configs/secret/aws-credentials/dev.toml"
 
@@ -195,7 +195,7 @@ credentials_file = "configs/secret/aws-credentials/dev.toml"
 purpose = "prod"
 bucket = "your-family-bucket"
 region = "ap-northeast-1"
-prefix = "backup-remote/"
+prefix = "amazing-backup/"
 storage_class = "DEEP_ARCHIVE"
 credentials_file = "configs/secret/aws-credentials/prod.toml"
 
@@ -203,7 +203,7 @@ credentials_file = "configs/secret/aws-credentials/prod.toml"
 purpose = "prod"
 bucket = "your-baked-bucket"
 region = "ap-northeast-1"
-prefix = "backup-remote/"
+prefix = "amazing-backup/"
 storage_class = "DEEP_ARCHIVE"
 credentials_file = "configs/secret/aws-credentials/prod.toml"
 
@@ -211,7 +211,7 @@ credentials_file = "configs/secret/aws-credentials/prod.toml"
 purpose = "prod"
 bucket = "your-atara-bucket"
 region = "ap-northeast-1"
-prefix = "backup-remote/"
+prefix = "amazing-backup/"
 storage_class = "DEEP_ARCHIVE"
 credentials_file = "configs/secret/aws-credentials/prod.toml"
 ```
@@ -221,7 +221,7 @@ credentials_file = "configs/secret/aws-credentials/prod.toml"
 | `[aws].active_profile` | 既定で使用するprofile名 |
 | `[aws.profiles.<name>].purpose` | profileの用途(`dev`/`prod`) |
 | `bucket` / `region` | 接続先S3 bucket・region |
-| `prefix` | 名前空間root prefix。`/`終端・空でない・先頭`/`禁止・`[a-z0-9-]`と`/`区切り。省略時は`backup-remote/` |
+| `prefix` | 名前空間root prefix。`/`終端・空でない・先頭`/`禁止・`[a-z0-9-]`と`/`区切り。省略時は`amazing-backup/` |
 | `storage_class` | file objectのstorage class。`STANDARD`/`DEEP_ARCHIVE`等(allowlist検証) |
 | `credentials_file` | credentialファイル(2.2)のpath。必須 |
 | `[aws.lifecycle].noncurrent_days` | NCVE NoncurrentDays。DEEP_ARCHIVE profileでは180以上必須 |
@@ -235,7 +235,7 @@ credentials_file = "configs/secret/aws-credentials/prod.toml"
 - profileの切替は`active_profile`書換えまたは`--profile`オプション(5.1。当該実行限りの一時上書き)。prod系の書き込みは`--profile family`等の明示指定を推奨(8.2)
 - 検証規則(設定エラー2): prefix形式違反・storage_class allowlist外・bucket/region/credentials_fileの空・前後空白付き値・credentialファイルの不在・不正・lifecycle値の範囲違反(keep_versions 1〜100・noncurrent_days/mpu_abort_days 1以上・DEEP_ARCHIVE profileでnoncurrent_days<180)
 
-**エンドポイント確定性の注記**: SDKは環境変数`AWS_ENDPOINT_URL`/`AWS_ENDPOINT_URL_S3`を解釈して接続先endpointを切替え得る。backup-remoteは起動時にこれらのenvが設定されていれば警告をstderrへ表示する(処理は継続)。意図した検証用構成か誤設定かは利用者側で確認すること。
+**エンドポイント確定性の注記**: SDKは環境変数`AWS_ENDPOINT_URL`/`AWS_ENDPOINT_URL_S3`を解釈して接続先endpointを切替え得る。amazing-backupは起動時にこれらのenvが設定されていれば警告をstderrへ表示する(処理は継続)。意図した検証用構成か誤設定かは利用者側で確認すること。
 
 ### 3.3 対象リストtoml(`--from-list`)
 
@@ -324,11 +324,11 @@ backup verifyのみ旧形式の`--config`/`--key`/`--checksum`/`--roundtrip`を�
 ### 5.2 list — 一覧(照会)
 
 ```
-backup-remote list files [--category C]
-backup-remote list versions [--title T] [--category C]
-backup-remote list pins [--title T]
-backup-remote list runs
-backup-remote list jobs
+amazing-backup list files [--category C]
+amazing-backup list versions [--title T] [--category C]
+amazing-backup list pins [--title T]
+amazing-backup list runs
+amazing-backup list jobs
 ```
 
 | subcommand | 表示内容 |
@@ -344,7 +344,7 @@ backup-remote list jobs
 ### 5.3 query — 探索
 
 ```
-backup-remote query <手がかり> [--category C] [--versions]
+amazing-backup query <手がかり> [--category C] [--versions]
 ```
 
 title部分一致・uuid前方一致・所在(source_path)部分一致で索引を検索。既定は実体単位要約、`--versions`で版一覧も表示。title重複で候補が複数ある場合は候補一覧(uuid・所在source_path)を表示し`get <title> --path <source_path>`での特定を案内する。0件は警告+終了コード0。
@@ -352,7 +352,7 @@ title部分一致・uuid前方一致・所在(source_path)部分一致で索引�
 ### 5.4 get — 単一実体の取得
 
 ```
-backup-remote get <title|uuid> [--path P] [--version V] [--version-id ID] [--pin 名]
+amazing-backup get <title|uuid> [--path P] [--version V] [--version-id ID] [--pin 名]
                      [--out DIR] [--tier Standard|Bulk] [--days N] [--yes]
 ```
 
@@ -381,7 +381,7 @@ sha不一致は検証エラー4・S3 API失敗は転送エラー5。
 ### 5.5 diff — 完全性突合
 
 ```
-backup-remote diff [--run ID]
+amazing-backup diff [--run ID]
 ```
 
 索引とS3実態(ListObjectVersions)を突合し、missing(索引に在るがS3に無い)・unexpected(S3に在るが索引に無い)を報告する(`sys/`予約領域と`data/`配下の`metadata_`接頭辞objectは索引管理外のため突合対象外)。`--run ID`指定時は索引・manifest・実態の三方突合(run完否の監査)。不一致があっても報告して終了コード0(照会command)。
@@ -389,7 +389,7 @@ backup-remote diff [--run ID]
 ### 5.6 backup push — 書き込み
 
 ```
-backup-remote backup push [--from-list FILE] [--dry-run] [--pin <版名>] [--keep-going] <PATH> [<PATH> ...]
+amazing-backup backup push [--from-list FILE] [--dry-run] [--pin <版名>] [--keep-going] <PATH> [<PATH> ...]
 ```
 
 | 引数/option | 既定 | 意味 |
@@ -416,7 +416,7 @@ backup-remote backup push [--from-list FILE] [--dry-run] [--pin <版名>] [--kee
 ### 5.7 backup pull — 一括復元
 
 ```
-backup-remote backup pull (--all | --category C | --run ID) [--tier T] [--days N]
+amazing-backup backup pull (--all | --category C | --run ID) [--tier T] [--days N]
                           [--out DIR] [--dry-run] [--yes]
 ```
 
@@ -429,7 +429,7 @@ backup-remote backup pull (--all | --category C | --run ID) [--tier T] [--days N
 ### 5.8 backup verify — ローカル整合検査
 
 ```
-backup-remote backup verify [--config PATH] [--checksum] [--roundtrip] [--key PATH]
+amazing-backup backup verify [--config PATH] [--checksum] [--roundtrip] [--key PATH]
 ```
 
 registryと`data/out`のrun成果物(`.age`)の整合を検証する(S3接続なし・aws不要)。旧経路(encrypt記録)と新経路(file_write記録)の両方を検査する。
@@ -445,8 +445,8 @@ registryと`data/out`のrun成果物(`.age`)の整合を検証する(S3接続な
 ### 5.9 pin — ピン留め版の付与/解除
 
 ```
-backup-remote pin add <title|uuid> [--latest | --version V] --as <版名>
-backup-remote pin rm <title|uuid> --pin <版名>
+amazing-backup pin add <title|uuid> [--latest | --version V] --as <版名>
+amazing-backup pin rm <title|uuid> --pin <版名>
 ```
 
 対象実体の指定はtitle完全一致またはuuid完全一致(title重複で候補が複数の場合はuuidで一意化)。`pin add`の対象版は`--version V`(日付)指定、省略時は最新版(`--latest`は明示用)。
@@ -459,13 +459,13 @@ backup-remote pin rm <title|uuid> --pin <版名>
 ### 5.10 manage — 保持・索引・lifecycle・job管理
 
 ```
-backup-remote manage prune [--dry-run | --apply]
-backup-remote manage lifecycle show|apply
-backup-remote manage index rebuild
-backup-remote manage index reconcile [--apply]
-backup-remote manage location rm <source_path> [--uuid <uuid>]
-backup-remote manage jobs reissue <object_key> [--tier T]
-backup-remote manage reset [--apply]
+amazing-backup manage prune [--dry-run | --apply]
+amazing-backup manage lifecycle show|apply
+amazing-backup manage index rebuild
+amazing-backup manage index reconcile [--apply]
+amazing-backup manage location rm <source_path> [--uuid <uuid>]
+amazing-backup manage jobs reissue <object_key> [--tier T]
+amazing-backup manage reset [--apply]
 ```
 
 | subcommand | 動作 |
@@ -484,7 +484,7 @@ backup-remote manage reset [--apply]
 ### 5.11 edit — 設定の確認
 
 ```
-backup-remote edit metadata|files|layout|policy
+amazing-backup edit metadata|files|layout|policy
 ```
 
 対応設定sectionの現在値を表示する(検証付き読込)。`metadata`は`[metadata].latest_source_path`の掲載形式、`policy`は`[output].keep_artifacts`(保持数はaws.toml `[aws.lifecycle]`側で管理)。編集自体はpipeline.tomlの直接編集で行う(保存時に検証される)。対象外の指定はusage 64。
@@ -511,7 +511,7 @@ fail-fastが既定(最初のエラーで中止。ただし対象解決段階の�
 2. **予定確認(dry-run)**:
 
    ```console
-   $ backup-remote backup push --dry-run --from-list targets.toml --config configs/pipeline.toml
+   $ amazing-backup backup push --dry-run --from-list targets.toml --config configs/pipeline.toml
    ```
 
    対象ごとの`skip`/`re-put`/`merge`(合流先uuid)/`new`(新規発行・title必須状態を含む)予測と合計sizeを確認する(旧plan相当。エラーはこの段階で全件出る)
@@ -519,7 +519,7 @@ fail-fastが既定(最初のエラーで中止。ただし対象解決段階の�
 3. **書き込み実行**:
 
    ```console
-   $ backup-remote backup push --from-list targets.toml --config configs/pipeline.toml
+   $ amazing-backup backup push --from-list targets.toml --config configs/pipeline.toml
    ```
 
    per-fileの`ok`/`skip`/`merge`/`re-put`行とrun summary(`run <batch_id>: ok=N skip=N failed=N`)が出る。大容量(数十GiB以上)では時間がかかる(進捗はper-file完了行単位)。中断した場合は再実行で再開(skip判定・crash残存のuuid再利用により二重暗号化・二重uploadは起きない)
@@ -527,7 +527,7 @@ fail-fastが既定(最初のエラーで中止。ただし対象解決段階の�
 4. **ローカル整合検査(任意・S3不要)**:
 
    ```console
-   $ backup-remote backup verify --roundtrip
+   $ amazing-backup backup verify --roundtrip
    ```
 
    `keep_artifacts="run"`(既定)で掃除済みのrun(当該batchのindex_upload成功記録があり成果物dirが不在)は構造検査・`--checksum`・`--roundtrip`の対象外となり、「verify: 掃除済みrun N件(構造検査対象外)」と報告される(成功run直後のverifyが必ず検証エラー4にならないようにするため。成果物が残っているrunは従来どおり検査対象)
@@ -535,9 +535,9 @@ fail-fastが既定(最初のエラーで中止。ただし対象解決段階の�
 5. **照会**:
 
    ```console
-   $ backup-remote list files
-   $ backup-remote query travel
-   $ backup-remote diff
+   $ amazing-backup list files
+   $ amazing-backup query travel
+   $ amazing-backup diff
    ```
 
 ## 7. 復元手順
@@ -545,7 +545,7 @@ fail-fastが既定(最初のエラーで中止。ただし対象解決段階の�
 ### 7.1 単一実体の復元(get)
 
 ```console
-$ backup-remote get 旅のしおり2026        # title(またはuuid)で指定
+$ amazing-backup get 旅のしおり2026        # title(またはuuid)で指定
 ```
 
 - DEEP_ARCHIVE配置の対象は、初回実行で復元jobを発行して案内表示+終了0(この時点で取り出し費用が発生)。**約12〜48時間後に同じcommandを再実行**すると取得・検証・復号まで行う
@@ -556,9 +556,9 @@ $ backup-remote get 旅のしおり2026        # title(またはuuid)で指定
 ### 7.2 一括復元(backup pull)
 
 ```console
-$ backup-remote backup pull --category main     # category単位(最新版+pin)
-$ backup-remote backup pull --run 20261015-abcd1234   # run単位
-$ backup-remote backup pull --all              # 全対象(最新版+全pin)
+$ amazing-backup backup pull --category main     # category単位(最新版+pin)
+$ amazing-backup backup pull --run 20261015-abcd1234   # run単位
+$ amazing-backup backup pull --all              # 全対象(最新版+全pin)
 ```
 
 確認ガードあり(5.7)。大量対象では復元job発行 -> 待ち -> 再実行の2段階になる点はgetと同じ(pending分は再実行で取得される)。
@@ -599,7 +599,7 @@ get/pullは出力先の既存平文を保護する:
   - `atara` -> `your-atara-bucket`
 - 切替は`active_profile`の書換え(恒久)または`--profile <name>`(当該実行限り)。**誤投入防止のため、prod系への書き込みは`--profile family`等を明示した実行を推奨**(active_profileはdev固定運用)
 - **backup pushは実行開始時に接続先(実効profile・bucket・prefix)を表示**する(5.6。dry-runでも表示)。表示を確認してから書き込みを続けることで誤bucketへの投入に気づける
-- **名前空間の分離はbucket単位で働く(混同防止)**。prod系3bucketは同一prefix(`backup-remote/`)を共有するが、ローカルregistry(data/registry.jsonl)は単一でも記録の参照(skip判定・索引versions/pins構築・未書込namespace判定・pin解決)はすべて**bucket一致で分離**される。他bucketの書込実績では誤ってskipしない・索引へ他bucketの版やpinが混入しない・未書込救済判定に他bucket実績が採用されない、が構造的に保証される(bucket横断で1byteもuploadされないrunは作れない)
+- **名前空間の分離はbucket単位で働く(混同防止)**。prod系3bucketは同一prefix(`amazing-backup/`)を共有するが、ローカルregistry(data/registry.jsonl)は単一でも記録の参照(skip判定・索引versions/pins構築・未書込namespace判定・pin解決)はすべて**bucket一致で分離**される。他bucketの書込実績では誤ってskipしない・索引へ他bucketの版やpinが混入しない・未書込救済判定に他bucket実績が採用されない、が構造的に保証される(bucket横断で1byteもuploadされないrunは作れない)
 
 ### 8.3 recipient鍵の管理
 
@@ -610,7 +610,7 @@ get/pullは出力先の既存平文を保護する:
    ```
 
 2. `configs/pipeline.toml` の `[recipients].public_keys` へ公開鍵(.pub)を追加する
-3. `backup-remote backup push --dry-run` を実行して設定エラーが出ないことを確認する(鍵ファイルの不在・形式違い・指紋の重複は設定読込時の設定エラー2で検出される。dry-runは暗号化しないため指紋そのものの表示は無い)
+3. `amazing-backup backup push --dry-run` を実行して設定エラーが出ないことを確認する(鍵ファイルの不在・形式違い・指紋の重複は設定読込時の設定エラー2で検出される。dry-runは暗号化しないため指紋そのものの表示は無い)
 
 追加以降の書き込みは新recipient構成で暗号化される(索引・manifestも同様)。
 
@@ -633,7 +633,7 @@ get/pullは出力先の既存平文を保護する:
 索引を復旧する:
 
 ```console
-$ backup-remote manage index rebuild --config configs/pipeline.toml
+$ amazing-backup manage index rebuild --config configs/pipeline.toml
 ```
 
 `sys/manifests/`のmanifest(DEEP_ARCHIVE)から索引を再構築する。未復元manifestへはBulk復元jobを発行する(発行したら案内+終了0。**最大48時間の待ちの後に再実行**で継続)。開始時に費用の目安(7.3)が表示される。完了すると索引がPUTされ、以降の照会が復旧する(完了時に続けての`manage index reconcile`実行が案内される・5.10)。
@@ -642,13 +642,13 @@ $ backup-remote manage index rebuild --config configs/pipeline.toml
 
 ### 9.3 手動復元(aws CLI + age・最後の手段)
 
-backup-remoteを使わない環境での復元手順。対象のkey配置(4.1)と索引(または`aws s3api list-object-versions`での列挙)から対象のuuidを特定する:
+amazing-backupを使わない環境での復元手順。対象のkey配置(4.1)と索引(または`aws s3api list-object-versions`での列挙)から対象のuuidを特定する:
 
 1. 復元jobを発行する(DEEP_ARCHIVEの場合):
 
    ```console
    $ aws s3api restore-object --bucket <bucket> \
-       --key backup-remote/data/<uuid>/default.age \
+       --key amazing-backup/data/<uuid>/default.age \
        --restore-request 'Days=7,GlacierJobParameters={Tier=Standard}'
    ```
 
@@ -657,7 +657,7 @@ backup-remoteを使わない環境での復元手順。対象のkey配置(4.1)�
 2. 対象を取得する:
 
    ```console
-   $ aws s3 cp s3://<bucket>/backup-remote/data/<uuid>/default.age .
+   $ aws s3 cp s3://<bucket>/amazing-backup/data/<uuid>/default.age .
    ```
 
 3. 秘密鍵で復号する:
@@ -669,7 +669,7 @@ backup-remoteを使わない環境での復元手順。対象のkey配置(4.1)�
 4. checksum検証: 索引(またはmanifest)を取得・復号し、`.age`のsha256が`age_sha256`と、平文のsha256が`source_sha256`と一致することを確認する:
 
    ```console
-   $ aws s3 cp s3://<bucket>/backup-remote/sys/index.jsonl.age .
+   $ aws s3 cp s3://<bucket>/amazing-backup/sys/index.jsonl.age .
    $ age -d -i <秘密鍵> -o index.jsonl index.jsonl.age
    $ sha256sum <title>
    ```

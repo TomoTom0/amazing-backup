@@ -35,7 +35,7 @@ pub(crate) mod testutil {
         pub(crate) fn new(tag: &str) -> TempDir {
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "backup-remote-unit-{tag}-{}-{n}",
+                "amazing-backup-unit-{tag}-{}-{n}",
                 std::process::id()
             ));
             std::fs::create_dir_all(&path).expect("unit test temp dir create");
@@ -84,14 +84,14 @@ pub(crate) mod testutil {
     }
 
     /// 既知のed25519公開鍵(throwaway・指紋 SHA256:559q/vywXFjM/NvGcD0pGur4xs/btSeJYjRe+eJtVew)。
-    pub(crate) const TEST_ED25519_PUB: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM/n+OMp5XIhXxpN7m5TDSj7Px+8UfoaTq1wy4lW1DN1 backup-remote-test-embed";
+    pub(crate) const TEST_ED25519_PUB: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM/n+OMp5XIhXxpN7m5TDSj7Px+8UfoaTq1wy4lW1DN1 amazing-backup-test-embed";
 
     /// 上記鍵のssh-keygen -lf表示指紋(FPR-001の独立oracle)。
     pub(crate) const TEST_ED25519_FINGERPRINT: &str =
         "SHA256:559q/vywXFjM/NvGcD0pGur4xs/btSeJYjRe+eJtVew";
 
     /// 対象外形式検証用のssh-rsa公開鍵(throwaway)。
-    pub(crate) const TEST_RSA_PUB: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDXNf/oTBwu/lMRdjWkvqj3cmXhj65nCN9tiAgN05bSFKumoG3/0jMTEbJXi2xddDZLeMmnGS+U2QgF1guBC+z8jIQTHwRPozpySrZq4gKrxfw/Gas6/uZZwRaM4MR7/VNLp7VZI7b/OufrFQd5RvGhT90UnYmJObhe5ZH8UwDh5gZQfUjGe4WM+It9aid2plQ4HKZctMFnTsz4LydGDu1RPgXUWhyBOT7f29uBBE4I85VPCUHT5v55DAQ5JRcViavNKtbhYhJOJAJUu/X9777VAERmaHrHIlZk8WZKgWd6Sfhs0lI2UfjR293egMD8LdEQqOZem8/aBz085grFQd backup-remote-test-rsa";
+    pub(crate) const TEST_RSA_PUB: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDXNf/oTBwu/lMRdjWkvqj3cmXhj65nCN9tiAgN05bSFKumoG3/0jMTEbJXi2xddDZLeMmnGS+U2QgF1guBC+z8jIQTHwRPozpySrZq4gKrxfw/Gas6/uZZwRaM4MR7/VNLp7VZI7b/OufrFQd5RvGhT90UnYmJObhe5ZH8UwDh5gZQfUjGe4WM+It9aid2plQ4HKZctMFnTsz4LydGDu1RPgXUWhyBOT7f29uBBE4I85VPCUHT5v55DAQ5JRcViavNKtbhYhJOJAJUu/X9777VAERmaHrHIlZk8WZKgWd6Sfhs0lI2UfjR293egMD8LdEQqOZem8/aBz085grFQd amazing-backup-test-rsa";
 
     /// TEST_ED25519_PUBをfileに書き出しそのpathを返す。
     pub(crate) fn write_test_ed25519_pub(dir: &Path) -> PathBuf {

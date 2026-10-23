@@ -1,7 +1,7 @@
 //! restore エリアの結合test。TASK-11(Phase B)で旧restoreサブコマンド
 //! (request/status/download)が削除され、復元job系の共通経路(tier/days検証・
 //! Restore header parse・--key事前検査・平文衝突保護)は get / backup pull / list jobs
-//! (src/storage.rs)経路で検証する。fake seam(BACKUP_REMOTE_FAKE_S3_STATE)のbin
+//! (src/storage.rs)経路で検証する。fake seam(AMAZING_BACKUP_FAKE_S3_STATE)のbin
 //! subprocess実行(実networkなし)。平文衝突保護はPhase B実装前のため実行failを許容。
 
 mod common;
@@ -130,7 +130,7 @@ fn get_preflight_key_and_age_errors() {
     std::fs::create_dir_all(&empty_cwd).expect("empty cwd");
     let (code, _, stderr) = run_bin_cwd(
         &["get", "a.zip", "--aws-config", &aws_s],
-        &[("BACKUP_REMOTE_FAKE_S3_STATE", state_dir.as_str())],
+        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_dir.as_str())],
         &empty_cwd,
     );
     assert_eq!(
@@ -151,7 +151,7 @@ fn get_preflight_key_and_age_errors() {
             "--key",
             bad_key,
         ],
-        &[("BACKUP_REMOTE_FAKE_S3_STATE", state_dir.as_str())],
+        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_dir.as_str())],
     );
     assert_eq!(code, 2, "鍵ファイル不在は設定エラー2: {stderr}");
 
@@ -352,7 +352,7 @@ fn plain_conflict_unreadable_existing_file_protected_get_and_pull() {
             "--out",
             &out_s,
         ],
-        &[("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())],
+        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())],
         "yes",
     ) else {
         eprintln!("skipping: script(pty)が利用できない");

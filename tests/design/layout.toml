@@ -1,4 +1,4 @@
-# backup-remote テスト設計条件書(layout エリア)
+# amazing-backup テスト設計条件書(layout エリア)
 # 出典: tmp/tasks/tm-10/design_s3_storage.md 1章(1.1〜1.4)・4.2・9章素案(TASK-10 S3ストレージ設計)
 # 2026-10-14: TASK-10実装(Phase A)に先立つテスト先行の条件書(新設feature)。
 #   src/layout.rs は設計8.1で新設されるmodule(key生成・分類解決・衝突検出の純関数群・unit test主対象)。
@@ -37,8 +37,8 @@ id = "layout.data-area-object-keys"
 target_function = "layout::data_object_key / layout::pin_object_key / layout::metadata_object_key"
 source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 5.1(新設関数)・1.1(キー配置図)"
 description = "実体領域のkey生成: data_object_key={prefix}data/{uuid}/default.age・pin_object_key={prefix}data/{uuid}/{pin}.age(引数を(category,rel_path,folder,pin)から(uuid,pin)へ替える)・metadata_object_key={prefix}data/{uuid}/metadata_{title}.json。prefixはaws.tomlのprofile値をそのまま連結(data/・sys/はRESERVE_SEGMENT体系・pin名の検証は呼び出し側で実施済み) (unit)"
-given = "prefix=backup-remote/・uuid=0192a4f0-3c1b-7a2e-9f10-112233445566・pin=keep-1・title=旅のしおり2026"
-expect_return = "backup-remote/data/0192a4f0-3c1b-7a2e-9f10-112233445566/default.age と backup-remote/data/0192a4f0-3c1b-7a2e-9f10-112233445566/keep-1.age と backup-remote/data/0192a4f0-3c1b-7a2e-9f10-112233445566/metadata_旅のしおり2026.json"
+given = "prefix=amazing-backup/・uuid=0192a4f0-3c1b-7a2e-9f10-112233445566・pin=keep-1・title=旅のしおり2026"
+expect_return = "amazing-backup/data/0192a4f0-3c1b-7a2e-9f10-112233445566/default.age と amazing-backup/data/0192a4f0-3c1b-7a2e-9f10-112233445566/keep-1.age と amazing-backup/data/0192a4f0-3c1b-7a2e-9f10-112233445566/metadata_旅のしおり2026.json"
 source_lines = "src/layout.rs:359; tests/layout.rs:421"
 
 [[condition]]
@@ -109,7 +109,7 @@ id = "layout.prefix-format-validation"
 target_function = "layout::(prefix形式検証) / config::load_aws"
 source = "tmp/tasks/tm-10/design_s3_storage.md 1.1(prefix規則)・4.2(検証規則)"
 description = "prefix形式: 空でない・`/`終端・先頭`/`禁止・使用文字は`[a-z0-9-]`区切り`/`。違反は設定エラー2 (unit)"
-given = "aws.tomlの[aws.profiles.X].prefixに \"\"(空)・\"backup-remote\"(末尾スラッシュなし)・\"/backup-remote/\"(先頭スラッシュ)・\"Backup_Remote/\"(使用文字違反)を指定した各ケース"
+given = "aws.tomlの[aws.profiles.X].prefixに \"\"(空)・\"amazing-backup\"(末尾スラッシュなし)・\"/amazing-backup/\"(先頭スラッシュ)・\"Backup_Remote/\"(使用文字違反)を指定した各ケース"
 expect_throw = "ConfigError(exit code 2)"
 source_lines = "src/layout.rs:433; tests/layout.rs:270"
 

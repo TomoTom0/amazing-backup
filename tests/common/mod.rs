@@ -12,8 +12,10 @@ pub struct TestDir(PathBuf);
 impl TestDir {
     pub fn new(tag: &str) -> TestDir {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("backup-remote-it-{tag}-{}-{n}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "amazing-backup-it-{tag}-{}-{n}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&path).expect("integration test temp dir create");
         TestDir(path)
     }
@@ -69,7 +71,7 @@ pub fn generate_ed25519_keypair(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
     let secret = stem.clone();
     let public = dir.join(format!("{name}.pub"));
     let out = std::process::Command::new("ssh-keygen")
-        .args(["-t", "ed25519", "-N", "", "-C", "backup-remote-it", "-f"])
+        .args(["-t", "ed25519", "-N", "", "-C", "amazing-backup-it", "-f"])
         .arg(&stem)
         .output()
         .expect("ssh-keygen実行");
@@ -151,21 +153,21 @@ pub fn make_archive(path: &Path, size_bytes: usize) {
     write_file(path, &data);
 }
 
-/// bin backup-remoteをsubprocess実行し(exit code, stdout, stderr)を返す。
+/// bin amazing-backupをsubprocess実行し(exit code, stdout, stderr)を返す。
 pub fn run_bin(args: &[&str]) -> (i32, String, String) {
     run_bin_env(args, &[])
 }
 
-/// 環境変数を上書きしてbinを実行する(BACKUP_REMOTE_FAKE_S3_STATE seam・PATH制限等)。
+/// 環境変数を上書きしてbinを実行する(AMAZING_BACKUP_FAKE_S3_STATE seam・PATH制限等)。
 pub fn run_bin_env(args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
     use std::os::unix::process::ExitStatusExt as _;
-    let bin = env!("CARGO_BIN_EXE_backup-remote");
+    let bin = env!("CARGO_BIN_EXE_amazing-backup");
     let mut cmd = std::process::Command::new(bin);
     cmd.args(args);
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let out = cmd.output().expect("backup-remote bin 実行");
+    let out = cmd.output().expect("amazing-backup bin 実行");
     (
         out.status
             .code()
@@ -180,13 +182,13 @@ pub fn run_bin_env(args: &[&str], env: &[(&str, &str)]) -> (i32, String, String)
 /// 走るため、test process側のcwdは変更せずsubprocessのcwdのみ変更する)。
 pub fn run_bin_cwd(args: &[&str], env: &[(&str, &str)], cwd: &Path) -> (i32, String, String) {
     use std::os::unix::process::ExitStatusExt as _;
-    let bin = env!("CARGO_BIN_EXE_backup-remote");
+    let bin = env!("CARGO_BIN_EXE_amazing-backup");
     let mut cmd = std::process::Command::new(bin);
     cmd.args(args).current_dir(cwd);
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let out = cmd.output().expect("backup-remote bin 実行");
+    let out = cmd.output().expect("amazing-backup bin 実行");
     (
         out.status
             .code()
@@ -197,7 +199,7 @@ pub fn run_bin_cwd(args: &[&str], env: &[(&str, &str)], cwd: &Path) -> (i32, Str
 }
 
 /// fake S3 backend seam(TASK-9設計4章・10.3)の検証構造。
-/// bin側(cli.rs)が`BACKUP_REMOTE_FAKE_S3_STATE=<dir>`環境変数を検出するとS3 backendを
+/// bin側(cli.rs)が`AMAZING_BACKUP_FAKE_S3_STATE=<dir>`環境変数を検出するとS3 backendを
 /// fakeへ差し替える(gateは#[cfg(debug_assertions)]・release buildにはseamが存在しない)。
 /// fakeはstate dir配下へ次の状態を書く(旧fake aws scriptと同一の状態構造・API呼び出し記録は
 /// 設計10.1のAPI形式行):
@@ -274,7 +276,7 @@ pub fn run_bin_pty_stdin(
     use std::io::Write as _;
     use std::os::unix::process::ExitStatusExt as _;
     use std::process::Stdio;
-    let bin = env!("CARGO_BIN_EXE_backup-remote");
+    let bin = env!("CARGO_BIN_EXE_amazing-backup");
     let mut cmdstr = format!("'{bin}'");
     for a in args {
         cmdstr.push_str(&format!(" '{a}'"));
@@ -312,7 +314,7 @@ pub fn run_bin_pty_stdin(
 
 /// TASK-10(S3ストレージ設計・tmp/tasks/tm-10/design_s3_storage.md)結合testの共用fixture。
 /// 新体系コマンド(backup push/pull・pin add/rm・manage・list/query/get/diff)を
-/// bin subprocess + fake seam(BACKUP_REMOTE_FAKE_S3_STATE)で実行する。
+/// bin subprocess + fake seam(AMAZING_BACKUP_FAKE_S3_STATE)で実行する。
 ///
 /// fake seam側の拡張解釈(設計8.2のversioning模擬を先取り。実装taskでsrc/s3.rsのFakeS3へ
 /// 反映される想定の仕掛け。テストはstate dirへの直接読書きでfixtureを組む):
@@ -355,7 +357,7 @@ pub struct StorageFixture {
     pub elsewhere: PathBuf,
     /// fake seam用credentialファイルのpath(dummy値)
     pub credentials: PathBuf,
-    /// aws.tomlのroot prefix(既定 "backup-remote/")
+    /// aws.tomlのroot prefix(既定 "amazing-backup/")
     pub prefix: String,
 }
 
@@ -451,7 +453,7 @@ impl StorageFixture {
 
         let credentials = write_fake_credentials(tmp.path());
         let aws_toml = tmp.path().join("aws.toml");
-        let prefix = "backup-remote/".to_string();
+        let prefix = "amazing-backup/".to_string();
         let mut body =
             storage_aws_toml_body("it-bucket", &prefix, opts.storage_class, &credentials);
         body.push_str(&opts.aws_lifecycle);
@@ -498,7 +500,7 @@ impl StorageFixture {
     /// fake seam環境でbinを実行する(共通envに追加envを合わせる)。
     pub fn bin(&self, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
         let state_s = self.state.display().to_string();
-        let mut envs: Vec<(&str, &str)> = vec![("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())];
+        let mut envs: Vec<(&str, &str)> = vec![("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())];
         envs.extend_from_slice(env);
         run_bin_env(args, &envs)
     }
@@ -1037,7 +1039,7 @@ pub fn push_titled_pty(
     let state_s = fx.state.display().to_string();
     run_bin_pty_stdin(
         &refs,
-        &[("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())],
+        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())],
         stdin_lines,
     )
 }

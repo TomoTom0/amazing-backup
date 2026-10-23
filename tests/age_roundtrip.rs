@@ -3,8 +3,8 @@
 
 mod common;
 
-use backup_remote::crypto::{decrypt_sha256, encrypt_stream};
-use backup_remote::fingerprint::{
+use amazing_backup::crypto::{decrypt_sha256, encrypt_stream};
+use amazing_backup::fingerprint::{
     parse_age_header, parse_ssh_pubkey, stanza_tag, verify_recipients,
 };
 use base64::Engine as _;

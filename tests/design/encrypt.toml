@@ -1,4 +1,4 @@
-# backup-remote テスト設計条件書(encrypt エリア)
+# amazing-backup テスト設計条件書(encrypt エリア)
 # 出典: tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-001〜ENC-018(詳細は2.2・2.5・4.1・4.3・6章・7章)
 # 2026-10-09: テスト全件PASS・verify-conditions.py PASSを確認し[meta]へ検証記録を書いた(レビュー指摘12件対応で条件追加・更新した際)。
 # 2026-10-14: TASK-10(S3ストレージ設計)対応でテスト先行の更新(tmp/tasks/tm-10/design_s3_storage.md

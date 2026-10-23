@@ -11,7 +11,7 @@ const DEFAULT_PIPELINE_CONFIG: &str = "configs/pipeline.toml";
 
 /// サブコマンド引数定義(2章各表)。
 #[derive(clap::Parser)]
-#[command(name = "backup-remote", version)]
+#[command(name = "amazing-backup", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -70,7 +70,7 @@ fn load_config_or_exit(config: &Option<PathBuf>) -> Option<crate::config::Pipeli
 }
 
 /// S3 backendの選択(TASK-9設計4.3・9.3)。
-/// debug build(`#[cfg(debug_assertions)]`)ではenv `BACKUP_REMOTE_FAKE_S3_STATE`指定時に
+/// debug build(`#[cfg(debug_assertions)]`)ではenv `AMAZING_BACKUP_FAKE_S3_STATE`指定時に
 /// fake seam(`FakeS3`)へ差し替える(release buildにはseam・fakeともcompileされず
 /// 実S3経路になる。cargo testはdev profileのためseam有効)。fake選択時はstderr冒頭へ
 /// 「WARNING: FAKE S3 MODE」を必ず表示する(誤用防御)。
@@ -82,7 +82,7 @@ pub(crate) fn select_backend(
     warn_endpoint_url_env();
     #[cfg(debug_assertions)]
     {
-        if let Some(state) = std::env::var_os("BACKUP_REMOTE_FAKE_S3_STATE") {
+        if let Some(state) = std::env::var_os("AMAZING_BACKUP_FAKE_S3_STATE") {
             eprintln!("WARNING: FAKE S3 MODE");
             return Ok(Box::new(crate::s3::FakeS3::from_env(PathBuf::from(state))));
         }
@@ -643,13 +643,13 @@ mod tests {
     /// 使用法誤り(不明オプション・サブコマンド不足)はexit 64。
     #[test]
     fn usage_error_exits_64() {
-        let code = run(["backup-remote".into(), "--definitely-not-an-option".into()]);
+        let code = run(["amazing-backup".into(), "--definitely-not-an-option".into()]);
         assert_eq!(code, 64, "不明オプション");
 
-        let code = run(["backup-remote".into()]);
+        let code = run(["amazing-backup".into()]);
         assert_eq!(code, 64, "サブコマンド不足");
 
-        let code = run(["backup-remote".into(), "no-such-subcommand".into()]);
+        let code = run(["amazing-backup".into(), "no-such-subcommand".into()]);
         assert_eq!(code, 64, "未知サブコマンド");
     }
 
@@ -662,7 +662,7 @@ mod tests {
 
         // 2: 設定エラー(不在のpipeline.tomlでbackup push)
         let code = run([
-            "backup-remote".into(),
+            "amazing-backup".into(),
             "backup".into(),
             "push".into(),
             "--config".into(),
@@ -675,10 +675,10 @@ mod tests {
         let aws_toml = tmp.path().join("aws.toml");
         write_file(
             &aws_toml,
-            b"[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"b\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"creds.toml\"\n",
+            b"[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"b\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"creds.toml\"\n",
         );
         let code = run([
-            "backup-remote".into(),
+            "amazing-backup".into(),
             "backup".into(),
             "push".into(),
             "--config".into(),
@@ -986,7 +986,7 @@ mod tests {
     fn paths_required_usage_error() {
         // PATH 0個(--from-listの有無にかかわらず)は64
         let code = run([
-            "backup-remote".into(),
+            "amazing-backup".into(),
             "backup".into(),
             "push".into(),
             "--config".into(),
@@ -995,7 +995,7 @@ mod tests {
         assert_eq!(code, 64, "backup push PATH 0個");
 
         let code = run([
-            "backup-remote".into(),
+            "amazing-backup".into(),
             "backup".into(),
             "push".into(),
             "--config".into(),
@@ -1007,7 +1007,7 @@ mod tests {
 
         // PATH 1個(+--from-list併用)はusage errorとならない(設定エラー等別区分)
         let code = run([
-            "backup-remote".into(),
+            "amazing-backup".into(),
             "backup".into(),
             "push".into(),
             "--config".into(),
@@ -1017,7 +1017,7 @@ mod tests {
         assert_ne!(code, 64, "PATH 1個はusage errorでない(実際は設定エラー2)");
 
         let code = run([
-            "backup-remote".into(),
+            "amazing-backup".into(),
             "backup".into(),
             "push".into(),
             "--config".into(),

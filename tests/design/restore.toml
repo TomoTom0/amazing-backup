@@ -1,4 +1,4 @@
-# backup-remote テスト設計条件書(restore エリア)
+# amazing-backup テスト設計条件書(restore エリア)
 # 出典: tmp/tasks/tm-5/design_restore.md 3.9 RES-001〜024(本編8章 RES節・CLI仕様は本編2.7)
 # 2026-10-11: TASK-5(restore系)対応で新設(テスト先行。実装前のため新条件のテストは実行failを許容し
 #   [meta]はverified=falseのまま)。重要期待値(設計レビュー指摘反映済み):
@@ -14,7 +14,7 @@
 #   RES-001/003/007/014/015/020(6件)+RES-018の5系文言をSDK API呼び出し参数表現へ改訂
 #   (RestoreRequest days/glacier_job_parameters tier・GetObject checksum_mode=ENABLED・
 #   ListObjectsV2 paginator・SDK error→BackupError写像)。RES-020から--profileを削除(--profile廃止仕様)。
-#   全条件のaws差替え表記を「fake aws PATH差替え」から「fake seam(BACKUP_REMOTE_FAKE_S3_STATE)」へ
+#   全条件のaws差替え表記を「fake aws PATH差替え」から「fake seam(AMAZING_BACKUP_FAKE_S3_STATE)」へ
 #   変更(設計4章・10.3)。失敗注入env名(FAKE_S3_FAIL_CP_FOR等4種)は維持(10.3)。
 #   idは付与後不変のため旧idのまま文言のみ改訂。実装前のため更新後期待値のテストは実行failを許容し
 #   [meta]はverified=falseのまま。
@@ -62,7 +62,7 @@ verified_at = "2026-10-22"
 verified_by = "claude"
 test_command = "cargo test"
 source_hash = "1d7f20aba295cdb1b6862bd14605958ca4ccde61"
-note = "復元job系の共通経路(tier/days検証・Restore header parse・--key事前検査)の条件群。TASK-11(Phase B)で旧restoreサブコマンド(src/restore.rs)が削除され、復元はget/backup pull/list jobs/manage jobs(src/storage.rs)経路で検証する(旧CLI固有の条件は廃止済み)。S3実行はfake seam(env BACKUP_REMOTE_FAKE_S3_STATE・tests/common)で検証(実networkなし)"
+note = "復元job系の共通経路(tier/days検証・Restore header parse・--key事前検査)の条件群。TASK-11(Phase B)で旧restoreサブコマンド(src/restore.rs)が削除され、復元はget/backup pull/list jobs/manage jobs(src/storage.rs)経路で検証する(旧CLI固有の条件は廃止済み)。S3実行はfake seam(env AMAZING_BACKUP_FAKE_S3_STATE・tests/common)で検証(実networkなし)"
 
 [[condition]]
 id = "restore.request-tier-days-validation"

@@ -213,7 +213,7 @@ impl RealS3 {
             creds.secret_access_key.clone(),
             creds.session_token.clone(),
             None,
-            "backup-remote-credentials-file",
+            "amazing-backup-credentials-file",
         );
         // connect_timeoutのみ設定(設計8章)。api_call_timeout等の総時間型timeoutは
         // 大object転送を切断するため設定しない。
@@ -1006,7 +1006,7 @@ impl S3Backend for RealS3 {
 // FakeS3(unit test・結合seam用。gateは#[cfg(debug_assertions)]でrelease buildから排除)
 
 /// 状態を持つS3 simulator(設計4.3案1・10.3)。unit testと結合testのseam
-/// (env `BACKUP_REMOTE_FAKE_S3_STATE`)で共用する。実network不使用。
+/// (env `AMAZING_BACKUP_FAKE_S3_STATE`)で共用する。実network不使用。
 ///
 /// state dir配下の状態構造(旧fake aws scriptと同一・tests/common/mod.rs doc参照):
 /// - `objects/<key>`   配置済みobjectの実体
@@ -1068,7 +1068,7 @@ impl FakeS3 {
         }
     }
 
-    /// 結合seam用: env `BACKUP_REMOTE_FAKE_S3_STATE`選択時に失敗注入env 5種+TASK-10
+    /// 結合seam用: env `AMAZING_BACKUP_FAKE_S3_STATE`選択時に失敗注入env 5種+TASK-10
     /// のversioning系env 2種を解釈する。
     pub fn from_env(state_dir: impl Into<PathBuf>) -> FakeS3 {
         let env_key = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());

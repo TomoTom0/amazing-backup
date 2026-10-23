@@ -1,7 +1,7 @@
 //! registry/manifestを含むbatch単位の結合test(設計1章・8章・TASK-10設計2.2・7.3・8.1)。
 //! TASK-11(Phase B)で旧encrypt/uploadサブコマンドが削除され、暗号化・registry記録・
 //! manifest構築・S3転送はbackup push(暗号化→upload→manifest→索引更新の統合run)経路で
-//! 検証する。実ageでの暗号化とfake seam(BACKUP_REMOTE_FAKE_S3_STATE)のbin subprocess実行。
+//! 検証する。実ageでの暗号化とfake seam(AMAZING_BACKUP_FAKE_S3_STATE)のbin subprocess実行。
 
 mod common;
 
@@ -252,15 +252,15 @@ fn reencrypt_on_source_change() {
     );
 
     // reduce後は同一identity_hashの新記録(file_writes)が有効(次回から所在skip回復)
-    let records: Vec<backup_remote::registry::Record> = writes
+    let records: Vec<amazing_backup::registry::Record> = writes
         .iter()
         .map(|v| {
-            let e: backup_remote::registry::FileWriteRecord =
+            let e: amazing_backup::registry::FileWriteRecord =
                 serde_json::from_value(v.clone()).expect("FileWriteRecord");
-            backup_remote::registry::Record::FileWrite(e)
+            amazing_backup::registry::Record::FileWrite(e)
         })
         .collect();
-    let reduced = backup_remote::registry::reduce_records(&records);
+    let reduced = amazing_backup::registry::reduce_records(&records);
     assert_eq!(reduced.file_writes.len(), 1, "同一identityは後勝ち");
 }
 

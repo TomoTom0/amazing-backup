@@ -608,7 +608,7 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
         let mut all: Vec<Rec> = Vec::new();
         for key in &manifest_keys {
             let tmp = std::env::temp_dir().join(format!(
-                "backup-remote-manifest-{}-{}.age",
+                "amazing-backup-manifest-{}-{}.age",
                 std::process::id(),
                 sha256_hex(key.as_bytes())
                     .chars()
@@ -875,7 +875,7 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             manifest_keys.len()
         );
         println!(
-            "案内: 続けて `backup-remote manage index reconcile` を実行してください(manifest由来の再構築ではregistryのprune/sweep除外が及ばない場合があるため、S3実在集合へ整合します)"
+            "案内: 続けて `amazing-backup manage index reconcile` を実行してください(manifest由来の再構築ではregistryのprune/sweep除外が及ばない場合があるため、S3実在集合へ整合します)"
         );
         Ok(0)
     })();

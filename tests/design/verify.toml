@@ -1,4 +1,4 @@
-# backup-remote テスト設計条件書(verify エリア)
+# amazing-backup テスト設計条件書(verify エリア)
 # 出典: tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-001〜VER-013(詳細は2.4・4.1注記・7章)
 # 2026-10-09: テスト全件PASS・verify-conditions.py PASSを確認し[meta]へ検証記録を書いた(レビュー指摘12件対応で条件追加・更新した際)。
 # 2026-10-11: TASK-2(age_size完全一致化+verify構造検査recipient照合)対応でテスト先行の更新。

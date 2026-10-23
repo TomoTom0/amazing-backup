@@ -1,4 +1,4 @@
-# backup-remote テスト設計条件書(registry エリア)
+# amazing-backup テスト設計条件書(registry エリア)
 # 出典: tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(registry schema 1→2)・5.3・4.1(sha_uuid_lookup)・10章(registry)
 # 2026-10-22: TASK-18(S3キー設計: UUID+versioning)対応でテスト先行の条件書(新設feature)。
 #   src/registry.rs のrecord schema=2化(file_write/file_upload/pin_write/pin_remove/prune)・

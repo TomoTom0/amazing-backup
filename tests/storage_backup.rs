@@ -1,7 +1,7 @@
 //! TASK-10操作系CLI(backup push/pull・versioning確認・索引不在・災害時動作・
 //! tmp/tasks/tm-10/design_s3_storage.md 2.4・3.2・5.1・7.3・8.3)と
 //! TASK-10追加のconfig/encrypt条件(config.keep-artifacts-run-cleanup・
-//! encrypt.skip-by-registry-record)の結合test。fake seam(BACKUP_REMOTE_FAKE_S3_STATE)の
+//! encrypt.skip-by-registry-record)の結合test。fake seam(AMAZING_BACKUP_FAKE_S3_STATE)の
 //! bin subprocessで検証する(テスト先行のため実装前の実行failは許容・--no-runは通る)。
 
 mod common;
@@ -196,7 +196,7 @@ fn backup_push_runs_integrated_pipeline() {
             &aws_s,
             "--dry-run",
         ],
-        &[("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())],
+        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())],
     );
     assert_eq!(
         code, 64,
@@ -344,7 +344,7 @@ fn backup_pull_all_requires_confirmation() {
             "--key",
             &key_s,
         ],
-        &[("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())],
+        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())],
         "no",
     );
     if let Some((code, stdout)) = result {
@@ -393,7 +393,7 @@ fn backup_pull_category_and_run_keep_confirmation_guard() {
         clear_calls(&fx);
         if let Some((code, stdout)) = run_bin_pty_stdin(
             &args,
-            &[("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())],
+            &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())],
             "no",
         ) {
             assert_eq!(code, 0, "{scope_args:?}の確認noはexit 0: {stdout}");
@@ -633,7 +633,7 @@ fn read_commands_work_without_pipeline_and_registry() {
     let aws_s = fx.aws_toml.display().to_string();
     let key_s = fx.secret.display().to_string();
     let state_s = fx.state.display().to_string();
-    let env = [("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())];
+    let env = [("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())];
 
     let (code, stdout, stderr) = run_bin_cwd(
         &["query", "travel", "--aws-config", &aws_s, "--key", &key_s],
@@ -864,7 +864,7 @@ fn pin_add_without_config_fails_before_s3_calls() {
             "--aws-config",
             &aws_s,
         ],
-        &[("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())],
+        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())],
     );
     assert_eq!(code, 2, "--configなしpin addは設定エラー2: {stderr}");
     assert_eq!(
@@ -1643,7 +1643,7 @@ fn removed_options_are_rejected_with_usage_error() {
         args.push(&key_s);
         let state_s = fx.state.display().to_string();
         let (code, stdout, stderr) =
-            run_bin_env(&args, &[("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())]);
+            run_bin_env(&args, &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())]);
         assert_eq!(
             code, 64,
             "{tag}はusage error 64(未知オプション/サブコマンド扱い): {stdout}{stderr}"

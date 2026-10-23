@@ -1,5 +1,5 @@
 //! S3 backend固有の結合test(TASK-9 AWS SDK移行・tmp/tasks/tm-9/design_sdk_migration.md)。
-//! fake seam(env BACKUP_REMOTE_FAKE_S3_STATE・設計4章)・multipart(5章)・
+//! fake seam(env AMAZING_BACKUP_FAKE_S3_STATE・設計4章)・multipart(5章)・
 //! credentialファイル(3章)・AWS_ENDPOINT_URL系env警告(9.3)をbin subprocess実行で検証する。
 //! TASK-11(Phase B)で旧uploadサブコマンドが削除され、S3転送はbackup push経路で検証する。
 
@@ -24,12 +24,12 @@ fn rewrite_credentials(fx: &StorageFixture, body: &str) {
 /// profileを1つだけ含むaws.toml本文(credentials_fileは引数)。
 fn aws_toml_with(credentials_file: &str) -> String {
     format!(
-        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{credentials_file}\"\n"
+        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{credentials_file}\"\n"
     )
 }
 
 /// [covers:cli.fake-s3-seam]
-/// fake seam(TASK-9設計4.3案1・12.4): env BACKUP_REMOTE_FAKE_S3_STATE指定でS3 backendが
+/// fake seam(TASK-9設計4.3案1・12.4): env AMAZING_BACKUP_FAKE_S3_STATE指定でS3 backendが
 /// fakeへ差し替わる。ダミーcredential値(実AWSで無効)でもbackup pushが成功する=実network不使用。
 /// fake選択時はstderr冒頭へ「WARNING: FAKE S3 MODE」が表示される(誤用防御)。
 /// state dir配下へobjects/<key>とAPI呼び出し記録(calls.log)が書かれる。
@@ -75,7 +75,7 @@ fn credentials_file_key_required() {
     write_file(&a, b"cred-req-plain");
     // キー欠落
     fx.rewrite_aws_toml(
-        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\n",
+        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\n",
     );
     clear_calls(&fx);
     let (code, _, stderr) = fx.push(&[&a], &[], &[]);
@@ -437,7 +437,7 @@ fn endpoint_url_env_warns_on_stderr() {
                 a.display().to_string().as_str(),
             ],
             &[
-                ("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str()),
+                ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
                 (env_name, "http://127.0.0.1:19000"),
             ],
             "endpoint-title",
@@ -473,7 +473,7 @@ fn fake_s3_restore_validates_key_and_archive_state() {
     let std_key = fx.data_key(&uuid_of_path(&fx, &a));
 
     // 不在keyへの復元job発行はNoSuchKey相当の転送エラー5
-    let ghost_key = "backup-remote/data/00000000-0000-7000-8000-0000000000ff/default.age";
+    let ghost_key = "amazing-backup/data/00000000-0000-7000-8000-0000000000ff/default.age";
     let (code, _, stderr) = fx.manage("jobs", &["reissue", ghost_key]);
     assert_eq!(code, 5, "不在keyへのreissueは転送エラー5: {stderr}");
     assert!(

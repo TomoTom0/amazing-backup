@@ -1,6 +1,6 @@
 //! metadata エリア(TASK-18・tmp/tasks/tm-18/design_key-uuid-versioning.md 2章/5.5)の結合test。
 //! src/metadata.rsは実装前(新設module)のため、backup push run末尾のmetadata syncを
-//! fake seam(BACKUP_REMOTE_FAKE_S3_STATE)のAPI呼び出し記録とmetadata objectの実体
+//! fake seam(AMAZING_BACKUP_FAKE_S3_STATE)のAPI呼び出し記録とmetadata objectの実体
 //! (平文JSON)で観測する(テスト先行のため実行failは許容・cargo test --no-runは通る)。
 
 mod common;
@@ -404,7 +404,7 @@ fn metadata_title_change_rotates_key() {
     }
     assert!(
         calls.lines().any(|l| l.starts_with("s3 ListObjectsV2")
-            && l.contains(&format!("prefix=backup-remote/data/{uuid}/"))),
+            && l.contains(&format!("prefix=amazing-backup/data/{uuid}/"))),
         "旧titleキーの特定はlist_keys列挙: {calls}"
     );
     // default.age・pin objectへの変更は行われない

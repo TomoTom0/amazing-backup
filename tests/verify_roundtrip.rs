@@ -5,7 +5,7 @@
 
 mod common;
 
-use backup_remote::crypto::decrypt_sha256;
+use amazing_backup::crypto::decrypt_sha256;
 use common::*;
 
 /// 1件backup push済みの検証環境(keep_artifacts=alwaysでdata/outの.ageを保持)を用意する。
@@ -183,8 +183,8 @@ fn structure_check_recipient_bijection_with_real_age() {
 
     // 誤recipient: registry記録のrecipients指紋を別鍵の実形式指紋へ書換え(.ageは不変)
     let (other_pub, _other_secret) = generate_ed25519_keypair(fx.elsewhere.as_path(), "other");
-    let other = backup_remote::fingerprint::parse_ssh_pubkey(&other_pub).expect("別鍵のparse");
-    let wrong_fp = backup_remote::fingerprint::fingerprint(&other);
+    let other = amazing_backup::fingerprint::parse_ssh_pubkey(&other_pub).expect("別鍵のparse");
+    let wrong_fp = amazing_backup::fingerprint::fingerprint(&other);
     let recs = fx.registry_values();
     let write = recs
         .iter()

@@ -1,5 +1,5 @@
 //! CLI entrypoint系の結合test(設計8章CLI-002/004・TASK-11 Phase B)。
-//! env!("CARGO_BIN_EXE_backup-remote")でbinを直接実行して検証する。
+//! env!("CARGO_BIN_EXE_amazing-backup")でbinを直接実行して検証する。
 //! TASK-11(Phase B)で旧サブコマンド(plan/encrypt/upload/verify/restore)が削除される
 //! (実装前のため旧サブコマンド削除のtestはfailを許容)。
 
@@ -14,14 +14,14 @@ fn version_flag_prints_and_exits_zero() {
     let (code, stdout, stderr) = run_bin(&["--version"]);
     assert_eq!(code, 0, "exit 0: {stderr}");
     assert!(
-        stdout.contains("backup-remote"),
+        stdout.contains("amazing-backup"),
         "version文字列にpackage名を含む: {stdout}"
     );
     assert!(!stdout.trim().is_empty(), "stdoutへ表示: {stdout}");
 }
 
 /// [covers:cli.module-entrypoint-parity]
-/// 同一引数をlib経由(cli::run直接呼出)とbin backup-remoteで実行すると同一の終了コードを返す
+/// 同一引数をlib経由(cli::run直接呼出)とbin amazing-backupで実行すると同一の終了コードを返す
 /// (TASK-11 Phase B: 旧plan経路の代表ケースはbackup pushの対象指定へ読み替え)。
 #[test]
 fn bin_and_lib_entrypoint_parity() {
@@ -51,7 +51,7 @@ fn bin_and_lib_entrypoint_parity() {
     write_file(
         &aws_toml,
         format!(
-            "[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{}\"\n",
+            "[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{}\"\n",
             creds.display()
         )
         .as_bytes(),
@@ -83,13 +83,13 @@ fn bin_and_lib_entrypoint_parity() {
     ];
 
     for case in cases {
-        let mut bin_args: Vec<&str> = vec!["backup-remote"];
+        let mut bin_args: Vec<&str> = vec!["amazing-backup"];
         bin_args.extend(case.iter().map(|s| s.as_str()));
         let (bin_code, stdout, stderr) = run_bin(&bin_args[1..]);
 
-        let mut lib_argv: Vec<std::ffi::OsString> = vec!["backup-remote".into()];
+        let mut lib_argv: Vec<std::ffi::OsString> = vec!["amazing-backup".into()];
         lib_argv.extend(case.iter().map(|s| std::ffi::OsString::from(s)));
-        let lib_code = backup_remote::cli::run(lib_argv);
+        let lib_code = amazing_backup::cli::run(lib_argv);
 
         assert_eq!(
             bin_code, lib_code,

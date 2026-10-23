@@ -1,4 +1,4 @@
-# backup-remote テスト設計条件書(fingerprint エリア)
+# amazing-backup テスト設計条件書(fingerprint エリア)
 # 出典: tmp/tasks/tm-1/design_backup_pipeline.md 8章 FPR-001〜FPR-004(詳細は4.4)
 # 2026-10-09: テスト全件PASS・verify-conditions.py PASSを確認し[meta]へ検証記録を書いた(レビュー指摘12件対応で条件追加・更新した際)。
 

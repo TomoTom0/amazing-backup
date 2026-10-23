@@ -1,5 +1,5 @@
 //! retention エリアの結合test(TASK-10 S3ストレージ設計・tmp/tasks/tm-10/design_s3_storage.md 3.2・5.2)。
-//! manage lifecycle apply・manage pruneをfake seam(BACKUP_REMOTE_FAKE_S3_STATE)の
+//! manage lifecycle apply・manage pruneをfake seam(AMAZING_BACKUP_FAKE_S3_STATE)の
 //! bin subprocessで検証する(テスト先行のため実装前の実行failは許容・--no-runは通る)。
 
 mod common;
@@ -125,7 +125,7 @@ fn lifecycle_applies_mpu_abort_rule() {
         "ハードコード値(7)は使われない: {stdout}"
     );
     assert!(
-        stdout.contains("backup-remote/"),
+        stdout.contains("amazing-backup/"),
         "MPU abort ruleのprefix(<prefix>/): {stdout}"
     );
 }
@@ -372,7 +372,7 @@ fn lifecycle_apply_generates_data_area_three_rules() {
     assert_eq!(specs.len(), 3, "3rule構成(category毎ruleは廃止): {payload}");
     let ncve = serde_json::json!({
         "Noncurrent": {
-            "prefix": "backup-remote/data/",
+            "prefix": "amazing-backup/data/",
             "noncurrent_days": 180,
             "newer_noncurrent_versions": 10,
         }
@@ -382,7 +382,7 @@ fn lifecycle_apply_generates_data_area_three_rules() {
         "data-ncve rule: 期待={ncve} payload={payload}"
     );
     let mpu = serde_json::json!({
-        "MpuAbort": { "prefix": "backup-remote/", "days_after_initiation": 7 }
+        "MpuAbort": { "prefix": "amazing-backup/", "days_after_initiation": 7 }
     });
     assert!(
         specs.contains(&mpu),
@@ -399,8 +399,8 @@ fn lifecycle_apply_generates_data_area_three_rules() {
         .unwrap_or_else(|| panic!("delete-marker-sweep rule: {payload}"));
     let sweep_s = serde_json::to_string(sweep).unwrap();
     assert!(
-        sweep_s.contains("backup-remote/data/"),
-        "delete-marker-sweepのprefix(backup-remote/data/): {sweep_s}"
+        sweep_s.contains("amazing-backup/data/"),
+        "delete-marker-sweepのprefix(amazing-backup/data/): {sweep_s}"
     );
     assert!(
         sweep_s.contains("true"),
@@ -409,7 +409,7 @@ fn lifecycle_apply_generates_data_area_three_rules() {
 
     // stdoutにも3ruleの構成(値はaws.toml値)が現れる
     for want in [
-        "backup-remote/data/",
+        "amazing-backup/data/",
         "NoncurrentDays",
         "180",
         "NewerNoncurrentVersions",
@@ -420,11 +420,11 @@ fn lifecycle_apply_generates_data_area_three_rules() {
         assert!(stdout1.contains(want), "apply表示に{want}: {stdout1}");
     }
     assert!(
-        !stdout1.contains("backup-remote/unfiled/"),
+        !stdout1.contains("amazing-backup/unfiled/"),
         "category毎ruleのprefixは現れない: {stdout1}"
     );
     assert!(
-        !stdout1.contains("backup-remote/sys/"),
+        !stdout1.contains("amazing-backup/sys/"),
         "sys(索引・manifestの予約領域)はNCVE対象外: {stdout1}"
     );
 
@@ -640,7 +640,7 @@ fn reset_run_cwd(
     let state_s = fx.state.display().to_string();
     run_bin_cwd(
         &refs,
-        &[("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())],
+        &[("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())],
         cwd,
     )
 }
@@ -718,7 +718,7 @@ fn reset_rejects_foreign_bucket_upload_records() {
         .clone();
     foreign["s3_bucket"] = serde_json::json!("prod-your-family-bucket");
     foreign["s3_key"] =
-        serde_json::json!("backup-remote/data/00000000-0000-7000-8000-000000000000/default.age");
+        serde_json::json!("amazing-backup/data/00000000-0000-7000-8000-000000000000/default.age");
     append_registry_line(&fx.registry, &foreign);
     clear_calls(&fx);
 

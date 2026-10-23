@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""backup-remote テスト設計条件書の機械検証 (test-structure skill準拠)。
+"""amazing-backup テスト設計条件書の機械検証 (test-structure skill準拠)。
 
 条件書: tests/design/*.toml(エリア別分割)
 テスト: [covers:<id>] タグ付きのテストファイル。走査対象:

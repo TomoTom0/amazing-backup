@@ -1,4 +1,4 @@
-# backup-remote テスト設計条件書(upload エリア)
+# amazing-backup テスト設計条件書(upload エリア)
 # 出典: tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-001〜UPL-022(詳細は2.3・2.3-7・2.3 TASK-6節・2.6・3.3・4.1・7章)
 # 2026-10-09: テスト全件PASS・verify-conditions.py PASSを確認し[meta]へ検証記録を書いた(レビュー指摘12件対応で条件追加・更新した際)。
 # 2026-10-09: TASK-6(CLI一時上書き)対応でUPL-015〜019を追加(テスト先行。実装前のため新条件のテストは実行failを許容し[meta]はverified=falseのまま)。
@@ -12,7 +12,7 @@
 # 2026-10-10: コードレビュー指摘5件対応でUPL-023(送り元一時fileのO_EXCL・設定エラー2)・
 #   UPL-024(実行summaryのREADME配置分分離表示)を追加。
 # 2026-10-11: TASK-5(restore系)対応でUPL-020のテンプレート内容要件期待値へ
-#   「backup-remote restoreコマンドによる復元の1行(内容要件6)」を追加(テスト先行。
+#   「amazing-backup restoreコマンドによる復元の1行(内容要件6)」を追加(テスト先行。
 #   テンプレート本体(src/templates/restore_readme.txt)への追記はTASK-5実装段階のため、
 #   更新後期待値のテストは実行failを許容し[meta]はverified=falseのまま。
 #   tests/design/restore.toml RES-021と相互参照)。

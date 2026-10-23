@@ -1,6 +1,6 @@
 //! TASK-11(Phase B)のCLI option系結合test: --profile(aws.toml active_profile一時上書き)・
 //! --aws-config既定path・索引GET転送エラーのexit 5分離・manage jobs reissue。
-//! fake seam(BACKUP_REMOTE_FAKE_S3_STATE)のbin subprocessで検証する
+//! fake seam(AMAZING_BACKUP_FAKE_S3_STATE)のbin subprocessで検証する
 //! (Phase B実装前のため--profile等は未知オプション扱いとなり各testはfailを許容)。
 
 mod common;
@@ -15,7 +15,7 @@ fn clear_calls(fx: &StorageFixture) {
 /// dev(active_profile)とprodの2profileを含むaws.toml本文(dev/prodでprefixが異なる)。
 fn two_profile_aws_toml(fx: &StorageFixture) -> String {
     format!(
-        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n[aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"prod-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n",
+        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n[aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"prod-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n",
         creds = fx.credentials.display()
     )
 }
@@ -149,7 +149,7 @@ fn aws_config_default_path_is_configs_aws_toml() {
     std::fs::copy(&fx.aws_toml, configs_dir.join("aws.toml")).expect("aws.toml配置");
     let state_s = fx.state.display().to_string();
     let key_s = fx.secret.display().to_string();
-    let env = [("BACKUP_REMOTE_FAKE_S3_STATE", state_s.as_str())];
+    let env = [("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str())];
 
     // --aws-config未指定のlist files: configs/aws.tomlを読み込んで索引参照まで動作
     let (code, stdout, stderr) = run_bin_cwd(&["list", "files", "--key", &key_s], &env, &work);
@@ -236,7 +236,7 @@ fn index_get_transfer_error_is_exit_5() {
 /// (cli.profile-namespace-isolated-by-bucket検証用。prefixが同一である点が本質)。
 fn same_prefix_diff_bucket_aws_toml(fx: &StorageFixture) -> String {
     format!(
-        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"bucket-dev\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n[aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"bucket-prod\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n",
+        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"bucket-dev\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n[aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"bucket-prod\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n",
         creds = fx.credentials.display()
     )
 }
@@ -665,9 +665,9 @@ fn three_bucket_aws_toml(fx: &StorageFixture) -> String {
     let creds = fx.credentials.display();
     format!(
         "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n\
-         [aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"bucket-dev\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n\
-         [aws.profiles.family]\npurpose = \"prod\"\nbucket = \"bucket-family\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"DEEP_ARCHIVE\"\ncredentials_file = \"{creds}\"\n\n\
-         [aws.profiles.baked]\npurpose = \"prod\"\nbucket = \"bucket-baked\"\nregion = \"ap-northeast-1\"\nprefix = \"backup-remote/\"\nstorage_class = \"DEEP_ARCHIVE\"\ncredentials_file = \"{creds}\"\n"
+         [aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"bucket-dev\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n\
+         [aws.profiles.family]\npurpose = \"prod\"\nbucket = \"bucket-family\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"DEEP_ARCHIVE\"\ncredentials_file = \"{creds}\"\n\n\
+         [aws.profiles.baked]\npurpose = \"prod\"\nbucket = \"bucket-baked\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"DEEP_ARCHIVE\"\ncredentials_file = \"{creds}\"\n"
     )
 }
 
@@ -756,7 +756,7 @@ fn backup_push_shows_connection_destination() {
         stdout.lines().any(|l| l.contains("接続先")
             && l.contains("profile=baked")
             && l.contains("bucket=bucket-baked")
-            && l.contains("prefix=backup-remote/")),
+            && l.contains("prefix=amazing-backup/")),
         "dry-runにも接続先行(実効profile/bucket/prefix)が表示される: {stdout}"
     );
     assert!(
@@ -775,7 +775,7 @@ fn backup_push_shows_connection_destination() {
         stdout.lines().any(|l| l.contains("接続先")
             && l.contains("profile=family")
             && l.contains("bucket=bucket-family")
-            && l.contains("prefix=backup-remote/")),
+            && l.contains("prefix=amazing-backup/")),
         "通常実行にも接続先行が表示される: {stdout}"
     );
 
@@ -786,7 +786,7 @@ fn backup_push_shows_connection_destination() {
         stdout.lines().any(|l| l.contains("接続先")
             && l.contains("profile=dev")
             && l.contains("bucket=bucket-dev")
-            && l.contains("prefix=backup-remote/")),
+            && l.contains("prefix=amazing-backup/")),
         "profile省略時はactive_profile(dev)の接続先が表示される: {stdout}"
     );
 }

@@ -1,5 +1,5 @@
 //! TASK-10照会系CLI(list/query/get/diff・tmp/tasks/tm-10/design_s3_storage.md 3.1)の結合test。
-//! fake seam(BACKUP_REMOTE_FAKE_S3_STATE)のbin subprocessで検証する
+//! fake seam(AMAZING_BACKUP_FAKE_S3_STATE)のbin subprocessで検証する
 //! (テスト先行のため実装前の実行failは許容・cargo test --no-runは通る)。
 
 mod common;

@@ -1,10 +1,10 @@
-# backup-remote テスト設計条件書(CLI共通エリア)
+# amazing-backup テスト設計条件書(CLI共通エリア)
 # 出典: tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-001〜CLI-006(詳細は2章・5章cli.rs・7.1)
 # 2026-10-09: テスト全件PASS・verify-conditions.py PASSを確認し[meta]へ検証記録を書いた(レビュー指摘12件対応で条件追加・更新した際)。
 # 2026-10-09: コードレビュー指摘対応でCLI-006(--dateのYYYY-MM-DD形式検証)を追加。
 # 2026-10-13: TASK-9(AWS SDK移行)対応でテスト先行の更新(tmp/tasks/tm-9/design_sdk_migration.md 3.7・4.3・9.1・10.2)。
 #   新規2件追加: --profile廃止(未知オプションでusage 64・--region/--bucketは維持)・
-#   fake seam(env BACKUP_REMOTE_FAKE_S3_STATE・debug build専用gate)。実装前のため新条件のテストは
+#   fake seam(env AMAZING_BACKUP_FAKE_S3_STATE・debug build専用gate)。実装前のため新条件のテストは
 #   実行failを許容し[meta]はverified=falseのまま。
 # 2026-10-14: TASK-10(S3ストレージ設計)対応でテスト先行の更新(tmp/tasks/tm-10/design_s3_storage.md
 #   3章CLI構文・2.4・5.1・7.3・8.4・9章素案+本文)。新規24件追加(照会系list/query/get/diff・操作系
@@ -76,7 +76,7 @@ id = "cli.version-flag"
 target_function = "Cli::parse / cli::run"
 source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-002(2章共通オプション)"
 description = "--version でversion表示・exit 0となる (unit)"
-given = "backup-remote --version 実行"
+given = "amazing-backup --version 実行"
 expect_return_shape = "version文字列がstdoutへ表示され exit code 0"
 source_lines = "tests/cli_bin.rs:10"
 
@@ -93,8 +93,8 @@ source_lines = "src/cli.rs:656; src/errors.rs:56"
 id = "cli.module-entrypoint-parity"
 target_function = "main.rs / cli::run"
 source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-004(5章lib.rs・main.rs)"
-description = "cargo run -- 経由でも install済みbin backup-remote と同一挙動となる(結合testでは env!(\"CARGO_BIN_EXE_backup-remote\") でbinを直接実行して検証) (unit)"
-given = "同一引数を lib経由(cli::run直接呼出)と bin backup-remote で実行"
+description = "cargo run -- 経由でも install済みbin amazing-backup と同一挙動となる(結合testでは env!(\"CARGO_BIN_EXE_amazing-backup\") でbinを直接実行して検証) (unit)"
+given = "同一引数を lib経由(cli::run直接呼出)と bin amazing-backup で実行"
 expect_return_shape = "同一の出力・終了コードを返す"
 source_lines = "tests/cli_bin.rs:23"
 
@@ -111,8 +111,8 @@ source_lines = "src/cli.rs:982"
 id = "cli.fake-s3-seam"
 target_function = "cli::select_backend(FakeS3 seam選択)"
 source = "TASK-9 SDK移行設計 4.3案1・10.3・12.4(tmp/tasks/tm-9/design_sdk_migration.md 4章・12章)。10.2新規条件。TASK-11(Phase B): 旧upload削除に伴い新CLI経路(backup push等)での検証へ文言改訂(select_backendは全経路共通)"
-description = "fake seam: env BACKUP_REMOTE_FAKE_S3_STATE=<dir>指定時はS3 backendをfakeへ差し替える(gateは#[cfg(debug_assertions)]でrelease build・debug_assertions無効にはseam・FakeS3ともcompileされず実S3経路になる)。fakeはstate dir配下へobjects/<key>とcalls.log相当のAPI呼び出し記録(op名・bucket・key・storage_class・checksum・days・tier等のfield)を書く。fake選択時はstderr冒頭へ「WARNING: FAKE S3 MODE」を必ず表示する(誤用防御)。fakeはcredential値が不正(検出用ダミー値)でも成功する=実network不使用 (integration, fake seam)"
-given = "BACKUP_REMOTE_FAKE_S3_STATEを設定したbackup push実行(state dirを用意・credentialファイルはダミー値)"
+description = "fake seam: env AMAZING_BACKUP_FAKE_S3_STATE=<dir>指定時はS3 backendをfakeへ差し替える(gateは#[cfg(debug_assertions)]でrelease build・debug_assertions無効にはseam・FakeS3ともcompileされず実S3経路になる)。fakeはstate dir配下へobjects/<key>とcalls.log相当のAPI呼び出し記録(op名・bucket・key・storage_class・checksum・days・tier等のfield)を書く。fake選択時はstderr冒頭へ「WARNING: FAKE S3 MODE」を必ず表示する(誤用防御)。fakeはcredential値が不正(検出用ダミー値)でも成功する=実network不使用 (integration, fake seam)"
+given = "AMAZING_BACKUP_FAKE_S3_STATEを設定したbackup push実行(state dirを用意・credentialファイルはダミー値)"
 expect_return_shape = "exit 0でstate dirへobjects/<key>と呼び出し記録が書かれ、stderr冒頭にWARNING: FAKE S3 MODE表示。credential値・検出用ダミーは出力に現れない"
 source_lines = "src/s3.rs:1937; src/s3.rs:2001; tests/s3_backend.rs:31"
 

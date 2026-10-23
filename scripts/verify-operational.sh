@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# one-click operational verification for backup-remote.
+# one-click operational verification for amazing-backup.
 #
 # Uses a small generated archive and isolated data/out + registry.
 # By default this only runs dry-run upload.
@@ -8,10 +8,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TMP="${TMPDIR:-/tmp}/backup-remote-operational-$$"
+TMP="${TMPDIR:-/tmp}/amazing-backup-operational-$$"
 mkdir -p "$TMP/test"
 ZIP="$TMP/test/verify.zip"
-python3 -c 'import zipfile; z=zipfile.ZipFile("'"$ZIP"'","w"); z.writestr("hello.txt","hello backup-remote operational verification"); z.close()'
+python3 -c 'import zipfile; z=zipfile.ZipFile("'"$ZIP"'","w"); z.writestr("hello.txt","hello amazing-backup operational verification"); z.close()'
 
 PIPELINE="$TMP/pipeline.toml"
 cat > "$PIPELINE" <<PIPELINE_TOML

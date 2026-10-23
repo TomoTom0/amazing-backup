@@ -24,7 +24,7 @@ pub const RESERVED_PIN_NAME: &str = "default";
 pub fn validate_prefix(prefix: &str) -> BackupResult<()> {
     let invalid = |detail: &str| {
         BackupError::Config(format!(
-            "prefixの形式が不正です({detail}): {prefix:?}(例: \"backup-remote/\")"
+            "prefixの形式が不正です({detail}): {prefix:?}(例: \"amazing-backup/\")"
         ))
     };
     if prefix.is_empty() {
@@ -362,20 +362,20 @@ mod tests {
     fn data_area_keys_follow_uuid_layout() {
         let uuid = "0192a4f0-3c1b-7a2e-9f10-112233445566";
         assert_eq!(
-            data_object_key("backup-remote/", uuid).unwrap(),
-            "backup-remote/data/0192a4f0-3c1b-7a2e-9f10-112233445566/default.age"
+            data_object_key("amazing-backup/", uuid).unwrap(),
+            "amazing-backup/data/0192a4f0-3c1b-7a2e-9f10-112233445566/default.age"
         );
         assert_eq!(
-            pin_object_key("backup-remote/", uuid, "keep-1").unwrap(),
-            "backup-remote/data/0192a4f0-3c1b-7a2e-9f10-112233445566/keep-1.age"
+            pin_object_key("amazing-backup/", uuid, "keep-1").unwrap(),
+            "amazing-backup/data/0192a4f0-3c1b-7a2e-9f10-112233445566/keep-1.age"
         );
         assert_eq!(
-            metadata_object_key("backup-remote/", uuid, "旅のしおり2026").unwrap(),
-            "backup-remote/data/0192a4f0-3c1b-7a2e-9f10-112233445566/metadata_旅のしおり2026.json"
+            metadata_object_key("amazing-backup/", uuid, "旅のしおり2026").unwrap(),
+            "amazing-backup/data/0192a4f0-3c1b-7a2e-9f10-112233445566/metadata_旅のしおり2026.json"
         );
         assert_eq!(
-            data_prefix("backup-remote/"),
-            "backup-remote/data/",
+            data_prefix("amazing-backup/"),
+            "amazing-backup/data/",
             "data領域prefix"
         );
     }
@@ -434,14 +434,14 @@ mod tests {
     /// prefix形式(空・末尾/なし・先頭/・使用文字違反を拒否)。
     #[test]
     fn prefix_format_validation() {
-        validate_prefix("backup-remote/").expect("適正");
-        validate_prefix("backup-remote/v2/x-1/").expect("多段も適正");
+        validate_prefix("amazing-backup/").expect("適正");
+        validate_prefix("amazing-backup/v2/x-1/").expect("多段も適正");
         for ng in [
             "",
-            "backup-remote",
-            "/backup-remote/",
+            "amazing-backup",
+            "/amazing-backup/",
             "Backup_Remote/",
-            "backup-remote//x/",
+            "amazing-backup//x/",
         ] {
             assert!(validate_prefix(ng).is_err(), "{ng:?}は拒否されるべき");
         }
@@ -474,12 +474,12 @@ mod tests {
     #[test]
     fn reserve_keys_and_rel_path_normalization() {
         assert_eq!(
-            index_object_key("backup-remote/"),
-            "backup-remote/sys/index.jsonl.age"
+            index_object_key("amazing-backup/"),
+            "amazing-backup/sys/index.jsonl.age"
         );
         assert_eq!(
-            manifest_object_key("backup-remote/", "20261014-abcd0001").unwrap(),
-            "backup-remote/sys/manifests/20261014-abcd0001.jsonl.age"
+            manifest_object_key("amazing-backup/", "20261014-abcd0001").unwrap(),
+            "amazing-backup/sys/manifests/20261014-abcd0001.jsonl.age"
         );
         assert_eq!(normalize_rel_path("a/b/").unwrap(), "a/b");
         assert_eq!(normalize_rel_path("a/./b/").unwrap(), "a/b");

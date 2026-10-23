@@ -971,7 +971,7 @@ mod tests {
                 version_ts: "2026-10-14T10:00:00+09:00".into(),
                 uuid: uuid.into(),
                 title: "t".into(),
-                s3_key: format!("backup-remote/data/{uuid}/default.age"),
+                s3_key: format!("amazing-backup/data/{uuid}/default.age"),
                 s3_bucket: bucket.into(),
                 s3_region: "r".into(),
                 version_id: format!("vid-{uuid}"),

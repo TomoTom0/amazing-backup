@@ -1,7 +1,7 @@
 //! layout エリアの結合test(TASK-10 S3ストレージ設計・tmp/tasks/tm-10/design_s3_storage.md 1章)。
 //! src/layout.rsは実装前(Phase Aで新設)のため、key生成・分類解決の純関数群は
 //! bin subprocessの`backup push --dry-run`(対象・分類・衝突・予定key表示)と
-//! 実pushのfake seam(BACKUP_REMOTE_FAKE_S3_STATE)のAPI呼び出し記録で観測する
+//! 実pushのfake seam(AMAZING_BACKUP_FAKE_S3_STATE)のAPI呼び出し記録で観測する
 //! (テスト先行のため実装前の実行failは許容・cargo test --no-runは通る)。
 
 mod common;
@@ -280,18 +280,18 @@ fn prefix_format_validation_rejects_invalid_prefixes() {
     // [aws.lifecycle]は必須(設計7章)のため基準本文へ含めた状態でprefixのみ書換える
     let base = format!(
         "{}{}",
-        storage_aws_toml_body("it-bucket", "backup-remote/", "STANDARD", &fx.credentials),
+        storage_aws_toml_body("it-bucket", "amazing-backup/", "STANDARD", &fx.credentials),
         aws_lifecycle_toml(180, 10, 7)
     );
 
     for (tag, prefix) in [
         ("空", ""),
-        ("末尾スラッシュなし", "backup-remote"),
-        ("先頭スラッシュ", "/backup-remote/"),
+        ("末尾スラッシュなし", "amazing-backup"),
+        ("先頭スラッシュ", "/amazing-backup/"),
         ("使用文字違反", "Backup_Remote/"),
     ] {
         fx.rewrite_aws_toml(&base.replace(
-            "prefix = \"backup-remote/\"",
+            "prefix = \"amazing-backup/\"",
             &format!("prefix = \"{prefix}\""),
         ));
         let (code, _, stderr) = fx.push(&[&target], &["--dry-run"], &[]);
@@ -305,7 +305,7 @@ fn prefix_format_validation_rejects_invalid_prefixes() {
     let (code, stdout, stderr) = fx.push(&[&target], &["--dry-run"], &[]);
     assert_eq!(code, 0, "適正prefixはexit 0: {stdout}{stderr}");
     assert!(
-        stdout.contains("prefix=backup-remote/"),
+        stdout.contains("prefix=amazing-backup/"),
         "適正prefixによる接続先表示: {stdout}"
     );
     assert!(
@@ -337,7 +337,7 @@ fn key_length_over_1024_is_target_error() {
 
     // 1025 byte: 対象エラー3(key上限の表示)
     fx.rewrite_aws_toml(&base_aws.replace(
-        "prefix = \"backup-remote/\"",
+        "prefix = \"amazing-backup/\"",
         &format!("prefix = \"{over_prefix}\""),
     ));
     let Some((code, stdout)) = push_titled_pty(&fx, &[&target], &title64, &[]) else {
@@ -348,7 +348,7 @@ fn key_length_over_1024_is_target_error() {
 
     // 1024 byteちょうど: 受理される
     fx.rewrite_aws_toml(&base_aws.replace(
-        "prefix = \"backup-remote/\"",
+        "prefix = \"amazing-backup/\"",
         &format!("prefix = \"{just_prefix}\""),
     ));
     let Some((code, stdout)) = push_titled_pty(&fx, &[&target], &title64, &[]) else {

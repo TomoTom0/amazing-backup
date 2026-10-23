@@ -227,7 +227,7 @@ fn cmd_pin_rm(ctx: &CtxArgs, name: &str, pin_name: &str) -> i32 {
         )
         .map_err(|e| {
             BackupError::Process(format!(
-                "pin_remove記録の失敗: {e}。S3側のpin object削除は完了しています。索引のpins[]が削除前のまま残るため `backup-remote manage index rebuild` で索引を再構築してください"
+                "pin_remove記録の失敗: {e}。S3側のpin object削除は完了しています。索引のpins[]が削除前のまま残るため `amazing-backup manage index rebuild` で索引を再構築してください"
             ))
         })?;
         rebuild_and_upload_index(&session, &registry_path, "pin-rm")?;

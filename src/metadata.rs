@@ -72,7 +72,7 @@ pub(crate) fn encrypt_path(
         recipients.push(crate::fingerprint::fingerprint(&pk));
     }
     let tmp = std::env::temp_dir().join(format!(
-        "backup-remote-meta-path-{}-{}.age",
+        "amazing-backup-meta-path-{}-{}.age",
         std::process::id(),
         crate::storage::sha256_hex(path.as_bytes())
             .chars()
@@ -199,7 +199,7 @@ pub fn read_metadata(
     key: &str,
 ) -> BackupResult<Option<MetadataDoc>> {
     let tmp = std::env::temp_dir().join(format!(
-        "backup-remote-meta-dl-{}-{}.json",
+        "amazing-backup-meta-dl-{}-{}.json",
         std::process::id(),
         crate::storage::sha256_hex(key.as_bytes())
             .chars()
@@ -242,7 +242,7 @@ pub fn put_metadata_if_changed(
         }
     }
     let tmp = std::env::temp_dir().join(format!(
-        "backup-remote-meta-put-{}-{}.json",
+        "amazing-backup-meta-put-{}-{}.json",
         std::process::id(),
         crate::storage::sha256_hex(key.as_bytes())
             .chars()

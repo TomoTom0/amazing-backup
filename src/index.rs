@@ -288,7 +288,7 @@ pub fn serialize_index(
 /// TASK-18: header.schema != 2(旧schema=1索引)は設定エラー2+rebuild案内で拒否
 /// (旧索引の誤読防止・設計5.4/9章)。
 pub fn parse_index(plain: &str) -> BackupResult<(IndexHeader, Vec<IndexFileEntry>)> {
-    let guidance = "索引の再構築は `backup-remote manage index rebuild` で行えます";
+    let guidance = "索引の再構築は `amazing-backup manage index rebuild` で行えます";
     let mut header: Option<IndexHeader> = None;
     let mut entries: Vec<IndexFileEntry> = Vec::new();
     for (idx, line) in plain.lines().enumerate() {
@@ -350,7 +350,7 @@ pub fn upload_index(
     let key = crate::layout::index_object_key(prefix);
     // 平文をdiskに置かず一時file経由でage化(既存crypto API。tmpはOS一時dir)
     let tmp = std::env::temp_dir().join(format!(
-        "backup-remote-index-{}-{}.age",
+        "amazing-backup-index-{}-{}.age",
         std::process::id(),
         updated_at.replace(':', "")
     ));
@@ -390,13 +390,13 @@ pub fn read_index(
 ) -> BackupResult<(IndexHeader, Vec<IndexFileEntry>)> {
     let key = crate::layout::index_object_key(prefix);
     let guidance = format!(
-        "索引object({key})を取得・復号できません。`backup-remote manage index rebuild`で復旧するか、aws.tomlのbucket/prefixを確認してください"
+        "索引object({key})を取得・復号できません。`amazing-backup manage index rebuild`で復旧するか、aws.tomlのbucket/prefixを確認してください"
     );
     if backend.head(bucket, &key)?.is_none() {
         return Err(BackupError::Config(guidance));
     }
     let tmp = std::env::temp_dir().join(format!(
-        "backup-remote-index-dl-{}-{}.age",
+        "amazing-backup-index-dl-{}-{}.age",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -453,7 +453,7 @@ mod tests {
             category: category.into(),
             rel_path: rel.into(),
             identity_hash: crate::layout::identity_hash(std::path::Path::new(path)),
-            s3_key: format!("backup-remote/data/{uuid}/default.age"),
+            s3_key: format!("amazing-backup/data/{uuid}/default.age"),
         }
     }
 
@@ -565,7 +565,7 @@ mod tests {
         let uuid = "0192a4f0-3c1b-7a2e-9f10-112233445566";
         let w = file_write(uuid, "a.zip", "/data/a.zip", "unfiled", "");
         let key = w.s3_key.clone();
-        let pin_key = format!("backup-remote/data/{uuid}/pin-1.age");
+        let pin_key = format!("amazing-backup/data/{uuid}/pin-1.age");
         let records = vec![
             registry::Record::FileWrite(w.clone()),
             registry::Record::FileUpload(file_upload(uuid, &key, "v1", "2026-10-14T10:00:00")),
@@ -631,7 +631,7 @@ mod tests {
             recorded_at: "2026-10-14T23:00:00+09:00".into(),
             uuid: uuid_a.into(),
             pin: pin.into(),
-            pin_s3_key: format!("backup-remote/data/{uuid_a}/{pin}.age"),
+            pin_s3_key: format!("amazing-backup/data/{uuid_a}/{pin}.age"),
             source_s3_key: key_a.clone(),
             source_version_id: "v1".into(),
             date: "2026-10-14".into(),
@@ -649,7 +649,7 @@ mod tests {
             recorded_at: "2026-10-15T09:00:00+09:00".into(),
             uuid: uuid_a.into(),
             pin: pin.into(),
-            pin_s3_key: format!("backup-remote/data/{uuid_a}/{pin}.age"),
+            pin_s3_key: format!("amazing-backup/data/{uuid_a}/{pin}.age"),
             s3_bucket: bucket.into(),
         };
         let base = || {
@@ -859,7 +859,7 @@ mod tests {
         let vid = upload_index(
             &fake,
             "b",
-            "backup-remote/",
+            "amazing-backup/",
             &[keypair],
             &entries,
             "20261014-x",
@@ -870,7 +870,7 @@ mod tests {
         assert!(!vid.is_empty(), "version_idを返す");
         let calls = fake.calls();
         assert!(
-            calls.contains("s3 PutObject bucket=b key=backup-remote/sys/index.jsonl.age src="),
+            calls.contains("s3 PutObject bucket=b key=amazing-backup/sys/index.jsonl.age src="),
             "{calls}"
         );
         assert!(calls.contains("storage_class=STANDARD"), "{calls}");
@@ -889,7 +889,7 @@ mod tests {
     fn read_index_missing_returns_config_error_with_guidance() {
         let tmp = TempDir::new("idx-miss");
         let fake = FakeS3::new(tmp.path().join("s3state"));
-        let e = read_index(&fake, "b", "backup-remote/", Path::new("nokey")).unwrap_err();
+        let e = read_index(&fake, "b", "amazing-backup/", Path::new("nokey")).unwrap_err();
         assert_eq!(e.exit_code(), 2, "索引不在は設定・環境エラー2: {e}");
         let msg = format!("{e}");
         assert!(msg.contains("manage index rebuild"), "案内を含む: {msg}");

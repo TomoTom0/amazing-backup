@@ -1,6 +1,6 @@
 # tests/ — テスト構成の索引
 
-backup-remote(バックアップ暗号化・S3 Glacier uploadパイプライン)のテスト構成。
+amazing-backup(バックアップ暗号化・S3 Glacier uploadパイプライン)のテスト構成。
 `tests/design/`の条件書が正本であり、生成の向きは一方向:
 設計(tmp/tasks/tm-1/design_backup_pipeline.md 8章) → 条件書(tests/design/) → テスト(src内`#[cfg(test)]`・tests/*.rs)。
 テストコードや実装から条件書を生成しない(test-structure skill)。
@@ -31,7 +31,7 @@ UPL-020のテンプレート内容要件期待値へrestoreコマンドの1行�
 (tmp/tasks/tm-9/design_sdk_migration.md 10章・テスト再構成方針)。
 aws CLI(subprocess)依存のテスト構造をfake seamへ再構成:
 - fake差替え機構をPATH差替えのfake aws shell script(write_fake_aws・FAKE_S3_STATE)から
-  bin内seam(env BACKUP_REMOTE_FAKE_S3_STATE・src/s3.rsのFakeS3・debug build専用gate)へ変更。
+  bin内seam(env AMAZING_BACKUP_FAKE_S3_STATE・src/s3.rsのFakeS3・debug build専用gate)へ変更。
   state構造(objects/・restore/・calls.log相当のAPI呼び出し記録)と失敗注入env 4種
   (FAKE_S3_FAIL_CP_FOR・FAKE_S3_FAIL_RESTORE_FOR・FAKE_S3_FAIL_HEAD_FOR・FAKE_S3_HEAD_404_FOR)は維持
 - 条件書13+7件をargv/CLI引数期待値からSDK API呼び出し参数期待値へ改訂
@@ -277,8 +277,8 @@ tests/index_storage.rs rebuild folder・tests/storage_query.rs list categories�
 | src/**/*.rs 内 #[cfg(test)] | cargo単体test(S3実行はS3Backend fake(FakeS3)差替) | 作成済み |
 
 cargo testの階層: unit=src/各モジュール内`#[cfg(test)] mod tests`、
-integration=cargoの結合testとして`tests/`直下`*.rs`(各ファイルが独立crateとしてlibを`backup_remote::...`で参照)。
-結合testはbinをsubprocess実行するものが中心(fake seamの`BACKUP_REMOTE_FAKE_S3_STATE`・
+integration=cargoの結合testとして`tests/`直下`*.rs`(各ファイルが独立crateとしてlibを`amazing_backup::...`で参照)。
+結合testはbinをsubprocess実行するものが中心(fake seamの`AMAZING_BACKUP_FAKE_S3_STATE`・
 失敗注入envを子processへ渡す)。cargo testはdev profile(debug_assertions有効)で
 seamが有効。release profile(`cargo test --release`)ではseam・FakeS3がcompileされず
 seam依存testは動作しない(通常の検証は`cargo test`で行う)。

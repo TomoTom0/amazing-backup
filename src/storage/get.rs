@@ -146,7 +146,7 @@ fn run_get(args: &GetArgs) -> BackupResult<i32> {
                 Format::Json => {
                     eprintln!(
                         "{}",
-                        restore_guidance(&format!("backup-remote get {}", args.name))
+                        restore_guidance(&format!("amazing-backup get {}", args.name))
                     );
                     print_json(&serde_json::json!({
                         "name": target.dest_name,
@@ -155,7 +155,7 @@ fn run_get(args: &GetArgs) -> BackupResult<i32> {
                 }
                 Format::Human => println!(
                     "{}",
-                    restore_guidance(&format!("backup-remote get {}", args.name))
+                    restore_guidance(&format!("amazing-backup get {}", args.name))
                 ),
             }
             return Ok(0);
@@ -283,7 +283,7 @@ impl FetchTarget {
         key_path: &Path,
     ) -> BackupResult<PathBuf> {
         let tmp_age = std::env::temp_dir().join(format!(
-            "backup-remote-get-{}-{}.age",
+            "amazing-backup-get-{}-{}.age",
             std::process::id(),
             sha256_hex(self.s3_key.as_bytes())
                 .chars()

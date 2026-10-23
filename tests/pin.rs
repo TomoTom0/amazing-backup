@@ -1,5 +1,5 @@
 //! pin エリアの結合test(TASK-10 S3ストレージ設計・tmp/tasks/tm-10/design_s3_storage.md 1.3・3.2)。
-//! pin add/rm・backup push --pinをfake seam(BACKUP_REMOTE_FAKE_S3_STATE)のbin subprocessで
+//! pin add/rm・backup push --pinをfake seam(AMAZING_BACKUP_FAKE_S3_STATE)のbin subprocessで
 //! 検証する(テスト先行のため実装前の実行failは許容・cargo test --no-runは通る)。
 
 mod common;
