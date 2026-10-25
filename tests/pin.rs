@@ -29,11 +29,6 @@ fn pin_add_until_copied(fx: &StorageFixture, name: &str, pin: &str) {
     panic!("pin add({name} -> {pin})のCopyObjectが行われない: {last}");
 }
 
-/// name=data_root直下のfile想定でpin keyを組み立てる。
-fn pin_key_of(fx: &StorageFixture, name: &str, pin: &str) -> String {
-    fx.pin_key("unfiled", None, name, pin)
-}
-
 /// [covers:pin.add-writes-pin-key-from-version]
 /// pin add正常系(TASK-18 5.8・6.6): 探索語彙<title完全一致|uuid完全一致>でentityを解決し、
 /// --latest/--versionで対象versionを解決、未復元時は復元jobを発行、復元済み版を
@@ -113,7 +108,7 @@ fn pin_add_copies_version_to_pin_key() {
         "復元済み版へのpin addは復元jobを再発行しない: {calls}"
     );
 
-    // 索引更新(uuid照合で接続)+registry記録(schema2: uuid入り・name/category/rel_path/folder無し)
+    // 索引更新(uuid照合で接続)+registry記録(schema2: uuid入り・name/category/label/folder無し)
     let lines = fx.read_index();
     let entry = index_entity_by(&lines, "uuid", &uuid);
     let pins = entity_pins(entry);
@@ -133,7 +128,7 @@ fn pin_add_copies_version_to_pin_key() {
             Some(uuid.as_str()),
             "pin_write記録はuuid入り(schema2): {pw}"
         );
-        for absent in ["name", "category", "rel_path", "folder"] {
+        for absent in ["name", "category", "label", "folder"] {
             assert!(
                 pw.get(absent).is_none(),
                 "pin_write記録に{absent}は廃止(schema2): {pw}"

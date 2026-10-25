@@ -168,7 +168,7 @@ profile使い分け・混同配置が構造的に起きないこと)。
   index.rebuild-preserves-folder-and-pins(folder廃止)・cli.list-categories-keep-and-files
   (list categories廃止)・retention.lifecycle-rules-per-category(category毎rule廃止)・
   retention.prune-category-required・retention.prune-category-guard-early(prune data/一括化)
-- 文言改訂33条件(id不変): 探索語彙name→title/uuid・--path=source_path完全一致・復元先
+- 文言改訂33条件(id不変): 探索語彙name→title/uuid・--source-path=source_path完全一致・復元先
   <out>/<title>・version_ts供給源のfile_upload化・skip条件のuuid照合化・file_write/manifest
   schema2化・lifecycle/pruneのdata/一括+aws.toml値化・dry-run予測表示(skip/re-put/merge/new)等
 - 新規35条件: backup pushフロー12(sha合流・移動+内容変更・新規発行記録順序・crash再PUT・
@@ -269,11 +269,26 @@ tests/index_storage.rs rebuild folder・tests/storage_query.rs list categories�
   src/lib.rs testutilへconfig_env_lock/set_amazing_backup_homeを追加(env書換えunit
   testの直列化・PATH_ENV_LOCKと同一lockで順序deadlockを構造的に排除)
 
+2026-10-25: TASK-20(分類語彙rel_path→label改名・schema 3化)対応でテスト先行のテストコード更新
+(tmp/tasks/tm-20/design_vocab-rename-label.md 2.3・6.2章。条件書は前段で更新済み)。
+- 文言改訂21条件(id不変)のテスト期待値・語彙を新語彙へ更新: rel_path→label(field・JSON key・
+  文言)・[files]写像のpath key→label・get --path→--source-path(呼び出し・案内文言)・
+  file_write schema 2→3・manifest file record schema 2→3(batch header行はschema=2据え置き)・
+  索引schema 2→3
+- 必須case 2件を既存condition idの[covers:]タグのまま追加: 旧[files].path key拒否=設定エラー2
+  (config.layout-and-categories-validation)・旧get --path拒否=usage 64(cli.removed-options-rejected)。
+  旧schema拒否の拡張: registry.old-schema-fields-rejectedへ旧schema=2 file_write行(rel_path入り)の
+  拒否case・index.parse-failure-guides-rebuildへ旧schema=2索引の拒否case
+- 実装(段階6)前のため改訂期待値のテストは実行failを許容(cargo test --no-runのコンパイルは通る・
+  217 pass/25 failでfailはすべて改訂条件由来)・verify-conditions.py PASS(200条件・34 excluded)。
+  src内unit testの期待値変更は段階6実装と同一commitで更新(設計6.3)・
+  tests/common/mod.rsの旧key helper(file_key/pin_key/pin_key_of)の削除も段階6(設計2.3)
+
 ## 構成
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(14ファイル・200条件・excluded 32件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)反映済み。TASK-19分もテスト作成済み(200条件すべてcover) |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(14ファイル・200条件・excluded 34件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)反映済み。TASK-20分もテスト作成済み(200条件すべてcover) |
 | tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(新schema組立・AMAZING_BACKUP_HOMEによるXDG規定path統合・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
 | tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
@@ -285,7 +300,7 @@ tests/index_storage.rs rebuild folder・tests/storage_query.rs list categories�
 | tests/index_storage.rs | TASK-10/11/12/15 indexエリア(索引schema・registry再構築・STANDARD・recipients・version_id・manifest再構築・pin反映・version_ts供給源・未知record_type警告・pin再付与・別bucket同名pinの両bucket索引保持・bucket独立pin rm)+TASK-18(entity組立・location_remove・sweep除外・pins uuid接続・location rm・index reconcile。rebuild folder系はfolder廃止で削除) | 作成済み(TASK-12・TASK-15とも実装後にcargo test全件pass。TASK-18分は実装前fail許容) |
 | tests/pin.rs | TASK-10/11 pinエリア(pin add/rm・write-once・backup時pin・skip対象への--pin・pin_removeのbucket照合) | 作成済み |
 | tests/retention.rs | TASK-10/11 retentionエリア(lifecycle NCVE/MPU abort・prune dry-run/保護/削除条件・併置排他)+TASK-18(lifecycle data/一括3rule・prune data/一括+aws.toml値化。category系3件は廃止で削除)+TASK-18追加仕様(manage resetの安全弁2件・dry-run既定・apply全消去・冪等) | 作成済み |
-| tests/storage_query.rs | 照会系CLI(query/get/list/diff・版特定・復元job・--format human/json)+TASK-18(探索語彙title/uuid・--path=source_path・復元先<out>/<title>・list files entity表示・--title・diff metadata除外。list categoriesは廃止で削除) | 作成済み(--format系・list jobs noncurrent版はPhase B実装前fail許容。TASK-18改訂分は実装前fail許容) |
+| tests/storage_query.rs | 照会系CLI(query/get/list/diff・版特定・復元job・--format human/json)+TASK-18(探索語彙title/uuid・--source-path=source_path・復元先<out>/<title>・list files entity表示・--title・diff metadata除外。list categoriesは廃止で削除) | 作成済み(--format系・list jobs noncurrent版はPhase B実装前fail許容。TASK-18改訂分は実装前fail許容) |
 | tests/storage_backup.rs | 操作系CLI(backup push統合/dry-run・pull確認/範囲排他・versioning・索引不在・災害時動作)+keep_artifacts掃除+registry基準skip+TASK-18のbackup pushフロー12条件(sha合流・crash再PUT/孤児・title入力/変更/重複・registry喪失・廃止option拒否) | 作成済み(TASK-18分は実装前fail許容) |
 | tests/phase_b_options.rs | TASK-11 Phase BのCLI option系(--profile系3件・--aws-config既定path・索引GET転送エラー・manage jobs reissue)+再レビュー(旧記録bucket扱い・pin/entryのbucket分離)+prod 3bucket構成(3bucket分離・push接続先表示) | 作成済み |
 | tests/registry_storage.rs | TASK-18 registryエリア(schema2 records往復・旧schema拒否・sweep/location_remove・sha_uuid_lookup 3件。registry.jsonl直接編集+bin subprocessで観測) | 作成済み(実装前fail許容) |
@@ -326,7 +341,7 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | verify.toml | verify | src/storage.rs | 14 | VER-001〜013+M-1掃除済みrun(TASK-11でbackup verify経路へ文言改訂・id不変) |
 | cli.toml | cli | src/cli.rs | 59 | CLI-001〜006 + TASK-9/10系 + TASK-11 Phase B(旧サブコマンド削除・--format/--profile・manage jobs reissue・pull範囲排他等)+prod 3bucket構成(3bucket分離・push接続先表示)+TASK-18(探索語彙/復元先/pushフロー12新規・list categories廃止)+TASK-19(--out必須・--aws-config既定XDG化・data/out→cache) |
 | restore.toml | restore | src/storage.rs | 5 | 復元job系共通経路5件(TASK-11で旧restore固有19件廃止。get/pull/list jobs経路で検証。平文衝突保護含む) |
-| layout.toml | layout | src/layout.rs | 11 | TASK-10設計1章(分類解決・検証。9章素案+rel_path正規化) + TASK-18(UUIDv7・data領域key・validate_title。folder衝突廃止) |
+| layout.toml | layout | src/layout.rs | 11 | TASK-10設計1章(分類解決・検証。9章素案+label正規化) + TASK-18(UUIDv7・data領域key・validate_title。folder衝突廃止) |
 | index.toml | index | src/index.rs | 22 | TASK-10設計2章 + H-1/H-3 + TASK-11(version_ts供給源・未知record_type警告) + 再レビューM-R1(pins bucket分離)・L-R1(版・pin無しentry除外) + TASK-12(pin rm後の再付与) + TASK-15(別bucket同名pinの両bucket索引保持・bucket独立pin rm) + TASK-18(entity組立・location_remove・sweep除外・reconcile・location rm) |
 | pin.toml | pin | src/cli.rs | 10 | TASK-10設計1.3・3.2 + M-4(--config早期検査) + TASK-11 M-6(skip対象への--pin)・M-2・L-1 + 再レビューM-R1(pin解決のbucket分離) + TASK-18文言改訂(pin key/語彙・merged/skipped統合) |
 | retention.toml | retention | src/cli.rs | 13 | TASK-10設計3.2・5.2 + TASK-11 L-8(prune併置排他)・L-2・L-4 + TASK-18(lifecycle data一括3rule・prune一括化。category系3件廃止)+TASK-18追加仕様manage reset 5件(設計8.1) |

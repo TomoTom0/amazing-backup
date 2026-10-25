@@ -26,25 +26,32 @@
 # 2026-10-23: TASK-19(XDG配置移行)対応でテスト先行の更新(TASK-19 body)。
 #   文言改訂1件(id不変): add-requires-config-early(--config省略時はXDG規定path読込へ。
 #   M-4の本質=pipeline解決がS3変更より前、は維持)。
+# 2026-10-25: TASK-20(分類語彙rel_path→label改名・schema 3化)対応でテスト先行の更新
+#   (tmp/tasks/tm-20/design_vocab-rename-label.md 1章・6章)。
+#   廃止0件・新規0件・文言改訂1件(id不変): add-writes-pin-key-from-version
+#   (候補一意化の--path→--source-path語彙。pin_write recordのschema=2維持のためschema面の改訂なし)。
+#   meta.noteの旧pin key語彙(<category>[/<rel_path>]階層の旧記述)を現行キー体系
+#   (data/{uuid}/{pin名}.age)へ修正。pin.toml:38付近に条件idは存在せず(rel_path言及はmeta.note)。
+#   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseへ戻す。
 
 [meta]
 feature = "pin"
 source_file = "src/cli.rs"
-verified = true
-verified_at = "2026-10-23"
-verified_by = "claude"
+verified = false
+verified_at = ""
+verified_by = ""
 test_command = "cargo test"
-source_hash = "aaf662f8bd555a9b0b5bc73e72573822a20a683d"
-note = "TASK-10(9章素案+設計1.3/3.2本文)の条件化。pin objectは <prefix>/<category>[/<rel_path>]/<name>/<pin-name>.age(別key写し・6章確定)。source_fileはエリア主対象としてcli.rs(pin add/rmコマンド)を指し、写し・削除のS3 API実体(src/s3.rs・src/uploader.rs)と索引更新(src/index.rs)はtarget_functionで特定(config.tomlのCONF-005と同一運用)"
+source_hash = ""
+note = "TASK-10(9章素案+設計1.3/3.2本文)の条件化。pin objectは data/{uuid}/{pin名}.age(別key写し。TASK-18以降のキー体系。旧<category>[/<rel_path>]階層記述はTASK-20で修正)。source_fileはエリア主対象としてcli.rs(pin add/rmコマンド)を指し、写し・削除のS3 API実体(src/s3.rs・src/uploader.rs)と索引更新(src/index.rs)はtarget_functionで特定(config.tomlのCONF-005と同一運用)"
 
 [[condition]]
 id = "pin.add-writes-pin-key-from-version"
 target_function = "cli::cmd_pin_add"
-source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(pin add)・1.3(ピン留め規則)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 5.8・6.6・10章): pin key=data/{uuid}/{pin}.age・探索語彙title/uuidへ改訂"
-description = "pin add正常系: 探索語彙<title完全一致|uuid完全一致>(候補複数は--pathで一意化)でentityを解決し、--latest/--version で対象versionを解決、未復元時は復元jobを発行、復元済み版をCopyObjectでpin key(data/{uuid}/{pin名}.age)へ写す。storage classはfile objectと同じ(profileのstorage_class)。索引更新+registry記録(PinWriteRecord schema2・uuid入り)+metadata sync(pins反映) (integration, fake seam)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(pin add)・1.3(ピン留め規則)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 5.8・6.6・10章): pin key=data/{uuid}/{pin}.age・探索語彙title/uuidへ改訂。TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md 1章・6章): rel_path→label改名・schema 3化(候補一意化の--path→--source-path)"
+description = "pin add正常系: 探索語彙<title完全一致|uuid完全一致>(候補複数は--source-pathで一意化)でentityを解決し、--latest/--version で対象versionを解決、未復元時は復元jobを発行、復元済み版をCopyObjectでpin key(data/{uuid}/{pin名}.age)へ写す。storage classはfile objectと同じ(profileのstorage_class)。索引更新+registry記録(PinWriteRecord schema2・uuid入り)+metadata sync(pins反映) (integration, fake seam)"
 given = "未復元(DEEP_ARCHIVE)の版への pin add と、復元済み版への pin add --as pre-migration"
 expect_return_shape = "未復元版は復元job発行後に写しが行われ(進行中は案内)、復元済み版は即時にCopyObjectでpin key(data/{uuid}/{pin}.age)へ写る。storage_class=<profile値>。索引pins[]とregistryのpin_write記録(uuid入り)・metadata pinsが更新される"
-source_lines = "tests/pin.rs:37"
+source_lines = "tests/pin.rs:32"
 
 [[condition]]
 id = "pin.write-once-violation-rejected"
@@ -53,7 +60,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 1.3(write-once)"
 description = "write-once違反: 既存pin keyへのPUTはhead確認で検出して拒否(対象エラー3)。上書きしたい場合はpin rm後に再付与という案内を表示 (integration, fake seam)"
 given = "同一pin名が既に存在する状態での pin add --as <既存pin名> 実行"
 expect_return_shape = "exit 3(対象エラー)。既存pin objectは不変で、pin rm後の再付与を案内する表示が出る"
-source_lines = "tests/pin.rs:281"
+source_lines = "tests/pin.rs:276"
 
 [[condition]]
 id = "pin.copy-oversize-uses-uploadpartcopy"
@@ -62,7 +69,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 1.3・11章S3-3・8.1(s3.rs行)"
 description = "後付けpinのCopyObjectは1回5GB上限のため、5GB超の版はUploadPartCopyで分割写しとする(backup時ピンは同制約を受けない) (integration, fake seam)"
 given = "source versionが5GB超の版への pin add と、5GB以内の版への pin add"
 expect_return_shape = "5GB超はCopyObject(単発)ではなくCreateMultipartUpload→UploadPartCopy×N→CompleteMultipartUploadの呼び出しでpin keyへ写る。5GB以内は単発CopyObject"
-source_lines = "tests/pin.rs:195"
+source_lines = "tests/pin.rs:190"
 
 [[condition]]
 id = "pin.backup-time-pin-upload"
@@ -71,7 +78,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(backup push --pin)・1.3"
 description = "backup push --pin <版名>: uploadと同時にpin keyへ書き込まれる(復元job不要・CopyObject 5GB上限の制約を受けない直接upload。5GB超対象でも可。storage_classはprofile値) (integration, fake seam)"
 given = "backup push <対象> --pin pre-migration 実行"
 expect_return_shape = "default.age と pin key(<pin名>.age)の両方がPUTされ(CopyObjectは使われない)、索引pins[]へ反映される"
-source_lines = "tests/pin.rs:318"
+source_lines = "tests/pin.rs:313"
 
 [[condition]]
 id = "pin.rm-updates-index"
@@ -80,7 +87,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(pin rm)。TASK-11 body(Phase 
 description = "pin rm: pin objectを削除し索引から該当pin entryを除去。削除はversion実体の削除(DeleteObjectVersion相当・delete marker付与のみで実体がnoncurrentとして残る形でない)とし、削除後のdiffのpins報告と整合する(削除済みpinは存在しない)。DEEP_ARCHIVE配置のpinも復元不要で削除できる (integration, fake seam)"
 given = "pinが付与済み(DEEP_ARCHIVE配置)のfileへの pin rm --pin <版名> 実行後の ListObjectVersions 確認と diff 実行"
 expect_return_shape = "復元jobなしでpin objectのversion実体が削除され(ListObjectVersionsに当該pin keyが現れない)、索引pins[]から該当entryが除去され、registryへpin_remove記録され、diffは当該pinを存在しないものとして報告し exit 0"
-source_lines = "tests/pin.rs:383"
+source_lines = "tests/pin.rs:378"
 
 [[condition]]
 id = "pin.add-requires-config-early"
@@ -89,7 +96,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(pin add)・レビューM-4。
 description = "pin add/rmはregistryへの記録を要するためpipeline.toml解決が必須。--config省略時はXDG規定path(config::resolve_app_paths)のpipeline.tomlを読む(不在はcopy案内付き設定エラー2)。pipeline.toml解決はS3変更(copy_object等)より前に行われ、解決失敗時はS3 API呼び出しを行わない(copy後にregistry解決失敗するとwrite-once滞留で手詰まりになるのを防ぐ=旧M-4の本質は維持) (integration, fake seam)"
 given = "--aws-configのみで--config/--keyなし(規定pathにもpipeline.tomlが無い)のpin add実行"
 expect_return_shape = "exit 2(設定エラー)かつS3 API呼び出しなし(calls.log空)"
-source_lines = "tests/storage_backup.rs:875"
+source_lines = "tests/storage_backup.rs:885"
 
 [[condition]]
 id = "pin.push-pin-on-skip-targets"
@@ -98,7 +105,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 12章レビューM-6(Phase A実�
 description = "backup push --pinでskip・合流(merge)対象が含まれる場合は、新規upload・再PUT分(手元.ageがある)の直接putと同時に、merged/skippedにも警告表示(WARNING: 変更なしfileの件数と最新版へのpin付与を通知)のうえ、当該entityの最新版(bucket一致file_uploadの最終記録)からensure_restored+CopyObjectでpinを付与する(skip・合流対象がpinなしになるのを防ぐ=現行skip分pinの経路を統合)。既存の当該pin keyが存在する場合はwrite-onceに従い付与をskipする警告を出す (integration, fake seam)"
 given = "1度push済みのfile(再実行でskip)・mtime touch合流分と新規fileを同時に指定した backup push --pin <版名> 実行"
 expect_return_shape = "exit 0。skip/merge表示とWARNING表示があり、新規分はpin keyへの直接PUT・merged/skipped分は最新版からensure_restored+CopyObjectでpin keyへ写され、索引pins[]に双方反映される"
-source_lines = "tests/pin.rs:437"
+source_lines = "tests/pin.rs:432"
 
 [[condition]]
 id = "pin.push-pin-write-once-violation-skips-file"
@@ -107,7 +114,7 @@ source = "TASK-11(Phase B)コードレビュー指摘M-2+tmp/tasks/tm-10/design_
 description = "backup push --pinでupload済みitemへのpin keyが既に存在する(write-once違反)場合は、run全体を中断せず警告表示+当該fileのみpin付与をskipする(skip対象へのpin付与の既存挙動と統一)。fileのupload・registry記録は済んでいるため、run末尾のmanifest upload・索引再構築は必ず実行される(filesがupload+記録済みなのに索引staleのまま中断しない) (integration, fake seam)"
 given = "backup push --pin pm1 実行後、同一fileを内容変更して backup push --pin pm1(write-once違反)を再実行"
 expect_return_shape = "exit 0。WARNING表示(既存pin名・当該fileのpin付与skip)があり、fileの新version upload・manifest upload・索引更新(versionsに新version反映)が行われる。run全体の中断(exit 3)はしない"
-source_lines = "tests/pin.rs:542"
+source_lines = "tests/pin.rs:537"
 
 [[condition]]
 id = "pin.rm-registry-failure-guides-rebuild"
@@ -116,7 +123,7 @@ source = "TASK-11(Phase B)コードレビュー指摘L-1+tmp/tasks/tm-10/design_
 description = "pin rmはS3削除成功後にpin_remove記録をregistryへappendするが、この記録に失敗した場合のerror文に`manage index rebuild`による回復案内を含める(索引pins[]由来の再実行は記録失敗のままではexitを繰返すため、索引再構築による回復経路を利用者へ示す。最小対応) (integration, fake seam)"
 given = "pin付与済みfileへの pin rm 実行時にregistry.jsonlへの追記が失敗する状態(registry.jsonlをdirectoryへ差し替え)での pin rm 実行"
 expect_return_shape = "S3削除は行われたうえでexit 4(処理エラー・終了コードは従来どおり)。error文に manage index rebuild による回復案内が含まれる"
-source_lines = "tests/pin.rs:585"
+source_lines = "tests/pin.rs:580"
 
 [[condition]]
 id = "pin.pin-resolution-bucket-isolated"

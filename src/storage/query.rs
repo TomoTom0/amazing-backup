@@ -99,7 +99,7 @@ fn location_json(l: &IndexLocation) -> serde_json::Value {
     serde_json::json!({
         "source_path": l.source_path,
         "category": l.category,
-        "rel_path": l.rel_path,
+        "label": l.label,
         "identity_hash": l.identity_hash,
         "last_backup": l.last_backup,
     })
@@ -205,7 +205,7 @@ fn run_query(args: &QueryArgs) -> BackupResult<i32> {
             }
         }
     }
-    // title重複(別uuid同title)候補は--path特定の案内
+    // title重複(別uuid同title)候補は--source-path特定の案内
     let mut titles: Vec<&str> = matched.iter().map(|e| e.title.as_str()).collect();
     titles.sort();
     titles.dedup();
@@ -213,13 +213,13 @@ fn run_query(args: &QueryArgs) -> BackupResult<i32> {
         .iter()
         .any(|t| matched.iter().filter(|e| e.title == *t).count() > 1);
     if duplicated {
-        println!("title重複の候補があります。--path <source_path> で特定してください:");
+        println!("title重複の候補があります。--source-path <source_path> で特定してください:");
         for e in &matched {
             let dup = matched.iter().filter(|o| o.title == e.title).count() > 1;
             if dup {
                 println!("  {}  (uuid={})", e.title, e.uuid);
                 for l in &e.locations {
-                    println!("    --path {}", l.source_path);
+                    println!("    --source-path {}", l.source_path);
                 }
             }
         }
@@ -377,7 +377,7 @@ fn list_versions(
                 "  所在: {}  ({}/{})",
                 l.source_path,
                 l.category,
-                print_rel(&l.rel_path)
+                print_label(&l.label)
             );
         }
         let current_vid = e.versions.first().map(|f| f.version_id.as_str());
@@ -402,11 +402,11 @@ fn list_versions(
     Ok(0)
 }
 
-fn print_rel(rel: &str) -> String {
-    if rel.is_empty() {
+fn print_label(label: &str) -> String {
+    if label.is_empty() {
         "-".to_string()
     } else {
-        rel.to_string()
+        label.to_string()
     }
 }
 

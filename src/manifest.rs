@@ -92,21 +92,21 @@ pub fn write_manifest(
 }
 
 // ---------------------------------------------------------------------------
-// TASK-10新経路(backup push)のmanifest V2(設計8.1・F8)
+// TASK-10新経路(backup push)のmanifest(設計8.1・F8)
 //
 // 旧`build_manifest`(encrypt時構築・旧encrypt/upload経路が使う)とは分離されており、
 // 新経路はfile upload後に構築する(file recordに実s3_keyとversion_idを記録)。
 
-/// manifest V2のfile record 1件(backup pushのupload済み対象・TASK-18 3.3 schema=2)。
-/// uuid/title追加・identity_hash/folder削除。name/category/rel_path/source_pathは
+/// manifestのfile record 1件(backup pushのupload済み対象・TASK-20 3.3 schema=3)。
+/// uuid/title追加・identity_hash/folder削除。name/category/label/source_pathは
 /// 所在記録として維持(index rebuildのlocations源)。
 #[derive(Debug, Clone)]
-pub struct ManifestV2File {
+pub struct ManifestV3File {
     pub uuid: String,
     pub title: String,
     pub name: String,
     pub category: String,
-    pub rel_path: String,
+    pub label: String,
     pub source_path: String,
     pub s3_key: String,
     pub version_id: String,
@@ -119,15 +119,15 @@ pub struct ManifestV2File {
     pub age_size: u64,
 }
 
-/// manifest V2(JSONL平文)の構築。1行目=header・2行目以降=file record。
+/// manifest(JSONL平文)の構築。1行目=header・2行目以降=file record。
 /// 平文をdiskに置かず(`encrypt_bytes`へ渡す)運用は旧manifestと同じ。
 /// ヘッダは条件書正本のschemaへ合わせる(TASK-11 Phase B・encrypt.manifest-content-
 /// roundtrip): `record_type=batch`・`total_source_size`・`recipients`(現在設定の指紋列)。
 /// 1行の形式は旧manifestと同じ`": "`/`", "`区切り(平文を文字列照合する検証との整合)。
-pub fn build_manifest_v2(
+pub fn build_manifest_v3(
     batch_id: &str,
     created_at: &str,
-    files: &[ManifestV2File],
+    files: &[ManifestV3File],
     recipients: &[String],
 ) -> BackupResult<String> {
     let total_source_size: u64 = files.iter().map(|f| f.source_size).sum();
@@ -145,13 +145,13 @@ pub fn build_manifest_v2(
     out.push('\n');
     for f in files {
         let rec = serde_json::json!({
-            "schema": 2,
+            "schema": 3,
             "record_type": "file",
             "uuid": f.uuid,
             "title": f.title,
             "name": f.name,
             "category": f.category,
-            "rel_path": f.rel_path,
+            "label": f.label,
             "source_path": f.source_path,
             "s3_key": f.s3_key,
             "version_id": f.version_id,

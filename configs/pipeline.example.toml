@@ -36,7 +36,7 @@ auto_path_roots = ["/home/yourname/data"]
 
 # [files."travel.zip"]     # 手動写像(省略可)
 # category = "photos"      # category名規則を満たす任意の文字列(記録値として自由化)
-# path = "2020-2023/travel" # rel_path(""でrel_pathなし)
+# label = "2020-2023/travel" # label(""でlabelなし)
 
 # 廃止section(存在したら設定エラー2):
 #   [output]   registry・暗号化一時物dirのpathはXDG規定path固定(TASK-19)

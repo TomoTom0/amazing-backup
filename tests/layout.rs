@@ -9,16 +9,16 @@ mod common;
 use common::*;
 
 /// [covers:layout.key-generation-manual-mapping]
-/// files写像が最優先(設計1.2優先順位1): [files.<name>]のcategoryとpathをそのまま用い、
-/// category/rel_pathは所在記録値(IndexLocation・manifest file record)として解決される
-/// (TASK-18: keyはUUID体系で生成され分類に依存しない。対象がauto_path_roots配下にも
-/// 一致する状態でも写像が勝つ)。
+/// files写像が最優先(設計1.2優先順位1): [files.<name>]のcategoryとlabelをそのまま用い、
+/// category/labelは所在記録値(IndexLocation・manifest file record)として解決される
+/// (TASK-18: keyはUUID体系で生成され分類に依存しない。TASK-20: rel_path→label改名。
+/// 対象がauto_path_roots配下にも一致する状態でも写像が勝つ)。
 #[test]
 fn files_mapping_takes_priority_for_classification() {
     let Some(fx) = StorageFixture::new(
         "lay-manual",
         StorageOpts {
-            files: "[files.\"travel.zip\"]\ncategory = \"photos\"\npath = \"2020-2023/travel\"\n"
+            files: "[files.\"travel.zip\"]\ncategory = \"photos\"\nlabel = \"2020-2023/travel\"\n"
                 .into(),
             no_categories: true,
             ..StorageOpts::default()
@@ -43,9 +43,9 @@ fn files_mapping_takes_priority_for_classification() {
         "files写像のcategoryが記録値になる: {rec}"
     );
     assert_eq!(
-        rec.get("rel_path").and_then(|r| r.as_str()),
+        rec.get("label").and_then(|r| r.as_str()),
         Some("2020-2023/travel"),
-        "files写像のpathがrel_path記録値になる: {rec}"
+        "files写像のlabelが記録値になる: {rec}"
     );
 }
 
@@ -64,7 +64,7 @@ fn file_write_of(fx: &StorageFixture, path: &std::path::Path) -> serde_json::Val
 
 /// [covers:layout.key-generation-auto-relativize]
 /// auto_path_roots相対化(設計1.2優先順位2): source_pathがいずれかのroot配下なら
-/// 最初に一致したrootからの相対pathをrel_pathとし、categoryはunfiled_category(既定unfiled)。
+/// 最初に一致したroot相対のdirectory側文字列をlabelとし、categoryはunfiled_category(既定unfiled)。
 /// rootsは順序優先(先頭root=data_rootから相対化するため2番目root基準にはならない)。
 /// 解決結果は所在記録値として記録される(TASK-18)。
 #[test]
@@ -97,9 +97,9 @@ fn auto_path_roots_relativize_classification() {
     // 最初に一致したroot(data_root)からの相対 = 2020-2023/travel
     // (2番目のroot基準なら "travel" になるため、これで順序優先を観測する)
     assert_eq!(
-        rec.get("rel_path").and_then(|r| r.as_str()),
+        rec.get("label").and_then(|r| r.as_str()),
         Some("2020-2023/travel"),
-        "最初に一致したrootからの相対rel_path記録値: {rec}"
+        "最初に一致したroot相対のlabel記録値: {rec}"
     );
     assert_eq!(
         rec.get("category").and_then(|c| c.as_str()),
@@ -110,7 +110,7 @@ fn auto_path_roots_relativize_classification() {
 
 /// [covers:layout.key-generation-fallback-category-only]
 /// fallback(設計1.2優先順位3): いずれのrootにも一致しないsource_pathは
-/// rel_pathなし(空)・category=unfiled_categoryの記録値になる(TASK-18)。
+/// labelなし(空)・category=unfiled_categoryの記録値になる(TASK-18)。
 #[test]
 fn fallback_category_only_classification() {
     let Some(fx) = StorageFixture::new("lay-fallback", StorageOpts::default()) else {
@@ -124,9 +124,9 @@ fn fallback_category_only_classification() {
     assert_eq!(code, 0, "pushはexit 0: {stdout}");
     let rec = file_write_of(&fx, &outside);
     assert_eq!(
-        rec.get("rel_path").and_then(|r| r.as_str()),
+        rec.get("label").and_then(|r| r.as_str()),
         Some(""),
-        "roots不一致はrel_pathなし(空)の記録値: {rec}"
+        "roots不一致はlabelなし(空)の記録値: {rec}"
     );
     assert_eq!(
         rec.get("category").and_then(|c| c.as_str()),
@@ -136,17 +136,17 @@ fn fallback_category_only_classification() {
 }
 
 /// [covers:layout.rel-path-normalization]
-/// rel_path正規化(設計1.2): `.`/`..`要素の排除・空要素除去・path末尾`/`禁止。
-/// いずれの書き方も正規化後のrel_path(a/b)が所在記録値として記録される(TASK-18:
-/// normalize_rel_path維持・記録値の正規化)。
+/// label正規化(設計1.2): `.`/`..`要素の排除・空要素除去・末尾`/`禁止。
+/// いずれの書き方も正規化後のlabel(a/b)が所在記録値として記録される(TASK-20:
+/// normalize_labelへ改名・正規化規則は不変)。
 #[test]
-fn rel_path_is_normalized_in_records() {
+fn label_is_normalized_in_records() {
     let Some(fx) = StorageFixture::new(
         "lay-norm",
         StorageOpts {
-            files: "[files.\"n1.zip\"]\ncategory = \"photos\"\npath = \"a/./b/\"\n\
-                    [files.\"n2.zip\"]\ncategory = \"photos\"\npath = \"a/b/\"\n\
-                    [files.\"n3.zip\"]\ncategory = \"photos\"\npath = \"a//b\"\n"
+            files: "[files.\"n1.zip\"]\ncategory = \"photos\"\nlabel = \"a/./b/\"\n\
+                    [files.\"n2.zip\"]\ncategory = \"photos\"\nlabel = \"a/b/\"\n\
+                    [files.\"n3.zip\"]\ncategory = \"photos\"\nlabel = \"a//b\"\n"
                 .into(),
             no_categories: true,
             ..StorageOpts::default()
@@ -169,9 +169,9 @@ fn rel_path_is_normalized_in_records() {
     for p in &paths {
         let rec = file_write_of(&fx, p);
         assert_eq!(
-            rec.get("rel_path").and_then(|r| r.as_str()),
+            rec.get("label").and_then(|r| r.as_str()),
             Some("a/b"),
-            "正規化後rel_path(a/b)の記録値: {rec}"
+            "正規化後label(a/b)の記録値: {rec}"
         );
     }
 }
@@ -180,8 +180,8 @@ fn rel_path_is_normalized_in_records() {
 /// category名規則違反と予約語sys/旧表記_sysの拒否(設計1.1・4.2): unfiled_category・
 /// files.categoryの値として不正な名前は設定エラー2(TASK-18: [categories]定義存在検証は
 /// 廃止されvalidate_category_nameによる文字列検証のみへ置換。カテゴリ語彙は記録値として
-/// 自由化=規則を満たす名前は[categories]未定義でも受理。files写像path先頭のsys衝突検証は
-/// 廃止=path値の"_sys"先頭は受理される)。
+/// 自由化=規則を満たす名前は[categories]未定義でも受理。files写像label先頭のsys衝突検証は
+/// 廃止=label値の"_sys"先頭は受理される)。
 #[test]
 fn invalid_category_names_are_config_errors() {
     // (tag, files断片, 期待exit code)
@@ -189,22 +189,22 @@ fn invalid_category_names_are_config_errors() {
         ("unfiled_categoryの名前規則違反", "", 2),
         (
             "files.categoryの_sys予約",
-            "[files.\"x.zip\"]\ncategory = \"_sys\"\npath = \"a\"\n",
+            "[files.\"x.zip\"]\ncategory = \"_sys\"\nlabel = \"a\"\n",
             2,
         ),
         (
             "files.categoryの名前規則違反",
-            "[files.\"x.zip\"]\ncategory = \"BadName\"\npath = \"a\"\n",
+            "[files.\"x.zip\"]\ncategory = \"BadName\"\nlabel = \"a\"\n",
             2,
         ),
         (
             "files.categoryの[categories]未定義値(新仕様では受理)",
-            "[files.\"x.zip\"]\ncategory = \"docs\"\npath = \"a\"\n",
+            "[files.\"x.zip\"]\ncategory = \"docs\"\nlabel = \"a\"\n",
             0,
         ),
         (
-            "files写像path先頭の_sys(新仕様では受理)",
-            "[files.\"x.zip\"]\ncategory = \"unfiled\"\npath = \"_sys/x\"\n",
+            "files写像label先頭の_sys(新仕様では受理)",
+            "[files.\"x.zip\"]\ncategory = \"unfiled\"\nlabel = \"_sys/x\"\n",
             0,
         ),
     ];

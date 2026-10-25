@@ -66,7 +66,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-005(コマンド仕�
 description = "upload時のPutObject呼び出しにstorage_class(設定値)とchecksum_algorithm SHA256が指定される(backup pushのobject PUT) (integration, fake seam)"
 given = "backup push 実行(fake seam がAPI呼び出し参数を記録)"
 expect_return_shape = "PutObject呼び出しの記録に storage_class=<設定値> と checksum_algorithm SHA256(ChecksumAlgorithm::Sha256)が含まれる"
-source_lines = "tests/encrypt_batch.rs:440"
+source_lines = "tests/encrypt_batch.rs:449"
 
 [[condition]]
 id = "upload.cp-failure-transfer-error"
@@ -75,7 +75,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-009(7.1転送エラ�
 description = "PutObject失敗(SDK error・retry上限後)は転送エラー5。messageは操作名・bucket・key・SDK由来のerror文を含み、credential値・署名stringを含まない (integration, fake seam)"
 given = "fake seam の put が失敗(失敗注入FAKE_S3_FAIL_CP_FOR)する backup push 実行"
 expect_throw = "TransferError(exit code 5)。messageに操作名・bucket・key・SDK由来error文が含まれcredential値は含まれない"
-source_lines = "tests/encrypt_batch.rs:546"
+source_lines = "tests/encrypt_batch.rs:555"
 
 [[condition]]
 id = "upload.keep-going-continues"
@@ -84,7 +84,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 UPL-012(規則は7.2)。
 description = "--keep-going でper-object失敗(PutObject失敗)でも継続し、exitは最初のエラー区分(5)。成功分の記録(file_upload・manifest等の新経路event)がregistryにappendされる (integration, fake seam)"
 given = "1件put失敗+1件成功+manifest成功の backup push --keep-going 実行"
 expect_return_shape = "exit code 5。成功分のfile_upload記録とmanifest/index_upload記録がappendされる"
-source_lines = "tests/encrypt_batch.rs:481"
+source_lines = "tests/encrypt_batch.rs:490"
 
 [[condition]]
 id = "upload.multipart-threshold"

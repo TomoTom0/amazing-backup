@@ -6,15 +6,15 @@ mod common;
 
 use common::*;
 
-/// 照会系test共通のfixture: travel.zip(2版・rel_path付き)・album.zip(photos写像)・
-/// dup.zip×2(rel_path a/bで候補複数)・x.zip(rel_pathなし)をpush済みにする。
+/// 照会系test共通のfixture: travel.zip(2版・label付き)・album.zip(photos写像)・
+/// dup.zip×2(label a/bで候補複数)・x.zip(labelなし)をpush済みにする。
 /// TASK-18: 新規発行はtitle必須(設計6.1)のためpty promptでtitleを与え、travelの
 /// 2版はcrash残存re-put経路(設計4.4)で構築する。
 fn query_fixture(tag: &str) -> Option<StorageFixture> {
     let fx = StorageFixture::new(
         tag,
         StorageOpts {
-            files: "[files.\"album.zip\"]\ncategory = \"photos\"\npath = \"album\"\n".into(),
+            files: "[files.\"album.zip\"]\ncategory = \"photos\"\nlabel = \"album\"\n".into(),
             ..StorageOpts::default()
         },
     )?;
@@ -140,10 +140,11 @@ fn query_finds_partial_matches() {
 }
 
 /// [covers:cli.query-candidate-paths]
-/// queryで複数候補がhitした場合は全件表示(uuid・title・locations)+--path特定の案内
-/// (TASK-18 5.11)。title重複(別uuid同title)があれば警告行を出す(一意化はuuid/所在指定)。
+/// queryで複数候補がhitした場合は全件表示(uuid・title・locations)+--source-path特定の案内
+/// (TASK-18 5.11。TASK-20: --path→--source-path改名)。title重複(別uuid同title)があれば
+/// 警告行を出す(一意化はuuid/所在指定)。
 #[test]
-fn query_multiple_candidates_shows_all_with_path_hint() {
+fn query_multiple_candidates_shows_all_with_source_path_hint() {
     let Some(fx) = titled_query_fixture("q-cand") else {
         return;
     };
@@ -174,8 +175,8 @@ fn query_multiple_candidates_shows_all_with_path_hint() {
         "候補bの所在表示: {stdout}"
     );
     assert!(
-        stdout.contains("--path"),
-        "--path <source_path>での特定を求める案内: {stdout}"
+        stdout.contains("--source-path"),
+        "--source-path <source_path>での特定を求める案内: {stdout}"
     );
     assert!(
         stdout.contains("重複") || stdout.contains("duplicate"),
@@ -187,7 +188,7 @@ fn query_multiple_candidates_shows_all_with_path_hint() {
 /// [covers:cli.get-output-structure]
 /// get <term>(TASK-18 5.9・6.6): 候補はtitle完全一致またはuuid完全一致。
 /// 版指定なしは最新版(versions先頭=date降順の最新)を取得・検証・復号。
-/// 復元先は<out>/<title>(dest_name=entry.title・rel_path廃止)。
+/// 復元先は<out>/<title>(dest_name=entry.title・旧所在記録語彙の階層配置は廃止済み)。
 #[test]
 fn get_defaults_to_latest_and_reproduces_layout() {
     let Some(fx) = titled_query_fixture("q-getlatest") else {
@@ -826,12 +827,13 @@ fn diff_run_audits_run_completeness() {
 }
 
 /// [covers:cli.get-candidates-error]
-/// get <term>(TASK-18 5.9・6.6): 候補はtitle/uuid完全一致。title重複(別uuid)の
-/// 2候補があり--path未指定は対象エラー3(候補一覧表示(source_path付き)+--path特定の案内)。
-/// --pathはlocation.source_path完全一致で一意化し当該候補を取得できる
+/// get <term>(TASK-18 5.9・6.6。TASK-20: --path→--source-path改名): 候補はtitle/uuid完全一致。
+/// title重複(別uuid)の2候補があり--source-path未指定は対象エラー3(候補一覧表示
+/// (source_path付き)+--source-path特定の案内)。
+/// --source-pathはlocation.source_path完全一致で一意化し当該候補を取得できる
 /// (復元先は<out>/<title>)。
 #[test]
-fn get_multiple_candidates_requires_path() {
+fn get_multiple_candidates_requires_source_path() {
     let Some(fx) = titled_query_fixture("q-getcand") else {
         return;
     };
@@ -841,10 +843,13 @@ fn get_multiple_candidates_requires_path() {
     let (code, stdout, stderr) = fx.get("dup", &["--out", &out.display().to_string()]);
     assert_eq!(
         code, 3,
-        "title重複候補で--pathなしは対象エラー3: {stdout}{stderr}"
+        "title重複候補で--source-pathなしは対象エラー3: {stdout}{stderr}"
     );
     let combined = format!("{stdout}{stderr}");
-    assert!(combined.contains("--path"), "--path特定の案内: {combined}");
+    assert!(
+        combined.contains("--source-path"),
+        "--source-path特定の案内: {combined}"
+    );
     assert!(
         combined.contains(dup_a.to_string_lossy().as_ref()),
         "候補一覧にsource_path付き表示(a): {combined}"
@@ -854,11 +859,11 @@ fn get_multiple_candidates_requires_path() {
         "候補一覧にsource_path付き表示(b): {combined}"
     );
 
-    // --path <source_path>完全一致で候補aを特定して取得できる
+    // --source-path <source_path>完全一致で候補aを特定して取得できる
     let (code, stdout, stderr) = fx.get(
         "dup",
         &[
-            "--path",
+            "--source-path",
             &dup_a.to_string_lossy(),
             "--out",
             &out.display().to_string(),
@@ -866,12 +871,12 @@ fn get_multiple_candidates_requires_path() {
     );
     assert_eq!(
         code, 0,
-        "get --path <aのsource_path>はexit 0: {stdout}{stderr}"
+        "get --source-path <aのsource_path>はexit 0: {stdout}{stderr}"
     );
     assert_eq!(
         std::fs::read(out.join("dup")).expect("候補aの復号成果物"),
         b"query-dup-a".to_vec(),
-        "--path特定の候補が取得され<out>/<title>へ配置される"
+        "--source-path特定の候補が取得され<out>/<title>へ配置される"
     );
 }
 
@@ -885,7 +890,7 @@ fn titled_query_fixture(tag: &str) -> Option<StorageFixture> {
     let fx = StorageFixture::new(
         tag,
         StorageOpts {
-            files: "[files.\"album.zip\"]\ncategory = \"photos\"\npath = \"album\"\n".into(),
+            files: "[files.\"album.zip\"]\ncategory = \"photos\"\nlabel = \"album\"\n".into(),
             no_categories: true,
             aws_lifecycle: aws_lifecycle_toml(180, 10, 7),
             ..StorageOpts::default()

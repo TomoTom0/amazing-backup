@@ -30,7 +30,7 @@ pub struct PipelineConfig {
     pub layout: LayoutConfig,
     /// metadataのlatest_source_path掲載形式(TASK-18 2.2)
     pub metadata: MetadataConfig,
-    /// 手動写像(basename → category/path)。省略時はauto_path_roots相対化へ
+    /// 手動写像(basename → category/label)。省略時はauto_path_roots相対化へ
     pub files: std::collections::BTreeMap<String, FileMapping>,
 }
 
@@ -161,8 +161,8 @@ pub struct LayoutConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileMapping {
     pub category: String,
-    /// rel_path(空文字列=category直下)
-    pub path: String,
+    /// label(空文字列=category直下)
+    pub label: String,
 }
 
 /// `aws.toml`(規定path: XDG配置)相当(3.3・TASK-9 9.2・TASK-10設計4.2)。credential値は含まない
@@ -253,13 +253,13 @@ struct LayoutFile {
     auto_path_roots: Vec<String>,
 }
 
-/// `[files."<name>"]`のschema(category必須・path省略可=category直下)。
+/// `[files."<name>"]`のschema(category必須・label省略可=category直下)。
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileMappingFile {
     category: String,
     #[serde(default)]
-    path: String,
+    label: String,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -460,13 +460,13 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
         }
         crate::layout::validate_category_name(&mapping.category)
             .map_err(|e| BackupError::Config(format!("[files.{name}].categoryが不正です: {e}")))?;
-        let rel = crate::layout::normalize_rel_path(&mapping.path)
-            .map_err(|e| BackupError::Config(format!("[files.{name}].pathが不正です: {e}")))?;
+        let label = crate::layout::normalize_label(&mapping.label)
+            .map_err(|e| BackupError::Config(format!("[files.{name}].labelが不正です: {e}")))?;
         files.insert(
             name.clone(),
             FileMapping {
                 category: mapping.category.clone(),
-                path: rel,
+                label,
             },
         );
     }
@@ -1494,7 +1494,7 @@ mod tests {
     /// [layout]/[files]の検証(TASK-18 5.15改訂): auto_path_rootsは絶対path・
     /// files.categoryと[layout].unfiled_categoryはvalidate_category_nameによる
     /// 文字列検証のみ([categories]定義存在検証は廃止・category語彙は記録値として自由化)。
-    /// files写像path先頭のsys衝突検証は廃止。適正な拡張schemaは読み込める。
+    /// files写像label先頭のsys衝突検証は廃止。適正な拡張schemaは読み込める。
     #[test]
     fn load_pipeline_validates_layout_and_categories() {
         let tmp = TempDir::new("conf-t10-layout");
@@ -1513,7 +1513,7 @@ mod tests {
                 tmp.path(),
                 &pub_s,
                 "run",
-                "[files.\"travel.zip\"]\ncategory = \"photos\"\npath = \"2020-2023/travel\"\n",
+                "[files.\"travel.zip\"]\ncategory = \"photos\"\nlabel = \"2020-2023/travel\"\n",
             ),
         );
         load_pipeline(&valid).expect("適正な拡張schemaは読み込める");
@@ -1525,32 +1525,32 @@ mod tests {
                 tmp.path(),
                 &pub_s,
                 "run",
-                "[files.\"x.zip\"]\ncategory = \"ghost\"\npath = \"a\"\n",
+                "[files.\"x.zip\"]\ncategory = \"ghost\"\nlabel = \"a\"\n",
             ),
         );
         load_pipeline(&p).expect("未定義category値は文字列検査のみで受理");
 
-        // files写像path先頭の_sys(旧予約衝突検査)は受理される(検証廃止)
+        // files写像label先頭の_sys(旧予約衝突検査)は受理される(検証廃止)
         let p = write_cfg(
             "t10-sysprefix.toml",
             task10_pipeline_toml(
                 tmp.path(),
                 &pub_s,
                 "run",
-                "[files.\"x.zip\"]\ncategory = \"unfiled\"\npath = \"_sys/x\"\n",
+                "[files.\"x.zip\"]\ncategory = \"unfiled\"\nlabel = \"_sys/x\"\n",
             ),
         );
-        load_pipeline(&p).expect("_sys先頭のfiles写像pathは受理される");
+        load_pipeline(&p).expect("_sys先頭のfiles写像labelは受理される");
 
         // files.categoryの名前規則違反(_sys・BadName)は設定エラー2
         for (name, extra) in [
             (
                 "cat-sys",
-                "[files.\"x.zip\"]\ncategory = \"_sys\"\npath = \"a\"\n",
+                "[files.\"x.zip\"]\ncategory = \"_sys\"\nlabel = \"a\"\n",
             ),
             (
                 "cat-uppercase",
-                "[files.\"x.zip\"]\ncategory = \"BadName\"\npath = \"a\"\n",
+                "[files.\"x.zip\"]\ncategory = \"BadName\"\nlabel = \"a\"\n",
             ),
         ] {
             let p = write_cfg(

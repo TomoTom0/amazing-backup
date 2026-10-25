@@ -756,26 +756,6 @@ impl StorageFixture {
         read_calls(&self.state)
     }
 
-    /// file objectのkey(<prefix>/<category>[/<rel_path>]/<name>/default.age)。
-    pub fn file_key(&self, category: &str, rel_path: Option<&str>, name: &str) -> String {
-        match rel_path {
-            Some(rel) if !rel.is_empty() => {
-                format!("{}{}/{}/{}/default.age", self.prefix, category, rel, name)
-            }
-            _ => format!("{}{}/{}/default.age", self.prefix, category, name),
-        }
-    }
-
-    /// pin objectのkey(<prefix>/<category>[/<rel_path>]/<name>/<pin>.age)。
-    pub fn pin_key(&self, category: &str, rel_path: Option<&str>, name: &str, pin: &str) -> String {
-        match rel_path {
-            Some(rel) if !rel.is_empty() => {
-                format!("{}{}/{}/{}/{}.age", self.prefix, category, rel, name, pin)
-            }
-            _ => format!("{}{}/{}/{}.age", self.prefix, category, name, pin),
-        }
-    }
-
     /// TASK-18 data領域のfile object key({prefix}data/{uuid}/default.age)。
     pub fn data_key(&self, uuid: &str) -> String {
         format!("{}data/{}/default.age", self.prefix, uuid)

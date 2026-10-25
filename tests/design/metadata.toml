@@ -7,22 +7,28 @@
 #   実装前のため条件に対応するテストコードは未作成(網羅検査は後段のテスト作成で解消)。
 # 2026-10-23: TASK-19(XDG配置移行)対応で語彙修正(conditions本文のconfigs/pipeline.toml→pipeline.toml。
 #   設定file配置はXDG規定pathへ移行したため。振る舞い条件の変更なし)。
+# 2026-10-25: TASK-20(分類語彙rel_path→label改名・schema 3化)対応でテスト先行の更新
+#   (tmp/tasks/tm-20/design_vocab-rename-label.md 1章・6章)。
+#   廃止0件・新規0件・文言改訂1件(id不変): doc-built-from-registry
+#   (非掲載分類の語彙 category/rel_path→category/label)。
+#   latest-source-path-modes・excluded decrypt_pathは不変(latest_source_path維持・METADATA_SCHEMA=1)。
+#   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseへ戻す。
 
 [meta]
 feature = "metadata"
 source_file = "src/metadata.rs"
-verified = true
-verified_at = "2026-10-23"
-verified_by = "claude"
+verified = false
+verified_at = ""
+verified_by = ""
 test_command = "cargo test"
-source_hash = "8558b12c2877e0554ac9d253010fca97b49064fd"
+source_hash = ""
 note = "TASK-18(設計2章・5.5本文)の条件化。metadataはregistry reduceから正規形として導出できる実体の身元票(災害時にS3コンソールだけで実体を同定する目的・平文JSON)。書込観測はfake seamのPutObject/GetObject呼び出し記録で行う。encrypted版latest_source_pathは実ageでの暗号化を要する"
 
 [[condition]]
 id = "metadata.doc-built-from-registry"
 target_function = "metadata::build_metadata"
-source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 2.1(schema=1のfield定義)・2.3.1(pins/recipients導出規則)・5.5・10章(metadata sync)"
-description = "MetadataDocはregistry reduceから正規形として導出される: 現行title=uuid直近file_writeのtitle・現行版=bucket一致のuuid直近file_upload(version_id/source_sha256/age_sha256/size両側/date/version_ts)・pins=未削除bucket一致pin_writeから{pin,date,source_sha256}(並びはpin名辞書順で確定=冪等)・recipients=現行版のbatch_idとuuidが一致するfile_writeのrecipients(file_uploadはrecipientsを持たないため。欠損時はuuid直近file_writeへfall back)・latest_source_path=last_backup最新location。serializeはstruct宣言順で固定(同内容ならbyte同一=差分比較の前提)。版歴全件・所在履歴全件・分類(category/rel_path)は載せない(承認事項1) (unit)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 2.1(schema=1のfield定義)・2.3.1(pins/recipients導出規則)・5.5・10章(metadata sync)。TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md 1章・6章): rel_path→label改名・schema 3化"
+description = "MetadataDocはregistry reduceから正規形として導出される: 現行title=uuid直近file_writeのtitle・現行版=bucket一致のuuid直近file_upload(version_id/source_sha256/age_sha256/size両側/date/version_ts)・pins=未削除bucket一致pin_writeから{pin,date,source_sha256}(並びはpin名辞書順で確定=冪等)・recipients=現行版のbatch_idとuuidが一致するfile_writeのrecipients(file_uploadはrecipientsを持たないため。欠損時はuuid直近file_writeへfall back)・latest_source_path=last_backup最新location。serializeはstruct宣言順で固定(同内容ならbyte同一=差分比較の前提)。版歴全件・所在履歴全件・分類(category/label)は載せない(承認事項1) (unit)"
 given = "同一uuidへfile_write複数(直近title=B)・file_upload 2件(bucket一致は新方のみ)・pin_write 2件(pin名辞書順と逆の記録順)を含むregistryからのbuild_metadata"
 expect_return_shape = "title=B・version_id/各shaは新方file_upload記録値・pinsはpin名辞書順・recipientsは現行版batch一致file_write由来(fall back分岐含む)のdoc。同一registryからの2回の導出はbyte同一"
 source_lines = "tests/metadata_storage.rs:53"

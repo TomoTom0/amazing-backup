@@ -33,8 +33,8 @@ pub fn cmd_edit(args: &EditArgs) -> i32 {
                 println!("現在の[files]手動写像({}):", cfg_path.display());
                 for (name, m) in &cfg.files {
                     println!(
-                        "  [files.{name:?}] category = {:?} path = {:?}",
-                        m.category, m.path
+                        "  [files.{name:?}] category = {:?} label = {:?}",
+                        m.category, m.label
                     );
                 }
                 if cfg.files.is_empty() {

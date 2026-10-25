@@ -585,13 +585,13 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             return Ok(0);
         }
 
-        // manifest取得・復号・parse(TASK-18 3.3 schema=2: uuid/title入り・
-        // identity_hash/folder無し・name/category/rel_path/source_pathは所在記録として維持)
+        // manifest取得・復号・parse(TASK-20: file record schema=3・label入り。uuid/title入り・
+        // identity_hash/folder無し・name/category/label/source_pathは所在記録として維持)
         struct Rec {
             uuid: String,
             title: String,
             category: String,
-            rel_path: String,
+            label: String,
             source_path: String,
             s3_key: String,
             version_id: Option<String>,
@@ -639,7 +639,7 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
                     uuid: g("uuid"),
                     title: g("title"),
                     category: g("category"),
-                    rel_path: g("rel_path"),
+                    label: g("label"),
                     source_path: g("source_path"),
                     s3_key: g("s3_key"),
                     version_id: v
@@ -701,7 +701,7 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
         struct LocRec {
             source_path: String,
             category: String,
-            rel_path: String,
+            label: String,
             last_backup: String,
         }
         let mut latest_loc: BTreeMap<(String, String), LocRec> = BTreeMap::new();
@@ -719,7 +719,7 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
                     LocRec {
                         source_path: r.source_path.clone(),
                         category: r.category.clone(),
-                        rel_path: r.rel_path.clone(),
+                        label: r.label.clone(),
                         last_backup: r.date.clone(),
                     },
                 );
@@ -748,7 +748,7 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
                     .map(|(_, l)| IndexLocation {
                         source_path: l.source_path.clone(),
                         category: l.category.clone(),
-                        rel_path: l.rel_path.clone(),
+                        label: l.label.clone(),
                         identity_hash: layout::identity_hash(std::path::Path::new(&l.source_path)),
                         last_backup: l.last_backup.clone(),
                     })

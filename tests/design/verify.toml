@@ -58,7 +58,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-003(規則は4.1注�
 description = "registryの不正JSON行を検出。改行終端でない最終行はtorn writeとして警告のうえ除外され処理継続する (unit)"
 given = "不正JSON行を含むregistryと、改行終端しない最終行(torn write)を含むregistry"
 expect_return_shape = "不正JSON行は行番号付きでProcessError、torn write最終行は警告のうえ除外され残り行の読込が継続する"
-source_lines = "src/registry.rs:787"
+source_lines = "src/registry.rs:788"
 
 [[condition]]
 id = "verify.checksum-detects-mutation"
@@ -112,7 +112,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-009(規則は4.1注�
 description = "registry内の未知record_type行は警告のうえ無視され読込が継続する(将来のschema追加への前方互換。Phase A以降の既知種は旧3種(encrypt/upload/manifest_upload)+新種(file_write/file_upload/manifest/index_upload/pin_write/pin_remove/prune)等の増加を含む) (unit)"
 given = "未知record_typeの行を既知レコードに混在させたregistry"
 expect_return_shape = "未知record_typeの行は警告表示のうえ結果から除外され、残り行の読込・reduceは継続する(読込エラーとならない)"
-source_lines = "src/registry.rs:823"
+source_lines = "src/registry.rs:824"
 
 [[condition]]
 id = "verify.registry-read-error-propagates"
@@ -121,7 +121,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-010(2026-10-08レビ
 description = "registry読込のread errorは ErrorKind::NotFound のみ「空」として扱い、他のread error(directory指定によるEISDIR・権限不足等)はProcessエラーとして伝播する(初回実行以外の読込失敗を黙って空扱いにしない) (unit)"
 given = "registry pathに実fileでないpath(directory)を指定した読込"
 expect_throw = "ProcessError(exit code 4)。ファイル不在(NotFound)のみ空配列を返す"
-source_lines = "src/registry.rs:761"
+source_lines = "src/registry.rs:762"
 
 [[condition]]
 id = "verify.roundtrip-env-error-exit-2"
@@ -157,4 +157,4 @@ source = "TASK-11(Phase B)コードレビュー指摘M-1+tmp/tasks/tm-10/design_
 description = "backup verifyはkeep_artifacts=\"run\"の既定動作で成功run直後にXDG cache dir(規定$XDG_CACHE_HOME/amazing-backup/)配下の<batch_id>/を掃除されたrun(file_write記録のage_path実ファイル・run manifest実ファイルが不在)を検証失敗扱いにしない: 当該batchのindex_upload成功記録(成功run末尾の索引更新が完了した事実)があり・run成果物dirが不在のbatchは「掃除済み・検査対象外」として構造検査(.age不在・manifest不在)・--checksum・--roundtripの対象から除外し、掃除済みrun件数を報告する。run成果物が残っているbatch(keep_artifacts=\"always\"指定run・失敗run残り・掃除済み判定を満たさないbatch)は従来どおり検査対象(実ファイル欠損は検証エラー4のまま) (integration, fake seam)"
 given = "keep_artifacts=\"run\"既定でbackup push成功後(当該batchのrun成果物dirが掃除済み)の backup verify・backup verify --checksum・backup verify --roundtrip の各実行"
 expect_return_shape = "いずれも exit 0(掃除済みrunは検査対象外の報告表示あり)。.age・manifestの不在は検証エラー4として報告されない"
-source_lines = "tests/storage_backup.rs:926"
+source_lines = "tests/storage_backup.rs:936"
