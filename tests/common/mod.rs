@@ -853,17 +853,6 @@ pub fn storage_aws_toml_body(
     )
 }
 
-/// 索引のfile entryをnameで引く。
-pub fn index_file_entry<'a>(lines: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
-    lines
-        .iter()
-        .find(|v| {
-            v.get("record_type").and_then(|r| r.as_str()) == Some("file")
-                && v.get("name").and_then(|n| n.as_str()) == Some(name)
-        })
-        .unwrap_or_else(|| panic!("索引にfile entry({name})が無い: {lines:?}"))
-}
-
 /// 索引file entryのversions[].version_id(格納順=新しい順)。
 pub fn index_version_ids(entry: &serde_json::Value) -> Vec<String> {
     entry
@@ -1126,20 +1115,4 @@ pub fn drop_version_state(state_dir: &Path, key: &str, version_id: &str) {
     );
     write_file(&versions_path, out.as_bytes());
     let _ = std::fs::remove_file(state_dir.join("object-versions").join(key).join(version_id));
-}
-
-/// registryのrecordのうちfield=valueのものを取り出す。
-pub fn registry_records<'a>(
-    registry: &'a [serde_json::Value],
-    record_type: &str,
-    field: &str,
-    value: &str,
-) -> Vec<&'a serde_json::Value> {
-    registry
-        .iter()
-        .filter(|r| {
-            r.get("record_type").and_then(|t| t.as_str()) == Some(record_type)
-                && r.get(field).and_then(|v| v.as_str()) == Some(value)
-        })
-        .collect()
 }

@@ -830,9 +830,7 @@ mod tests {
         assert!(entries.is_empty());
 
         // 旧schema=1索引は設定エラー2
-        let v1 = concat!(
-            "{\"schema\":1,\"record_type\":\"index_header\",\"updated_at\":\"t\",\"run_id\":\"r\",\"tool_version\":\"v\",\"entries\":0}\n"
-        );
+        let v1 = "{\"schema\":1,\"record_type\":\"index_header\",\"updated_at\":\"t\",\"run_id\":\"r\",\"tool_version\":\"v\",\"entries\":0}\n";
         let e = parse_index(v1).unwrap_err();
         assert_eq!(e.exit_code(), 2, "旧schema=1は設定エラー2: {e}");
         assert!(format!("{e}").contains("manage index rebuild"));
