@@ -23,11 +23,11 @@ use std::path::{Path, PathBuf};
 pub struct GetArgs {
     #[command(flatten)]
     pub ctx: CtxArgs,
-    /// 対象ファイル名(basename)
+    /// 対象のtitleまたはuuid(完全一致)
     pub name: String,
-    /// 同名候補のpath特定
+    /// 同名候補の所在特定(location.source_path完全一致)
     #[arg(long)]
-    pub path: Option<String>,
+    pub source_path: Option<String>,
     /// 版の日付(YYYY-MM-DD)
     #[arg(long, value_parser = super::parse_date)]
     pub version: Option<String>,
@@ -107,7 +107,7 @@ fn run_get(args: &GetArgs) -> BackupResult<i32> {
         &session.aws.bucket,
         &session.canonical_bucket,
         &args.name,
-        args.path.as_deref(),
+        args.source_path.as_deref(),
         args.version.as_deref(),
         args.version_id.as_deref(),
         args.pin.as_deref(),
@@ -122,7 +122,7 @@ fn run_get(args: &GetArgs) -> BackupResult<i32> {
     let target = resolve_fetch_target(
         &entries,
         &args.name,
-        args.path.as_deref(),
+        args.source_path.as_deref(),
         args.version.as_deref(),
         args.version_id.as_deref(),
         args.pin.as_deref(),
@@ -273,7 +273,7 @@ impl FetchTarget {
         out_dir.join(&self.dest_name)
     }
 
-    /// 取得→sha検証(索引正本)→復号→<out>/<rel_path>/<name>へ配置。
+    /// 取得→sha検証(索引正本)→復号→<out>/<title>へ配置。
     pub(crate) fn fetch_verify_decrypt(
         &self,
         backend: &dyn S3Backend,
@@ -327,8 +327,8 @@ impl FetchTarget {
 }
 
 /// 索引からterm(title完全一致またはuuid完全一致)でentity entryを引く(TASK-18 5.9・6.6)。
-/// 候補が複数(title重複等)なら候補一覧(source_path付き)+--path特定を求める(対象エラー3)。
-/// --pathはlocation.source_path完全一致で一意化する。
+/// 候補が複数(title重複等)なら候補一覧(source_path付き)+--source-path特定を求める(対象エラー3)。
+/// --source-pathはlocation.source_path完全一致で一意化する。
 pub(crate) fn find_entry<'a>(
     entries: &'a [IndexFileEntry],
     term: &str,
@@ -349,7 +349,7 @@ pub(crate) fn find_entry<'a>(
             .find(|e| e.locations.iter().any(|l| l.source_path == p))
             .ok_or_else(|| {
                 BackupError::Target(format!(
-                    "term={term} --path={p} の組は索引にありません(--pathの確認またはqueryで候補を表示してください)"
+                    "term={term} --source-path={p} の組は索引にありません(--source-pathの確認またはqueryで候補を表示してください)"
                 ))
             });
     }
@@ -375,7 +375,7 @@ pub(crate) fn find_entry<'a>(
             .collect::<Vec<_>>()
             .join("\n");
         return Err(BackupError::Target(format!(
-            "term={term} の候補が複数あります。--path <source_path> で特定してください:\n{candidates}"
+            "term={term} の候補が複数あります。--source-path <source_path> で特定してください:\n{candidates}"
         )));
     }
     Ok(matched[0])

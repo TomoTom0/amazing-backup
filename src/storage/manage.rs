@@ -585,13 +585,13 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             return Ok(0);
         }
 
-        // manifest取得・復号・parse(TASK-18 3.3 schema=2: uuid/title入り・
-        // identity_hash/folder無し・name/category/rel_path/source_pathは所在記録として維持)
+        // manifest取得・復号・parse(TASK-20: file record schema=3・label入り。uuid/title入り・
+        // identity_hash/folder無し・name/category/label/source_pathは所在記録として維持)
         struct Rec {
             uuid: String,
             title: String,
             category: String,
-            rel_path: String,
+            label: String,
             source_path: String,
             s3_key: String,
             version_id: Option<String>,
@@ -603,6 +603,17 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             source_size: u64,
             age_size: u64,
         }
+        // TASK-22: file recordのschema値・必須fieldを検査し、旧record(label無し・rel_path入りの
+        // schema=2等)を黙って空labelで読まない。検査なしだと分類labelが消えた状態の
+        // schema=3索引をuploadしてしまい、registry file_write(deny_unknown_fields)や
+        // 索引parse(schema≠3拒否)と異なりmanifest file record経路だけ拒否が無い状態になる
+        // (schema≠3=設定エラー2+初期化と再pushの案内・必須field欠損=処理エラー4。
+        // version_idはListObjectVersions補完があるため必須としない)
+        const MANIFEST_FILE_REQUIRED_STR_FIELDS: [&str; 12] = [
+            "uuid", "title", "name", "category", "label", "source_path", "s3_key", "date",
+            "version_ts", "batch_id", "source_sha256", "age_sha256",
+        ];
+        const MANIFEST_FILE_REQUIRED_NUM_FIELDS: [&str; 2] = ["source_size", "age_size"];
         let mut all: Vec<Rec> = Vec::new();
         for key in &manifest_keys {
             let tmp = std::env::temp_dir().join(format!(
@@ -629,6 +640,29 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
                 if v.get("record_type").and_then(|t| t.as_str()) != Some("file") {
                     continue;
                 }
+                let rec_schema = v.get("schema").and_then(|x| x.as_i64());
+                if rec_schema != Some(crate::manifest::MANIFEST_FILE_RECORD_SCHEMA) {
+                    return Err(BackupError::Config(format!(
+                        "manifest file recordのschemaが不正です(schema={}・期待={})({key})。\
+                         旧形式のmanifestが残る環境ではrebuildできません(初期化と再pushが必要)",
+                        rec_schema.map_or_else(|| "なし".to_string(), |s| s.to_string()),
+                        crate::manifest::MANIFEST_FILE_RECORD_SCHEMA
+                    )));
+                }
+                for field in MANIFEST_FILE_REQUIRED_STR_FIELDS {
+                    if v.get(field).and_then(|x| x.as_str()).is_none() {
+                        return Err(BackupError::Process(format!(
+                            "manifest file recordの必須field({field})がありません({key})"
+                        )));
+                    }
+                }
+                for field in MANIFEST_FILE_REQUIRED_NUM_FIELDS {
+                    if v.get(field).and_then(|x| x.as_u64()).is_none() {
+                        return Err(BackupError::Process(format!(
+                            "manifest file recordの必須field({field})がありません({key})"
+                        )));
+                    }
+                }
                 let g = |f: &str| {
                     v.get(f)
                         .and_then(|x| x.as_str())
@@ -639,7 +673,7 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
                     uuid: g("uuid"),
                     title: g("title"),
                     category: g("category"),
-                    rel_path: g("rel_path"),
+                    label: g("label"),
                     source_path: g("source_path"),
                     s3_key: g("s3_key"),
                     version_id: v
@@ -701,7 +735,7 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
         struct LocRec {
             source_path: String,
             category: String,
-            rel_path: String,
+            label: String,
             last_backup: String,
         }
         let mut latest_loc: BTreeMap<(String, String), LocRec> = BTreeMap::new();
@@ -719,7 +753,7 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
                     LocRec {
                         source_path: r.source_path.clone(),
                         category: r.category.clone(),
-                        rel_path: r.rel_path.clone(),
+                        label: r.label.clone(),
                         last_backup: r.date.clone(),
                     },
                 );
@@ -748,7 +782,7 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
                     .map(|(_, l)| IndexLocation {
                         source_path: l.source_path.clone(),
                         category: l.category.clone(),
-                        rel_path: l.rel_path.clone(),
+                        label: l.label.clone(),
                         identity_hash: layout::identity_hash(std::path::Path::new(&l.source_path)),
                         last_backup: l.last_backup.clone(),
                     })

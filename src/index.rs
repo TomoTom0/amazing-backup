@@ -1,6 +1,6 @@
 //! TASK-18索引(設計3.1・5.4・tmp/tasks/tm-18/design_key-uuid-versioning.md)。
 //! 索引JSONLの構築(registry reduceから・冪等)・暗号化(age)・S3配置(hot=STANDARD)・
-//! 読込(災害時の逆引き正本)。schema=2・実体(entity=uuid)単位entry。
+//! 読込(災害時の逆引き正本)。schema=3・実体(entity=uuid)単位entry。
 //! schema詳細は条件書 tests/design/index.toml。
 
 use crate::crypto;
@@ -9,8 +9,8 @@ use crate::registry::{self, Reduced};
 use crate::s3::S3Backend;
 use std::path::{Path, PathBuf};
 
-/// 索引schema版数(TASK-18 3.1: 1→2。旧schema=1索引の読込・変換は行わない)
-pub const INDEX_SCHEMA: i64 = 2;
+/// 索引schema版数(TASK-20: 2→3。旧schema(1・2)索引の読込・変換は行わない)
+pub const INDEX_SCHEMA: i64 = 3;
 
 /// 索引header(1行目・`record_type: "index_header"`)。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -83,7 +83,7 @@ pub struct IndexLocation {
     /// 分類解決結果(記録値)
     pub category: String,
     /// 正規化済み(空=なし。記録値)
-    pub rel_path: String,
+    pub label: String,
     /// sha256(realpath)先頭8hex(所在の突合キー)
     pub identity_hash: String,
     /// YYYY-MM-DD その所在の最終backup日
@@ -165,7 +165,7 @@ pub fn build_entries(
                 .map(|w| IndexLocation {
                     source_path: w.source_path.clone(),
                     category: w.category.clone(),
-                    rel_path: w.rel_path.clone(),
+                    label: w.label.clone(),
                     identity_hash: w.identity_hash.clone(),
                     last_backup: w.recorded_at.get(..10).unwrap_or("").to_string(),
                 })
@@ -285,7 +285,7 @@ pub fn serialize_index(
 /// 索引JSONL平文のparse(読込側)。未知record_type行は警告のうえ無視(前方互換)。
 /// 1行目はindex_header必須。parse失敗時のerror文には`manage index rebuild`による
 /// 索引再構築の案内を含める(L-6。終了コードは検証エラー4のまま)。
-/// TASK-18: header.schema != 2(旧schema=1索引)は設定エラー2+rebuild案内で拒否
+/// TASK-20: header.schema != 3(旧schema=1・2索引)は設定エラー2+rebuild案内で拒否
 /// (旧索引の誤読防止・設計5.4/9章)。
 pub fn parse_index(plain: &str) -> BackupResult<(IndexHeader, Vec<IndexFileEntry>)> {
     let guidance = "索引の再構築は `amazing-backup manage index rebuild` で行えます";
@@ -381,7 +381,7 @@ pub fn upload_index(
 
 /// S3から索引を取得・復号・parseする(照会系の最初の1 GET・設計2.4)。
 /// 索引不在(404)・復号失敗・schema不一致は設定・環境エラー2として
-/// `manage index rebuild`への案内を添える(F4・TASK-18 schema=2)。
+/// `manage index rebuild`への案内を添える(F4・TASK-20 schema=3)。
 pub fn read_index(
     backend: &dyn S3Backend,
     bucket: &str,
@@ -434,7 +434,7 @@ mod tests {
         rel: &str,
     ) -> FileWriteRecord {
         FileWriteRecord {
-            schema: 2,
+            schema: 3,
             record_type: "file_write".into(),
             recorded_at: "2026-10-14T10:00:00+09:00".into(),
             batch_id: "20261014-abcdef01".into(),
@@ -451,7 +451,7 @@ mod tests {
             age_sha256: "b".repeat(64),
             recipients: vec!["SHA256:test".into()],
             category: category.into(),
-            rel_path: rel.into(),
+            label: rel.into(),
             identity_hash: crate::layout::identity_hash(std::path::Path::new(path)),
             s3_key: format!("amazing-backup/data/{uuid}/default.age"),
         }
@@ -517,7 +517,7 @@ mod tests {
         assert_eq!(e.title, "旅のしおり");
         assert_eq!(e.locations.len(), 1);
         assert_eq!(e.locations[0].source_path, "/data/sub/旅のしおり.zip");
-        assert_eq!(e.locations[0].rel_path, "sub");
+        assert_eq!(e.locations[0].label, "sub");
         assert_eq!(e.versions.len(), 2);
         assert_eq!(e.versions[0].version_id, "v2", "date降順(先頭=最新)");
         assert_eq!(e.versions[0].date, "2026-10-14");
@@ -527,7 +527,7 @@ mod tests {
             .expect("serialize");
         let (h, parsed) = parse_index(&body).expect("parse");
         assert_eq!(h.record_type, "index_header");
-        assert_eq!(h.schema, 2);
+        assert_eq!(h.schema, 3);
         assert_eq!(h.entries, 1);
         assert_eq!(parsed, entries, "往復で全fieldが保たれる");
     }
@@ -818,23 +818,27 @@ mod tests {
     }
 
     /// [covers:index.parse-failure-guides-rebuild]
-    /// schema違反平文は検証エラー4+rebuild案内。schema=1索引は設定エラー2+rebuild案内。
+    /// schema違反平文は検証エラー4+rebuild案内。schema=1・2索引は設定エラー2+rebuild案内。
     #[test]
     fn parse_failure_error_guides_index_rebuild() {
         let body = concat!(
-            "{\"schema\":2,\"record_type\":\"index_header\",\"updated_at\":\"t\",\"run_id\":\"r\",\"tool_version\":\"v\",\"entries\":0}\n",
-            "{\"schema\":2,\"record_type\":\"future_kind\",\"x\":1}\n"
+            "{\"schema\":3,\"record_type\":\"index_header\",\"updated_at\":\"t\",\"run_id\":\"r\",\"tool_version\":\"v\",\"entries\":0}\n",
+            "{\"schema\":3,\"record_type\":\"future_kind\",\"x\":1}\n"
         );
         let (h, entries) = parse_index(body).expect("未知行は無視してparse");
         assert_eq!(h.run_id, "r");
         assert!(entries.is_empty());
 
         // 旧schema=1索引は設定エラー2
-        let v1 = concat!(
-            "{\"schema\":1,\"record_type\":\"index_header\",\"updated_at\":\"t\",\"run_id\":\"r\",\"tool_version\":\"v\",\"entries\":0}\n"
-        );
+        let v1 = "{\"schema\":1,\"record_type\":\"index_header\",\"updated_at\":\"t\",\"run_id\":\"r\",\"tool_version\":\"v\",\"entries\":0}\n";
         let e = parse_index(v1).unwrap_err();
         assert_eq!(e.exit_code(), 2, "旧schema=1は設定エラー2: {e}");
+        assert!(format!("{e}").contains("manage index rebuild"));
+
+        // 旧schema=2索引も設定エラー2(TASK-20: 2→3)
+        let v2 = "{\"schema\":2,\"record_type\":\"index_header\",\"updated_at\":\"t\",\"run_id\":\"r\",\"tool_version\":\"v\",\"entries\":0}\n";
+        let e = parse_index(v2).unwrap_err();
+        assert_eq!(e.exit_code(), 2, "旧schema=2は設定エラー2: {e}");
         assert!(format!("{e}").contains("manage index rebuild"));
     }
 
@@ -899,8 +903,8 @@ mod tests {
     #[test]
     fn parse_skips_unknown_record_types() {
         let body = concat!(
-            "{\"schema\":2,\"record_type\":\"index_header\",\"updated_at\":\"t\",\"run_id\":\"r\",\"tool_version\":\"v\",\"entries\":0}\n",
-            "{\"schema\":2,\"record_type\":\"future_kind\",\"x\":1}\n"
+            "{\"schema\":3,\"record_type\":\"index_header\",\"updated_at\":\"t\",\"run_id\":\"r\",\"tool_version\":\"v\",\"entries\":0}\n",
+            "{\"schema\":3,\"record_type\":\"future_kind\",\"x\":1}\n"
         );
         let (h, entries) = parse_index(body).expect("未知行は無視してparse");
         assert_eq!(h.run_id, "r");

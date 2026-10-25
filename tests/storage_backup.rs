@@ -88,10 +88,13 @@ fn sb_opts() -> StorageOpts {
 
 /// [covers:cli.backup-push-integrated-run]
 /// backup push統合正常系(TASK-18 1.2・5.7): 対象解決(+title)→分類解決→暗号化→
-/// upload(default.age(data/{uuid}/)・manifest(V2・schema=2)・索引再構築(schema=2)・
-/// touched_entitiesのmetadata sync)を1実行で行う(順序処理)。data/outは
-/// <out>/<batch_id>/<name>.ageのrun単位構造。registryのeventはschema2 record
-/// (file_write・file_upload(uuid/title入り)・manifest・index_upload)で記録される。
+/// upload(default.age(data/{uuid}/)・manifest(file record schema=3・batch header行は
+/// schema=2のまま)・索引再構築(schema=3)・touched_entitiesのmetadata sync)を
+/// 1実行で行う(順序処理)。TASK-20: file_writeはschema=3(label入り)・索引schema=3・
+/// manifest file record schema=3へ。data/outは
+/// <out>/<batch_id>/<name>.ageのrun単位構造。registryのeventは
+/// (file_write(schema=3・label入り)・file_upload(uuid/title入り)・manifest・
+/// index_upload)で記録される。
 #[test]
 fn backup_push_runs_integrated_pipeline() {
     let Some(fx) = StorageFixture::new(
@@ -153,7 +156,7 @@ fn backup_push_runs_integrated_pipeline() {
         run_dir.display()
     );
 
-    // registryにschema2 recordの記録がappendされる
+    // registryに記録がappendされる(file_writeはschema=3(TASK-20)・file_uploadはschema=2)
     let registry = fx.registry_values();
     assert_eq!(
         registry_count(&registry, "file_write"),
@@ -165,13 +168,20 @@ fn backup_push_runs_integrated_pipeline() {
         2,
         "file_upload記録は2対象分"
     );
-    for r in registry.iter().filter(|r| {
-        matches!(
-            r.get("record_type").and_then(|t| t.as_str()),
-            Some("file_write") | Some("file_upload")
-        )
-    }) {
-        assert_eq!(r["schema"], 2, "schema=2: {r}");
+    for r in registry
+        .iter()
+        .filter(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_write"))
+    {
+        assert_eq!(r["schema"], 3, "file_write schema=3(TASK-20): {r}");
+        assert!(r.get("label").is_some(), "file_writeはlabel入り: {r}");
+        assert!(r.get("uuid").is_some(), "uuid入り: {r}");
+        assert!(r.get("title").is_some(), "title入り: {r}");
+    }
+    for r in registry
+        .iter()
+        .filter(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload"))
+    {
+        assert_eq!(r["schema"], 2, "file_upload schema=2(不変): {r}");
         assert!(r.get("uuid").is_some(), "uuid入り: {r}");
         assert!(r.get("title").is_some(), "title入り: {r}");
     }
@@ -1652,7 +1662,8 @@ fn backup_push_registry_loss_issues_new_uuid() {
 /// [covers:cli.removed-options-rejected]
 /// TASK-18廃止面の拒否(6.5): manage prune --category/--keep・list files --tree・
 /// list categories・探索のname(basename)語彙(--name)は廃止され、指定はusage error 64
-/// (未知オプション/サブコマンド扱い)。内部toolのため移行措置なし。
+/// (未知オプション/サブコマンド扱い)。TASK-20: getの--pathは--source-pathへ改名された
+/// ため旧--pathも廃止面に加わる(同様にusage 64)。内部toolのため移行措置なし。
 #[test]
 fn removed_options_are_rejected_with_usage_error() {
     let Some(fx) = StorageFixture::new("sb-removed", sb_opts()) else {
@@ -1663,6 +1674,10 @@ fn removed_options_are_rejected_with_usage_error() {
     // 対象解決・設定読込より前に弾かれるためpush済み状態は不要だが、
     // 索引不在でもusage errorが先に出ることを確認する(索引GET不可の状態で実行)
     sb_clear_calls(&fx);
+    // getの旧--path拒否case(TASK-20): --out付きで実行し「--out欠落ではなく--path未知で
+    // 弾かれる」ことを観測する(拒否はclap parse段階のためpathの実在は不要)
+    let dup_src_s = fx.elsewhere.join("dup.zip").display().to_string();
+    let get_out_s = fx.elsewhere.join("get-removed-out").display().to_string();
     let cases: Vec<(&str, Vec<&str>)> = vec![
         (
             "manage prune --category",
@@ -1677,6 +1692,17 @@ fn removed_options_are_rejected_with_usage_error() {
         (
             "list versions --name",
             vec!["list", "versions", "--name", "x.zip"],
+        ),
+        (
+            "get --path(TASK-20改名前の旧flag)",
+            vec![
+                "get",
+                "dup",
+                "--path",
+                &dup_src_s,
+                "--out",
+                &get_out_s,
+            ],
         ),
     ];
     let cfg_s = fx.cfg.display().to_string();

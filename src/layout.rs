@@ -127,17 +127,18 @@ pub fn validate_title(title: &str) -> BackupResult<()> {
     Ok(())
 }
 
-/// rel_path正規化: 先頭`/`禁止・`./`/`../`要素と空要素の拒否・末尾`/`の除去。
-/// 空文字列は「rel_pathなし」を表す正当値。
+/// label正規化: 先頭`/`禁止・`./`/`../`要素と空要素の拒否・末尾`/`の除去。
+/// 空文字列は「labelなし」を表す正当値。
 /// 違反は呼び出し側の区分(設定値は設定エラー2・対象解決由来は対象エラー3)に
 /// 帰着させるため、ここではmessage付きエラーのみ返す。
-pub fn normalize_rel_path(path: &str) -> BackupResult<String> {
-    let invalid = |detail: &str| BackupError::Config(format!("path({path:?})が不正です: {detail}"));
-    if path.starts_with('/') {
+pub fn normalize_label(label: &str) -> BackupResult<String> {
+    let invalid =
+        |detail: &str| BackupError::Config(format!("label({label:?})が不正です: {detail}"));
+    if label.starts_with('/') {
         return Err(invalid("先頭に/があります"));
     }
     // `.`/`..`要素と空要素は排除(除去)する。`a/./b/`も`a//b`も`a/b`へ正規化される
-    let segments: Vec<&str> = path
+    let segments: Vec<&str> = label
         .split('/')
         .filter(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
         .collect();
@@ -160,19 +161,19 @@ pub fn identity_hash(realpath: &Path) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Classification {
     pub category: String,
-    /// 正規化済み。空文字列=rel_pathなし
-    pub rel_path: String,
+    /// 正規化済み。空文字列=labelなし
+    pub label: String,
 }
 
 /// files手動写像の1件(configのschemaと同一形状の純粋参照用)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileMapping {
     pub category: String,
-    pub path: String,
+    pub label: String,
 }
 
 /// 分類解決(優先順位): ①files写像 ②auto_path_roots相対化(最初に一致したroot)
-/// ③fallback(category=unfiled・rel_pathなし)。
+/// ③fallback(category=unfiled・labelなし)。
 /// source_canonicalはrealpath解決済み絶対path。source_nameはbasename(拡張子付き)。
 /// 解決結果はIndexLocation・manifest file recordの所在記録値として記録される
 /// (TASK-18: キーはUUID体系のため分類はキー構成に影響しない)。
@@ -186,26 +187,26 @@ pub fn classify(
     if let Some(mapping) = files.get(source_name) {
         return Ok(Classification {
             category: mapping.category.clone(),
-            rel_path: normalize_rel_path(&mapping.path)?,
+            label: normalize_label(&mapping.label)?,
         });
     }
     for root in auto_path_roots {
         if let Ok(rel) = source_canonical.strip_prefix(root) {
-            // rel_pathは「root配下のdirectory側path」(末尾のファイル名は除く。
-            // root直下のfileはrel_pathなし)
-            let rel_path = rel
+            // labelは「root配下のdirectory側path」(末尾のファイル名は除く。
+            // root直下のfileはlabelなし)
+            let label = rel
                 .parent()
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
             return Ok(Classification {
                 category: unfiled_category.to_string(),
-                rel_path: normalize_rel_path(&rel_path)?,
+                label: normalize_label(&label)?,
             });
         }
     }
     Ok(Classification {
         category: unfiled_category.to_string(),
-        rel_path: String::new(),
+        label: String::new(),
     })
 }
 
@@ -272,12 +273,12 @@ mod tests {
     fn files_map(entries: &[(&str, &str, &str)]) -> BTreeMap<String, FileMapping> {
         entries
             .iter()
-            .map(|(name, category, path)| {
+            .map(|(name, category, label)| {
                 (
                     name.to_string(),
                     FileMapping {
                         category: category.to_string(),
-                        path: path.to_string(),
+                        label: label.to_string(),
                     },
                 )
             })
@@ -285,7 +286,7 @@ mod tests {
     }
 
     /// [covers:layout.key-generation-manual-mapping]
-    /// files写像が最優先(auto_path_roots配下でも写像のcategory/pathが勝つ)。
+    /// files写像が最優先(auto_path_roots配下でも写像のcategory/labelが勝つ)。
     #[test]
     fn files_mapping_takes_priority() {
         let files = files_map(&[("travel.zip", "photos", "2020-2023/travel")]);
@@ -299,12 +300,12 @@ mod tests {
         )
         .expect("写像優先で解決");
         assert_eq!(c.category, "photos");
-        assert_eq!(c.rel_path, "2020-2023/travel");
+        assert_eq!(c.label, "2020-2023/travel");
     }
 
     /// [covers:layout.key-generation-auto-relativize]
     /// auto_path_roots相対化: 最初に一致したrootから相対化しcategoryはunfiled。
-    /// どのrootにも一致しない場合はrel_pathなし(fallback)。
+    /// どのrootにも一致しない場合はlabelなし(fallback)。
     #[test]
     fn auto_roots_relativize_and_fallback() {
         let roots = vec![PathBuf::from("/data"), PathBuf::from("/data/2020-2023")];
@@ -317,7 +318,7 @@ mod tests {
         )
         .expect("相対化");
         assert_eq!(c.category, "unfiled");
-        assert_eq!(c.rel_path, "2020-2023/travel", "先頭root基準の相対path");
+        assert_eq!(c.label, "2020-2023/travel", "先頭root基準の相対path");
 
         let c = classify(
             Path::new("/tmp/elsewhere/travel.zip"),
@@ -328,7 +329,7 @@ mod tests {
         )
         .expect("fallback");
         assert_eq!(c.category, "unfiled");
-        assert_eq!(c.rel_path, "", "roots不一致はrel_pathなし");
+        assert_eq!(c.label, "", "roots不一致はlabelなし");
     }
 
     /// [covers:layout.uuid-v7-generation]
@@ -470,9 +471,9 @@ mod tests {
         assert_eq!(e2.exit_code(), 3, "data key長超過も対象エラー3: {e2}");
     }
 
-    /// 予約領域key・rel_path正規化の単位確認。
+    /// 予約領域key・label正規化の単位確認。
     #[test]
-    fn reserve_keys_and_rel_path_normalization() {
+    fn reserve_keys_and_label_normalization() {
         assert_eq!(
             index_object_key("amazing-backup/"),
             "amazing-backup/sys/index.jsonl.age"
@@ -481,11 +482,11 @@ mod tests {
             manifest_object_key("amazing-backup/", "20261014-abcd0001").unwrap(),
             "amazing-backup/sys/manifests/20261014-abcd0001.jsonl.age"
         );
-        assert_eq!(normalize_rel_path("a/b/").unwrap(), "a/b");
-        assert_eq!(normalize_rel_path("a/./b/").unwrap(), "a/b");
-        assert_eq!(normalize_rel_path("a//b").unwrap(), "a/b");
-        assert_eq!(normalize_rel_path("../a").unwrap(), "a");
-        assert_eq!(normalize_rel_path("").unwrap(), "");
-        assert!(normalize_rel_path("/abs").is_err());
+        assert_eq!(normalize_label("a/b/").unwrap(), "a/b");
+        assert_eq!(normalize_label("a/./b/").unwrap(), "a/b");
+        assert_eq!(normalize_label("a//b").unwrap(), "a/b");
+        assert_eq!(normalize_label("../a").unwrap(), "a");
+        assert_eq!(normalize_label("").unwrap(), "");
+        assert!(normalize_label("/abs").is_err());
     }
 }

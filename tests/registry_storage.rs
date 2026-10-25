@@ -31,11 +31,12 @@ fn reg_opts() -> StorageOpts {
 }
 
 /// [covers:registry.schema2-records-roundtrip]
-/// schema2 recordのappend→load往復(TASK-18 3.2): file_write(+uuid,+title/削除folder)・
-/// file_upload(+uuid,+title/削除name,category,rel_path,identity_hash)・
-/// pin_write(+uuid/削除name,category,rel_path,folder)・pin_remove(+uuid/削除name)・
-/// prune(削除category,keep・deleted[]維持)の全fieldがserialize→parseで失われることなく
-/// 復元される(s3_keyはdata/{uuid}/default.age記録値・Record enumへ正しく分類)。
+/// recordのappend→load往復(TASK-20 3.2: file_writeのみschema=3・label入りへ改訂。
+/// 他recordのschema=2は維持): file_write(schema=3・uuid/title/label入り・identity_hash維持)・
+/// file_upload(schema=2・uuid/title入り)・pin_write(schema=2・uuid入り)・
+/// pin_remove(schema=2・uuid入り)・prune(schema=2・deleted[]維持)の全fieldが
+/// serialize→parseで失われることなく復元される(s3_keyはdata/{uuid}/default.age記録値・
+/// Record enumへ正しく分類)。
 #[test]
 fn schema2_records_survive_append_load_roundtrip() {
     let Some(fx) = StorageFixture::new(
@@ -75,15 +76,19 @@ fn schema2_records_survive_append_load_roundtrip() {
     );
     assert_eq!(fx.manage("prune", &["--apply"]).0, 0, "prune --apply");
 
-    // 各record_typeのschema2 field検査
+    // 各record_typeのschema field検査(file_writeはschema=3・他はschema=2)
     let registry = fx.registry_values();
     let fw = registry
         .iter()
         .find(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_write"))
         .expect("file_write記録");
-    assert_eq!(fw["schema"], 2, "file_write schema=2: {fw}");
+    assert_eq!(fw["schema"], 3, "file_write schema=3(TASK-20): {fw}");
     assert_eq!(fw["uuid"], serde_json::json!(uuid), "uuid追加: {fw}");
     assert_eq!(fw["title"], "round-title", "title追加: {fw}");
+    assert!(
+        fw.get("label").is_some(),
+        "file_writeはlabel入り(TASK-20): {fw}"
+    );
     assert!(fw.get("folder").is_none(), "folder廃止: {fw}");
     assert!(
         fw.get("identity_hash").is_some() && fw.get("s3_key").is_some(),
@@ -97,7 +102,7 @@ fn schema2_records_survive_append_load_roundtrip() {
     assert_eq!(fu["schema"], 2, "file_upload schema=2: {fu}");
     assert_eq!(fu["uuid"], serde_json::json!(uuid), "uuid追加: {fu}");
     assert!(fu.get("title").is_some(), "title追加: {fu}");
-    for absent in ["name", "category", "rel_path", "identity_hash"] {
+    for absent in ["name", "category", "label", "identity_hash"] {
         assert!(
             fu.get(absent).is_none(),
             "file_uploadの{absent}は削除(uuid接続へ一本化): {fu}"
@@ -114,7 +119,7 @@ fn schema2_records_survive_append_load_roundtrip() {
         .expect("pin_write記録");
     assert_eq!(pw["schema"], 2, "pin_write schema=2: {pw}");
     assert_eq!(pw["uuid"], serde_json::json!(uuid), "uuid追加: {pw}");
-    for absent in ["name", "category", "rel_path", "folder"] {
+    for absent in ["name", "category", "label", "folder"] {
         assert!(
             pw.get(absent).is_none(),
             "pin_writeの{absent}は削除(uuid照合のみへ単純化): {pw}"
@@ -148,51 +153,79 @@ fn schema2_records_survive_append_load_roundtrip() {
 
     // 往復: 次コマンド(list files)が全recordを読み込んで索引を表示できる
     let (code, stdout, stderr) = fx.list("files", &[]);
-    assert_eq!(code, 0, "schema2 record群のload往復: {stdout}{stderr}");
+    assert_eq!(code, 0, "全record群のload往復: {stdout}{stderr}");
     assert!(stdout.contains("round-title"), "entity表示: {stdout}");
 }
 
 /// [covers:registry.old-schema-fields-rejected]
-/// 旧schema1形式のrecord行(旧フィールドfolder等の混入・schema=1)はdeny_unknown_fieldsに
-/// よりparse失敗となる(旧記録の互換読込・黙黙変換は行わない。行番号付きparseエラー)。
+/// 旧schema形式のrecord行はdeny_unknown_fieldsによりparse失敗となる(旧記録の互換読込・
+/// 黙黙変換は行わない。行番号付きparseエラー)。
+/// - 旧schema1形式(folder入り・uuid/title無し・schema=1)
+/// - 旧schema2形式のfile_write行(rel_path入り・label無し・schema=2。TASK-20の
+///   schema 3化前の記録)→ unknown field rel_pathとして同様に拒否
+///   (拒否原因はunknown fieldであり「missing field label」文言はtest契約にしない=
+///   文言でなく終了code・行番号付きエラーの挙動で検証)
 #[test]
 fn old_schema_record_line_is_rejected() {
-    let Some(fx) = StorageFixture::new("reg-old", reg_opts()) else {
-        return;
-    };
-    let a = fx.data_root.join("a.zip");
-    write_file(&a, b"old-schema-plain");
-    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "old-title", &[]) else {
-        return;
-    };
-    assert_eq!(code, 0, "初回push: {stdout}");
+    for (i, old_schema) in [1, 2].into_iter().enumerate() {
+        let Some(fx) = StorageFixture::new(&format!("reg-old-{i}"), reg_opts()) else {
+            return;
+        };
+        let a = fx.data_root.join("a.zip");
+        write_file(&a, b"old-schema-plain");
+        let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "old-title", &[]) else {
+            return;
+        };
+        assert_eq!(code, 0, "初回push: {stdout}");
 
-    // 旧schema1形式( folder入り・uuid/title無し・schema=1)のfile_write行を混入
-    let mut old = fx
-        .registry_values()
-        .into_iter()
-        .find(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_write"))
-        .expect("file_write記録")
-        .clone();
-    if let Some(obj) = old.as_object_mut() {
-        obj.insert("schema".into(), serde_json::Value::from(1));
-        obj.insert("folder".into(), serde_json::Value::from("a.zip"));
-        obj.remove("uuid");
-        obj.remove("title");
+        // 現行のfile_write記録を旧schema形式の行へ組み替える
+        let mut old = fx
+            .registry_values()
+            .into_iter()
+            .find(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_write"))
+            .expect("file_write記録")
+            .clone();
+        if let Some(obj) = old.as_object_mut() {
+            match old_schema {
+                1 => {
+                    obj.insert("schema".into(), serde_json::Value::from(1));
+                    obj.insert("folder".into(), serde_json::Value::from("a.zip"));
+                    obj.remove("uuid");
+                    obj.remove("title");
+                }
+                _ => {
+                    obj.insert("schema".into(), serde_json::Value::from(2));
+                    obj.insert("rel_path".into(), serde_json::Value::from("2020/old-place"));
+                    obj.remove("label");
+                }
+            }
+        }
+        append_registry_line(&fx.registry, &old);
+
+        // 索引objectを削除してregistryを読む照会経路(索引不在→namespace_never_written)へ
+        // 誘導する(索引が存在する場合のlistは索引ベース表示でregistryを読まない)
+        std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
+
+        // 読込は行番号付きparseエラー(ProcessError)となり、黙って読み飛ばされない
+        let (code, _stdout, stderr) = fx.list("files", &[]);
+        assert_eq!(
+            code, 4,
+            "旧schema={old_schema}行はparseエラー(処理エラー4): {stderr}"
+        );
+        // 混入行の行番号(内容一致で特定)までエラー文に現れることを検査する
+        // (「registryを含む」だけの緩い検査では混入行の位置を検証できない)
+        let old_line = serde_json::to_string(&old).expect("追加行serialize");
+        let lineno = std::fs::read_to_string(&fx.registry)
+            .expect("registry読込")
+            .lines()
+            .position(|l| l == old_line)
+            .expect("混入行の発見")
+            + 1;
+        assert!(
+            stderr.contains(&format!("registryの{lineno}行目")),
+            "混入行の行番号付きエラー: {stderr}"
+        );
     }
-    append_registry_line(&fx.registry, &old);
-
-    // 索引objectを削除してregistryを読む照会経路(索引不在→namespace_never_written)へ
-    // 誘導する(索引が存在する場合のlistは索引ベース表示でregistryを読まない)
-    std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
-
-    // 読込は行番号付きparseエラー(ProcessError)となり、黙って読み飛ばされない
-    let (code, _stdout, stderr) = fx.list("files", &[]);
-    assert_eq!(code, 4, "旧schema行はparseエラー(処理エラー4): {stderr}");
-    assert!(
-        stderr.contains("行目") || stderr.contains("schema違反") || stderr.contains("registry"),
-        "行番号・schema違反の表示: {stderr}"
-    );
 }
 
 /// [covers:registry.sweep-location-remove-records]

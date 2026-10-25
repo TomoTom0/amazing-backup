@@ -756,26 +756,6 @@ impl StorageFixture {
         read_calls(&self.state)
     }
 
-    /// file objectのkey(<prefix>/<category>[/<rel_path>]/<name>/default.age)。
-    pub fn file_key(&self, category: &str, rel_path: Option<&str>, name: &str) -> String {
-        match rel_path {
-            Some(rel) if !rel.is_empty() => {
-                format!("{}{}/{}/{}/default.age", self.prefix, category, rel, name)
-            }
-            _ => format!("{}{}/{}/default.age", self.prefix, category, name),
-        }
-    }
-
-    /// pin objectのkey(<prefix>/<category>[/<rel_path>]/<name>/<pin>.age)。
-    pub fn pin_key(&self, category: &str, rel_path: Option<&str>, name: &str, pin: &str) -> String {
-        match rel_path {
-            Some(rel) if !rel.is_empty() => {
-                format!("{}{}/{}/{}/{}.age", self.prefix, category, rel, name, pin)
-            }
-            _ => format!("{}{}/{}/{}.age", self.prefix, category, name, pin),
-        }
-    }
-
     /// TASK-18 data領域のfile object key({prefix}data/{uuid}/default.age)。
     pub fn data_key(&self, uuid: &str) -> String {
         format!("{}data/{}/default.age", self.prefix, uuid)
@@ -871,17 +851,6 @@ pub fn storage_aws_toml_body(
         "[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"{bucket}\"\nregion = \"ap-northeast-1\"\nprefix = \"{prefix}\"\nstorage_class = \"{storage_class}\"\ncredentials_file = \"{}\"\n",
         credentials_file.display()
     )
-}
-
-/// 索引のfile entryをnameで引く。
-pub fn index_file_entry<'a>(lines: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
-    lines
-        .iter()
-        .find(|v| {
-            v.get("record_type").and_then(|r| r.as_str()) == Some("file")
-                && v.get("name").and_then(|n| n.as_str()) == Some(name)
-        })
-        .unwrap_or_else(|| panic!("索引にfile entry({name})が無い: {lines:?}"))
 }
 
 /// 索引file entryのversions[].version_id(格納順=新しい順)。
@@ -1146,20 +1115,4 @@ pub fn drop_version_state(state_dir: &Path, key: &str, version_id: &str) {
     );
     write_file(&versions_path, out.as_bytes());
     let _ = std::fs::remove_file(state_dir.join("object-versions").join(key).join(version_id));
-}
-
-/// registryのrecordのうちfield=valueのものを取り出す。
-pub fn registry_records<'a>(
-    registry: &'a [serde_json::Value],
-    record_type: &str,
-    field: &str,
-    value: &str,
-) -> Vec<&'a serde_json::Value> {
-    registry
-        .iter()
-        .filter(|r| {
-            r.get("record_type").and_then(|t| t.as_str()) == Some(record_type)
-                && r.get(field).and_then(|v| v.as_str()) == Some(value)
-        })
-        .collect()
 }

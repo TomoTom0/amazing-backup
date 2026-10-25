@@ -7,6 +7,7 @@
 | path | 内容 |
 |---|---|
 | `usage_backup.md` | amazing-backup CLIの使用手順書(セットアップ・XDG配置の設定ファイル・UUID発行キー+versioningのデータ配置と保持・全commandリファレンス(title/uuid語彙)・終了コード・E2E・復元手順(get/backup pull・費用目安・平文衝突保護)・運用規則(dev/prod profile・prod系3bucket使い分けとbucket単位の混同防止)・災害時手順・旧サブコマンドからの移行ガイド) |
+| `changelog/unreleased.md` | 未release分のchangelog(次期0.2.0・TASK-20の破壊的変更と旧語彙→新語彙対応表・移行手順。release時に`vX.Y.Z.md`へrename) |
 
 ## 参照(docs外の正本)
 

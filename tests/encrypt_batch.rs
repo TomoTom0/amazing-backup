@@ -39,7 +39,7 @@ fn run_batch_ids(fx: &StorageFixture) -> Vec<String> {
 }
 
 /// [covers:encrypt.registry-append-fields]
-/// 暗号化成功時にregistryへfile_write記録(TASK-18 3.2のschema=2: uuid/title入り・
+/// 暗号化成功時にregistryへfile_write記録(TASK-20 3.2のschema=3: uuid/title/label入り・
 /// folder廃止)が1行appendされる(backup pushでの暗号化成功・title指定)。
 #[test]
 fn registry_append_fields() {
@@ -64,7 +64,7 @@ fn registry_append_fields() {
     let writes = file_writes(&fx);
     assert_eq!(writes.len(), 1, "file_write記録は1行: {writes:?}");
     let rec = &writes[0];
-    assert_eq!(rec["schema"], 2, "schema=2(TASK-18): {rec}");
+    assert_eq!(rec["schema"], 3, "schema=3(TASK-20): {rec}");
     assert_eq!(rec["record_type"], "file_write");
     assert!(
         rec["recorded_at"].as_str().unwrap().ends_with("+09:00"),
@@ -114,9 +114,9 @@ fn registry_append_fields() {
     let fps = rec["recipients"].as_array().unwrap();
     assert_eq!(fps.len(), 1);
     assert!(fps[0].as_str().unwrap().starts_with("SHA256:"));
-    // layout分類解決の記録(category/rel_path/identity_hash)とUUID体系のs3_key
+    // layout分類解決の記録(category/label/identity_hash)とUUID体系のs3_key
     assert_eq!(rec["category"], "unfiled");
-    assert_eq!(rec["rel_path"], "");
+    assert_eq!(rec["label"], "");
     assert_eq!(
         rec["identity_hash"],
         serde_json::json!(hash8_of_path(&src)),
@@ -279,9 +279,10 @@ fn writes_uuid_of(fx: &StorageFixture, path: &std::path::Path) -> String {
 }
 
 /// [covers:encrypt.manifest-content-roundtrip]
-/// runのmanifest(V2・TASK-18 3.3のschema=2)が暗号化生成され、復号するとバッチヘッダ+
-/// ファイルレコードが正しい: file recordはuuid/title追加・identity_hash/folder削除で、
-/// name/category/rel_path/source_pathは所在記録として維持(index rebuildのlocations源)・
+/// runのmanifest(V3・TASK-20 3.3のfile record schema=3・batch header行はschema=2のまま)が
+/// 暗号化生成され、復号するとバッチヘッダ+ファイルレコードが正しい:
+/// file recordはuuid/title追加・identity_hash/folder削除で、
+/// name/category/label/source_pathは所在記録として維持(index rebuildのlocations源)・
 /// s3_key(data/{uuid}/default.age)・version_id・sha類・size類・date・version_ts・batch_idは維持。
 #[test]
 fn manifest_content_roundtrip() {
@@ -317,7 +318,10 @@ fn manifest_content_roundtrip() {
 
     let header: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(header["record_type"], "batch");
-    assert_eq!(header["schema"], 2, "manifest schema=2: {header}");
+    assert_eq!(
+        header["schema"], 2,
+        "batch header行のschema=2は据え置き(TASK-20): {header}"
+    );
     assert_eq!(header["batch_id"], serde_json::json!(batch_ids[0]));
     assert_eq!(header["file_count"], 2);
     assert_eq!(header["total_source_size"], serde_json::json!(18 + 19));
@@ -334,6 +338,11 @@ fn manifest_content_roundtrip() {
     for line in &lines[1..] {
         let fr: serde_json::Value = serde_json::from_str(line).unwrap();
         assert_eq!(fr["record_type"], "file");
+        assert_eq!(fr["schema"], 3, "file record schema=3(TASK-20): {fr}");
+        assert!(
+            fr.get("label").is_some(),
+            "labelは所在記録として維持(TASK-20): {fr}"
+        );
         let uuid = fr["uuid"].as_str().unwrap().to_string();
         let up = uploads
             .iter()
@@ -358,7 +367,7 @@ fn manifest_content_roundtrip() {
         );
         assert!(
             fr.get("identity_hash").is_none() && fr.get("folder").is_none(),
-            "identity_hash/folderは削除(schema2): {fr}"
+            "identity_hash/folderは削除(TASK-18): {fr}"
         );
         assert_eq!(
             fr["source_sha256"], up["source_sha256"],

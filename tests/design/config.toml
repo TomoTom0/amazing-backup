@@ -34,15 +34,23 @@
 #   keep-artifacts-run-cleanup(data/out→XDG cache dir配下へ)・
 #   aws-credentials-file-required(credentials_fileのpath解決はcwd基準維持の明確化)。
 #   実装前のため新規条件のテストは未作成・改訂期待値のテストは実行failを許容。
+# 2026-10-25: TASK-20(分類語彙rel_path→label改名・schema 3化)対応でテスト先行の更新
+#   (tmp/tasks/tm-20/design_vocab-rename-label.md 1章・2.1・4章・6章)。
+#   廃止0件・新規0件・文言改訂1件(id不変): layout-and-categories-validation
+#   ([files.<basename>]のpath key→label・label値はnormalize_label検証・旧path keyは
+#   deny_unknown_fieldsの未知key=設定エラー2の拒否caseをgiven・期待値へ追記)。
+#   metadata-latest-source-path-valuesは影響なし(latest_source_path維持)。
+#   excludedへ実運用config(repo外)の[files] key書換対応を追加。
+#   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseへ戻す。
 
 [meta]
 feature = "config"
 source_file = "src/config.rs"
-verified = true
-verified_at = "2026-10-23"
-verified_by = "claude"
+verified = false
+verified_at = ""
+verified_by = ""
 test_command = "cargo test"
-source_hash = "8cb855319de41ac937d2271f318d19be4df1e220"
+source_hash = ""
 note = "CONF-005(from-list)は targets::parse_from_list が実体。source_fileはエリアの主対象(src/config.rs)を指し、実関数はtarget_functionで特定する。TASK-9でload_credentials(src/config.rs新設)が追加され、credential系条件(CONF-009〜012)もsrc/config.rsが実体"
 
 [[condition]]
@@ -70,7 +78,7 @@ source = "TASK-19 body(XDG配置・初回セットアップ案内)"
 description = "設定fileが規定pathに無い場合(--config/--aws-config省略時の既定path解決先にfileが無い)は設定エラー2+案内表示: repoのconfigs/aws.example.toml(aws.toml側)・configs/pipeline.example.toml(pipeline.toml側)を規定pathへcopyして記述する旨と--config/--aws-configによる明示指定が可能な旨。--config/--aws-configで明示指定したpathの不在は従来どおりpathのみの設定エラー2(copy案内無し) (integration)"
 given = "AMAZING_BACKUP_HOME配下にpipeline.toml・aws.tomlを置かない状態での backup verify(規定pipeline.toml読込経路)と list files(規定aws.toml読込経路)の各実行、および--config/--aws-configで不在pathを明示指定した実行"
 expect_return_shape = "規定path不在はいずれも exit 2+copy案内表示(configs/pipeline.example.toml・configs/aws.example.tomlの語を含む)。明示指定の不在は exit 2(copy案内無し)"
-source_lines = "tests/config_storage.rs:314"
+source_lines = "tests/config_storage.rs:321"
 
 [[condition]]
 id = "config.output-section-rejected"
@@ -79,7 +87,7 @@ source = "TASK-19 body(XDG配置: [output]section廃止・registry/out pathはXD
 description = "[output]sectionは廃止: pipeline.tomlに[output]が存在したら設定エラー2(deny_unknown_fieldsによる未知キー扱いで静的に廃止を確定。registry・暗号化一時物dirのpathはXDG規定path固定で設定fileからは指定不可・env上書きのみ)。keep_artifactsは[behavior].keep_artifactsへ移設(config.keep-artifacts-enum) (unit)"
 given = "[output]を含むpipeline.toml(dir/registry/keep_artifactsの各キー)"
 expect_throw = "ConfigError(exit code 2)"
-source_lines = "src/config.rs:1041; tests/config_storage.rs:286"
+source_lines = "src/config.rs:1041; tests/config_storage.rs:293"
 
 [[condition]]
 id = "config.pipeline-toml-invalid-error"
@@ -124,7 +132,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-005(from-list schem
 description = "from-list tomlの path 欠落・未知キーは設定エラー。[[targets]]にはtitle欄(任意文字列・validate_title)を追加でき、省略可(合流時は現行title継続・新規発行時にtitle必須)。name欄の拒否(新経路)は現行どおり (unit)"
 given = "path無しentryと未知キー入りentryを含む from-list toml、title欄付きentry、title省略entry"
 expect_return_shape = "path無し・未知キーは ConfigError(exit code 2)。title欄付き・title省略は受理される"
-source_lines = "src/targets.rs:390; tests/config_storage.rs:224"
+source_lines = "src/targets.rs:390; tests/config_storage.rs:231"
 
 [[condition]]
 id = "config.recipient-fingerprint-duplicate-error"
@@ -192,10 +200,10 @@ source_lines = "tests/s3_backend.rs:193"
 [[condition]]
 id = "config.layout-and-categories-validation"
 target_function = "config::load_pipeline(layout/files検証)"
-source = "tmp/tasks/tm-10/design_s3_storage.md 4.1(pipeline.toml拡張)・4.2(検証規則)・1.1(sys予約・旧表記_sysも拒否)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 5.15・10章): [categories]廃止・files.categoryの文字列検証置換へ改訂"
-description = "[layout]/[files]の検証(設定エラー2): auto_path_rootsは絶対path・files.categoryと[layout].unfiled_categoryはvalidate_category_nameによる文字列検証のみ([categories]定義存在検証は廃止・category語彙は記録値として自由化)・category名規則違反・予約語sys(_sys旧表記含む)はlayout.category-name-validationと同一検証。keepの検証(1..=100)はaws.toml [aws.lifecycle]側へ移行(config.aws-lifecycle-required-and-ranged)。files写像path先頭のsys衝突検証は廃止(path_collides_reserve削除・キー構造に影響しなくなったため) (unit)"
-given = "auto_path_rootsに相対path・files.categoryの規則違反値(_sys・BadName)・unfiled_categoryの規則違反値の各pipeline.toml、および従来拒否されていたfiles.categoryの[categories]未定義値(新仕様では文字列検査を通るため受理)"
-expect_return_shape = "相対path・規則違反・予約語は ConfigError(exit code 2)。未定義category値は受理される"
+source = "tmp/tasks/tm-10/design_s3_storage.md 4.1(pipeline.toml拡張)・4.2(検証規則)・1.1(sys予約・旧表記_sysも拒否)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 5.15・10章): [categories]廃止・files.categoryの文字列検証置換へ改訂。TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md 1章・2.1・4章・6章): rel_path→label改名・schema 3化([files]のpath key→label・旧key拒否case追記)"
+description = "[layout]/[files]の検証(設定エラー2): auto_path_rootsは絶対path・files.categoryと[layout].unfiled_categoryはvalidate_category_nameによる文字列検証のみ([categories]定義存在検証は廃止・category語彙は記録値として自由化)・category名規則違反・予約語sys(_sys旧表記含む)はlayout.category-name-validationと同一検証・[files.<basename>]のschema keyはlabelで(TASK-20で旧path keyから改名)label値はnormalize_label検証(エラー文は[files.{name}].labelが不正です)。FileMappingFileはdeny_unknown_fieldsのため旧path keyの存在は未知keyとして設定エラー2。keepの検証(1..=100)はaws.toml [aws.lifecycle]側へ移行(config.aws-lifecycle-required-and-ranged)。files写像のsys衝突検証は廃止済み(TASK-18でpath_collides_reserve削除) (unit)"
+given = "auto_path_rootsに相対path・files.categoryの規則違反値(_sys・BadName)・unfiled_categoryの規則違反値の各pipeline.toml、[files.<basename>]に旧key path(labelの代わり)を書いたpipeline.toml、および従来拒否されていたfiles.categoryの[categories]未定義値(新仕様では文字列検査を通るため受理)"
+expect_return_shape = "相対path・規則違反・予約語は ConfigError(exit code 2)。旧path keyはdeny_unknown_fieldsの未知keyとして ConfigError(exit code 2)。未定義category値は受理される"
 source_lines = "src/config.rs:1493; tests/config_storage.rs:169"
 
 [[condition]]
@@ -223,7 +231,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 8.3(data/out保持policy変更)�
 description = "keep_artifacts=\"run\": backup push成功(run完結)後にXDG cache dir(規定$XDG_CACHE_HOME/amazing-backup/・AMAZING_BACKUP_HOME指定時は$ABH/cache/)配下の当該run分(<batch_id>/*.age)を削除(旧経路産物・失敗runの残りは消さない)。失敗残りは再実行で再利用される(encrypt skipのregistry基準化により.age不在でも重複暗号化は起きない)。\"always\"は全保持 (integration, fake seam)"
 given = "keep_artifacts=\"run\"でのbackup push成功後と、失敗注入した実行後のcache dir(AMAZING_BACKUP_HOME=$ABHで$ABH/cache/を観測)"
 expect_return_shape = "成功後は当該runの$ABH/cache/<batch_id>配下が削除され(失敗runの残りは保持)、失敗時は残る(再実行で再利用)"
-source_lines = "tests/storage_backup.rs:698"
+source_lines = "tests/storage_backup.rs:708"
 
 [[condition]]
 id = "config.metadata-latest-source-path-values"
@@ -264,4 +272,11 @@ item = "TASK-9設計3.6: 手順書でのchmod 600案内"
 source = "tmp/tasks/tm-9/design_sdk_migration.md 3.6・11章"
 reason = "docs(usage_backup.md)の記載事項でありコードの振る舞い条件ではない。docs更新は実装task(12.3ステップ6)"
 decided_at = "2026-10-13"
+decided_by = "claude"
+
+[[excluded]]
+item = "実運用pipeline.toml(repo外~/.config/amazing-backup/)の[files]旧path key→label書換とchangelogでの破壊的変更告知"
+source = "TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md)4章3(実運用configの[files] key)・7.3(changelog内容案)"
+reason = "repo外の利用者側対応事項であり検証対象コードの振る舞い条件ではない。旧path key拒否の振る舞い自体はconfig.layout-and-categories-validationの追記caseで担保済み"
+decided_at = "2026-10-25"
 decided_by = "claude"
