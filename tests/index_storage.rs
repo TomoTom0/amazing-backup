@@ -631,6 +631,126 @@ fn manage_index_rebuild_rebuilds_entries_from_manifests() {
     );
 }
 
+/// [covers:index.rebuild-from-manifests]
+/// manage index rebuildの旧manifest拒否(TASK-22・PR#4レビュー指摘P2):
+/// 旧schema=2 file record(rel_path入り・label無し)やschema=3のまま必須field(label)が
+/// 欠損するfile recordを含むmanifestからのrebuildは、分類labelが黙って消えた状態の
+/// schema=3索引をuploadせず索引PUT前に失敗する(schema≠3は設定エラー2+旧manifestを
+/// 明示した初期化と再pushの案内・必須field欠損は処理エラー4。registry file_writeの
+/// deny_unknown_fields・索引parseのschema≠3拒否と同じ拒否をmanifest file record経路にも適用)。
+#[test]
+fn manage_index_rebuild_rejects_legacy_manifest_records() {
+    let Some(fx) = StorageFixture::new(
+        "idx-mreb-legacy",
+        StorageOpts {
+            files: "[files.\"a.zip\"]\ncategory = \"photos\"\nlabel = \"legacy\"\n".into(),
+            ..idx_opts()
+        },
+    ) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"rebuild-legacy-plain");
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a], "legacy-title") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    let manifests = manifest_objects(&fx);
+    assert_eq!(manifests.len(), 1, "manifestは1件: {manifests:?}");
+    let manifest = manifests[0].clone();
+    let original_plain = age_decrypt(&fx.age, &manifest, &fx.secret);
+
+    // manifest平文のfile recordを書き換えて暗号化し直す(batch header行は不変)
+    let rewrite_manifest = |transform: &dyn Fn(serde_json::Value) -> serde_json::Value| {
+        let text = String::from_utf8(original_plain.clone()).expect("manifest平文はUTF-8");
+        let mut rewritten = String::new();
+        for line in text.lines() {
+            let v: serde_json::Value = serde_json::from_str(line).expect("manifest行はJSON");
+            rewritten.push_str(&serde_json::to_string(&transform(v)).expect("manifest行serialize"));
+            rewritten.push('\n');
+        }
+        age_encrypt_bytes(
+            &fx.age,
+            &[fx.public.clone()],
+            rewritten.as_bytes(),
+            &manifest,
+        );
+    };
+
+    // 索引object不在の状態でrebuildを実行(復元job発行の再実行を吸収)し、
+    // 終了コードと出力を返す
+    let run_rebuild = || -> (i32, String) {
+        let mut out = String::new();
+        let mut code = 0;
+        for _ in 0..3 {
+            let (c, stdout, stderr) = fx.manage("index", &["rebuild"]);
+            code = c;
+            out.push_str(&stdout);
+            out.push_str(&stderr);
+            if code != 0 || fx.object_path(&fx.index_key()).is_file() {
+                break;
+            }
+        }
+        (code, out)
+    };
+
+    // (1) 旧schema=2 file record(rel_path入り・label無し): 設定エラー2+uploadなし
+    std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
+    rewrite_manifest(&|mut v| {
+        if v.get("record_type").and_then(|t| t.as_str()) == Some("file") {
+            let obj = v.as_object_mut().expect("manifest file recordはobject");
+            obj.insert("schema".into(), serde_json::json!(2));
+            let label = obj.remove("label").unwrap_or_default();
+            obj.insert("rel_path".into(), label);
+        }
+        v
+    });
+    let (code, out) = run_rebuild();
+    assert_eq!(code, 2, "旧schema=2 file record混入は設定エラー2: {out}");
+    assert!(
+        !fx.object_path(&fx.index_key()).is_file(),
+        "索引はuploadされない(label黙示消去なし): {out}"
+    );
+    assert!(
+        out.contains("旧形式") && out.contains("再push"),
+        "旧manifestと初期化・再pushの案内: {out}"
+    );
+
+    // (2) schema=3のまま必須field(label)欠損: 処理エラー4+uploadなし
+    // ((1)で索引がuploadされなかったため対象objectは無いまま)
+    let _ = std::fs::remove_file(fx.object_path(&fx.index_key()));
+    rewrite_manifest(&|mut v| {
+        if v.get("record_type").and_then(|t| t.as_str()) == Some("file") {
+            v.as_object_mut()
+                .expect("manifest file recordはobject")
+                .remove("label");
+        }
+        v
+    });
+    let (code, out) = run_rebuild();
+    assert_eq!(code, 4, "必須field欠損は処理エラー4: {out}");
+    assert!(
+        !fx.object_path(&fx.index_key()).is_file(),
+        "索引はuploadされない: {out}"
+    );
+    assert!(out.contains("label"), "欠損field名を明示: {out}");
+
+    // (3) 正常なschema=3 recordの同一manifestからはrebuildできる(陽性対照)
+    rewrite_manifest(&|v| v);
+    let (code, out) = run_rebuild();
+    assert_eq!(code, 0, "正常系rebuildは成功: {out}");
+    let lines = fx.read_index();
+    let uuid = idx_uuid_of(&fx, &a);
+    let entry = index_entity_by(&lines, "uuid", &uuid);
+    let locations = entity_locations(entry);
+    assert_eq!(locations.len(), 1, "locationsは1件: {locations:?}");
+    assert_eq!(
+        locations[0].get("label").and_then(|l| l.as_str()),
+        Some("legacy"),
+        "labelは欠損せず復元される: {locations:?}"
+    );
+}
+
 /// [covers:index.pin-entries]
 /// pin add/rmの索引反映(設計2.1・2.2): pin addは当該file entryのpins[]へ
 /// (pin・s3_key・created_at・date・source_sha256・age_sha256・source_size)、

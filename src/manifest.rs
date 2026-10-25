@@ -97,6 +97,10 @@ pub fn write_manifest(
 // 旧`build_manifest`(encrypt時構築・旧encrypt/upload経路が使う)とは分離されており、
 // 新経路はfile upload後に構築する(file recordに実s3_keyとversion_idを記録)。
 
+/// manifest file recordのschema版数(TASK-20: 2→3。manage index rebuildは旧schema
+/// recordを検出した時点で失敗する・TASK-22)。
+pub const MANIFEST_FILE_RECORD_SCHEMA: i64 = 3;
+
 /// manifestのfile record 1件(backup pushのupload済み対象・TASK-20 3.3 schema=3)。
 /// uuid/title追加・identity_hash/folder削除。name/category/label/source_pathは
 /// 所在記録として維持(index rebuildのlocations源)。
@@ -145,7 +149,7 @@ pub fn build_manifest_v3(
     out.push('\n');
     for f in files {
         let rec = serde_json::json!({
-            "schema": 3,
+            "schema": MANIFEST_FILE_RECORD_SCHEMA,
             "record_type": "file",
             "uuid": f.uuid,
             "title": f.title,

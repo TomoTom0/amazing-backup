@@ -603,6 +603,17 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             source_size: u64,
             age_size: u64,
         }
+        // TASK-22: file recordのschema値・必須fieldを検査し、旧record(label無し・rel_path入りの
+        // schema=2等)を黙って空labelで読まない。検査なしだと分類labelが消えた状態の
+        // schema=3索引をuploadしてしまい、registry file_write(deny_unknown_fields)や
+        // 索引parse(schema≠3拒否)と異なりmanifest file record経路だけ拒否が無い状態になる
+        // (schema≠3=設定エラー2+初期化と再pushの案内・必須field欠損=処理エラー4。
+        // version_idはListObjectVersions補完があるため必須としない)
+        const MANIFEST_FILE_REQUIRED_STR_FIELDS: [&str; 12] = [
+            "uuid", "title", "name", "category", "label", "source_path", "s3_key", "date",
+            "version_ts", "batch_id", "source_sha256", "age_sha256",
+        ];
+        const MANIFEST_FILE_REQUIRED_NUM_FIELDS: [&str; 2] = ["source_size", "age_size"];
         let mut all: Vec<Rec> = Vec::new();
         for key in &manifest_keys {
             let tmp = std::env::temp_dir().join(format!(
@@ -628,6 +639,29 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
                 })?;
                 if v.get("record_type").and_then(|t| t.as_str()) != Some("file") {
                     continue;
+                }
+                let rec_schema = v.get("schema").and_then(|x| x.as_i64());
+                if rec_schema != Some(crate::manifest::MANIFEST_FILE_RECORD_SCHEMA) {
+                    return Err(BackupError::Config(format!(
+                        "manifest file recordのschemaが不正です(schema={}・期待={})({key})。\
+                         旧形式のmanifestが残る環境ではrebuildできません(初期化と再pushが必要)",
+                        rec_schema.map_or_else(|| "なし".to_string(), |s| s.to_string()),
+                        crate::manifest::MANIFEST_FILE_RECORD_SCHEMA
+                    )));
+                }
+                for field in MANIFEST_FILE_REQUIRED_STR_FIELDS {
+                    if v.get(field).and_then(|x| x.as_str()).is_none() {
+                        return Err(BackupError::Process(format!(
+                            "manifest file recordの必須field({field})がありません({key})"
+                        )));
+                    }
+                }
+                for field in MANIFEST_FILE_REQUIRED_NUM_FIELDS {
+                    if v.get(field).and_then(|x| x.as_u64()).is_none() {
+                        return Err(BackupError::Process(format!(
+                            "manifest file recordの必須field({field})がありません({key})"
+                        )));
+                    }
                 }
                 let g = |f: &str| {
                     v.get(f)

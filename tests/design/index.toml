@@ -51,6 +51,10 @@
 #   entity-grouping-by-uuid・pins-connect-by-uuid(所在記録値語彙rel_path→label)。
 #   location-remove-excludes-and-revives・location-rm-commandはrel_path言及なし(影響なし)。
 #   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseへ戻す。
+# 2026-10-25: TASK-22(PR#4レビュー指摘P2: rebuildの旧schema=2 manifest file record黙示読取)対応で更新。
+#   改訂1件(id不変): rebuild-from-manifests(旧schema=2 file record(rel_path入り・label無し)や
+#   schema=3での必須field欠損recordを検出した際の索引upload前失敗を必須期待値へ追加。
+#   labelが黙って消えた状態のschema=3索引はuploadしない)。
 
 [meta]
 feature = "index"
@@ -87,7 +91,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 1.4(storage class表)・2.2"
 description = "索引 sys/index.jsonl.age のPUTはstorage class STANDARD固定(per-object指定。bucket default・lifecycle移行に依存しない)。profileのstorage_classがDEEP_ARCHIVEでもSTANDARDで置かれる (integration, fake seam)"
 given = "storage_class=DEEP_ARCHIVEのprofileでのbackup push実行(または索引更新を伴う操作)"
 expect_return_shape = "sys/index.jsonl.age のPutObject呼び出しが storage_class=STANDARD で行われる"
-source_lines = "src/index.rs:849; tests/index_storage.rs:338"
+source_lines = "src/index.rs:845; tests/index_storage.rs:338"
 
 [[condition]]
 id = "index.encrypted-with-configured-recipients"
@@ -110,11 +114,11 @@ source_lines = "tests/index_storage.rs:421"
 [[condition]]
 id = "index.rebuild-from-manifests"
 target_function = "manage index rebuild"
-source = "tmp/tasks/tm-10/design_s3_storage.md 2.3(喪失時再構築)・2.2(index_upload記録)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 5.12(rebuild)・3.3(manifest V2)・6.3・10章): manifest schema2・除外集合適用・reconcile案内へ改訂。TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md 1章・3.3・6章): rel_path→label改名・schema 3化(manifest file record schema=3・所在記録fieldはlabel読取)"
-description = "manage index rebuild: manifest(file record schema=3: uuid/title・name/category/label/source_pathは所在記録として維持。batch header行はschema=2のまま)からentity単位へentry再構築。locationsはfile recordsのsource_path単位(最新)から復元(所在記録fieldの読取はlabel。旧schema=2 manifest(rel_path入り)からのrebuildはlabel欠損のため対象外)。prunes/sweepsの除外集合を適用(prune・reconcile除去版の索引への復活防止。TASK-18でrebuildへ適用を追加)。pin復元はuuid照合(未削除pin_write記録から)。version_id欠損(旧manifest等)はListObjectVersionsでkey+LastModifiedから補完。完了時、registryのprune/sweep記録が無い環境(registry喪失後等)では除外が効かないため続けてのmanage index reconcile実行を案内表示する。開始時にtier別単価で区別した費用・所要の概算を表示(Deep Archive復元: Standard≈$0.10/GB級・最大12時間 / Bulk≈$0.02/GB級・最大48時間) (integration, fake seam)"
-given = "manifest(file record schema=3・uuid/title/label入り)がN件(DEEP_ARCHIVE未復元)で索引objectが不在のfake S3での manage index rebuild 実行・再実行(進行中)、およびprune/sweep記録入りregistryでの実行"
-expect_return_shape = "未復元manifestへBulkの復元jobが発行され(再実行で継続)、全manifestからuuid/title/label入りのentity(locationsはsource_path単位)が再構築され、prune/sweep削除済み版はversionsへ復活せず、sys/index.jsonl.ageへPUTされ、reconcile案内表示と開始時のtier別費用・所要概算表示が出る"
-source_lines = "src/index.rs:894; tests/index_storage.rs:483"
+source = "tmp/tasks/tm-10/design_s3_storage.md 2.3(喪失時再構築)・2.2(index_upload記録)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 5.12(rebuild)・3.3(manifest V2)・6.3・10章): manifest schema2・除外集合適用・reconcile案内へ改訂。TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md 1章・3.3・6章): rel_path→label改名・schema 3化(manifest file record schema=3・所在記録fieldはlabel読取)。TASK-22(PR#4レビュー指摘P2: rebuild経路のmanifest file record読取が旧recordを黙って空label化): file recordのschema値(3以外)・必須field(label等ManifestV3Fileの必須field)欠損の検出でupload前に失敗させることを必須期待値へ追加"
+description = "manage index rebuild: manifest(file record schema=3: uuid/title・name/category/label/source_pathは所在記録として維持。batch header行はschema=2のまま)からentity単位へentry再構築。locationsはfile recordsのsource_path単位(最新)から復元(所在記録fieldの読取はlabel。旧schema=2 manifest(rel_path入り)からのrebuildはlabel欠損のため対象外)。file recordのschema値が3でない(旧schema=2等)場合・schema=3でもManifestV3Fileの必須field(label等)が欠損する場合はrebuildを索引upload前に失敗させる(分類labelが黙って消えた状態のschema=3索引をuploadしない。schema≠3は設定エラー2+旧manifestを明示した初期化と再pushへの案内・必須field欠損はschema違反の処理エラー4。registry file_writeや索引parseと同じ拒否をmanifest file record経路にも適用)。prunes/sweepsの除外集合を適用(prune・reconcile除去版の索引への復活防止。TASK-18でrebuildへ適用を追加)。pin復元はuuid照合(未削除pin_write記録から)。version_id欠損(旧manifest等)はListObjectVersionsでkey+LastModifiedから補完。完了時、registryのprune/sweep記録が無い環境(registry喪失後等)では除外が効かないため続けてのmanage index reconcile実行を案内表示する。開始時にtier別単価で区別した費用・所要の概算を表示(Deep Archive復元: Standard≈$0.10/GB級・最大12時間 / Bulk≈$0.02/GB級・最大48時間) (integration, fake seam)"
+given = "manifest(file record schema=3・uuid/title/label入り)がN件(DEEP_ARCHIVE未復元)で索引objectが不在のfake S3での manage index rebuild 実行・再実行(進行中)、prune/sweep記録入りregistryでの実行、およびfile recordが旧schema=2(rel_path入り・label無し)のmanifestとschema=3で必須field(label)欠損のmanifestを含む状態での実行"
+expect_return_shape = "未復元manifestへBulkの復元jobが発行され(再実行で継続)、全manifestからuuid/title/label入りのentity(locationsはsource_path単位)が再構築され、prune/sweep削除済み版はversionsへ復活せず、sys/index.jsonl.ageへPUTされ、reconcile案内表示と開始時のtier別費用・所要概算表示が出る。旧schema=2 file record混入時は索引PUTを行わず設定エラー2で失敗し(error文は旧manifestと初期化・再pushの案内を含む)、schema=3での必須field欠損も索引PUTなしの失敗(label黙示消去なし)"
+source_lines = "src/index.rs:890; tests/index_storage.rs:483; tests/index_storage.rs:634"
 
 [[condition]]
 id = "index.pin-entries"
@@ -123,7 +127,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 2.1(pins[])・2.2(索引に影響
 description = "pin add/rmが索引へ反映される: pin addは当該file entryのpins[]へ(pin名・s3_key・created_at・date・source_sha256・age_sha256・source_size)、pin rmは該当pin entryを除去 (integration, fake seam)"
 given = "pin add実行後の索引と、pin rm実行後の索引"
 expect_return_shape = "add後は当該file entryのpins[]にpin記録が現れ、rm後は該当pin記録が除去される"
-source_lines = "tests/index_storage.rs:634"
+source_lines = "tests/index_storage.rs:754"
 
 [[excluded]]
 item = "第2recipient(秘密鍵の地理的第二保管場所)の登録・保管(2.2 recipient構成の運用要件・10章項目9)"
@@ -162,7 +166,7 @@ source = "TASK-11 body(Phase B低残件: version_ts時刻源)+tmp/tasks/tm-10/de
 description = "索引versions[].version_tsの時刻源はregistryのfile_upload記録自身のversion_tsとする(現行のwrite_ts_by_group対応付け(identity+batch組)は廃止・簡素化。file_uploadはversion_ts=記録時刻を保持)。同一日内複数版の一意化(getの--version-id特定・候補表示)はこの時刻で行う (integration, fake seam)"
 given = "backup push後の索引versions[].version_tsと、registryの当該版file_upload記録version_tsとの比較"
 expect_return_shape = "versions[].version_tsは当該版のfile_upload記録version_tsと一致する"
-source_lines = "src/index.rs:795; tests/index_storage.rs:715"
+source_lines = "src/index.rs:795; tests/index_storage.rs:835"
 
 [[condition]]
 id = "index.unknown-record-warning-plain-format"
@@ -171,7 +175,7 @@ source = "TASK-11 body(Phase B低残件L-5)+tmp/tasks/tm-10/design_s3_storage.md
 description = "索引parse時の未知record_type行の警告はrecord_type文字列をそのまま表示する(Some(\"x\")等のRust Debug形式の引用でない。L-5。registry側の未知record_type警告(src/registry.rs・文字列そのまま)と表示形式が揃う) (unit)"
 given = "未知record_type行(例: record_type=\"future_x\")を含む索引平文のparse"
 expect_return_shape = "警告表示にrecord_type文字列(future_x)がそのまま含まれ、Some(...)形式では表示されない"
-source_lines = "tests/index_storage.rs:765"
+source_lines = "tests/index_storage.rs:885"
 
 [[condition]]
 id = "index.parse-failure-guides-rebuild"
@@ -180,7 +184,7 @@ source = "TASK-11(Phase B)コードレビュー指摘L-6+tmp/tasks/tm-10/design_
 description = "索引parse失敗(不正JSON行・index_header/file entryのschema違反・index_header不在)のerror文には`manage index rebuild`による索引再構築の案内を含める(終了コードは検証エラー4のまま変更しない。索引objectが壊れている場合の回復経路を利用者へ示す)。TASK-18の索引schema=2化・TASK-20のschema=3化に伴い、旧schema(1・2)索引の読込はschema不一致として設定エラー2+rebuild案内で拒否される(旧索引の誤読防止) (integration, fake seam)"
 given = "索引objectをschema違反の平文(file entry必須field欠損)へ書き換えた状態と、旧schema=1索引(schema=1のindex_header)・旧schema=2索引(schema=2のindex_header)を配置した状態での list files 実行"
 expect_return_shape = "schema違反平文は exit 4(検証エラー)+rebuild案内。schema=1・schema=2索引はいずれも exit 2(設定エラー)+rebuild案内"
-source_lines = "src/index.rs:820; tests/index_storage.rs:1257"
+source_lines = "src/index.rs:820; tests/index_storage.rs:1377"
 
 [[condition]]
 id = "index.pins-bucket-isolated"
@@ -207,7 +211,7 @@ source = "TASK-12 body(pin rm後の同一pin名再付与が索引へ反映され
 description = "write-onceの正規フロー「pin rm後に再付与」(設計1.3)が索引経由の参照でも成立すること: registryの記録順処理で、pin rm→同一pin名の再addではrmよりrecorded_atが新しい再付与のpin_writeが旧pin_removeに抑止されず勝つ(reduce結果のpin_removesから当該pin_s3_keyが除かれる。bucket一致規則はindex.pins-bucket-isolatedのままで本条件と直交)。従来はpin_writes/pin_removesが独立mapのためrm→再addでも削除済み扱いが残り、索引pins[]から消えたままget --pin/list pins/pin rm再実行が不能になっていた(TASK-12)。manage index rebuildのpins復元も同一reduce結果を参照するため共通して直る (integration, fake seam)"
 given = "backup push→pin add(pm1)→pin rm(pm1)→同一pin名pm1の再付与(pin add)後の索引再構築と list pins・get --pin pm1 の各実行、および索引object削除後の manage index rebuild 実行"
 expect_return_shape = "再付与後の索引当該entry pins[]にpm1が載り(created_atは再付与のpin_write記録時刻)、list pinsにpm1が現れget --pin pm1はexit 0でpin objectを取得できる。manage index rebuild復元後の索引pins[]にもpm1が含まれる"
-source_lines = "tests/index_storage.rs:805"
+source_lines = "tests/index_storage.rs:925"
 
 [[condition]]
 id = "index.pins-multi-bucket-same-name-kept"
@@ -216,7 +220,7 @@ source = "TASK-15 body(別bucket同名pin付与で先付けbucket側の索引か
 description = "索引pins[]構築のbucket分離は「他bucketのpin記録が混入しない」(index.pins-bucket-isolated)とともに「当方bucketのpin記録が他bucketの同名pin_writeで失われない」方向も含む: reduceのpin_writes/pin_removesのmap keyは(pin_s3_key, s3_bucket)組で、同一prefix・別bucket構成で同一fileへ同名pinを複数bucketへ付与しても、後bucketのpin_writeが先bucketのmap entryを上書きせず両bucketの索引pins[]にそれぞれのpinが載る(get --pin・list pinsで参照可能)。従来はpin_s3_key単位のHashMap(後勝ち単一entry)のため後bucketのwriteが先bucketのentryを上書きし、先付けbucket側の索引からpinが消えていた(pin_write記録がreduce結果から喪失するためbuild_entriesのbucket一致判定でも救えず、manage index rebuildでも回復しない=記録喪失。TASK-15) (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成でa.zipを両bucketへpushし、同一pin名pm1をdev(先付け)・prod(後付け)の順で両bucketへ付与した状態での、(1)prod側push(all-skip)後に再構築されたprod側索引と、dev側索引再構築(all-skip push)・list pins・get --pin pm1(dev・prod各profile)の各実行 (2)dev側索引object削除後の manage index rebuild 実行"
 expect_return_shape = "(1)dev側索引の当該entry pins[]にpm1(devのpin_write記録由来)が載り、prod側索引の当該entry pins[]にもpm1(prodのpin_write記録由来)が載る(created_atは各bucketの付与時刻。いずれも片側にのみ載る片寄りがない)。いずれのprofileでも list pins にpm1が現れ get --pin pm1 はexit 0で当該bucketのpin objectを取得できる (2)rebuild復元後のdev側索引pins[]にもpm1が含まれる"
-source_lines = "tests/index_storage.rs:1028"
+source_lines = "tests/index_storage.rs:1148"
 
 [[condition]]
 id = "index.pin-rm-multi-bucket-independent"
@@ -225,7 +229,7 @@ source = "TASK-15 body(goal: 各bucketの索引からそれぞれのpinが消え
 description = "同一file・同名pinを複数bucketへ付与した状態でのpin rmはbucket単位で独立して可能: 各bucketでの実行は当該bucketの索引pins[](当該bucketのpin_write記録由来)を参照してpin objectを削除・索引から除去し、他方bucketの索引pins[]・pin objectは不変(他方bucketで同名pinが引き続き参照できる)。従来は先付けbucket側の索引からpinが消えるため、当該bucketでpin rm不能(索引に無くpin名不在の対象エラー3)かつpin add不能(write-onceのhead検出で既存pin keyへのPUT拒否)のtrapになっていた(TASK-15 goalの「pin rmも可能」) (integration, fake seam)"
 given = "同一fileへ両bucketに同名pin(pm1)を付与した状態(index.pins-multi-bucket-same-name-keptのgivenと同一構成)での、(1)dev側(先付けbucket=従来索引から消えていた側)での pin rm --pin pm1 実行 (2)その後のprod側 get --pin pm1 --profile prod と pin rm --pin pm1 --profile prod の各実行"
 expect_return_shape = "(1)dev側pin rmはexit 0(索引pins[]に載っているためpin名不在の対象エラー3にならない)で、dev側索引pins[]からpm1が除かれdev bucketのpin objectも削除される (2)prod側索引pins[]はpm1を保持し(pin object不変) get --pin pm1 はexit 0。続くprod側 pin rm もexit 0でprod側索引から除去される。一方のbucketでの実行が他方bucketの索引pins[]・pin objectへ影響しない"
-source_lines = "tests/index_storage.rs:1146"
+source_lines = "tests/index_storage.rs:1266"
 
 [[excluded]]
 item = "pin rm後(再付与なし)のまま再構築・manage index rebuildを実行してもpinが索引から排除され続けることの新規条件化"
@@ -255,7 +259,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 5.4(build_entriesの組�
 description = "entity組立: 所在単位reduce済みfile_writesをuuidでgroupingしlocationsを組立(source_path・category・label=記録値・identity_hash・last_backup。並びはsource_path辞書順)。entityのtitleはentity_title導出=uuid一致file_write群のうちrecorded_at最大(ISO8601同形式文字列比較・同値ならVec後方=後勝ち)のtitle。同一内容2箇所以上所在は実体1つ(uuid)+locations複数になる。entityの維持条件(versions/pinsのbucket一致検査によるretain)は現行踏襲 (integration, fake seam)"
 given = "同一uuidへ2所在(異なるsource_path)のfile_writeと、同一recorded_atのfile_write 2件(記録順で後方が新title)を含むregistryからの索引再構築"
 expect_return_shape = "当該uuidのentryは1件でlocationsが2件(source_path辞書順)。titleはrecorded_at最大・同値なら記録順後方のfile_writeのtitle"
-source_lines = "src/index.rs:535; tests/index_storage.rs:1318"
+source_lines = "src/index.rs:535; tests/index_storage.rs:1438"
 
 [[condition]]
 id = "index.location-remove-excludes-and-revives"
@@ -264,7 +268,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(location_removeの�
 description = "location_removeの反映規則: build_entriesでfile_write(w)を除外する条件は「同identity_hashのlocation_remove(lr)が存在し lr.recorded_at >= w.recorded_at」。除去後に同pathを再backupすると新file_write(時刻が後)が勝って所在が復活する (integration, fake seam)"
 given = "(1)location_remove後に同pathを再backupしない状態 (2)location_remove後に同pathを再backup(新file_writeのrecorded_atが後)した状態、での索引再構築"
 expect_return_shape = "(1)当該pathのlocationはlocationsから除外される (2)所在が復活しlocationsに再登場する"
-source_lines = "src/index.rs:753; tests/index_storage.rs:1390"
+source_lines = "src/index.rs:753; tests/index_storage.rs:1510"
 
 [[condition]]
 id = "index.swept-versions-not-revived"
@@ -273,7 +277,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(sweep)・5.4・5.12�
 description = "sweep記録(manage index reconcileの実行記録)に含まれる{s3_key, version_id}は、以降の索引再構築(backup push等のbuild_entries)・manage index rebuildのいずれでもversions/pinsへ復活しない(prune除外と同じ除外集合。reconcileの効果がrebuildで失われるのを防ぐ=TASK-18でrebuildへ適用を追加) (integration, fake seam)"
 given = "版3件push→該当版をsweep記録で除去(reconcile相当のregistry状態)→backup push(all-skip)による索引再構築と manage index rebuild の各実行"
 expect_return_shape = "いずれの再構築でもsweep済みversion_idはversionsに含まれず、get --version-id <sweep済み版> はexit 3"
-source_lines = "src/index.rs:721; tests/index_storage.rs:1470"
+source_lines = "src/index.rs:721; tests/index_storage.rs:1590"
 
 [[condition]]
 id = "index.pins-connect-by-uuid"
@@ -282,7 +286,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.1・5.4(pinsはuuid照
 description = "索引pins[]への接続はuuid照合のみ: pin_writeのuuidがentityのuuidと一致すれば接続される(TASK-18以前のname+category+rel_path+folder完全一致の照合は廃止済み。所在記録値の変化・所在間の差異があっても同一uuidなら接続)。bucket一致規則(index.pins-bucket-isolated)・並びのs3_key sort・pin_remove反映は維持 (integration, fake seam)"
 given = "同一uuidのfile_write(category=A)とpin_write(pin_s3_key=data/{uuid}/pm1.age・記録上の所在情報がcategory=Aと異なる)を含むregistryからの索引再構築"
 expect_return_shape = "当該entityのpins[]にpm1が載り(get --pin・list pinsで参照可能)"
-source_lines = "tests/index_storage.rs:1539"
+source_lines = "tests/index_storage.rs:1659"
 
 [[condition]]
 id = "index.location-rm-command"
@@ -291,7 +295,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 6.2(manage location rm�
 description = "manage location rm <source_path> [--uuid <uuid>]: 索引からsource_path完全一致の所在を探し(--uuid指定でentity絞込。複数entityで同一pathはidentity_hash一意のため生じない)、不在は対象エラー3。実行はlocation_remove記録(registry)→索引再構築+upload→当該entityのmetadata sync(最新所在が変わった場合はlatest_source_path更新)。S3・実体(default.age・pin object)には触れない(所在は索引・registryの記録値のみ)。再backupすると所在が復活する(index.location-remove-excludes-and-revivesの規則) (integration, fake seam)"
 given = "2所在を持つentityへの location rm 実行と1所在のみのentityへの実行、不在path指定の実行、rm後の同path再backup"
 expect_return_shape = "rm後の索引locationsから当該pathが除外され(1所在のみのentityはlocationsが空になる)、metadataのlatest_source_pathが残所在へ更新され、S3へのAPI呼び出しは無く(default.age不変)、再backupで所在が復活する。不在pathは exit 3"
-source_lines = "tests/index_storage.rs:1594"
+source_lines = "tests/index_storage.rs:1714"
 
 [[condition]]
 id = "index.reconcile-swept-versions"
@@ -300,7 +304,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 6.3(manage index reconci
 description = "manage index reconcile: 既定dry-run(件数表示)・--applyで実行。read_index → ListObjectVersions(bucket, {prefix}data/)のpresent集合(key, version_id・delete marker除外)と突合し、索引versions[](version_id空のものはkey存在のみで判定)・pins[](key存在判定)のうちS3に存在しないもの(lifecycle消滅版)を特定 → sweep記録(registry)→索引再構築+upload。sweep記録により以降のbuild_entries・manage index rebuildでも当該版は復活しない(index.swept-versions-not-revived)。metadataは対象外(default.ageの現行版はlifecycleで消えないためmetadata.version_idが消失版を指すことはない) (integration, fake seam)"
 given = "索引versionsにS3へ存在しない版(lifecycle消滅を模擬)を含む状態での、--applyなし実行と--apply実行、およびapply後の manage index rebuild 実行"
 expect_return_shape = "--applyなしは件数表示のみで索引不変・S3削除なし。--applyは索引versions/pinsから該当版が除去されsweep記録がregistryへ追記される。apply後のrebuildでも該当版は復活しない"
-source_lines = "tests/index_storage.rs:1703"
+source_lines = "tests/index_storage.rs:1823"
 
 [[excluded]]
 item = "索引喪失時のmetadata列挙による最小復元(実体の身元+所在1件の最小索引構築)"

@@ -489,7 +489,7 @@ amazing-backup manage reset [--apply]
 | `prune` | 世代削除の即時実行(`{prefix}data/`一括)。**dry-runが既定**(削除予定を表示)。`--apply`でDeleteObjectVersionを実行し索引を更新。keepはaws.toml `[aws.lifecycle].keep_versions`(実行時上書き不可)。`--dry-run`と`--apply`の併用はusage 64。現行version・pin key・metadata keyは対象外(構造的保護) |
 | `lifecycle show` | bucketの現在のlifecycle設定を表示 |
 | `lifecycle apply` | `{prefix}data/`一括の3rule(NCVE+MPU abort+期限切れdelete marker掃除)を適用(rule一式の置換・冪等)。値はすべてaws.toml `[aws.lifecycle]`から |
-| `index rebuild` | 索引をmanifest(`sys/manifests/`)から再構築(9.2)。完了時に続けての`index reconcile`実行を案内。`--config`必須 |
+| `index rebuild` | 索引をmanifest(`sys/manifests/`)から再構築(9.2)。完了時に続けての`index reconcile`実行を案内。旧schema manifest file record(schema≠3・label無し)検出時は設定エラー2で失敗(初期化と再pushが必要)。`--config`必須 |
 | `index reconcile` | lifecycle消滅版の索引整合。**dry-runが既定**(件数表示)。`--apply`でsweep記録+索引再構築(S3実在集合へ整合)。`--config`必須 |
 | `location rm` | 旧所在の明示除去(`--uuid`でentity絞込可。不在・複数hitは対象エラー3)。location_remove記録+索引再構築+metadata sync。S3・実体には触れない(再backupで所在は復活) |
 | `jobs reissue` | 復元jobの再発行(tier変更可。Tierのallowlist外はusage 64)。対象はobject keyで指定 |
@@ -652,7 +652,7 @@ get/pullは出力先の既存平文を保護する:
 $ amazing-backup manage index rebuild   # pipeline.tomlは規定path(2.2)
 ```
 
-`sys/manifests/`のmanifest(DEEP_ARCHIVE)から索引を再構築する。未復元manifestへはBulk復元jobを発行する(発行したら案内+終了0。**最大48時間の待ちの後に再実行**で継続)。開始時に費用の目安(7.3)が表示される。完了すると索引がPUTされ、以降の照会が復旧する(完了時に続けての`manage index reconcile`実行が案内される・5.10)。
+`sys/manifests/`のmanifest(DEEP_ARCHIVE)から索引を再構築する。未復元manifestへはBulk復元jobを発行する(発行したら案内+終了0。**最大48時間の待ちの後に再実行**で継続)。開始時に費用の目安(7.3)が表示される。完了すると索引がPUTされ、以降の照会が復旧する(完了時に続けての`manage index reconcile`実行が案内される・5.10)。旧schemaのmanifest file record(schema≠3・label無し)を検出した場合は設定エラー2で失敗する(分類labelを欠いた索引を作らず、初期化と再pushで作り直す)。
 
 それでも復旧しない場合: aws.tomlのbucket/prefixが正しいか確認する(エラー2の案内に含まれる)。aws cliによるS3側の直接確認(`aws s3api list-objects-v2 --bucket <bucket> --prefix <prefix>sys/`)は最後の手段。
 

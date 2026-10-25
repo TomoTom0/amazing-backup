@@ -49,7 +49,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(sweep/location_remov
 description = "新record_typeのparse/reduce: sweep={schema:1, record_type:\"sweep\", recorded_at, reason:\"lifecycle\", deleted:[{s3_key, version_id}]}(manage index reconcileの実行記録・索引再構築で消滅版を復活させない除外集合)・location_remove={schema:1, record_type:\"location_remove\", recorded_at, uuid, identity_hash, source_path}(manage location rmの実行記録)。reduce結果はReducedのsweeps/location_removesへ全件格納される (unit)"
 given = "sweep(deleted 2件)・location_remove各1行を含むregistryのloadとreduce"
 expect_return_shape = "両record_typeが既知種として読み込まれ(未知record_type警告なし)、Reducedのsweeps/location_removesに全件格納される"
-source_lines = "src/registry.rs:916; tests/registry_storage.rs:222"
+source_lines = "src/registry.rs:916; tests/registry_storage.rs:231"
 
 [[condition]]
 id = "registry.sha-uuid-lookup-resolves-unique"
@@ -58,7 +58,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(Reducedへの追加�
 description = "sha_uuid_lookup(合流正本・承認事項4): file_uploadsからbucket一致する同source_sha256記録のuuid集合を作り、1件ならそのuuidを返す。bucket一致はrecord_bucket_matchedと同一規則(記録s3_bucket欠損の空文字は正本bucket相当) (unit)"
 given = "実効bucket=正本bucketのregistryに同shaのbucket一致file_uploadが1件だけ存在する状態でのlookup"
 expect_return = "当該uuidのSome(uuid)"
-source_lines = "src/registry.rs:959; tests/registry_storage.rs:304"
+source_lines = "src/registry.rs:959; tests/registry_storage.rs:313"
 
 [[condition]]
 id = "registry.sha-uuid-lookup-multiple-picks-min-uuid"
@@ -67,7 +67,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(複数(歴史的重�
 description = "同一shaがbucket一致する複数uuidに存在する(歴史的重複)場合は辞書順最小uuidを返す(合流先を決定的にする) (unit)"
 given = "同shaのbucket一致file_uploadがuuid昇順でuuid-b・uuid-aの2件存在する状態でのlookup"
 expect_return = "uuid-a(辞書順最小)のSome"
-source_lines = "src/registry.rs:960; tests/registry_storage.rs:356"
+source_lines = "src/registry.rs:960; tests/registry_storage.rs:365"
 
 [[condition]]
 id = "registry.sha-uuid-lookup-bucket-scoped"
@@ -76,7 +76,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2・10章(registry: bu
 description = "lookupのuuid集合はbucket一致で分離される: 他方bucketの同sha記録は不採用(同一prefix・別bucket構成で他bucket実績へ合流しない)。s3_bucket欠損(空文字)の旧記録相当は正本bucket解釈(record_bucket_matchedと同一規則)で、実効bucket=正本bucketの実行でのみ採用される (unit, fake S3Backend)"
 given = "dev(active_profile=正本)とprodが同一prefix・別bucketの構成で、(1)同shaのfile_uploadがprod bucket側のみ存在する状態でのdev実効bucketでのlookup (2)同shaのfile_upload(s3_bucket空文字)が存在する状態でのdev・prod各実効bucketでのlookup"
 expect_return_shape = "(1)None(他方bucket記録は不採用) (2)正本bucket(dev)側はSome・prod側はNone"
-source_lines = "src/registry.rs:961; tests/registry_storage.rs:422"
+source_lines = "src/registry.rs:961; tests/registry_storage.rs:431"
 
 [[excluded]]
 item = "registry喪失(索引はS3に残る)からの回復操作(manage index rebuildで索引をmanifest基準へ現状化したうえで重複実体の不要側をprune・手動deleteで回収)"

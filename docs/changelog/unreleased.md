@@ -8,7 +8,7 @@
 - CLI: `get`の`--path` flagを`--source-path`へ変更(照合対象=location.source_path完全一致は不変。旧flagはusage 64)
 - 索引schemaを2から3へ(旧schema索引の読込・変換は行わない。`manage index rebuild`で再構築)
 - registry file_write record schemaを2から3へ(旧形式行はparse失敗。初期化は0.2.0適用前に旧binary(v0.1.0)で`manage reset --apply`を実行)
-- manifest file record schemaを2から3へ(batch header行はschema 2のまま。旧manifestが残る環境では`manage index rebuild`不可・0.2.0適用前に初期化と再pushが必要)
+- manifest file record schemaを2から3へ(batch header行はschema 2のまま。旧manifestが残る環境では`manage index rebuild`は旧record検出時に設定エラー2で失敗する(黙って続行しない)・0.2.0適用前に初期化と再pushが必要)
 - 移行手順(旧registry/旧manifestが残る環境): 【旧binary(v0.1.0)でreset→config書換([files].path→label)→0.2.0適用】の順序(0.2.0 binaryのresetは削除前にregistryを読み込むため旧形式registryに対して実行できず・旧manifestからのrebuildはlabel欠損のため不可)
 
 ### 旧語彙→新語彙対応表
