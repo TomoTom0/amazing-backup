@@ -1,0 +1,5 @@
+#!/bin/sh
+# dev検証用: registry・configを実運用から分離(TASK-25案F)
+# AMAZING_BACKUP_HOME明示時はそれを尊重。初期setup(一度): ~/.amazing-backup-dev へ
+# dev profile(purpose=dev)のpipeline.toml・aws.tomlを配置(詳細はdocs/usage_backup.md 8.2)
+exec env AMAZING_BACKUP_HOME="${AMAZING_BACKUP_HOME:-$HOME/.amazing-backup-dev}" amazing-backup "$@"

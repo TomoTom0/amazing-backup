@@ -538,7 +538,7 @@ amazing-backup manage reset [--apply]
 | `index reconcile` | lifecycle消滅版の索引整合。**dry-runが既定**(件数表示)。`--apply`でsweep記録+索引再構築(S3実在集合へ整合)。`--config`必須 |
 | `location rm` | 旧所在の明示除去(`--uuid`でentity絞込可。不在・複数hitは対象エラー3)。location_remove記録+索引再構築+metadata sync。S3・実体には触れない(再backupで所在は復活) |
 | `jobs reissue` | 復元jobの再発行(tier変更可。Tierのallowlist外はusage 64)。対象はobject keyで指定 |
-| `reset` | dev bucketの初期化(全消去・冪等)。**dry-runが既定**(消去対象version数=Versions・DeleteMarkers別とregistry退避先pathを表示)。`--apply`で 1) ローカルregistryを`./tmp/<yyyymmdd>_registry_before_reset.jsonl`へ退避(実行時のcwd配下に`tmp/`を作成。registry不在ならskip) 2) root prefix配下の全object version(Versions・DeleteMarkers)をDeleteObjectVersionで削除(`{prefix}data/`配下に留まらず`sys/`索引・manifestも消去) 3) ローカルregistry削除(cache dirは対象外・手動掃除) 4) 再list_versionsで0件確認。安全弁(違反は設定エラー2+案内・S3 API呼び出しなし): 実効profileのpurpose=dev限定・ローカルregistryに当該bucketと異なるbucket宛のfile_upload記録があれば拒否。`--config`必須 |
+| `reset` | dev bucketの初期化(S3全消去・registryはbucket限定・冪等)。**dry-runが既定**(消去対象version数=Versions・DeleteMarkers別・registry退避先path・registry再書込の除去/残行数を表示)。`--apply`で 1) ローカルregistryを`./tmp/<yyyymmdd>_<bucket>_registry_before_reset.jsonl`へ全体退避(証跡。不在ならskip。同日再実行は上書き) 2) root prefix配下の全object version(Versions・DeleteMarkers)をDeleteObjectVersionで削除(`{prefix}data/`配下に留まらず`sys/`索引・manifestも消去) 3) ローカルregistryから当該bucket由来行(upload系記録と対象bucketのみにuploadされたuuidのfile_write)のみ除去して再書込(temp+fsync+rename+親dir fsync。他bucket宛記録・共有uuidのfile_write・crash残存file_write・prune/sweep等は温存。torn write最終行は破棄。残0行ならfile削除。cache dirは対象外・手動掃除) 4) 再list_versionsで0件確認。安全弁(違反は設定エラー2+案内・S3 API呼び出しなし): 実効profileのpurpose=dev限定。`--config`必須 |
 
 `prune`/`index`/`location rm`/`reset`は`--config`必須。`lifecycle`/`jobs reissue`はconfig不要。
 
@@ -690,8 +690,20 @@ get/pullは出力先の既存平文を保護する:
   - `atara` -> `your-atara-bucket`
 - TASK-7 profile化: pipeline.tomlの`[profiles.<name>]`がaws.tomlの各profileと同名対応し、profile毎に独立したrecipient鍵・分類設定を持つ(3.1)。切替は`active_profile`の書換え(恒久)または`--profile <name>`(当該実行限り・**aws/pipeline両fileの選択を兼ねる**)。**誤投入防止のため、prod系への書き込みは`--profile family`等を明示した実行を推奨**(active_profileはdev固定運用)
 - **backup pushは実行開始時に接続先(実効profile・bucket・prefix)とrecipient指紋を表示**する(5.6。dry-runでも表示)。表示を確認してから書き込みを続けることで誤bucket・誤鍵組への投入に気づける
-- **名前空間の分離はbucket単位で働く(混同防止)**。prod系3bucketは同一prefix(`amazing-backup/`)を共有するが、ローカルregistry(`~/.local/state/amazing-backup/registry.jsonl`)は単一でも記録の参照(skip判定・索引versions/pins構築・未書込namespace判定・pin解決)はすべて**bucket一致で分離**される。他bucketの書込実績では誤ってskipしない・索引へ他bucketの版やpinが混入しない・未書込救済判定に他bucket実績が採用されない、が構造的に保証される(bucket横断で1byteもuploadされないrunは作れない)
+- **名前空間の分離はbucket単位で働く(混同防止)**。prod系3bucketは同一prefix(`amazing-backup/`)を共有するが、ローカルregistry(`~/.local/state/amazing-backup/registry.jsonl`)は単一でも記録の参照(skip判定・索引versions/pins構築・未書込namespace判定・pin解決)はすべて**bucket一致で分離**される。他bucketの書込実績では誤ってskipしない・索引へ他bucketの版やpinが混入しない・未書込救済判定に他bucket実績が採用されない、が構造的に保証される(bucket横断で1byteもuploadされないrunは作れない)。`manage reset`(5.10)も同様にregistry操作を当該bucket由来行に限定し、prod系bucketの記録は温存される(prod投入とdev掃除の並行運用が可能。2026-10-26 TASK-25)
 - **運用規則: 同一(bucket, prefix)を別recipient構成(別pipeline profile)で書かないこと**。索引object keyはbucket+prefixで決まり、索引は毎push時に実行時のrecipientsで全体再暗号化されて同keyへ上書きされるため、別recipient構成が交互に書くと他方の秘密鍵で索引が読めなくなる。1bucket(=1namespace)に対するrecipient構成は1つのprofileで管理する。aws.toml内で複数profileが同一bucketを参照する場合は起動時に警告する(検出できるのは同一aws.toml内のbucket重複のみ。同一profileでの鍵差し替え・別aws設定fileからの書込みは検出できないため、最終検知はpush開始時のrecipients指紋表示による)
+
+**dev検証用の環境分離(AMAZING_BACKUP_HOME)**
+
+dev実機検証(lifecycle apply・push・reset等)は`AMAZING_BACKUP_HOME`(ABH)で設定・registryを実運用から物理分離して実施できる(設定path解決が`$ABH/{pipeline.toml,aws.toml,registry.jsonl,cache/}`へ一括切り替わるため。repo付属の`scripts/amazing-backup-dev` wrapperが`AMAZING_BACKUP_HOME`未指定時に`~/.amazing-backup-dev`へ分離して起動する):
+
+```sh
+# 初期setup(一度): ~/.amazing-backup-dev へdev profile(purpose=dev)の
+# pipeline.toml・aws.tomlを配置(credentials_fileが絶対path参照ならcredentialは共用可)
+amazing-backup-dev backup push /path/to/archive.zip   # 以降のdev実機検証はすべてwrapper経由
+```
+
+dev検証のregistryは`$ABH/registry.jsonl`へ分離されprod実運用registryに触れない。reset(5.10)自体も混在下で安全だが、ABH分離によりdev検証の事故面を更に遮断でき、dev bucket掃除もwrapper経由の`manage reset --apply`で完結する。
 
 ### 8.3 recipient鍵の管理
 

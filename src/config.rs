@@ -54,7 +54,7 @@ pub struct AppPaths {
 }
 
 /// 規定pathの解決(TASK-19 XDG配置)。優先順位:
-/// 1. `AMAZING_BACKUP_HOME`(一括上書き・テスト/CI用・空値は無視): すべて`$ABH/`配下へ
+/// 1. `AMAZING_BACKUP_HOME`(一括上書き・テスト/CI・dev検証環境分離(wrapper)用・空値は無視): すべて`$ABH/`配下へ
 ///    統合(`$ABH/pipeline.toml`・`$ABH/aws.toml`・`$ABH/registry.jsonl`・`$ABH/cache/`)
 /// 2. XDG準拠: 設定dir=`$XDG_CONFIG_HOME/amazing-backup/`(未設定なら
 ///    `~/.config/amazing-backup/`)・registry=`$XDG_STATE_HOME/amazing-backup/registry.jsonl`
