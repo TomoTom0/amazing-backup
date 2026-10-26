@@ -325,6 +325,20 @@ cargo test全量pass・verify-conditions.py PASS。[meta]はverified=trueへ更�
   全件pass・verify全pass・[meta]検証記録復帰を行う
 - 条件数202→204(excluded 34件のまま)
 
+2026-10-26: TASK-26(multipart Complete要求のpart checksum欠落bugfix)対応で条件書へ
+1件追加(テスト+実装を同一委任の簡易経路。原因確定済み: CreateMultipartUploadへ
+checksum_algorithm SHA256を指定したMPUでComplete要求の各part checksum_sha256欠落が
+実S3のInvalidRequestで拒否される)。
+- upload.toml: upload.multipart-complete-part-checksum(UploadPart応答のChecksumSHA256を
+  Complete要求の各partへ引き継ぐ。FakeS3はUploadPart応答checksum=part bytesのSHA256
+  base64の記録とComplete受付検査=Create時checksum指定なら全part checksum必須を追加し、
+  CompletedPart組立をRealS3::completed_partとして実装と共用=実装漏れがfake経路でも落ちる)
+- src/s3.rsへunit test(completed_part_carries_upload_part_checksum)・
+  tests/s3_backend.rs multipart_upload_above_thresholdへUploadPart応答checksum値検証と
+  Complete行parts_with_checksum検証を追加。calls.log形式の記載はtests/common/mod.rs docも更新
+- cargo test全件pass・verify-conditions.py PASS([meta]検証記録更新)
+- 条件数204→205(excluded 34件のまま)
+
 2026-10-29: TASK-1(config initコマンド新設)対応でテスト先行の更新
 (TASK-1 body + tmp/tasks/tm-1/design_config_init.md 3章・3.8条件書草案)。
 - config.tomlへ6条件追加(init-generates-under-resolved-paths・init-templates-from-example・
@@ -494,7 +508,7 @@ cargo test全件pass(297件)・verify-conditions.py PASS(235条件すべてcover
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(15ファイル・239条件・excluded 43件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-23(--from-list単独許容化・空リスト警告: cli改訂1・plan source追記1+新規2・id不変)とTASK-25(manage reset registry bucket限定化: 廃止1・改訂3・新規3・id不変)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)とTASK-7(pipeline profile化: config新規8・cli新規4+verify/docs文言改訂・除外4)と実運用file schema適合(2026-11-03: 1件)反映済み。TASK-1〜5・TASK-20・TASK-23・TASK-25・TASK-7分ともテスト作成済み・実装済み(239条件すべてcover。TASK-7分は2026-11-03実装後に全件pass・条件書4fileの[meta]verified=true) |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(15ファイル・240条件・excluded 43件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-23(--from-list単独許容化・空リスト警告: cli改訂1・plan source追記1+新規2・id不変)とTASK-25(manage reset registry bucket限定化: 廃止1・改訂3・新規3・id不変)とTASK-26(multipart Complete要求のpart checksum SHA256引き継ぎ: upload新規1)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)とTASK-7(pipeline profile化: config新規8・cli新規4+verify/docs文言改訂・除外4)と実運用file schema適合(2026-11-03: 1件)反映済み。TASK-1〜5・TASK-20・TASK-23・TASK-25・TASK-26・TASK-7分ともテスト作成済み・実装済み(240条件すべてcover。TASK-7分は2026-11-03実装後に全件pass・条件書4fileの[meta]verified=true) |
 | tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(TASK-7 profile schema([profiles.dev]+追加profile)組立・AMAZING_BACKUP_HOMEによるXDG規定path統合・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
 | tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
@@ -547,7 +561,7 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | config.toml | config | src/config.rs | 38 | CONF-001〜008 + TASK-9 credential系4件 + TASK-10 layout/prefix/keep_artifacts系4件 + TASK-18 3件([metadata]値・[categories]拒否・[aws.lifecycle]必須/範囲) + TASK-19 4件(XDG規定path解決・ABH一括上書き・規定path不在案内・[output]拒否)+TASK-1 config init 6件(生成path解決・template置換とescape符号化・既存file上書き保護・排他的作成とrollback・credential雛形空値/0600・stdout案内)+TASK-7 pipeline profile化8件(profile schema・profile名規則(pipeline/aws両側)・検証2層化・実効profile必須・余分profile無視・旧形式移行error・同一bucket警告)+実運用file schema適合1件(2026-11-03 TASK-8 PR準備でのgit追跡configs/pipeline.toml形式退行検出) |
 | encrypt.toml | encrypt | src/crypto.rs | 16 | ENC系のうち共通暗号化経路16件(TASK-11で旧encrypt固有6件廃止。backup push経路で検証。TASK-18でschema2化等4件を文言改訂) |
 | fingerprint.toml | fingerprint | src/fingerprint.rs | 5 | FPR-001〜005 |
-| upload.toml | upload | src/s3.rs | 7 | UPL系のうちS3転送共通経路7件(TASK-11で旧upload固有16件廃止。backup push経路で検証) |
+| upload.toml | upload | src/s3.rs | 8 | UPL系のうちS3転送共通経路7件(TASK-11で旧upload固有16件廃止。backup push経路で検証) + TASK-26(multipart Complete要求のpart checksum SHA256引き継ぎ)1件 |
 | verify.toml | verify | src/storage.rs | 14 | VER-001〜013+M-1掃除済みrun(TASK-11でbackup verify経路へ文言改訂・id不変)+TASK-7(runs-without-awsをaws.toml必須化へ文言改訂・id不変) |
 | cli.toml | cli | src/cli.rs | 69 | CLI-001〜006 + TASK-9/10系 + TASK-11 Phase B(旧サブコマンド削除・--format/--profile・manage jobs reissue・pull範囲排他等)+prod 3bucket構成(3bucket分離・push接続先表示)+TASK-18(探索語彙/復元先/pushフロー12新規・list categories廃止)+TASK-19(--out必須・--aws-config既定XDG化・data/out→cache)+TASK-2(completions 6件+除外1件)+TASK-7(新規4件: --profile共通選択・recipient指紋表示・verify対象の実効bucket絞り込み・verify aws必須) |
 | restore.toml | restore | src/storage.rs | 5 | 復元job系共通経路5件(TASK-11で旧restore固有19件廃止。get/pull/list jobs経路で検証。平文衝突保護含む) |

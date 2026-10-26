@@ -11,6 +11,13 @@ use common::*;
 const MIB: usize = 1024 * 1024;
 const THRESHOLD: usize = 64 * MIB;
 
+/// SHA256をbase64した文字列(S3 ChecksumSHA256表現。fakeのUploadPart応答checksum検証用)。
+fn sha256_b64(data: &[u8]) -> String {
+    use base64::Engine as _;
+    use sha2::Digest;
+    base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(data))
+}
+
 /// calls.logを空にする(以降の呼び出しのみを観測する)。
 fn clear_calls(fx: &StorageFixture) {
     let _ = std::fs::remove_file(fx.state.join("calls.log"));
@@ -264,11 +271,15 @@ fn credentials_values_never_leaked_in_output() {
 
 /// [covers:upload.multipart-threshold]
 /// [covers:upload.multipart-checksum-per-part]
+/// [covers:upload.multipart-complete-part-checksum]
 /// multipart閾値(設計5.3)とchecksum指定(設計5.4): 64 MiB超の対象(暗号化済み.age)は
 /// CreateMultipartUpload→UploadPart×N→CompleteMultipartUploadでuploadされ
 /// (単発PutObjectは使わない)、CreateMultipartUploadと各UploadPartの両方へ
 /// checksum_algorithm SHA256が指定される。閾値未満(索引・manifest)は単発PutObject。
 /// 完成objectはローカルの.ageとbyte一致する。
+/// TASK-26: UploadPart応答のchecksum(part bytesのSHA256 base64)はComplete要求の
+/// 全partへ引き継がれる(Create時checksum指定MPUのpart checksum欠落は実S3で
+/// InvalidRequest。fakeのComplete受付検査が同仕様を強制する)。
 #[test]
 fn multipart_upload_above_threshold() {
     let Some(fx) = StorageFixture::new(
@@ -320,19 +331,38 @@ fn multipart_upload_above_threshold() {
         .lines()
         .filter(|l| l.starts_with("s3 UploadPart") && l.contains(&format!("key={key}")))
         .collect();
-    assert!(parts.len() >= 2, "UploadPartは2回以上: {calls}");
+    // part境界はpart size 64MiB(=閾値と同値。640GiB超の切り上げは対象外size)
+    let expected_part_count = age_bytes.len().div_ceil(THRESHOLD);
+    assert_eq!(
+        parts.len(),
+        expected_part_count,
+        "UploadPart回数=part数(2以上のmultipart): {calls}"
+    );
     for p in &parts {
         assert!(
             p.contains("checksum=SHA256"),
             "各UploadPartのchecksum指定: {p}"
         );
     }
+    // TASK-26: 各UploadPart応答のchecksumは当該part bytesのSHA256(base64)で、
+    // CompleteMultipartUpload要求の全partへ引き継がれる
+    for (i, p) in parts.iter().enumerate() {
+        let start = i * THRESHOLD;
+        let end = ((i + 1) * THRESHOLD).min(age_bytes.len());
+        let expected = sha256_b64(&age_bytes[start..end]);
+        assert!(
+            p.contains(&format!("part_sha256={expected}")),
+            "UploadPart {i} 応答checksumはpart bytesのSHA256(base64): {p}"
+        );
+    }
+    let complete_line = calls
+        .lines()
+        .find(|l| l.starts_with("s3 CompleteMultipartUpload") && l.contains(&format!("key={key}")))
+        .unwrap_or_else(|| panic!("CompleteMultipartUpload行: {calls}"));
     assert!(
-        calls
-            .lines()
-            .any(|l| l.starts_with("s3 CompleteMultipartUpload")
-                && l.contains(&format!("key={key}"))),
-        "CompleteMultipartUpload行: {calls}"
+        complete_line.contains(&format!("parts={expected_part_count}"))
+            && complete_line.contains(&format!("parts_with_checksum={expected_part_count}")),
+        "Complete要求の全partがchecksum_sha256を伴う: {complete_line}"
     );
     assert!(
         !calls

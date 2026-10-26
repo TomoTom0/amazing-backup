@@ -140,7 +140,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-011(2026-10-08レビ
 description = "backup verify --roundtrip はroundtrip開始前に秘密鍵ファイルの存在とageバイナリを事前検査し、不在なら設定・環境エラー2で即終了する(対象ファイルごとの復号失敗に紛れて検証エラー4とならない) (unit)"
 given = "秘密鍵ファイルが不在の状態、およびageバイナリがPATH上に無い状態での backup verify --roundtrip 実行"
 expect_return = "exit code 2(設定・環境エラー)"
-source_lines = "src/cli.rs:1157"
+source_lines = "src/cli.rs:1162"
 
 [[condition]]
 id = "verify.decrypt-error-includes-age-stderr"

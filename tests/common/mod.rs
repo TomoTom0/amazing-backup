@@ -217,8 +217,8 @@ pub fn run_bin_cwd(args: &[&str], env: &[(&str, &str)], cwd: &Path) -> (i32, Str
 ///     s3 HeadObject bucket=<b> key=<k>
 ///     s3 PutObject bucket=<b> key=<k> src=<path> storage_class=<sc> checksum=SHA256
 ///     s3 CreateMultipartUpload bucket=<b> key=<k> storage_class=<sc> checksum=SHA256
-///     s3 UploadPart bucket=<b> key=<k> part_number=<n> checksum=SHA256
-///     s3 CompleteMultipartUpload bucket=<b> key=<k>
+///     s3 UploadPart bucket=<b> key=<k> part_number=<n> checksum=SHA256 part_sha256=<part bytesのSHA256 base64>
+///     s3 CompleteMultipartUpload bucket=<b> key=<k> parts=<n> parts_with_checksum=<n>
 ///     s3 AbortMultipartUpload bucket=<b> key=<k>
 ///     s3 GetObject bucket=<b> key=<k> dest=<path> checksum_mode=ENABLED
 ///     s3 ListObjectsV2 bucket=<b> prefix=<p>

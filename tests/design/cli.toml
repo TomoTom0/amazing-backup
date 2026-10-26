@@ -172,7 +172,7 @@ source = "TASK-9 SDK移行設計 4.3案1・10.3・12.4(tmp/tasks/tm-9/design_sdk
 description = "fake seam: env AMAZING_BACKUP_FAKE_S3_STATE=<dir>指定時はS3 backendをfakeへ差し替える(gateは#[cfg(debug_assertions)]でrelease build・debug_assertions無効にはseam・FakeS3ともcompileされず実S3経路になる)。fakeはstate dir配下へobjects/<key>とcalls.log相当のAPI呼び出し記録(op名・bucket・key・storage_class・checksum・days・tier等のfield)を書く。fake選択時はstderr冒頭へ「WARNING: FAKE S3 MODE」を必ず表示する(誤用防御)。fakeはcredential値が不正(検出用ダミー値)でも成功する=実network不使用 (integration, fake seam)"
 given = "AMAZING_BACKUP_FAKE_S3_STATEを設定したbackup push実行(state dirを用意・credentialファイルはダミー値)"
 expect_return_shape = "exit 0でstate dirへobjects/<key>と呼び出し記録が書かれ、stderr冒頭にWARNING: FAKE S3 MODE表示。credential値・検出用ダミーは出力に現れない"
-source_lines = "src/s3.rs:1937; src/s3.rs:2001; tests/s3_backend.rs:31"
+source_lines = "src/s3.rs:2011; src/s3.rs:2075; tests/s3_backend.rs:38"
 
 [[condition]]
 id = "cli.query-partial-match"
@@ -567,7 +567,7 @@ source = "TASK-11(Phase B)コードレビュー指摘L-3+cli.fake-s3-seam(fake�
 description = "fakeのRestoreObjectは実S3と同様の事前検査を行う: (1)key(版指定時は当該version)がS3に存在しない場合はNoSuchKey相当の転送エラー5で失敗させる(不在keyへの復元job発行がfakeで成功扱いにならない) (2)対象objectのstorage_classがarchive系(GLACIER/DEEP_ARCHIVE/GLACIER_IR)以外の場合はInvalidObjectState相当の転送エラー5で失敗させる(STANDARD objectへの復元job発行がfakeで成功扱いにならない) (3)archive系objectへの発行は従来どおり成功する (integration, fake seam・manage jobs reissue経由)"
 given = "fake S3での、(1)存在しないkeyへの manage jobs reissue 実行 (2)STORAGE_CLASS=STANDARDでpush済みfile keyへの reissue 実行 (3)STORAGE_CLASS=DEEP_ARCHIVEでpush済みfile keyへの reissue 実行"
 expect_return_shape = "(1)(2)は exit 5でエラー表示に起因(NoSuchKey相当/InvalidObjectState相当)が含まれる。(3)は exit 0でRestoreObjectが発行される"
-source_lines = "tests/s3_backend.rs:458"
+source_lines = "tests/s3_backend.rs:488"
 
 [[condition]]
 id = "cli.profile-multi-bucket-isolation"

@@ -217,7 +217,7 @@ source = "TASK-9 SDK移行設計 3.3・9.2(tmp/tasks/tm-9/design_sdk_migration.m
 description = "aws.tomlの[aws].credentials_fileキー(credentialファイルpath)は必須キー。pathの相対解決はcwd基準(TASK-19 XDG配置後も維持。--aws-config自体の既定pathはXDG規定path)。キー欠落・空値は設定エラー2(明示的に与えたAPI keyという要件に合致し、書き漏れを即検出) (integration, fake seam)"
 given = "credentials_fileキーを書かないaws.toml・空値を書いたaws.tomlでbackup push実行"
 expect_return_shape = "いずれも exit 2(設定エラー)。S3 API呼び出しは行われない"
-source_lines = "src/config.rs:1724; tests/s3_backend.rs:66"
+source_lines = "src/config.rs:1724; tests/s3_backend.rs:73"
 
 [[condition]]
 id = "config.credentials-file-schema"
@@ -226,7 +226,7 @@ source = "TASK-9 SDK移行設計 3.1・3.2(tmp/tasks/tm-9/design_sdk_migration.m
 description = "credentialファイルschema: [credentials]テーブル配下はaccess_key_id/secret_access_key必須・session_token省略可(一時credential用)・deny_unknown_fields(未知キー拒否)。TOML parse失敗・[credentials]テーブル不在・必須キー欠落・空値・前後空白付き値は設定エラー2。session_token省略時も正常動作する (integration, fake seam)"
 given = "正しい形式(session_token省略)のcredentialファイルと、不正TOML・未知キー・access_key_id欠落・空値・前後空白付き値の各credentialファイルでbackup push実行"
 expect_return_shape = "正しい形式はexit 0(S3 API呼び出しまで到達)。不正系はいずれも exit 2(設定エラー)"
-source_lines = "src/config.rs:1843; tests/s3_backend.rs:90"
+source_lines = "src/config.rs:1843; tests/s3_backend.rs:97"
 
 [[condition]]
 id = "config.credentials-fail-closed"
@@ -235,7 +235,7 @@ source = "TASK-9 SDK移行設計 3.5(tmp/tasks/tm-9/design_sdk_migration.md 3章
 description = "fail-closed: credentials_fileが指すcredentialファイル不在・読込不能は設定エラー2で、credential chain(IMDS/env/~/.aws)へのfallbackは一切行わない(誤って別環境のcredentialで意図しないAWS accountへ接続する事故を構造的に防止) (integration, fake seam)"
 given = "credentials_fileに不在pathを指定したaws.tomlでbackup push実行"
 expect_return_shape = "exit 2(設定エラー)。fallbackせず失敗し、S3 API呼び出しは行われない"
-source_lines = "src/config.rs:1921; src/s3.rs:2051; tests/s3_backend.rs:163"
+source_lines = "src/config.rs:1921; src/s3.rs:2125; tests/s3_backend.rs:170"
 
 [[condition]]
 id = "config.credentials-value-not-leaked"
@@ -244,7 +244,7 @@ source = "TASK-9 SDK移行設計 3.6・12.4(tmp/tasks/tm-9/design_sdk_migration.
 description = "credential値の非露出: 設定エラー時のerror文はcredentialファイルのpathのみを表示し、access_key_id/secret_access_key/session_tokenの値を含まない。正常時・転送エラー時の出力にも値は現れない(SDK呼び出し結果はmap_sdk_errorでBackupError化しunwrap/expect禁止によりpanic経路でもSdkError Debug展開しない) (integration, fake seam)"
 given = "credential値へ一意の検出用文字列を埋め込んだcredentialファイルで、設定エラー(schema違反)となるbackup push実行と、fake seamで正常完了するbackup push実行・失敗注入(FAKE_S3_FAIL_CP_FOR)で転送エラーとなる実行"
 expect_return_shape = "いずれの実行のstdout/stderrにも検出用文字列(credential値)が現れない"
-source_lines = "tests/s3_backend.rs:193"
+source_lines = "tests/s3_backend.rs:200"
 
 [[condition]]
 id = "config.layout-and-categories-validation"
