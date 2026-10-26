@@ -12,13 +12,20 @@
 #     統合runのため旧planの「aws不要」性質は引き継がれない)
 #   文言改訂(廃止しない): 対象解決共通経路(targets.rs。backup pushでも通る)5条件を実行経路backup pushへ改訂。
 #   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseのまま。
+# 2026-10-26: TASK-23(--from-list単独許容化)対応でテスト先行の更新
+#   (tmp/tasks/tm-23/design_fromlist_standalone.md 1章・2.2・2.3・4.2)。
+#   source欄追記1件: plan.from-list-union(和集合連結は単独許容化後も不変)。
+#   新規2件: plan.from-list-standalone(--from-list単独(位置引数0個)で対象解決・実行)・
+#     plan.from-list-empty-warning([[targets]]0件の空リストは警告+exit 0)。
+#   実装前のため新規条件のテストは未作成・[meta]はverified=falseへ戻す(実装後検証時に更新)。
+# 2026-10-26: TASK-23実装完了。cargo test全量pass・verify-conditions.py PASSを確認し[meta]をverified=trueへ更新。
 
 [meta]
 feature = "plan"
 source_file = "src/targets.rs"
 verified = true
-verified_at = "2026-10-22"
-verified_by = "claude"
+verified_at = "2026-10-26"
+verified_by = "cargo test全量pass+verify-conditions.py PASS(TASK-23実装後)"
 test_command = "cargo test"
 source_hash = "8f2760f80a5de9b3f8b811f924943201d1ba28d0"
 note = "対象解決(targets.rs)の条件群。TASK-11(Phase B)で旧planサブコマンドが削除され、対象解決はbackup push(push解決+--dry-run)経路で検証する(旧plan表示経路は消滅)。各条件のdescription末尾 (unit)/(integration) は階層の目安"
@@ -35,7 +42,7 @@ source_lines = "src/targets.rs:281"
 [[condition]]
 id = "plan.from-list-union"
 target_function = "targets::resolve_targets / targets::parse_from_list"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-002(--from-list仕様は2.5)。TASK-11(Phase B): 旧plan削除によりbackup push経路へ文言改訂"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 PLAN-002(--from-list仕様は2.5)。TASK-11(Phase B): 旧plan削除によりbackup push経路へ文言改訂。TASK-23(--from-list単独許容化: tmp/tasks/tm-23/design_fromlist_standalone.md 2.3。和集合連結の挙動は単独許容化後も不変)"
 description = "--from-list と位置引数の和集合が解決される(backup pushの対象解決) (unit)"
 given = "位置引数1件と、別の1件を含む from-list toml を同時に指定した backup push --dry-run 実行"
 expect_return_shape = "和集合の2件が解決・表示され exit code 0"
@@ -67,3 +74,21 @@ description = "解決後realpathの重複(位置引数×from-list間含む)は�
 given = "同一ファイルを相対path・絶対path・from-list entryで重複指定した backup push 実行"
 expect_throw = "TargetError(exit code 3)"
 source_lines = "src/targets.rs:366"
+
+[[condition]]
+id = "plan.from-list-standalone"
+target_function = "targets::resolve_targets / backup push(対象解決)"
+source = "TASK-23(--from-list単独許容化。tmp/tasks/tm-23/design_fromlist_standalone.md 1章)"
+description = "--from-list単独(位置引数0個)で対象解決・実行される(usage 64とならない) (integration, fake seam)"
+given = "1件の[[targets]]を含むfrom-listのみを指定した backup push --dry-run 実行"
+expect_return_shape = "from-listの対象が解決・予測表示され exit 0"
+source_lines = "tests/storage_backup.rs:1729"
+
+[[condition]]
+id = "plan.from-list-empty-warning"
+target_function = "storage::cmd_backup_push(対象0件の警告終了)"
+source = "TASK-23(--from-list単独許容化。tmp/tasks/tm-23/design_fromlist_standalone.md 2.2)"
+description = "from-listの[[targets]]0件(空リスト)指定は警告表示+exit 0(usage 64・対象エラー3としない) (integration, fake seam)"
+given = "[[targets]]0件のfrom-listのみを指定した backup push 実行"
+expect_return_shape = "警告表示+exit 0。S3 API呼び出し・暗号化は行われない"
+source_lines = "tests/storage_backup.rs:1765"

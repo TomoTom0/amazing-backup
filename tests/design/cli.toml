@@ -67,6 +67,12 @@
 #   get-latest-version・list-files-summary・backup-pull-category-run-confirmation・
 #   backup-pull-scope-options-exclusiveはrel_path/--path言及なし(影響なし)。
 #   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseへ戻す。
+# 2026-10-26: TASK-23(--from-list単独許容化)対応でテスト先行の更新
+#   (tmp/tasks/tm-23/design_fromlist_standalone.md 2.1・3.1・4.1)。
+#   文言改訂1件(id不変): cli.paths-required-usage-error(PATH 1個以上必須→<PATH>と--from-listの
+#     いずれか必須=required_unless_present化。両方0個のみusage 64・--from-list単独は許容)。
+#   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseのまま。
+# 2026-10-26: TASK-23実装完了。cargo test全量pass・verify-conditions.py PASSを確認し[meta]をverified=trueへ更新。
 # 2026-10-29: TASK-2(completionsコマンド新設)対応でテスト先行の更新
 #   (tmp/tasks/tm-2/design_completions.md D-1〜D-5)。
 #   新規6件: completions-generates-shells(ABH空dir固定でも動作)・
@@ -111,8 +117,8 @@ verified = true
 verified_at = "2026-11-03"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "73cea824ff94378893d5c761de5bb520d5182c0c"
-note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(--profile両file選択・backup verifyのaws.toml必須化・検査対象の実効bucket帰属絞り込み・recipients指紋表示はsrc/storage/backup.rs経由)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新。2026-11-03 REVIEW-1(code review)指摘対応を反映しsource_hashを再更新"
+source_hash = "328e20f3263795ece1bb3e58645def0cb3ea9a52"
+note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(--profile両file選択・backup verifyのaws.toml必須化・検査対象の実効bucket帰属絞り込み・recipients指紋表示はsrc/storage/backup.rs経由)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新。2026-11-03 REVIEW-1(code review)指摘対応を反映しsource_hashを再更新。2026-11-03 TASK-23(--from-list単独許容化のrebase統合。paths-required-usage-error条件をrequired_unless_present版へ)を反映しsource_hashを更新"
 
 [[condition]]
 id = "cli.usage-error-exit-64"
@@ -152,11 +158,11 @@ source_lines = "tests/cli_bin.rs:25"
 
 [[condition]]
 id = "cli.paths-required-usage-error"
-target_function = "clap定義(BackupSub::Push.paths)"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-005(2026-10-08レビュー指摘3対応。2.1・2.2)。TASK-10(tmp/tasks/tm-10/design_s3_storage.md 9章棚卸し表): Phase Bでbackup pushの対象指定へ文言改訂。TASK-11 body(Phase B: 旧サブコマンド削除に伴う引継ぎ)"
-description = "backup push のPATH位置引数0個はusage error扱いで exit 64。PATHは1個以上必須(--from-listは併用オプション)(旧plan/encryptの対象指定からbackup pushへの文言改訂・id不変) (unit)"
-given = "backup push をPATH無し(オプションのみ、または--from-listのみ)で実行するケースと、PATH 1個(+--from-list併用)のケース"
-expect_return = "PATH 0個は exit 64。PATH 1個(+--from-list併用を含む)はusage errorとならない"
+target_function = "clap定義(BackupSub::Push.paths required_unless_present)"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-005(2026-10-08レビュー指摘3対応。2.1・2.2)。TASK-10(tmp/tasks/tm-10/design_s3_storage.md 9章棚卸し表): Phase Bでbackup pushの対象指定へ文言改訂。TASK-11 body(Phase B: 旧サブコマンド削除に伴う引継ぎ)。TASK-23(--from-list単独許容化: tmp/tasks/tm-23/design_fromlist_standalone.md 2.1・4.1)"
+description = "backup push は<PATH>と--from-listのいずれかを要する: 両方0個(オプションのみ)は usage error 64。--from-list単独・PATH単独・併用はusage errorとならない(required_unless_present化。旧: PATH 1個以上必須) (unit)"
+given = "backup push をオプションのみ・--from-listのみ・PATH 1個(+--from-list併用)で実行する各ケース"
+expect_return = "オプションのみは exit 64。--from-listのみ・PATH 1個(+併用)はusage errorとならない"
 source_lines = "src/cli.rs:1107"
 
 [[condition]]

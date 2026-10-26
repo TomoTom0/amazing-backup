@@ -27,8 +27,8 @@ pub enum BackupSub {
         ctx: CtxArgs,
         #[arg(long)]
         from_list: Option<PathBuf>,
-        /// 対象アーカイブ(zip/7z)
-        #[arg(required = true)]
+        /// 対象アーカイブ(zip/7z)。--from-list指定時は省略可
+        #[arg(required_unless_present = "from_list")]
         paths: Vec<PathBuf>,
         /// 予測表示のみ(暗号化せず平文sha256のみ計算)
         #[arg(long)]
@@ -295,6 +295,10 @@ fn cmd_backup_push(
         }
 
         let targets = crate::targets::resolve_targets_storage(paths, from_list.as_deref())?;
+        if targets.is_empty() {
+            eprintln!("警告: 対象0件(--from-listに[[targets]]が無い)。処理を行わず終了します。");
+            return Ok(0);
+        }
         // from-listのtitle欄は引数形式検証として先に(usage 64・S3 API呼び出しに先行)
         for t in &targets {
             if let Some(title) = t.title.as_deref()

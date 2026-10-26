@@ -1105,11 +1105,12 @@ mod tests {
     }
 
     /// [covers:cli.paths-required-usage-error]
-    /// backup push のPATH位置引数0個はusage error(exit 64)。
-    /// PATH 1個+--from-list併用はusage errorとならない(TASK-11 Phase B: backup pushの対象指定)。
+    /// backup push のPATH 0個+--from-list無しはusage error(exit 64)。
+    /// --from-list単独・PATH 1個+--from-list併用はusage errorとならない
+    /// (TASK-23: --from-list単独許容化)。
     #[test]
     fn paths_required_usage_error() {
-        // PATH 0個(--from-listの有無にかかわらず)は64
+        // PATH 0個+--from-list無し(オプションのみ)は64
         let code = run([
             "amazing-backup".into(),
             "backup".into(),
@@ -1128,7 +1129,11 @@ mod tests {
             "--from-list".into(),
             "list.toml".into(),
         ]);
-        assert_eq!(code, 64, "backup push PATH 0個(--from-listのみでも不可)");
+        assert_ne!(
+            code,
+            64,
+            "--from-listのみはusage errorでない(実際は設定エラー2: pipeline設定ファイル不在)"
+        );
 
         // PATH 1個(+--from-list併用)はusage errorとならない(設定エラー等別区分)
         let code = run([
