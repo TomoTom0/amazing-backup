@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod config;
 pub mod crypto;
+pub mod docs;
 pub mod errors;
 pub mod fingerprint;
 pub mod index;

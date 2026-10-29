@@ -130,7 +130,7 @@ fn profile_option_does_not_write_back_to_aws_toml() {
 /// [covers:cli.aws-config-default-path]
 /// --aws-config省略時の既定pathはXDG規定(TASK-19): AMAZING_BACKUP_HOME指定時は
 /// $ABH/aws.toml・未指定時は$XDG_CONFIG_HOME/amazing-backup/aws.toml。
-/// 規定pathにaws.tomlが無い場合は設定エラー2+template(configs/aws.example.toml)copy案内。
+/// 規定pathにaws.tomlが無い場合は設定エラー2+config initによる生成案内(TASK-1)。
 #[test]
 fn aws_config_default_path_is_xdg() {
     let Some(fx) = StorageFixture::new("pb-awsdef", StorageOpts::default()) else {
@@ -192,7 +192,7 @@ fn aws_config_default_path_is_xdg() {
         "xdg配置でも索引の内容が表示される: {stdout}"
     );
 
-    // (3) 規定pathにaws.tomlが無い場合は設定エラー2+copy案内
+    // (3) 規定pathにaws.tomlが無い場合は設定エラー2+config init生成案内
     let empty_abh = fx.elsewhere.join("awsdef-empty");
     std::fs::create_dir_all(&empty_abh).expect("empty ABH dir");
     let (code, stdout, stderr) = run_bin_cwd(
@@ -211,8 +211,8 @@ fn aws_config_default_path_is_xdg() {
         "規定pathにaws.tomlが無い場合は設定エラー2: {stdout}{stderr}"
     );
     assert!(
-        stderr.contains("configs/aws.example.toml"),
-        "template copyの案内表示: {stderr}"
+        stderr.contains("config init"),
+        "config initによる生成の案内表示: {stderr}"
     );
 }
 

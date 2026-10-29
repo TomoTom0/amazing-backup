@@ -11,6 +11,8 @@ categories = ["command-line-utilities", "backup"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+# completionsサブコマンドの補完script生成(TASK-2設計D-1。runtime用・feature分岐なし)
+clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

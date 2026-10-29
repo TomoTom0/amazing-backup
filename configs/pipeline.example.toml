@@ -1,15 +1,16 @@
-# pipeline.tomlのtemplate。このfileを~/.config/amazing-backup/pipeline.tomlへ
-# copyして実際の値を記述する(XDG配置・TASK-19)。
+# pipeline.tomlのtemplate。`amazing-backup config init`がこの内容を規定path
+# (~/.config/amazing-backup/pipeline.toml)へ生成する(XDG配置・TASK-19)。
 # $XDG_CONFIG_HOME設定時は $XDG_CONFIG_HOME/amazing-backup/pipeline.toml。
 # AMAZING_BACKUP_HOME指定時(テスト/CI用)は $ABH/pipeline.toml。
-# 相対path(public_keys・decrypt_key)は実行時のcwd基準。
+# 相対path(public_keys・decrypt_key)を書いた場合は実行時のcwd基準で解決される
+# (install後はcwdが不定のため、例示は絶対path)。
 # 各keyの意味は docs/usage_backup.md 3.1 を参照。
 
 [recipients]
 # SSH ed25519公開鍵のpath列挙(1-of-N。全鍵で暗号化し、いずれか1鍵で復号可能)
 # 1つ以上必須。ed25519形式のみ許容
 public_keys = [
-  "configs/secret/keys/private/backup_ed25519.pub",
+  "/home/yourname/.config/amazing-backup/keys/backup_ed25519.pub",
 ]
 
 [behavior]
@@ -21,7 +22,7 @@ keep_going = false
 
 [verify]
 # --roundtrip検証で使う秘密鍵path(秘密そのものではなくpath参照)
-decrypt_key = "configs/secret/keys/private/backup_ed25519"
+decrypt_key = "/home/yourname/.config/amazing-backup/keys/backup_ed25519"
 
 [metadata]
 # metadata_{title}.jsonのlatest_source_path掲載形式

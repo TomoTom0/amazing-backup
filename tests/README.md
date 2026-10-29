@@ -269,18 +269,119 @@ tests/index_storage.rs rebuild folder・tests/storage_query.rs list categories�
   src/lib.rs testutilへconfig_env_lock/set_amazing_backup_homeを追加(env書換えunit
   testの直列化・PATH_ENV_LOCKと同一lockで順序deadlockを構造的に排除)
 
+2026-10-29: TASK-1(config initコマンド新設)対応でテスト先行の更新
+(TASK-1 body + tmp/tasks/tm-1/design_config_init.md 3章・3.8条件書草案)。
+- config.tomlへ6条件追加(init-generates-under-resolved-paths・init-templates-from-example・
+  init-existing-files-not-overwritten・init-exclusive-create-and-rollback・
+  init-credential-template-empty-and-private・init-stdout-artifacts-and-next-steps)し
+  excludedへ2件追加(usage誤り64はcli.usage-error-exit-64が共通cover・README/docsの
+  config init手順置換はdocs更新)。(23→29条件・excluded 30→32件)。[meta].verifiedは
+  falseへ戻す(design doc 3.8条件書運用)。既存条件(default-config-missing-guidance等)の
+  文言改訂は実装工程の対応のため本更新では未触
+- テスト追加: tests/config_init.rsへintegration 5test(bin subprocess・AMAZING_BACKUP_HOME
+  で生成先をtmp dirへ指向。ABH相対pathの絶対化はrun_bin_cwdでcwd固定観測・dangling
+  symlinkはsymlink_metadata存在扱い・生成fileとinclude_bytes!例示のbyte一致突合)。
+  tests/config_init_unit.rsを新設しunit 2test(design doc 3.8のunit観測:
+  render_init_templateのTOML basic string符号化(「"」「\」入りpathのparse復元一致)と
+  劣化template検出(全profile/部分劣化=内部エラー1)・cmd_config_init_with_writerの
+  失敗注入(EEXIST競合・IO失敗)によるrollback観測。「生成関数の書込を差し替え可能な
+  構成」を仮定したseam呼び出し)
+- 実装前(cmd_config_init・render_init_template未実装)のためconfig init系テストは赤:
+  tests/config_init.rsは実行fail(unrecognized subcommand 'config'=exit 64由来)、
+  tests/config_init_unit.rsはcompile error(unresolved imports)。verify-conditions.pyは
+  exit 0(TASK-2分込み212条件・35除外すべてcover)
+
+2026-10-29: TASK-2(completionsコマンド新設)対応でテスト先行の更新
+(tmp/tasks/tm-2/design_completions.md D-1〜D-5)。
+- cli.tomlへ6条件追加(completions-generates-shells・script-covers-current-vocabulary・
+  invalid-shell-usage-error・missing-shell-usage-error・help-listed・
+  output-write-error-exit-4)しexcludedへzsh実対話TAB補完効作確認(3点)1件を追加
+  (59→65条件)。
+- テスト追加: tests/cli_bin.rsへintegration 5test(bin subprocess・AMAZING_BACKUP_HOME
+  空dir固定での設定非依存検証・語彙はCli::command()から取得した現行
+  subcommand/long option語彙との実行時比較=固定期待リストに頼らない追随強制)。
+  tests/cli_completions_unit.rsを新設しunit 3test(design docの
+  cmd_completions(shell, &mut dyn Write)シグネチャ規定に依存。Vec<u8>注入による
+  生成内容と偽Write注入による書き込み失敗取扱い(BrokenPipe=0/その他=4))。
+- 実装前(cmd_completions・CompletionShell未実装)のためcompletions系テストは赤:
+  unit fileはcompile error E0432(unresolved imports)・integration 5testは
+  unrecognized subcommand 'completions'(exit 64)由来のfail。cli_bin既存4testは
+  pass維持。TASK-2追加時点のverify-conditions.pyはexit 0(当時206条件すべてcover)。
+- 条件数212(実数。TASK-2分+6のほか同日並行のTASK-1(config init)によるconfig.toml
+  +6を含む。excluded 35件)
+- 同日(TASK-2実装時): test期待値をclap_complete 4.6の実出力へ事実修正。
+  bash構造markerを_amazing__backupへ(bash generatorはbin nameのハイフンを二重下線へ
+  置換する規約)・廃止語(plan/encrypt/upload/restore)検査をscript全体の語scanから
+  サブコマンド候補位置限定(zsh: commands配列name部・bash: opts語列・fish: -a値)へ
+  変更(help説明文中の英語流入は語彙でないため対象外)。cli.tomlの[meta]は
+  cli area全test pass確認によりverified=trueへ戻した。
+- 同日(TASK-2コードレビュー「要修正(テストの検出力)」対応。実装本体の不具合なし):
+  語彙包含を全体部分文字列containsから候補定義からの語彙抽出との語一致へ強化
+  (zshはコマンド階層ごとに比較: ..._commands配列・case分岐でnode帰属を付けた
+  _arguments指定行。fishのoption語彙は深さ3以上のnodeをgeneratorが生成しないため
+  深さ2まで)。廃止語検査へ抽出の非空担保(既知候補の抽出確認)を追加。
+  書込失敗のstderr契約(BrokenPipe=表示なし・ENOSPC=エラー表示+exit 4)を
+  integration層でbin subprocessのstdoutへ/dev/full・相手close socketpairを接いで
+  検証するtest 2件を追加(output-write-error-exit-4条件はunit+integrationの両層に)。
+
+2026-10-29: TASK-4(docsサブコマンド新設)対応でテスト先行の更新
+(TASK-4 body + tmp/tasks/tm-4/design_docs_command.md 3章・3.9条件書草案。
+設計レビュー指摘8件対応済みの正本)。
+- docs areaを新設(tests/design/docs.toml。10条件+excluded 2件):
+  各ページbyte一致(正本stdoutそのまま・設定非依存)・version置換3段検出(変換関数unit
+  の合成入力9.9.9+test側独立期待値・対象行1行のみ置換+末尾改行保持・integration出力の
+  version行一致・正本sync検査のliteral一致+対象行count==1)・docs configのmarker置換
+  (render_init_template再利用・固定例示path~/.config/…・区切り行)・終了コード表doc間一致
+  (固定期待集合{0,1,2,3,4,5,64}・code→区分対応の両doc一致・同一code重複行拒否・空集合
+  拒否)・SKILL.md形式(frontmatter)・snippet pointer形式(短い出力・契約本文の内包なし)・
+  ページ一覧(docs/docs llm引数なしexit 0)・書込失敗(BrokenPipe=0・ENOSPC=4)・
+  invalid-syntax usage error(docs unknown・docs llm unknown・docs usage extra・
+  docs config --flag→64本文非出力)
+- tests/docs_pages.rsを新設(unit 3test: 変換関数substitute_version_lines(doc, version)
+  ->String〔テストが仮定するseam〕の合成入力検証・正本version sync・終了コード表抽出一致。
+  integration 8test: bin subprocess・AMAZING_BACKUP_HOME空dir固定・各ページbyte一致・
+  version行・config marker・skill frontmatter・snippet pointer・ページ一覧・
+  invalid syntax 64・書込失敗/dev/full・相手close socketpair)。Write注入系のunit観測は
+  実装工程でsrc/docs.rs内unit testへ追加する(design doc 3.9・5章影響の観測方針)
+- 実装前(src/docs.rs・docs/llm/*.md未作成)のためdocs系テストはcompile errorで赤:
+  include_str!対象docs/llm/{usage,skill,snippet}.md不在×3+E0432(unresolved import
+  `amazing_backup::docs`)。cargo test全体も同compile errorでtest実行段階へ進まない
+  (TASK-1 config_init_unit.rsと同状況。全errorがtests/docs_pages.rs由来でlib・bin・
+  他test targetのcompileは通っている)。verify-conditions.pyはexit 0(222条件すべてcover)
+- 条件数222(excluded 37件)
+
+2026-10-29: TASK-4(docsサブコマンド新設)実装。src/docs.rs新設(DocsArgs/DocsSub/DocsLlmArgs/
+DocsLlmSub・include_str!正本・version行置換substitute_version_lines・docs configのmarker置換=
+render_init_template再利用・Vec<u8>+write_allのBrokenPipe=0/その他4契約)・docs/llm/配下3file
+(usage/skill/snippet)作成・src/lib.rs・src/cli.rs接続・docs/usage_backup.mdへ5.13 docs節挿入
+(終了コード一覧は5.14へ繰り下げ)・config init成功案内のdocs参照をGitHub URLから
+`amazing-backup docs usage`案内へ更新(TASK-4設計5章影響)。これに伴い:
+- 条件config.init-stdout-artifacts-and-next-stepsの期待値をid不変で改訂(docs usage案内へ)し
+  tests/config_init.rsの該当assertを更新。config areaの[meta]は検証記録を書き直し
+- Write注入系unit観測4test(各ページ出力・config page・ページ一覧・書込失敗の偽Write注入)を
+  src/docs.rs内unit testへ追加(design doc 3.9・5章影響のとおり)
+- cargo test全件pass(276test)・verify-conditions.py PASS(222条件すべてcover)・
+  docs.tomlの[meta]へ検証記録
+2026-10-29: TASK-4コードレビュー指摘2件(中1・低1)対応。中: docs/llm/usage.mdへ`--yes`の
+上書き契約(get/pull共通・sha256一致はskip冪等・不一致/読込不能は--yesなし対象エラー3・
+あり上書き続行・既存データ保護は空の復元先)を追記しskill.mdへ一行反映・design doc 3.5へ
+同等説明追記。低: tests/docs_pages.rsへ対象行が入力末尾の改行あり/なし両case
+(無条件改行追加・改行欠落の両退行を検出)をtest側独立期待値で追加(unit 4件へ)。
+cargo test全件pass・verify-conditions.py PASSを確認
+
 ## 構成
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(14ファイル・200条件・excluded 32件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)反映済み。TASK-19分もテスト作成済み(200条件すべてcover) |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(15ファイル・222条件・excluded 37件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)反映済み(222条件の内訳に同日並行のTASK-1 config init分+6を含む)。TASK-4・TASK-2・TASK-1分はテスト先行で作成後に実装済み(全件pass) |
 | tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(新schema組立・AMAZING_BACKUP_HOMEによるXDG規定path統合・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
 | tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
 | tests/verify_roundtrip.rs | backup verify --roundtrip系(結合) | 作成済み(TASK-11 Phase Bでbackup verify経路へ書換。実装前fail許容) |
 | tests/restore.rs | 復元job系の共通経路(tier/days検証・Restore header parse・--key事前検査・get/pull平文衝突保護)をget/backup pull/list jobs経路で検証(結合) | 作成済み(TASK-11 Phase Bで新経路へ全面書換。平文衝突保護は実装前fail許容) |
 | tests/s3_backend.rs | S3 backend・credentialファイル系(fake seam・multipart・abort・endpoint env警告)をbackup push経路で検証(結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
-| tests/cli_bin.rs | bin entrypoint系(--version・lib/bin parity・旧サブコマンド削除。結合) | 作成済み(旧サブコマンド削除はPhase B実装前fail許容) |
+| tests/cli_bin.rs | bin entrypoint系(--version・lib/bin parity・旧サブコマンド削除・TASK-2 completions系5条件。結合) | 作成済み(TASK-2実装後に全件pass・実装時の期待値修正は履歴2026-10-29参照) |
+| tests/cli_completions_unit.rs | TASK-2 completionsのunit(cmd_completions(shell, &mut dyn Write)シグネチャ規定へのVec<u8>注入による生成内容・偽Write注入による書き込み失敗取扱い(BrokenPipe=0/その他=4)) | 作成済み(TASK-2実装後に全件pass) |
 | tests/layout.rs | TASK-10 layoutエリア(分類解決・検証。file_write記録値とfake seamで観測)+TASK-18(UUIDv7・data領域key・validate_title。衝突系はfolder廃止で削除) | 作成済み |
 | tests/index_storage.rs | TASK-10/11/12/15 indexエリア(索引schema・registry再構築・STANDARD・recipients・version_id・manifest再構築・pin反映・version_ts供給源・未知record_type警告・pin再付与・別bucket同名pinの両bucket索引保持・bucket独立pin rm)+TASK-18(entity組立・location_remove・sweep除外・pins uuid接続・location rm・index reconcile。rebuild folder系はfolder廃止で削除) | 作成済み(TASK-12・TASK-15とも実装後にcargo test全件pass。TASK-18分は実装前fail許容) |
 | tests/pin.rs | TASK-10/11 pinエリア(pin add/rm・write-once・backup時pin・skip対象への--pin・pin_removeのbucket照合) | 作成済み |
@@ -291,6 +392,9 @@ tests/index_storage.rs rebuild folder・tests/storage_query.rs list categories�
 | tests/registry_storage.rs | TASK-18 registryエリア(schema2 records往復・旧schema拒否・sweep/location_remove・sha_uuid_lookup 3件。registry.jsonl直接編集+bin subprocessで観測) | 作成済み(実装前fail許容) |
 | tests/metadata_storage.rs | TASK-18 metadataエリア(MetadataDoc導出・変更時のみPUT・latest_source_path 3形態・title変更キーローテーション。metadata object実体とAPI呼び出し記録で観測) | 作成済み(実装前fail許容) |
 | tests/config_storage.rs | TASK-18 configエリア結合side([metadata]3値・[categories]拒否・[aws.lifecycle]必須/範囲+改訂2条件の結合観測。src側unit testは実装時に追従) | 作成済み(実装前fail許容) |
+| tests/config_init.rs | TASK-1 config initの結合side(生成path解決=ABH絶対/相対・既存file上書き保護=通常file/dangling symlink・credential雛形のmode 0600と空値・空credentialでのbackup push事前検査・stdout案内・生成fileと埋め込みtemplateのbyte一致/parse突合。bin subprocess+AMAZING_BACKUP_HOME) | 作成済み(TASK-1実装前fail許容) |
+| tests/config_init_unit.rs | TASK-1 config initのunit(render_init_templateのTOML basic string符号化=「"」「\」入りpathのparse復元一致と劣化template内部エラー1・cmd_config_init_with_writerの失敗注入= EEXIST競合/IO失敗によるrollback。lib API直呼び) | 作成済み(TASK-1実装前compile error許容) |
+| tests/docs_pages.rs | TASK-4 docsサブコマンド(unit 4: 変換関数substitute_version_lines合成入力9.9.9+test側独立期待値・対象行が入力末尾の改行あり/なし両caseの保持=レビュー指摘対応・正本version literal sync+対象行count==1・終了コード表の両doc一致(固定期待集合・code→区分・重複拒否・空集合拒否)。integration 8: bin subprocess+AMAZING_BACKUP_HOME空dir固定=各ページbyte一致・usage version行・config marker置換+区切り行・llm skill frontmatter・llm snippet pointer・ページ一覧・invalid syntax 64本文非出力・書込失敗BrokenPipe=0/ENOSPC=4(/dev/full・相手close socketpair)。Write注入系unit観測はsrc/docs.rs内unit test 4件が担う) | 作成済み(TASK-4実装後に全件pass) |
 | src/**/*.rs 内 #[cfg(test)] | cargo単体test(S3実行はS3Backend fake(FakeS3)差替) | 作成済み |
 
 cargo testの階層: unit=src/各モジュール内`#[cfg(test)] mod tests`、
@@ -302,7 +406,7 @@ seam依存testは動作しない(通常の検証は`cargo test`で行う)。
 
 ## 条件書(tests/design/)
 
-エリア別に14分割。設計書8章の条件(初回61条件 + 2026-10-08レビュー指摘対応の追加11要件
+エリア別に15分割。設計書8章の条件(初回61条件 + 2026-10-08レビュー指摘対応の追加11要件
 CLI-005 / PLAN-009 / CONF-007 / ENC-019・020 / FPR-005 / UPL-013・014 / VER-010〜012、
 およびmanifest再構築関連の派生条件 + 2026-10-09 TASK-6のUPL-015〜019と
 同日レビュー指摘対応のCONF-008・CLI-006 + 2026-10-11 TASK-2のVER-013 + 同日TASK-5の
@@ -319,12 +423,12 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | ファイル | feature | source_file(主対象) | 条件数 | 設計対応 |
 |---|---|---|---|---|
 | plan.toml | plan | src/targets.rs | 5 | PLAN-001〜009のうち対象解決共通経路5件(TASK-11でname override系等4件廃止→layout.*へ) |
-| config.toml | config | src/config.rs | 23 | CONF-001〜008 + TASK-9 credential系4件 + TASK-10 layout/prefix/keep_artifacts系4件 + TASK-18 3件([metadata]値・[categories]拒否・[aws.lifecycle]必須/範囲) + TASK-19 4件(XDG規定path解決・ABH一括上書き・規定path不在案内・[output]拒否) |
+| config.toml | config | src/config.rs | 29 | CONF-001〜008 + TASK-9 credential系4件 + TASK-10 layout/prefix/keep_artifacts系4件 + TASK-18 3件([metadata]値・[categories]拒否・[aws.lifecycle]必須/範囲) + TASK-19 4件(XDG規定path解決・ABH一括上書き・規定path不在案内・[output]拒否)+TASK-1 config init 6件(生成path解決・template置換とescape符号化・既存file上書き保護・排他的作成とrollback・credential雛形空値/0600・stdout案内) |
 | encrypt.toml | encrypt | src/crypto.rs | 16 | ENC系のうち共通暗号化経路16件(TASK-11で旧encrypt固有6件廃止。backup push経路で検証。TASK-18でschema2化等4件を文言改訂) |
 | fingerprint.toml | fingerprint | src/fingerprint.rs | 5 | FPR-001〜005 |
 | upload.toml | upload | src/s3.rs | 7 | UPL系のうちS3転送共通経路7件(TASK-11で旧upload固有16件廃止。backup push経路で検証) |
 | verify.toml | verify | src/storage.rs | 14 | VER-001〜013+M-1掃除済みrun(TASK-11でbackup verify経路へ文言改訂・id不変) |
-| cli.toml | cli | src/cli.rs | 59 | CLI-001〜006 + TASK-9/10系 + TASK-11 Phase B(旧サブコマンド削除・--format/--profile・manage jobs reissue・pull範囲排他等)+prod 3bucket構成(3bucket分離・push接続先表示)+TASK-18(探索語彙/復元先/pushフロー12新規・list categories廃止)+TASK-19(--out必須・--aws-config既定XDG化・data/out→cache) |
+| cli.toml | cli | src/cli.rs | 65 | CLI-001〜006 + TASK-9/10系 + TASK-11 Phase B(旧サブコマンド削除・--format/--profile・manage jobs reissue・pull範囲排他等)+prod 3bucket構成(3bucket分離・push接続先表示)+TASK-18(探索語彙/復元先/pushフロー12新規・list categories廃止)+TASK-19(--out必須・--aws-config既定XDG化・data/out→cache)+TASK-2(completions 6件+除外1件) |
 | restore.toml | restore | src/storage.rs | 5 | 復元job系共通経路5件(TASK-11で旧restore固有19件廃止。get/pull/list jobs経路で検証。平文衝突保護含む) |
 | layout.toml | layout | src/layout.rs | 11 | TASK-10設計1章(分類解決・検証。9章素案+rel_path正規化) + TASK-18(UUIDv7・data領域key・validate_title。folder衝突廃止) |
 | index.toml | index | src/index.rs | 22 | TASK-10設計2章 + H-1/H-3 + TASK-11(version_ts供給源・未知record_type警告) + 再レビューM-R1(pins bucket分離)・L-R1(版・pin無しentry除外) + TASK-12(pin rm後の再付与) + TASK-15(別bucket同名pinの両bucket索引保持・bucket独立pin rm) + TASK-18(entity組立・location_remove・sweep除外・reconcile・location rm) |
@@ -332,6 +436,7 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | retention.toml | retention | src/cli.rs | 13 | TASK-10設計3.2・5.2 + TASK-11 L-8(prune併置排他)・L-2・L-4 + TASK-18(lifecycle data一括3rule・prune一括化。category系3件廃止)+TASK-18追加仕様manage reset 5件(設計8.1) |
 | registry.toml | registry | src/registry.rs | 6 | TASK-18設計3.2/5.3(schema2 records往復・旧schema拒否・sweep/location_remove・sha_uuid_lookup合流正本) |
 | metadata.toml | metadata | src/metadata.rs | 4 | TASK-18設計2章/5.5(MetadataDoc導出・変更時のみPUT・latest_source_path 3形態・title変更キーローテーション) |
+| docs.toml | docs | src/docs.rs | 10 | TASK-4設計3章・3.9(各ページbyte一致・version置換3段検出=変換関数unit/integration出力/正本sync・config marker置換=render_init_template再利用・終了コード表doc間一致・SKILL.md形式・snippet pointer形式・ページ一覧・invalid-syntax usage error 64・書込失敗0/4) |
 
 - 分割理由: test-structureの`[meta].source_file`(検証対象の実装ファイル・ファイル単位に1つ)が
   7エリアでそれぞれ別moduleに対応し、単一ファイルでは特定できないため。分割によりidの`<area>`部と
