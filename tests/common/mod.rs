@@ -6,16 +6,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// テスト終了時に再帰削除する一時dir(std::env::temp_dir配下・repo外)。
+/// テスト終了時に再帰削除する一時dir(repo内`tmp/test/`配下。cargo test実行cwd=
+/// package root基準で、cleanは`rm -rf ./tmp/test/`で完結する)。
 pub struct TestDir(PathBuf);
 
 impl TestDir {
     pub fn new(tag: &str) -> TestDir {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
+        // 生成先はcwd(package root)基準の相対path「tmp/test」。StorageFixtureがこの
+        // pathをpipeline.tomlのauto_path_rootsへ書くため、絶対path検証(設定エラー2)に
+        // 合わせて絶対化して返す(symlink解決なし・cwdのみ前置)。
+        let path = std::path::absolute(Path::new("tmp/test").join(format!(
             "amazing-backup-it-{tag}-{}-{n}",
             std::process::id()
-        ));
+        )))
+        .expect("test temp dirの絶対path化");
         std::fs::create_dir_all(&path).expect("integration test temp dir create");
         TestDir(path)
     }
