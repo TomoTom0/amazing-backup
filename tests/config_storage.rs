@@ -171,7 +171,8 @@ fn aws_lifecycle_keys_required_and_ranged() {
 /// [layout].unfiled_categoryはvalidate_category_nameによる文字列検証のみ
 /// ([categories]定義存在検証は廃止・category語彙は記録値として自由化)・
 /// keepの検証(1..=100)はaws.toml [aws.lifecycle]側へ移行。
-/// files写像path先頭のsys衝突検証は廃止。
+/// files写像label先頭のsys衝突検証は廃止。TASK-20: [files.<basename>]のschema keyは
+/// labelへ改名(旧path keyはdeny_unknown_fieldsの未知key=設定エラー2)。
 #[test]
 fn layout_and_files_validation_after_categories_removal() {
     // (tag, files断片, unfiled_category書換え値, 期待exit code)
@@ -179,15 +180,21 @@ fn layout_and_files_validation_after_categories_removal() {
         ("auto_path_roots相対path", "", None, 2),
         (
             "files.categoryの[categories]未定義値(受理)",
-            "[files.\"x.zip\"]\ncategory = \"docs\"\npath = \"a\"\n",
+            "[files.\"x.zip\"]\ncategory = \"docs\"\nlabel = \"a\"\n",
             None,
             0,
         ),
         (
-            "files写像pathの_sys先頭(受理)",
-            "[files.\"x.zip\"]\ncategory = \"unfiled\"\npath = \"_sys/x\"\n",
+            "files写像labelの_sys先頭(受理)",
+            "[files.\"x.zip\"]\ncategory = \"unfiled\"\nlabel = \"_sys/x\"\n",
             None,
             0,
+        ),
+        (
+            "[files]の旧path key(TASK-20改名前・未知key)",
+            "[files.\"x.zip\"]\ncategory = \"docs\"\npath = \"a\"\n",
+            None,
+            2,
         ),
         ("unfiled_category規則違反", "", Some("Unfiled"), 2),
     ];

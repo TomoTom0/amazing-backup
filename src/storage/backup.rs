@@ -125,7 +125,7 @@ pub fn cmd_backup(args: &BackupArgs) -> i32 {
 struct Planned {
     target: crate::targets::Target,
     category: String,
-    rel_path: String,
+    label: String,
     identity: String,
 }
 
@@ -141,7 +141,7 @@ fn plan_push(
                 k.clone(),
                 crate::layout::FileMapping {
                     category: v.category.clone(),
-                    path: v.path.clone(),
+                    label: v.label.clone(),
                 },
             )
         })
@@ -154,7 +154,7 @@ fn plan_push(
         planned.push(Planned {
             identity: crate::layout::identity_hash(&t.source_path),
             category: c.category,
-            rel_path: c.rel_path,
+            label: c.label,
             target: clone_target(t),
         });
     }
@@ -436,7 +436,7 @@ fn cmd_backup_push(
                     title: title.clone(),
                     name: p.target.source_name.clone(),
                     category: p.category.clone(),
-                    rel_path: p.rel_path.clone(),
+                    label: p.label.clone(),
                     source_path: p.target.source_path.display().to_string(),
                     s3_key: key.clone(),
                     version_id: vid.clone(),
@@ -557,7 +557,7 @@ fn cmd_backup_push(
                         title: title.clone(),
                         name: p.target.source_name.clone(),
                         category: p.category.clone(),
-                        rel_path: p.rel_path.clone(),
+                        label: p.label.clone(),
                         source_path: p.target.source_path.display().to_string(),
                         s3_key: key.clone(),
                         version_id: vid.clone(),
@@ -697,7 +697,7 @@ fn cmd_backup_push(
             }
         }
 
-        // run manifest(V2・schema=2: file upload後に構築。file recordにuuid/title入・
+        // run manifest(file record schema=3: file upload後に構築。file recordにuuid/title入・
         // identity_hash/folder無しの所在記録と実s3_key+version_idを記録)
         if !uploaded.is_empty() {
             // ヘッダのrecipientsは現在設定の指紋列
@@ -706,17 +706,17 @@ fn cmd_backup_push(
                 let pk = crate::fingerprint::parse_ssh_pubkey(k)?;
                 current_fingerprints.push(crate::fingerprint::fingerprint(&pk));
             }
-            let manifest_body = crate::manifest::build_manifest_v2(
+            let manifest_body = crate::manifest::build_manifest_v3(
                 &batch_id,
                 &now_jst(),
                 &uploaded
                     .iter()
-                    .map(|u| crate::manifest::ManifestV2File {
+                    .map(|u| crate::manifest::ManifestV3File {
                         uuid: u.uuid.clone(),
                         title: u.title.clone(),
                         name: u.name.clone(),
                         category: u.category.clone(),
-                        rel_path: u.rel_path.clone(),
+                        label: u.label.clone(),
                         source_path: u.source_path.clone(),
                         s3_key: u.s3_key.clone(),
                         version_id: u.version_id.clone(),
@@ -839,7 +839,7 @@ fn append_file_write(
 ) -> BackupResult<()> {
     let s3_key = crate::layout::data_object_key(prefix, uuid)?;
     let write = FileWriteRecord {
-        schema: 2,
+        schema: 3,
         record_type: "file_write".into(),
         recorded_at: recorded_at.to_string(),
         batch_id: batch_id.to_string(),
@@ -856,7 +856,7 @@ fn append_file_write(
         age_sha256: res.age_sha256.clone(),
         recipients: res.recipients.clone(),
         category: p.category.clone(),
-        rel_path: p.rel_path.clone(),
+        label: p.label.clone(),
         identity_hash: p.identity.clone(),
         s3_key,
     };
@@ -1033,7 +1033,7 @@ pub(crate) struct UploadItem {
     title: String,
     name: String,
     category: String,
-    rel_path: String,
+    label: String,
     source_path: String,
     s3_key: String,
     version_id: String,

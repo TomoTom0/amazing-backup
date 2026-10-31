@@ -101,11 +101,12 @@ fn idx_opts() -> StorageOpts {
 }
 
 /// [covers:index.schema-and-serialization]
-/// 索引JSONL schema(TASK-18 3.1・5.4のschema=2・実体単位entity構造):
-/// index_header(schema=2・updated_at・run_id・tool_version・entries=N)+file entity
+/// 索引JSONL schema(TASK-20 3.1・5.4のschema=3・実体単位entity構造):
+/// index_header(schema=3・updated_at・run_id・tool_version・entries=N)+file entity
 /// (record_type=file維持・uuid・title・versions[]・pins[]・locations[])。
 /// versionsはdate降順で各versionのfield構成は不変(s3_key=data/{uuid}/default.age記録値)。
-/// IndexLocation(新設): source_path・category・rel_path・identity_hash・last_backup。
+/// IndexLocation: source_path・category・label・identity_hash・last_backup
+/// (TASK-20: rel_path→label改名。空=labelなし)。
 /// locationsの並びはsource_path辞書順。旧entryのname/category等はlocationsへ移行・
 /// folder廃止。直列化→parseの往復で全fieldが保たれる。
 #[test]
@@ -136,8 +137,8 @@ fn index_jsonl_schema_and_field_roundtrip() {
     let header = index_header(&lines);
     assert_eq!(
         header.get("schema").and_then(|v| v.as_i64()),
-        Some(2),
-        "schema=2: {header}"
+        Some(3),
+        "schema=3: {header}"
     );
     for field in ["updated_at", "run_id", "tool_version"] {
         assert!(
@@ -166,7 +167,7 @@ fn index_jsonl_schema_and_field_roundtrip() {
     for field in [
         "name",
         "category",
-        "rel_path",
+        "label",
         "source_path",
         "identity_hash",
         "folder",
@@ -176,7 +177,7 @@ fn index_jsonl_schema_and_field_roundtrip() {
             "entity直下に{field}は無い(locationsへ移行・folder廃止): {entry}"
         );
     }
-    // IndexLocation: source_path・category・rel_path・identity_hash・last_backup
+    // IndexLocation: source_path・category・label・identity_hash・last_backup
     let locations = entity_locations(entry);
     assert_eq!(locations.len(), 1, "所在1件: {locations:?}");
     let loc = &locations[0];
@@ -191,9 +192,9 @@ fn index_jsonl_schema_and_field_roundtrip() {
         "categoryは分類解決結果の記録値: {loc}"
     );
     assert_eq!(
-        loc.get("rel_path").and_then(|v| v.as_str()),
+        loc.get("label").and_then(|v| v.as_str()),
         Some("2020-2023/travel"),
-        "rel_pathは正規化済み記録値: {loc}"
+        "labelは正規化済み記録値: {loc}"
     );
     assert_eq!(
         loc.get("identity_hash").and_then(|v| v.as_str()),
@@ -480,8 +481,9 @@ fn index_version_ids_come_from_put_responses_via_registry() {
 }
 
 /// [covers:index.rebuild-from-manifests]
-/// manage index rebuild(TASK-18 5.12・3.3): manifest(V2・schema=2: uuid/title入り)から
-/// entity単位へentry再構築。locationsはfile recordsのsource_path単位(最新)から復元。
+/// manage index rebuild(TASK-18 5.12・3.3): manifest(file record schema=3: uuid/title/label入り・
+/// TASK-20でschema 3化。batch header行はschema=2のまま)からentity単位へentry再構築。
+/// locationsはfile recordsのsource_path単位(最新)から復元(所在記録fieldの読取はlabel)。
 /// prunes/sweepsの除外集合を適用(prune除去版の索引への復活防止)。
 /// pin復元はuuid照合。version_id欠損manifestはListObjectVersionsで補完。
 /// 完了時は続けてのmanage index reconcile実行を案内表示。開始時にtier別単価で
@@ -626,6 +628,126 @@ fn manage_index_rebuild_rebuilds_entries_from_manifests() {
     assert!(
         vids.contains(&reg_ids[2]),
         "現行版(version_id欠損manifest分はListObjectVersionsで補完)が載る: {vids:?}"
+    );
+}
+
+/// [covers:index.rebuild-from-manifests]
+/// manage index rebuildの旧manifest拒否(TASK-22・PR#4レビュー指摘P2):
+/// 旧schema=2 file record(rel_path入り・label無し)やschema=3のまま必須field(label)が
+/// 欠損するfile recordを含むmanifestからのrebuildは、分類labelが黙って消えた状態の
+/// schema=3索引をuploadせず索引PUT前に失敗する(schema≠3は設定エラー2+旧manifestを
+/// 明示した初期化と再pushの案内・必須field欠損は処理エラー4。registry file_writeの
+/// deny_unknown_fields・索引parseのschema≠3拒否と同じ拒否をmanifest file record経路にも適用)。
+#[test]
+fn manage_index_rebuild_rejects_legacy_manifest_records() {
+    let Some(fx) = StorageFixture::new(
+        "idx-mreb-legacy",
+        StorageOpts {
+            files: "[files.\"a.zip\"]\ncategory = \"photos\"\nlabel = \"legacy\"\n".into(),
+            ..idx_opts()
+        },
+    ) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"rebuild-legacy-plain");
+    let Some((code, stdout)) = idx_push_titled(&fx, &[&a], "legacy-title") else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+    let manifests = manifest_objects(&fx);
+    assert_eq!(manifests.len(), 1, "manifestは1件: {manifests:?}");
+    let manifest = manifests[0].clone();
+    let original_plain = age_decrypt(&fx.age, &manifest, &fx.secret);
+
+    // manifest平文のfile recordを書き換えて暗号化し直す(batch header行は不変)
+    let rewrite_manifest = |transform: &dyn Fn(serde_json::Value) -> serde_json::Value| {
+        let text = String::from_utf8(original_plain.clone()).expect("manifest平文はUTF-8");
+        let mut rewritten = String::new();
+        for line in text.lines() {
+            let v: serde_json::Value = serde_json::from_str(line).expect("manifest行はJSON");
+            rewritten.push_str(&serde_json::to_string(&transform(v)).expect("manifest行serialize"));
+            rewritten.push('\n');
+        }
+        age_encrypt_bytes(
+            &fx.age,
+            &[fx.public.clone()],
+            rewritten.as_bytes(),
+            &manifest,
+        );
+    };
+
+    // 索引object不在の状態でrebuildを実行(復元job発行の再実行を吸収)し、
+    // 終了コードと出力を返す
+    let run_rebuild = || -> (i32, String) {
+        let mut out = String::new();
+        let mut code = 0;
+        for _ in 0..3 {
+            let (c, stdout, stderr) = fx.manage("index", &["rebuild"]);
+            code = c;
+            out.push_str(&stdout);
+            out.push_str(&stderr);
+            if code != 0 || fx.object_path(&fx.index_key()).is_file() {
+                break;
+            }
+        }
+        (code, out)
+    };
+
+    // (1) 旧schema=2 file record(rel_path入り・label無し): 設定エラー2+uploadなし
+    std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
+    rewrite_manifest(&|mut v| {
+        if v.get("record_type").and_then(|t| t.as_str()) == Some("file") {
+            let obj = v.as_object_mut().expect("manifest file recordはobject");
+            obj.insert("schema".into(), serde_json::json!(2));
+            let label = obj.remove("label").unwrap_or_default();
+            obj.insert("rel_path".into(), label);
+        }
+        v
+    });
+    let (code, out) = run_rebuild();
+    assert_eq!(code, 2, "旧schema=2 file record混入は設定エラー2: {out}");
+    assert!(
+        !fx.object_path(&fx.index_key()).is_file(),
+        "索引はuploadされない(label黙示消去なし): {out}"
+    );
+    assert!(
+        out.contains("旧形式") && out.contains("再push"),
+        "旧manifestと初期化・再pushの案内: {out}"
+    );
+
+    // (2) schema=3のまま必須field(label)欠損: 処理エラー4+uploadなし
+    // ((1)で索引がuploadされなかったため対象objectは無いまま)
+    let _ = std::fs::remove_file(fx.object_path(&fx.index_key()));
+    rewrite_manifest(&|mut v| {
+        if v.get("record_type").and_then(|t| t.as_str()) == Some("file") {
+            v.as_object_mut()
+                .expect("manifest file recordはobject")
+                .remove("label");
+        }
+        v
+    });
+    let (code, out) = run_rebuild();
+    assert_eq!(code, 4, "必須field欠損は処理エラー4: {out}");
+    assert!(
+        !fx.object_path(&fx.index_key()).is_file(),
+        "索引はuploadされない: {out}"
+    );
+    assert!(out.contains("label"), "欠損field名を明示: {out}");
+
+    // (3) 正常なschema=3 recordの同一manifestからはrebuildできる(陽性対照)
+    rewrite_manifest(&|v| v);
+    let (code, out) = run_rebuild();
+    assert_eq!(code, 0, "正常系rebuildは成功: {out}");
+    let lines = fx.read_index();
+    let uuid = idx_uuid_of(&fx, &a);
+    let entry = index_entity_by(&lines, "uuid", &uuid);
+    let locations = entity_locations(entry);
+    assert_eq!(locations.len(), 1, "locationsは1件: {locations:?}");
+    assert_eq!(
+        locations[0].get("label").and_then(|l| l.as_str()),
+        Some("legacy"),
+        "labelは欠損せず復元される: {locations:?}"
     );
 }
 
@@ -1254,8 +1376,8 @@ fn pin_rm_multi_bucket_independent() {
 
 /// [covers:index.parse-failure-guides-rebuild]
 /// 索引parse失敗のerror文には`manage index rebuild`による索引再構築の案内を含める
-/// (L-6)。schema違反平文は検証エラー4のまま。TASK-18の索引schema=2化に伴い、
-/// 旧schema=1索引の読込はschema不一致として設定エラー2+rebuild案内で拒否される
+/// (L-6)。schema違反平文は検証エラー4のまま。TASK-20の索引schema=3化に伴い、
+/// 旧schema(1・2)索引の読込はschema不一致として設定エラー2+rebuild案内で拒否される
 /// (旧索引の誤読防止)。
 #[test]
 fn parse_failure_error_guides_index_rebuild() {
@@ -1268,9 +1390,10 @@ fn parse_failure_error_guides_index_rebuild() {
         return;
     };
     assert_eq!(code, 0, "初回push: {stdout}");
+    let pristine: Vec<serde_json::Value> = fx.read_index();
 
     // (1) 索引objectをschema違反へ書き換える(entityから必須field(versions)を除去)
-    let mut broken: Vec<serde_json::Value> = fx.read_index();
+    let mut broken = pristine.clone();
     let entry = broken
         .iter_mut()
         .find(|v| v.get("record_type").and_then(|r| r.as_str()) == Some("file"))
@@ -1288,23 +1411,25 @@ fn parse_failure_error_guides_index_rebuild() {
         "manage index rebuildの案内: {stderr}"
     );
 
-    // (2) 旧schema=1索引(schema=1のindex_header)は設定エラー2+rebuild案内で拒否
-    let mut v1: Vec<serde_json::Value> = fx.read_index();
-    if let Some(header) = v1
-        .iter_mut()
-        .find(|v| v.get("record_type").and_then(|r| r.as_str()) == Some("index_header"))
-    {
-        if let Some(obj) = header.as_object_mut() {
-            obj.insert("schema".into(), serde_json::Value::from(1));
+    // (2) 旧schema=1・schema=2索引は設定エラー2+rebuild案内で拒否(TASK-20 schema 3化)
+    for old_schema in [1, 2] {
+        let mut v_old = pristine.clone();
+        if let Some(header) = v_old
+            .iter_mut()
+            .find(|v| v.get("record_type").and_then(|r| r.as_str()) == Some("index_header"))
+        {
+            if let Some(obj) = header.as_object_mut() {
+                obj.insert("schema".into(), serde_json::Value::from(old_schema));
+            }
         }
+        fx.rewrite_index(&v_old);
+        let (code, _, stderr) = fx.list("files", &[]);
+        assert_eq!(code, 2, "旧schema={old_schema}索引は設定エラー2: {stderr}");
+        assert!(
+            stderr.contains("manage index rebuild"),
+            "manage index rebuildの案内(schema={old_schema}拒否時): {stderr}"
+        );
     }
-    fx.rewrite_index(&v1);
-    let (code, _, stderr) = fx.list("files", &[]);
-    assert_eq!(code, 2, "旧schema=1索引は設定エラー2: {stderr}");
-    assert!(
-        stderr.contains("manage index rebuild"),
-        "manage index rebuildの案内(schema=1拒否時): {stderr}"
-    );
 }
 
 /// [covers:index.entity-grouping-by-uuid]
@@ -1530,8 +1655,9 @@ fn swept_versions_not_revived_on_rebuilds() {
 
 /// [covers:index.pins-connect-by-uuid]
 /// 索引pins[]への接続はuuid照合のみ(TASK-18 5.4): pin_writeのuuidがentityのuuidと一致
-/// すれば接続される(旧name+category+rel_path+folder完全一致は廃止。所在記録値の変化が
-/// あっても同一uuidなら接続)。bucket一致規則・並びのs3_key sort・pin_remove反映は維持。
+/// すれば接続される(旧name+category+所在記録値+folder完全一致の照合は廃止。
+/// 所在記録値(label)の変化があっても同一uuidなら接続)。
+/// bucket一致規則・並びのs3_key sort・pin_remove反映は維持。
 #[test]
 fn pins_connect_by_uuid_across_location_changes() {
     let Some(fx) = StorageFixture::new("idx-pinuuid", idx_opts()) else {
@@ -1551,7 +1677,7 @@ fn pins_connect_by_uuid_across_location_changes() {
         0
     );
 
-    // 所在を移動(rel_path=sub1→sub2へ変化)して合流: 旧照合(name+category+rel_path)なら
+    // 所在を移動(label=sub1→sub2へ変化)して合流: 旧照合(name+category+所在記録値)なら
     // pinが外れる構成だが、uuid照合なら接続が維持される
     let p2 = fx.data_root.join("sub2").join("a.zip");
     std::fs::create_dir_all(&p2.parent().expect("parent")).expect("sub2");

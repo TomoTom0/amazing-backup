@@ -137,8 +137,8 @@ fn metadata_doc_is_built_from_registry_reduce() {
         "版歴・所在履歴は載せない: {doc}"
     );
     assert!(
-        doc.get("category").is_none() && doc.get("rel_path").is_none(),
-        "分類は載せない: {doc}"
+        doc.get("category").is_none() && doc.get("label").is_none(),
+        "分類(category/label)は載せない: {doc}"
     );
 
     // 同一registryからの2回目の導出はPUTなし(byte同一=差分比較で書かない)

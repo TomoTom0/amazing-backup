@@ -168,7 +168,7 @@ auto_path_roots = ["/home/yourname/data"]
 
 [files."travel.zip"]     # 手動写像(省略可)
 category = "photos"      # category名規則を満たす任意の文字列(定義管理は廃止・記録値として自由化)
-path = "2020-2023/travel" # rel_path(""でrel_pathなし)
+label = "2020-2023/travel" # label(""でlabelなし)
 ```
 
 各キーの説明:
@@ -182,7 +182,7 @@ path = "2020-2023/travel" # rel_path(""でrel_pathなし)
 | `[metadata].latest_source_path` | metadata_<title>.jsonの最新所在掲載形式。`plain`(既定)/`encrypted`/`none` |
 | `[layout].unfiled_category` | 分類解決のfallback先category(既定`unfiled`) |
 | `[layout].auto_path_roots` | source_pathを相対化するroot列挙(最初に一致したrootを採用) |
-| `[files."<basename>"]` | 手動写像。`category`(必須・category名規則の文字列検査のみ)と`path`(rel_path) |
+| `[files."<basename>"]` | 手動写像。`category`(必須・category名規則の文字列検査のみ)と`label`(所在label・空文字列=なし) |
 
 省略時の既定: `[layout]`全体省略時はunfiled_category="unfiled"+auto_path_roots=[]・`[metadata]`省略時はlatest_source_path="plain"・`keep_artifacts`省略時は"run"。`[categories]`・`[output]`セクションの存在は未知キーとして設定エラー2(静的に廃止を確定。registry・cache dirのpathはXDG規定path固定)。
 
@@ -296,22 +296,22 @@ s3://<bucket>/<prefix>/
     manifests/<batch_id>.jsonl.age # run毎manifest
 ```
 
-- 索引は照会系(list/query/get/diff)の正本。schema=2で実体(uuid・title・所在locations)単位のentry構成(title重複は許容・一意化はuuid/所在指定)。run毎書込み・backup push完了時と索引に影響する操作後(pin add/rm・manage prune/location rm)に全体再構築してPUTされる(冪等)
+- 索引は照会系(list/query/get/diff)の正本。schema=3で実体(uuid・title・所在locations)単位のentry構成(title重複は許容・一意化はuuid/所在指定)。run毎書込み・backup push完了時と索引に影響する操作後(pin add/rm・manage prune/location rm)に全体再構築してPUTされる(冪等)
 - 索引の旧版はS3 versioningのnoncurrent versionとして残る(小容量のため蓄積を許容)
 - metadata_<title>.jsonはregistry reduceから導かれる正規形(現行版のsha/size/version_id・pins・最新所在latest_source_path)。内容が変わったときのみPUTされ、title変更時は新キーPUT+旧キーにdelete marker
 - storage classは索引とmetadataがSTANDARD固定、それ以外(default.age・pin・manifest)はprofileのstorage_class(prod=DEEP_ARCHIVE)
 
 ### 4.2 分類解決・title・合流
 
-分類(category/rel_path)はキー構成には影響せず、所在(location)の記録値として索引・manifestに記録される(絞り込み・表示の語彙)。分類は次の優先順位で解決される:
+分類(category/label)はキー構成には影響せず、所在(location)の記録値として索引・manifestに記録される(絞り込み・表示の語彙)。分類は次の優先順位で解決される:
 
-1. **files写像**(最優先): `[files."<basename>"]`の`category`と`path`をそのまま用いる
-2. **auto_path_roots相対化**: source_pathがいずれかのroot配下なら、最初に一致したroot配下のdirectory側path(ファイル名を除く)を`rel_path`とし、categoryは`unfiled_category`
-3. **fallback**: 一致rootなし -> rel_pathなし・category=`unfiled_category`
+1. **files写像**(最優先): `[files."<basename>"]`の`category`と`label`をそのまま用いる
+2. **auto_path_roots相対化**: source_pathがいずれかのroot配下なら、最初に一致したroot配下のdirectory側path(ファイル名を除く)を`label`とし、categoryは`unfiled_category`
+3. **fallback**: 一致rootなし -> labelなし・category=`unfiled_category`
 
-- 実体の識別はuuid(発行キー)とtitle(人間用ラベル・64文字以内・UTF-8可。`/`・改行・制御文字は拒否で違反はusage 64)。title重複(別uuid同title)は許容+警告で、一意化はuuidまたは`--path <source_path>`(所在完全一致)指定で行う
+- 実体の識別はuuid(発行キー)とtitle(人間用ラベル・64文字以内・UTF-8可。`/`・改行・制御文字は拒否で違反はusage 64)。title重複(別uuid同title)は許容+警告で、一意化はuuidまたは`--source-path <source_path>`(所在完全一致)指定で行う
 - 平文sha256が既存実体と一致する対象は**合流**する(所在追加のみ・uploadなし・版増加なし)。移動+内容不変は合流、移動+内容変更は合流せず別entityとして新規発行(title必須)
-- rel_pathは`.`/`..`要素の排除・正規化のみ適用(実source treeの要素名をそのまま用いる)
+- labelは`.`/`..`要素の排除・正規化のみ適用(実source treeの要素名をそのまま用いる)
 - 生成keyがS3のobject key上限1024 byteを超える場合は対象エラー3(prefix長またはtitle長で対処)
 - category名規則は`^[a-z0-9][a-z0-9-]{0,63}$`・予約語`sys`(旧表記`_sys`も)拒否。pin名は`^[a-z0-9][a-z0-9-]{0,62}$`(63文字以内)で`default`は予約
 
@@ -371,19 +371,19 @@ amazing-backup list jobs
 amazing-backup query <手がかり> [--category C] [--versions]
 ```
 
-title部分一致・uuid前方一致・所在(source_path)部分一致で索引を検索。既定は実体単位要約、`--versions`で版一覧も表示。title重複で候補が複数ある場合は候補一覧(uuid・所在source_path)を表示し`get <title> --path <source_path>`での特定を案内する。0件は警告+終了コード0。
+title部分一致・uuid前方一致・所在(source_path)部分一致で索引を検索。既定は実体単位要約、`--versions`で版一覧も表示。title重複で候補が複数ある場合は候補一覧(uuid・所在source_path)を表示し`get <title> --source-path <source_path>`での特定を案内する。0件は警告+終了コード0。
 
 ### 5.4 get — 単一実体の取得
 
 ```
-amazing-backup get <title|uuid> [--path P] [--version V] [--version-id ID] [--pin 名]
+amazing-backup get <title|uuid> [--source-path P] [--version V] [--version-id ID] [--pin 名]
                      [--out DIR] [--tier Standard|Bulk] [--days N] [--yes]
 ```
 
 | 引数/option | 既定 | 意味 |
 |---|---|---|
 | `<title|uuid>` | -(必須) | 対象実体の識別子(title完全一致・uuid完全一致) |
-| `--path` | なし | 同名(title重複)候補の所在特定(所在のsource_path完全一致)。候補複数で`--path`なしは対象エラー3 |
+| `--source-path` | なし | 同名(title重複)候補の所在特定(所在のsource_path完全一致)。候補複数で`--source-path`なしは対象エラー3 |
 | `--version` | なし(最新) | 版の日付(YYYY-MM-DD。形式不正はusage 64)。同日に複数版がhitしたら候補表示+`--version-id`指定要求(対象エラー3) |
 | `--version-id` | なし | 版のS3 VersionId指定(最優先) |
 | `--pin` | なし | ピン留め版の取得(pin名) |
@@ -497,7 +497,7 @@ amazing-backup manage reset [--apply]
 | `prune` | 世代削除の即時実行(`{prefix}data/`一括)。**dry-runが既定**(削除予定を表示)。`--apply`でDeleteObjectVersionを実行し索引を更新。keepはaws.toml `[aws.lifecycle].keep_versions`(実行時上書き不可)。`--dry-run`と`--apply`の併用はusage 64。現行version・pin key・metadata keyは対象外(構造的保護) |
 | `lifecycle show` | bucketの現在のlifecycle設定を表示 |
 | `lifecycle apply` | `{prefix}data/`一括の3rule(NCVE+MPU abort+期限切れdelete marker掃除)を適用(rule一式の置換・冪等)。値はすべてaws.toml `[aws.lifecycle]`から |
-| `index rebuild` | 索引をmanifest(`sys/manifests/`)から再構築(9.2)。完了時に続けての`index reconcile`実行を案内。`--config`必須 |
+| `index rebuild` | 索引をmanifest(`sys/manifests/`)から再構築(9.2)。完了時に続けての`index reconcile`実行を案内。旧schema manifest file record(schema≠3・label無し)検出時は設定エラー2で失敗(初期化と再pushが必要)。`--config`必須 |
 | `index reconcile` | lifecycle消滅版の索引整合。**dry-runが既定**(件数表示)。`--apply`でsweep記録+索引再構築(S3実在集合へ整合)。`--config`必須 |
 | `location rm` | 旧所在の明示除去(`--uuid`でentity絞込可。不在・複数hitは対象エラー3)。location_remove記録+索引再構築+metadata sync。S3・実体には触れない(再backupで所在は復活) |
 | `jobs reissue` | 復元jobの再発行(tier変更可。Tierのallowlist外はusage 64)。対象はobject keyで指定 |
@@ -550,7 +550,7 @@ amazing-backup docs [usage|config|llm <usage|skill|snippet>]
 | 0 | 成功 | 対象なし・全skip完結・復元job発行の案内(get/pull)も含む |
 | 1 | 内部エラー | 予期しない内部エラー(bug) |
 | 2 | 設定・環境エラー | toml不在・schema違反・recipient鍵不正・ageバイナリ不在・aws.toml不正・credentialファイル不在/不正・秘密鍵不在・versioning無効bucket・索引不在(9.2) |
-| 3 | 対象エラー | 対象ファイル不在・directory指定・拡張子対象外・重複・key長超過・索引上のtitle/uuid/版/pin不在・候補未特定(getの--pathなし等)・新規発行時のtitle無し(非tty)・write-once違反・sha不一致の既存平文(7.4) |
+| 3 | 対象エラー | 対象ファイル不在・directory指定・拡張子対象外・重複・key長超過・索引上のtitle/uuid/版/pin不在・候補未特定(getの--source-pathなし等)・新規発行時のtitle無し(非tty)・write-once違反・sha不一致の既存平文(7.4) |
 | 4 | 検証エラー | 取得object/復号平文のsha256不一致・verifyの検証不一致(検査対象ファイル欠損を含む) |
 | 5 | 転送エラー | S3 APIの失敗(認証・network含む)・索引GETの失敗 |
 | 64 | 使用法エラー | 引数誤り(不明オプション・PATH 0個・pullの範囲指定違反・`--tier`/pin名/日付形式不正等) |
@@ -698,7 +698,7 @@ get/pullは出力先の既存平文を保護する:
 $ amazing-backup manage index rebuild   # pipeline.tomlは規定path(2.2)
 ```
 
-`sys/manifests/`のmanifest(DEEP_ARCHIVE)から索引を再構築する。未復元manifestへはBulk復元jobを発行する(発行したら案内+終了0。**最大48時間の待ちの後に再実行**で継続)。開始時に費用の目安(7.3)が表示される。完了すると索引がPUTされ、以降の照会が復旧する(完了時に続けての`manage index reconcile`実行が案内される・5.10)。
+`sys/manifests/`のmanifest(DEEP_ARCHIVE)から索引を再構築する。未復元manifestへはBulk復元jobを発行する(発行したら案内+終了0。**最大48時間の待ちの後に再実行**で継続)。開始時に費用の目安(7.3)が表示される。完了すると索引がPUTされ、以降の照会が復旧する(完了時に続けての`manage index reconcile`実行が案内される・5.10)。旧schemaのmanifest file record(schema≠3・label無し)を検出した場合は設定エラー2で失敗する(分類labelを欠いた索引を作らず、初期化と再pushで作り直す)。
 
 それでも復旧しない場合: aws.tomlのbucket/prefixが正しいか確認する(エラー2の案内に含まれる)。aws cliによるS3側の直接確認(`aws s3api list-objects-v2 --bucket <bucket> --prefix <prefix>sys/`)は最後の手段。
 

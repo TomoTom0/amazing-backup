@@ -1,6 +1,7 @@
 //! registry.jsonl追記・読込・reduce(TASK-18設計3.2・5.3)。
-//! file系recordはschema=2(uuid/title入り・folder等廃止・deny_unknown_fieldsにより
-//! 旧schema1行はparse失敗。dev初期化でregistryごと消えるため互換層は不要)。
+//! file系recordはuuid/title入り・folder等廃止。file_writeはschema=3(TASK-20: label入り)・
+//! file_upload等はschema=2。deny_unknown_fieldsにより旧schema行はparse失敗
+//! (dev初期化でregistryごと消えるため互換層は不要)。
 
 use crate::errors::{BackupError, BackupResult};
 use std::collections::HashMap;
@@ -84,7 +85,7 @@ pub struct ManifestUploadRecord {
     pub uploaded_at: String,
 }
 
-/// `record_type: "file_write"`のレコード(TASK-18 schema=2)。
+/// `record_type: "file_write"`のレコード(TASK-20 schema=3・label入り)。
 /// 所在単位の記録(索引locations・metadata recipients導出の源)。
 /// uuid/title追加・folder廃止。identity_hashは所在skipの突合キーとして維持。
 /// s3_keyは`data/{uuid}/default.age`記録値。
@@ -112,8 +113,8 @@ pub struct FileWriteRecord {
     pub recipients: Vec<String>,
     /// 分類解決結果(所在記録値)
     pub category: String,
-    /// 正規化済みrel_path(空=なし。所在記録値)
-    pub rel_path: String,
+    /// 正規化済みlabel(空=なし。所在記録値)
+    pub label: String,
     /// sha256(realpath)先頭8hex(所在の突合キー)
     pub identity_hash: String,
     /// `data/{uuid}/default.age`記録値
@@ -1020,7 +1021,7 @@ mod tests {
     fn entity_title_latest_wins() {
         let fw = |uuid: &str, title: &str, at: &str| {
             Record::FileWrite(FileWriteRecord {
-                schema: 2,
+                schema: 3,
                 record_type: "file_write".into(),
                 recorded_at: at.into(),
                 batch_id: "b".into(),
@@ -1037,7 +1038,7 @@ mod tests {
                 age_sha256: "x".into(),
                 recipients: vec![],
                 category: "c".into(),
-                rel_path: "".into(),
+                label: "".into(),
                 identity_hash: format!("i{title}"),
                 s3_key: "k".into(),
             })

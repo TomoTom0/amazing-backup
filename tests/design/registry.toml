@@ -5,34 +5,42 @@
 #   新record_type(sweep/location_remove)・sha_uuid_lookup(合流正本・承認事項4)の条件群。
 #   dev初期化(設計8章)で旧registryは消去・prodは空のため旧schema1記録の互換層は不要(3.2)。
 #   実装前のため条件に対応するテストコードは未作成(網羅検査は後段のテスト作成で解消)。
+# 2026-10-25: TASK-20(分類語彙rel_path→label改名・schema 3化)対応でテスト先行の更新
+#   (tmp/tasks/tm-20/design_vocab-rename-label.md 1章・3.2・4章・6章)。
+#   廃止0件・新規0件・文言改訂2件(id不変): schema2-records-roundtrip(file_writeのみschema=3・label入りへ
+#   改訂・他recordのschema=2は維持記述)・old-schema-fields-rejected(拒否対象へ旧schema=2 file_write行
+#   (rel_path入り・label無し=deny_unknown_fieldsによるunknown field `rel_path`拒否)を追加。
+#   「missing field `label`」文言はtest契約にしない=終了code・行番号付きエラーの挙動で検証)。
+#   excludedへ旧registry/旧manifest残存環境の初期化手順(設計4章)を追加。
+#   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseへ戻す。
 
 [meta]
 feature = "registry"
 source_file = "src/registry.rs"
-verified = true
-verified_at = "2026-10-22"
-verified_by = "claude"
+verified = false
+verified_at = ""
+verified_by = ""
 test_command = "cargo test"
-source_hash = "3b3f17e6bd88a5be275a54b7c14ef5a063132c2c"
-note = "TASK-18(設計3.2・5.3本文)の条件化。registryは追記型JSONL(data/registry.jsonl・schema=2)。bucket一致規則(record_bucket_matched)は不変で、H-1/M-R1系の既存条件(cli.profile-namespace-isolated-by-bucket・index.pins-bucket-isolated等)がbucket分離の振る舞いを担保。registry読込の共通振る舞い(不正JSON行・torn write・未知record_type・read error伝播)はverifyエリアの既存条件が担保"
+source_hash = ""
+note = "TASK-18(設計3.2・5.3本文)の条件化。registryは追記型JSONL(data/registry.jsonl・TASK-20でfile_writeのみschema=3・他recordはschema=2)。bucket一致規則(record_bucket_matched)は不変で、H-1/M-R1系の既存条件(cli.profile-namespace-isolated-by-bucket・index.pins-bucket-isolated等)がbucket分離の振る舞いを担保。registry読込の共通振る舞い(不正JSON行・torn write・未知record_type・read error伝播)はverifyエリアの既存条件が担保"
 
 [[condition]]
 id = "registry.schema2-records-roundtrip"
-target_function = "registry::append_record / load_registry(schema2 record)"
-source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(registry schema 1→2・record単位)・5.3・10章(registry)"
-description = "schema2 recordのappend→load往復: file_write(+uuid,+title/削除folder・identity_hash維持)・file_upload(+uuid,+title/削除name,category,rel_path,identity_hash)・pin_write(+uuid/削除name,category,rel_path,folder)・pin_remove(+uuid/削除name)・prune(削除category,keep・deleted[]維持)の全fieldがserialize→parseで失われることなく復元される(s3_keyはdata/{uuid}/default.age記録値・Record enumへ正しく分類) (unit)"
-given = "5種のschema2 record(file_write・file_upload・pin_write・pin_remove・prune各1件)を含むregistryのappend→load往復"
-expect_return_shape = "全recordの全field(schema=2・record_type・uuid・title等の新field含む)がparse結果で失われず減reduceまで読み込まれる"
+target_function = "registry::append_record / load_registry(file_write schema3・他schema2 record)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(registry schema 1→2・record単位)・5.3・10章(registry)。TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md 1章・3.2・6章): rel_path→label改名・schema 3化(file_writeのみschema=3・label入り。他recordのschema=2は維持)"
+description = "recordのappend→load往復(TASK-20でfile_writeのみschema 3化): file_write(schema=3・uuid/title/label入り・identity_hash維持)・file_upload(schema=2・uuid/title入り)・pin_write(schema=2・uuid入り)・pin_remove(schema=2・uuid入り)・prune(schema=2・deleted[]維持)の全fieldがserialize→parseで失われることなく復元される(s3_keyはdata/{uuid}/default.age記録値・Record enumへ正しく分類) (unit)"
+given = "file_write(schema=3・label入り)1件とfile_upload/pin_write/pin_remove/prune(schema=2)各1件を含むregistryのappend→load往復"
+expect_return_shape = "全recordの全field(file_writeはschema=3・label含む。他recordはschema=2・record_type・uuid・title等)がparse結果で失われず減reduceまで読み込まれる"
 source_lines = "tests/registry_storage.rs:33"
 
 [[condition]]
 id = "registry.old-schema-fields-rejected"
 target_function = "registry::load_registry(deny_unknown_fields)"
-source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2・5.3(deny_unknown_fieldsにより旧schema1行はparse失敗。dev初期化でregistryごと消えるため互換層不要)"
-description = "旧schema1形式のrecord行(旧フィールドfolder/name等の混入・schema=1)はdeny_unknown_fieldsによりparse失敗となる(旧記録の互換読込・黙黙変換は行わない。失敗はverify.torn-write-and-bad-json-linesと同じ不正JSON行の扱い) (unit)"
-given = "旧schema1形式のfile_write行(folder入り・uuid/title無し・schema=1)を既知recordに混入したregistry"
-expect_return_shape = "当該行は行番号付きでparseエラー(ProcessError)となり、黙って読み飛ばされず変換もされない"
-source_lines = "src/registry.rs:938; tests/registry_storage.rs:155"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2・5.3(deny_unknown_fieldsにより旧schema1行はparse失敗。dev初期化でregistryごと消えるため互換層不要)。TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md 3.2・6章): rel_path→label改名・schema 3化(旧schema=2 file_write行の拒否case追加)"
+description = "旧schema1形式のrecord行(旧フィールドfolder/name等の混入・schema=1)はdeny_unknown_fieldsによりparse失敗となる(旧記録の互換読込・黙黙変換は行わない。失敗はverify.torn-write-and-bad-json-linesと同じ不正JSON行の扱い)。TASK-20のfile_write schema 3化に伴い、旧schema=2 file_write行(rel_path入り・label無し)もdeny_unknown_fieldsによりunknown field `rel_path`として同様に拒否される(拒否原因はunknown fieldであり「missing field `label`」文言はtest契約にしない=文言でなく終了code・行番号付きエラーの挙動で検証) (unit)"
+given = "旧schema1形式のfile_write行(folder入り・uuid/title無し・schema=1)と旧schema=2 file_write行(rel_path入り・label無し)を既知recordに混入したregistry"
+expect_return_shape = "いずれの混入行も行番号付きでparseエラー(ProcessError)となり、黙って読み飛ばされず変換もされない"
+source_lines = "src/registry.rs:939; tests/registry_storage.rs:160"
 
 [[condition]]
 id = "registry.sweep-location-remove-records"
@@ -41,7 +49,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(sweep/location_remov
 description = "新record_typeのparse/reduce: sweep={schema:1, record_type:\"sweep\", recorded_at, reason:\"lifecycle\", deleted:[{s3_key, version_id}]}(manage index reconcileの実行記録・索引再構築で消滅版を復活させない除外集合)・location_remove={schema:1, record_type:\"location_remove\", recorded_at, uuid, identity_hash, source_path}(manage location rmの実行記録)。reduce結果はReducedのsweeps/location_removesへ全件格納される (unit)"
 given = "sweep(deleted 2件)・location_remove各1行を含むregistryのloadとreduce"
 expect_return_shape = "両record_typeが既知種として読み込まれ(未知record_type警告なし)、Reducedのsweeps/location_removesに全件格納される"
-source_lines = "src/registry.rs:915; tests/registry_storage.rs:198"
+source_lines = "src/registry.rs:916; tests/registry_storage.rs:231"
 
 [[condition]]
 id = "registry.sha-uuid-lookup-resolves-unique"
@@ -50,7 +58,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(Reducedへの追加�
 description = "sha_uuid_lookup(合流正本・承認事項4): file_uploadsからbucket一致する同source_sha256記録のuuid集合を作り、1件ならそのuuidを返す。bucket一致はrecord_bucket_matchedと同一規則(記録s3_bucket欠損の空文字は正本bucket相当) (unit)"
 given = "実効bucket=正本bucketのregistryに同shaのbucket一致file_uploadが1件だけ存在する状態でのlookup"
 expect_return = "当該uuidのSome(uuid)"
-source_lines = "src/registry.rs:958; tests/registry_storage.rs:280"
+source_lines = "src/registry.rs:959; tests/registry_storage.rs:313"
 
 [[condition]]
 id = "registry.sha-uuid-lookup-multiple-picks-min-uuid"
@@ -59,7 +67,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(複数(歴史的重�
 description = "同一shaがbucket一致する複数uuidに存在する(歴史的重複)場合は辞書順最小uuidを返す(合流先を決定的にする) (unit)"
 given = "同shaのbucket一致file_uploadがuuid昇順でuuid-b・uuid-aの2件存在する状態でのlookup"
 expect_return = "uuid-a(辞書順最小)のSome"
-source_lines = "src/registry.rs:959; tests/registry_storage.rs:332"
+source_lines = "src/registry.rs:960; tests/registry_storage.rs:365"
 
 [[condition]]
 id = "registry.sha-uuid-lookup-bucket-scoped"
@@ -68,11 +76,18 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2・10章(registry: bu
 description = "lookupのuuid集合はbucket一致で分離される: 他方bucketの同sha記録は不採用(同一prefix・別bucket構成で他bucket実績へ合流しない)。s3_bucket欠損(空文字)の旧記録相当は正本bucket解釈(record_bucket_matchedと同一規則)で、実効bucket=正本bucketの実行でのみ採用される (unit, fake S3Backend)"
 given = "dev(active_profile=正本)とprodが同一prefix・別bucketの構成で、(1)同shaのfile_uploadがprod bucket側のみ存在する状態でのdev実効bucketでのlookup (2)同shaのfile_upload(s3_bucket空文字)が存在する状態でのdev・prod各実効bucketでのlookup"
 expect_return_shape = "(1)None(他方bucket記録は不採用) (2)正本bucket(dev)側はSome・prod側はNone"
-source_lines = "src/registry.rs:960; tests/registry_storage.rs:398"
+source_lines = "src/registry.rs:961; tests/registry_storage.rs:431"
 
 [[excluded]]
 item = "registry喪失(索引はS3に残る)からの回復操作(manage index rebuildで索引をmanifest基準へ現状化したうえで重複実体の不要側をprune・手動deleteで回収)"
 source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 4.3(境界条件表 registry喪失行)"
 reason = "運用手順(設計は回復手段を記載するが自動化しない)。registry喪失時に合流できず重複uuidを発行する許容挙動自体はcli.backup-push-registry-loss-new-uuidで条件化"
 decided_at = "2026-10-22"
+decided_by = "claude"
+
+[[excluded]]
+item = "旧registry/旧manifest残存環境の初期化手順(旧binary(v0.1.0)でmanage reset --apply→configの[files] key書換→0.2.0適用の順序遵守)"
+source = "TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md)4章(実装前確認事項・実行順序)"
+reason = "実環境の運用手順であり検証対象コードの振る舞い条件ではない。旧形式file_write行が新binaryでparse失敗すること自体はregistry.old-schema-fields-rejected・旧schema索引の拒否はindex.parse-failure-guides-rebuildでそれぞれ担保済み"
+decided_at = "2026-10-25"
 decided_by = "claude"

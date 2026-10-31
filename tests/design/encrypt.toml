@@ -27,15 +27,21 @@
 # 2026-10-23: TASK-19(XDG配置移行)対応でテスト先行の更新(TASK-19 body)。
 #   文言改訂2件(id不変): reencrypt-without-registry-record・skip-by-registry-record
 #   (data/out→XDG cache dir(暗号化一時物dir)の語彙へ)。
+# 2026-10-25: TASK-20(分類語彙rel_path→label改名・schema 3化)対応でテスト先行の更新
+#   (tmp/tasks/tm-20/design_vocab-rename-label.md 1章・3.2/3.3・6章)。
+#   廃止0件・新規0件・文言改訂2件(id不変): registry-append-fields(file_write schema=3・label)・
+#   manifest-content-roundtrip(manifest file record schema=3・label・build_manifest_v3。
+#   batch header行のschema=2は据え置き)。
+#   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseへ戻す。
 
 [meta]
 feature = "encrypt"
 source_file = "src/crypto.rs"
-verified = true
-verified_at = "2026-10-23"
-verified_by = "claude"
+verified = false
+verified_at = ""
+verified_by = ""
 test_command = "cargo test"
-source_hash = "b06e73e581cb55ea8d886a5a3edfa802d0f60b11"
+source_hash = ""
 note = "暗号化経路(crypto.rs)・registry記録・manifest構築の条件群。TASK-11(Phase B)で旧encryptサブコマンドが削除され、暗号化はbackup push(暗号化→upload→manifest→索引更新の統合run)経路で検証する。(integration)は実ageバイナリ前提(設計8章)"
 
 [[condition]]
@@ -126,24 +132,24 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-011(規則は2.2-2�
 description = "sourceのsize/mtime変化時は再暗号化(平文sha256入手)のうえsha照合へ進み、内容同一なら既存uuidへ合流: default.ageへのuploadなし・版増加なしでfile_write新記録が追記されreduce後勝ちになる(次回から所在skipが回復) (integration)"
 given = "過去file_write記録がある対象のsize/mtimeを変更(内容不変: mtimeのみ変化を含む)して backup push 再実行"
 expect_return_shape = "再暗号化されsha照合で合流し、default.ageへのPUTは行われず(版増加なし)、reduce後の状態で新記録が有効(age_sha256等が新値・旧記録は参照されない)"
-source_lines = "src/registry.rs:859; tests/encrypt_batch.rs:192"
+source_lines = "src/registry.rs:860; tests/encrypt_batch.rs:192"
 
 [[condition]]
 id = "encrypt.registry-append-fields"
 target_function = "registry::append_record(file_write記録)"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-012(record schemaは4.1)。TASK-11(Phase B): 旧encrypt削除により新経路event(file_write)の記録schemaへ文言改訂(設計7.3新record_type)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(registry schema 1→2)): file_write schema2へ改訂"
-description = "暗号化成功時にregistryへfile_write記録が1行appendされる(フィールド型・JST時刻を含む。schema=2・uuid/title入り) (integration)"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-012(record schemaは4.1)。TASK-11(Phase B): 旧encrypt削除により新経路event(file_write)の記録schemaへ文言改訂(設計7.3新record_type)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(registry schema 1→2)): file_write schema2へ改訂。TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md 1章・3.2・6章): rel_path→label改名・schema 3化(file_write schema=3・label入り)"
+description = "暗号化成功時にregistryへfile_write記録が1行appendされる(フィールド型・JST時刻を含む。schema=3(TASK-20)・uuid/title/label入り) (integration)"
 given = "backup pushでの1件の暗号化成功(新規発行)"
-expect_return_shape = "1行JSONがappendされ schema=2・record_type=file_write・recorded_at(+09:00付きISO8601 JST)・batch_id・uuid・title・source_path/source_size/source_mtime・source_sha256(hex 64桁)・age_path/age_size/age_sha256・recipients・category/rel_path/identity_hash・s3_key=data/{uuid}/default.ageが設計3.2のschemaどおり(folderは廃止)"
+expect_return_shape = "1行JSONがappendされ schema=3・record_type=file_write・recorded_at(+09:00付きISO8601 JST)・batch_id・uuid・title・source_path/source_size/source_mtime・source_sha256(hex 64桁)・age_path/age_size/age_sha256・recipients・category/label/identity_hash・s3_key=data/{uuid}/default.ageが設計3.2のschemaどおり(folderは廃止)"
 source_lines = "tests/encrypt_batch.rs:41"
 
 [[condition]]
 id = "encrypt.manifest-content-roundtrip"
-target_function = "manifest::build_manifest_v2 / manifest::write_manifest"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-013(manifest仕様は4.3・2.2-6)。TASK-11(Phase B): 旧encrypt削除によりbackup push(run単位manifest)経路へ文言改訂(設計8.1)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 3.3(manifest V2・schema 1→2)): file record schema2へ改訂"
-description = "runのmanifest(V2・schema=2)が暗号化生成され、復号するとバッチヘッダ+ファイルレコードが正しい。file recordはuuid/title追加・identity_hash/folder削除で、name/category/rel_path/source_pathは所在記録として維持(index rebuildのlocations源)・s3_key(data/{uuid}/default.age)・version_id・sha類・size類・date・version_ts・batch_idは維持 (integration)"
+target_function = "manifest::build_manifest_v3 / manifest::write_manifest"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-013(manifest仕様は4.3・2.2-6)。TASK-11(Phase B): 旧encrypt削除によりbackup push(run単位manifest)経路へ文言改訂(設計8.1)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 3.3(manifest V2・schema 1→2)): file record schema2へ改訂。TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md 1章・3.3・6章): rel_path→label改名・schema 3化(manifest file record schema=3・ManifestV3File/build_manifest_v3へ改称。batch header行のschema=2は据え置き)"
+description = "runのmanifest(file record schema=3・ManifestV3File/build_manifest_v3)が暗号化生成され、復号するとバッチヘッダ+ファイルレコードが正しい。file recordはuuid/title追加・identity_hash/folder削除(TASK-18)で、name/category/label/source_pathは所在記録として維持(TASK-20でrel_path→label・index rebuildのlocations源)・s3_key(data/{uuid}/default.age)・version_id・sha類・size類・date・version_ts・batch_idは維持 (integration)"
 given = "2件の暗号化成功(title指定)を含む backup push 実行後、manifest.jsonl.age を復号"
-expect_return_shape = "batchヘッダ(record_type=batch・schema=2・file_count=2・total_source_size・recipients)とfileレコード2行がregistry記録と一致し、各file recordがuuid・title・所在記録(name/category/rel_path/source_path)・実s3_key(data/{uuid}/default.age)・version_idを含む"
+expect_return_shape = "batchヘッダ(record_type=batch・schema=2・file_count=2・total_source_size・recipients)とfileレコード2行(schema=3)がregistry記録と一致し、各file recordがuuid・title・所在記録(name/category/label/source_path)・実s3_key(data/{uuid}/default.age)・version_idを含む"
 source_lines = "tests/encrypt_batch.rs:281"
 
 [[condition]]
@@ -153,7 +159,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-014(規則は2.2・7
 description = "--keep-going で一部失敗しても成功分のregistry/manifestが作られ、exitは最初のエラー区分になる(backup pushの暗号化段階) (integration)"
 given = "成功1件+失敗1件(読込不能な対象等)を backup push --keep-going で実行"
 expect_return_shape = "成功分のregistry記録・manifestが作成され、exit codeは最初に発生したエラーの区分"
-source_lines = "tests/encrypt_batch.rs:385"
+source_lines = "tests/encrypt_batch.rs:394"
 
 [[condition]]
 id = "encrypt.keep-going-manifest-success-only"
@@ -162,7 +168,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-015(規則は2.2-6)�
 description = "--keep-going 時のmanifestには成功分のみ含まれる(backup pushのmanifest) (integration)"
 given = "成功1件+失敗1件の backup push --keep-going 実行後の manifest を復号"
 expect_return_shape = "manifestのfileレコードは成功1件のみ(失敗対象を含まない)"
-source_lines = "tests/encrypt_batch.rs:388"
+source_lines = "tests/encrypt_batch.rs:397"
 
 [[condition]]
 id = "encrypt.large-stream-no-deadlock"
@@ -180,7 +186,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 8.1(registry.rs行)・8.3・9章�
 description = "encrypt skip判定のregistry基準化: skip条件はfile_write成功記録一致(identity_hash+size+mtime)かつfile_upload記録が存在(u.uuid == w.uuid照合+bucket一致。現行のs3_key==p.s3_key比較の置換=所在skipはuuid解決を要しないregistry側uuid照合)。.age不在でもskipされる(cache dir掃除(keep_artifacts=\"run\")後の再実行で重複暗号化が起きない)。file_write一致でもfile_upload無し(crash残存)はskipせず(2.5)再PUT分岐へ進む(振る舞いはcli.backup-push-crash-reput-same-uuidで担保) (unit)"
 given = "file_write成功記録+file_upload記録(uuid一致・bucket一致)がありcache dirの当該.ageが削除済みの状態でのbackup push再実行"
 expect_return_shape = "当該対象はskip表示され、平文read・age実行・registry追記なし"
-source_lines = "tests/storage_backup.rs:771"
+source_lines = "tests/storage_backup.rs:781"
 
 [[excluded]]
 item = "8章末尾注記: integrationはage実バイナリ前提(実行環境に無ければ当該testをskip扱い)"
