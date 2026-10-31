@@ -436,7 +436,7 @@ fn cmd_backup_push(
                     title: title.clone(),
                     name: p.target.source_name.clone(),
                     category: p.category.clone(),
-                        label: p.label.clone(),
+                    label: p.label.clone(),
                     source_path: p.target.source_path.display().to_string(),
                     s3_key: key.clone(),
                     version_id: vid.clone(),

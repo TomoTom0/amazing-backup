@@ -1695,14 +1695,7 @@ fn removed_options_are_rejected_with_usage_error() {
         ),
         (
             "get --path(TASK-20改名前の旧flag)",
-            vec![
-                "get",
-                "dup",
-                "--path",
-                &dup_src_s,
-                "--out",
-                &get_out_s,
-            ],
+            vec!["get", "dup", "--path", &dup_src_s, "--out", &get_out_s],
         ),
     ];
     let cfg_s = fx.cfg.display().to_string();

@@ -42,16 +42,40 @@
 #   metadata-latest-source-path-valuesは影響なし(latest_source_path維持)。
 #   excludedへ実運用config(repo外)の[files] key書換対応を追加。
 #   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseへ戻す。
+# 2026-10-29: TASK-1(config initコマンド新設)対応でテスト先行の更新
+#   (TASK-1 body + tmp/tasks/tm-1/design_config_init.md 3章・3.8条件書草案)。
+#   新規6件: init-generates-under-resolved-paths・init-templates-from-example・
+#   init-existing-files-not-overwritten・init-exclusive-create-and-rollback・
+#   init-credential-template-empty-and-private・init-stdout-artifacts-and-next-steps。
+#   excluded 2件追加(usage誤り64はcli.usage-error-exit-64が共通cover・docs置換はdocs更新)。
+#   実装前のため新条件のテストは実行fail・lib直呼びunit(tests/config_init_unit.rs)は
+#   compile errorを許容。[meta].verifiedはfalseへ戻す(design doc 3.8条件書運用)。
+#   関連する既存条件の文言改訂(id不変): default-config-missing-guidance
+#   (規定path不在時の案内を「repoのconfigs/*.example.tomlをcopy」から
+#   「amazing-backup config initで生成」へ。案内文はtemplate正本のrepo pathを併記)。
+# 2026-10-29: TASK-1実装のコードレビュー指摘対応でテスト強化・文言改訂(id不変):
+#   init-templates-from-example(置換対象をcredentials_file値行限定=コメント保持・
+#   実改行/Unicode制御文字/marker含みpath/非UTF-8・劣化templateのキー欠落/型不正/
+#   空profiles/parse失敗の各観測へ拡張)・
+#   init-exclusive-create-and-rollback(EEXIST競合fileの実際配置と内容保持・
+#   排他作成成功後の部分書込file後始末・新規dir不在の徹底・既存空dir保持)・
+#   init-credential-template-empty-and-private(権限観測をumask 022明示の独立testへ分離)。
+#   実装(src/config.rs)も変わるため[meta].verifiedはfalseへ戻し全件pass後に記録する。
+# 2026-10-29: TASK-4(docsサブコマンド新設)の影響で文言改訂(id不変):
+#   init-stdout-artifacts-and-next-stepsのdocs参照をGitHub URLから
+#   `amazing-backup docs usage`・`docs config`案内へ改訂(config init成功案内のdocs参照が
+#   TASK-4のdocsコマンドへ置き換わった分。src/config.rsの案内文とtests/config_init.rsの
+#   assertを同時更新。INIT_*_TEMPLATEのpub(crate)化はdocs.rsからの共用で条件の対象外)。
 
 [meta]
 feature = "config"
 source_file = "src/config.rs"
-verified = false
-verified_at = ""
-verified_by = ""
+verified = true
+verified_at = "2026-10-31"
+verified_by = "claude"
 test_command = "cargo test"
-source_hash = ""
-note = "CONF-005(from-list)は targets::parse_from_list が実体。source_fileはエリアの主対象(src/config.rs)を指し、実関数はtarget_functionで特定する。TASK-9でload_credentials(src/config.rs新設)が追加され、credential系条件(CONF-009〜012)もsrc/config.rsが実体"
+source_hash = "50515a7e93d1f8d06df0614f150d55f56af0e5ad"
+note = "CONF-005(from-list)は targets::parse_from_list が実体。source_fileはエリアの主対象(src/config.rs)を指し、実関数はtarget_functionで特定する。TASK-9でload_credentials(src/config.rs新設)が追加され、credential系条件(CONF-009〜012)もsrc/config.rsが実体。TASK-1のconfig init実装(cmd_config_init系)もsrc/config.rsが実体。2026-10-29 TASK-4でinit成功案内のdocs参照更新(docs usage案内)+INIT_*_TEMPLATE pub(crate)化に伴い全件pass確認のうえsource_hashを更新"
 
 [[condition]]
 id = "config.xdg-default-paths"
@@ -60,7 +84,7 @@ source = "TASK-19 body(XDG配置への移行・設計確定2026-10-23)"
 description = "規定path解決(XDG準拠・env未指定時の既定): 設定dirは$XDG_CONFIG_HOME/amazing-backup/(未設定なら~/.config/amazing-backup/)配下のpipeline.toml・aws.toml。registryは$XDG_STATE_HOME/amazing-backup/registry.jsonl(未設定なら~/.local/state/amazing-backup/registry.jsonl。dirが無ければregistry書込時に作成)。暗号化一時物dirは$XDG_CACHE_HOME/amazing-backup/(未設定なら~/.cache/amazing-backup/)。XDG_*_HOMEは絶対pathのみ有効(空値・相対pathは未指定扱い=XDG base directory仕様準拠) (unit)"
 given = "XDG_CONFIG_HOME/XDG_STATE_HOME/XDG_CACHE_HOMEに絶対pathを設定した環境と、未設定・空値・相対pathの各環境での規定path解決"
 expect_return_shape = "絶対path設定時は$XDG_*_HOME配下のamazing-backup/...へ解決され、未設定・空値・相対path時は~/.config等のhome配下の既定へ解決される"
-source_lines = "src/config.rs:919"
+source_lines = "src/config.rs:1251"
 
 [[condition]]
 id = "config.abh-home-override"
@@ -69,15 +93,15 @@ source = "TASK-19 body(AMAZING_BACKUP_HOME一括上書き・テスト/CI用)"
 description = "AMAZING_BACKUP_HOME(一括上書き・テスト/CI用)指定時は規定pathをすべて$ABH配下へ統合($ABH/pipeline.toml・$ABH/aws.toml・$ABH/registry.jsonl・$ABH/cache/)。XDG_*_HOMEより優先する(指定時はXDG系envは無視)。空値は未指定扱い (unit)"
 given = "AMAZING_BACKUP_HOMEに絶対pathを設定した環境(XDG_*_HOME併設定含む)と空値の環境での規定path解決"
 expect_return_shape = "設定時は$ABH配下の4path(pipeline.toml・aws.toml・registry.jsonl・cache/)へ統合され、空値時はXDG規定へ解決される"
-source_lines = "src/config.rs:1002"
+source_lines = "src/config.rs:1334"
 
 [[condition]]
 id = "config.default-config-missing-guidance"
 target_function = "config::load_pipeline / config::load_aws(規定path不在時の案内)"
-source = "TASK-19 body(XDG配置・初回セットアップ案内)"
-description = "設定fileが規定pathに無い場合(--config/--aws-config省略時の既定path解決先にfileが無い)は設定エラー2+案内表示: repoのconfigs/aws.example.toml(aws.toml側)・configs/pipeline.example.toml(pipeline.toml側)を規定pathへcopyして記述する旨と--config/--aws-configによる明示指定が可能な旨。--config/--aws-configで明示指定したpathの不在は従来どおりpathのみの設定エラー2(copy案内無し) (integration)"
+source = "TASK-19 body(XDG配置・初回セットアップ案内)。TASK-1(config init新設)で案内をcopyから生成へ改訂"
+description = "設定fileが規定pathに無い場合(--config/--aws-config省略時の既定path解決先にfileが無い)は設定エラー2+案内表示: amazing-backup config init で設定file群(pipeline.toml・aws.toml・credential雛形)を規定pathへ生成する旨(template正本のrepo path configs/*.example.tomlの併記付き)と--config/--aws-configによる明示指定が可能な旨。--config/--aws-configで明示指定したpathの不在は従来どおりpathのみの設定エラー2(生成案内無し) (integration)"
 given = "AMAZING_BACKUP_HOME配下にpipeline.toml・aws.tomlを置かない状態での backup verify(規定pipeline.toml読込経路)と list files(規定aws.toml読込経路)の各実行、および--config/--aws-configで不在pathを明示指定した実行"
-expect_return_shape = "規定path不在はいずれも exit 2+copy案内表示(configs/pipeline.example.toml・configs/aws.example.tomlの語を含む)。明示指定の不在は exit 2(copy案内無し)"
+expect_return_shape = "規定path不在はいずれも exit 2+config initによる生成案内表示(config initの語を含む)。明示指定の不在は exit 2(生成案内無し)"
 source_lines = "tests/config_storage.rs:321"
 
 [[condition]]
@@ -87,7 +111,7 @@ source = "TASK-19 body(XDG配置: [output]section廃止・registry/out pathはXD
 description = "[output]sectionは廃止: pipeline.tomlに[output]が存在したら設定エラー2(deny_unknown_fieldsによる未知キー扱いで静的に廃止を確定。registry・暗号化一時物dirのpathはXDG規定path固定で設定fileからは指定不可・env上書きのみ)。keep_artifactsは[behavior].keep_artifactsへ移設(config.keep-artifacts-enum) (unit)"
 given = "[output]を含むpipeline.toml(dir/registry/keep_artifactsの各キー)"
 expect_throw = "ConfigError(exit code 2)"
-source_lines = "src/config.rs:1041; tests/config_storage.rs:293"
+source_lines = "src/config.rs:1373; tests/config_storage.rs:293"
 
 [[condition]]
 id = "config.pipeline-toml-invalid-error"
@@ -96,7 +120,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-001(検証規則は
 description = "pipeline.toml不在・TOML parseエラー・未知キー・型不一致は設定エラー (unit)"
 given = "不在path・不正TOML・未知キー・型不一致(public_keysに文字列等)の4ケース"
 expect_throw = "ConfigError(exit code 2)"
-source_lines = "src/config.rs:1070"
+source_lines = "src/config.rs:1402"
 
 [[condition]]
 id = "config.recipient-keys-validation"
@@ -105,7 +129,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-002(検証規則は
 description = "public_keys空配列・鍵ファイル不在・ssh-ed25519以外の形式は設定エラー (unit)"
 given = "空配列・存在しないpath・ssh-rsa形式鍵を指定した3ケース"
 expect_throw = "ConfigError(exit code 2)"
-source_lines = "src/config.rs:1111"
+source_lines = "src/config.rs:1443"
 
 [[condition]]
 id = "config.aws-required-on-upload"
@@ -114,7 +138,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-003(schemaは3.3)�
 description = "aws.toml不在・bucket/region空・credentials_fileキー欠落でS3書込み系(backup push等)を開始すると設定エラー2(案内文付き)・S3 API呼び出しは一切行われない。require_readyはcredentialファイルの存在・parse・値検査まで含めて事前検査とする(aws CLIのPATH検査は廃止) (unit, fake seam)"
 given = "aws.toml不在・bucket/region空・credentials_file無しの各状態で backup push を実行(S3実行はfake差替)"
 expect_throw = "ConfigError(exit code 2。案内文付き)。S3 API呼び出しは行われない"
-source_lines = "src/config.rs:1291"
+source_lines = "src/config.rs:1623"
 
 [[condition]]
 id = "config.aws-credential-keys-rejected"
@@ -123,7 +147,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-004(schemaは3.3)�
 description = "aws.tomlの[aws]にcredentials_fileを除くcredential系キー(access_key_id等の値直書き)は書けない(schemaに該当キーが存在せず未知キーエラーとなり結果的に拒否。credentialはcredentials_fileによる外部ファイル明示参照のみ) (unit)"
 given = "credentials_fileとaccess_key_id(値直書き)を併記した aws.toml"
 expect_throw = "ConfigError(exit code 2)"
-source_lines = "src/config.rs:1187"
+source_lines = "src/config.rs:1519"
 
 [[condition]]
 id = "config.from-list-schema-validation"
@@ -141,7 +165,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-006(検証規則は
 description = "public_keys 内の公開鍵指紋(SHA256:...)の重複は設定エラー。同一pathの重複指定・異pathで同一鍵blobを指す場合のいずれも検出する(1-of-N重複暗号化は設定ミス扱い) (unit)"
 given = "同一pathを2回列挙したケースと、同一鍵blobを異path(copy)に置いて列挙したケース"
 expect_throw = "ConfigError(exit code 2)"
-source_lines = "src/config.rs:1153"
+source_lines = "src/config.rs:1485"
 
 [[condition]]
 id = "config.storage-class-allowlist"
@@ -150,7 +174,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-007(2026-10-08レ�
 description = "storage_classは既知S3 storage class(STANDARD/STANDARD_IA/ONEZONE_IA/INTELLIGENT_TIERING/GLACIER/DEEP_ARCHIVE/GLACIER_IR)のallowlist検証を行う。allowlist外の値(打ち間違い等)は設定エラー2。空文字は既定DEEP_ARCHIVE (unit)"
 given = "storage_class = \"DEEP_ARCHIV\"(打ち間違い)のaws.tomlと、許容値(GLACIER等)・空文字を指定したaws.toml"
 expect_return_shape = "allowlist外は ConfigError(exit code 2)。許容値はそのまま読込まれ、空文字は DEEP_ARCHIVE となる"
-source_lines = "src/config.rs:1236"
+source_lines = "src/config.rs:1568"
 
 [[condition]]
 id = "config.aws-bucket-region-whitespace-rejected"
@@ -159,7 +183,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-008(2026-10-09レ�
 description = "aws.tomlの[aws].bucket/[aws].region前後空白付き値(例: \" my-bucket \")は設定エラー2(値はtrimせずそのまま使う仕様のため、quote漏れ等の打ち間違いとして弾く。CLI一時上書き値の--bucket/--regionも同一基準・UPL-018) (unit)"
 given = "bucket・regionのいずれかに前後空白付き値を指定したaws.tomlと、空白なしの値を指定したaws.toml"
 expect_return_shape = "前後空白付きは ConfigError(exit code 2)。空白なしはそのまま(trimされず)読み込まれる"
-source_lines = "src/config.rs:1435"
+source_lines = "src/config.rs:1767"
 
 [[condition]]
 id = "config.aws-credentials-file-required"
@@ -168,7 +192,7 @@ source = "TASK-9 SDK移行設計 3.3・9.2(tmp/tasks/tm-9/design_sdk_migration.m
 description = "aws.tomlの[aws].credentials_fileキー(credentialファイルpath)は必須キー。pathの相対解決はcwd基準(TASK-19 XDG配置後も維持。--aws-config自体の既定pathはXDG規定path)。キー欠落・空値は設定エラー2(明示的に与えたAPI keyという要件に合致し、書き漏れを即検出) (integration, fake seam)"
 given = "credentials_fileキーを書かないaws.toml・空値を書いたaws.tomlでbackup push実行"
 expect_return_shape = "いずれも exit 2(設定エラー)。S3 API呼び出しは行われない"
-source_lines = "src/config.rs:1224; tests/s3_backend.rs:66"
+source_lines = "src/config.rs:1556; tests/s3_backend.rs:66"
 
 [[condition]]
 id = "config.credentials-file-schema"
@@ -177,7 +201,7 @@ source = "TASK-9 SDK移行設計 3.1・3.2(tmp/tasks/tm-9/design_sdk_migration.m
 description = "credentialファイルschema: [credentials]テーブル配下はaccess_key_id/secret_access_key必須・session_token省略可(一時credential用)・deny_unknown_fields(未知キー拒否)。TOML parse失敗・[credentials]テーブル不在・必須キー欠落・空値・前後空白付き値は設定エラー2。session_token省略時も正常動作する (integration, fake seam)"
 given = "正しい形式(session_token省略)のcredentialファイルと、不正TOML・未知キー・access_key_id欠落・空値・前後空白付き値の各credentialファイルでbackup push実行"
 expect_return_shape = "正しい形式はexit 0(S3 API呼び出しまで到達)。不正系はいずれも exit 2(設定エラー)"
-source_lines = "src/config.rs:1343; tests/s3_backend.rs:90"
+source_lines = "src/config.rs:1675; tests/s3_backend.rs:90"
 
 [[condition]]
 id = "config.credentials-fail-closed"
@@ -186,7 +210,7 @@ source = "TASK-9 SDK移行設計 3.5(tmp/tasks/tm-9/design_sdk_migration.md 3章
 description = "fail-closed: credentials_fileが指すcredentialファイル不在・読込不能は設定エラー2で、credential chain(IMDS/env/~/.aws)へのfallbackは一切行わない(誤って別環境のcredentialで意図しないAWS accountへ接続する事故を構造的に防止) (integration, fake seam)"
 given = "credentials_fileに不在pathを指定したaws.tomlでbackup push実行"
 expect_return_shape = "exit 2(設定エラー)。fallbackせず失敗し、S3 API呼び出しは行われない"
-source_lines = "src/config.rs:1421; src/s3.rs:2051; tests/s3_backend.rs:163"
+source_lines = "src/config.rs:1753; src/s3.rs:2051; tests/s3_backend.rs:163"
 
 [[condition]]
 id = "config.credentials-value-not-leaked"
@@ -204,7 +228,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 4.1(pipeline.toml拡張)・4.2(�
 description = "[layout]/[files]の検証(設定エラー2): auto_path_rootsは絶対path・files.categoryと[layout].unfiled_categoryはvalidate_category_nameによる文字列検証のみ([categories]定義存在検証は廃止・category語彙は記録値として自由化)・category名規則違反・予約語sys(_sys旧表記含む)はlayout.category-name-validationと同一検証・[files.<basename>]のschema keyはlabelで(TASK-20で旧path keyから改名)label値はnormalize_label検証(エラー文は[files.{name}].labelが不正です)。FileMappingFileはdeny_unknown_fieldsのため旧path keyの存在は未知keyとして設定エラー2。keepの検証(1..=100)はaws.toml [aws.lifecycle]側へ移行(config.aws-lifecycle-required-and-ranged)。files写像のsys衝突検証は廃止済み(TASK-18でpath_collides_reserve削除) (unit)"
 given = "auto_path_rootsに相対path・files.categoryの規則違反値(_sys・BadName)・unfiled_categoryの規則違反値の各pipeline.toml、[files.<basename>]に旧key path(labelの代わり)を書いたpipeline.toml、および従来拒否されていたfiles.categoryの[categories]未定義値(新仕様では文字列検査を通るため受理)"
 expect_return_shape = "相対path・規則違反・予約語は ConfigError(exit code 2)。旧path keyはdeny_unknown_fieldsの未知keyとして ConfigError(exit code 2)。未定義category値は受理される"
-source_lines = "src/config.rs:1493; tests/config_storage.rs:169"
+source_lines = "src/config.rs:1825; tests/config_storage.rs:169"
 
 [[condition]]
 id = "config.aws-profile-prefix"
@@ -213,7 +237,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 4.2(aws.toml再設計)・1.1(root
 description = "aws.tomlのprofile毎prefix: prefixはaws.tomlのprofile毎に持つ(共用bucketでの名前空間分離・専用bucketでも維持)。形式(空でない・/終端・先頭/禁止・[a-z0-9-]区切り/)の検証はlayout.prefix-format-validationと同一規則で設定エラー2 (unit)"
 given = "prefix形式違反(末尾スラッシュなし等)の[aws.profiles.X]を含むaws.tomlと、適正なprefixを含むaws.toml"
 expect_return_shape = "形式違反は ConfigError(exit code 2)。適正値は当該profileのprefixとして読み込まれる"
-source_lines = "src/config.rs:1641"
+source_lines = "src/config.rs:1973"
 
 [[condition]]
 id = "config.keep-artifacts-enum"
@@ -222,7 +246,7 @@ source = "tmp/tasks/tm-10/design_s3_storage.md 4.1([output].keep_artifacts)・4.
 description = "keep_artifactsは[behavior].keep_artifacts(TASK-19 XDG配置で[output]廃止に伴う移設)の列挙値 \"run\"(既定: run成功後削除)|\"always\"(全保持)。その他の値は設定エラー2 (unit)"
 given = "keep_artifacts = \"run\"・\"always\"・\"monthly\"(不正値)・キー省略の各pipeline.toml([behavior]配下に記述)"
 expect_return_shape = "run/alwaysは読み込まれ(省略時はrun既定)、不正値は ConfigError(exit code 2)"
-source_lines = "src/config.rs:1743"
+source_lines = "src/config.rs:2075"
 
 [[condition]]
 id = "config.keep-artifacts-run-cleanup"
@@ -240,7 +264,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 2.2(latest_source_path�
 description = "[metadata].latest_source_pathは列挙値 \"plain\"(既定)|\"encrypted\"|\"none\"。その他の値は設定エラー2。キー・セクション省略時はplain(設計判断: 検討書案Bの掲載推奨を既定とする。bucketはprivate前提) (unit)"
 given = "latest_source_path = \"plain\"・\"encrypted\"・\"none\"・\"monthly\"(不正値)・キー省略([metadata]自体の省略含む)の各pipeline.toml"
 expect_return_shape = "3値は読み込まれ(省略時はplain既定)、不正値は ConfigError(exit code 2)"
-source_lines = "src/config.rs:1600; tests/config_storage.rs:11"
+source_lines = "src/config.rs:1932; tests/config_storage.rs:11"
 
 [[condition]]
 id = "config.categories-section-rejected"
@@ -258,7 +282,61 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 7章(lifecycle設定詳�
 description = "[aws.lifecycle]の3キー(noncurrent_days・keep_versions・mpu_abort_days)はすべて必須(省略は設定エラー2・コード内defaultなし=ハードコード禁止の徹底)。範囲検証: keep_versionsは1..=100(S3仕様NewerNoncurrentVersionsの上限)・noncurrent_daysは1以上・mpu_abort_daysは1以上。当該profileのstorage_class=DEEP_ARCHIVEでnoncurrent_days<180の場合は設定エラー2(Deep Archive最低保存180日未満の早期削除を構造的に排除) (unit)"
 given = "3キー各種の欠落・keep_versions=0/101・noncurrent_days=0・mpu_abort_days=0・DEEP_ARCHIVE profileでnoncurrent_days=179の各aws.tomlと、適正値(180/10/7)のaws.toml"
 expect_return_shape = "欠落・範囲外・DEEP_ARCHIVEでnoncurrent_days=179は ConfigError(exit code 2)。適正値は読み込まれる"
-source_lines = "src/config.rs:1674; tests/config_storage.rs:85"
+source_lines = "src/config.rs:2006; tests/config_storage.rs:85"
+
+[[condition]]
+id = "config.init-generates-under-resolved-paths"
+target_function = "config::cmd_config_init"
+source = "TASK-1 body + tmp/tasks/tm-1/design_config_init.md 3.1"
+description = "config initはresolve_app_paths解決のconfig dir(ABH指定時$ABH/・未指定時XDG規定)配下へpipeline.toml・aws.toml・aws-credentials.tomlを生成する。config dirが無ければ作成する。ABHに相対pathを指定した場合は実行時cwd基準で絶対化したpath配下へ生成する(resolve_app_paths自体の解決仕様は不変) (integration)"
+given = "AMAZING_BACKUP_HOMEに絶対path(存在しないdir)を指定した環境と、相対pathを指定してcwdを固定した環境でのconfig init実行"
+expect_return_shape = "絶対path指定時は$ABH配下の3fileが生成され(config dirも作成される)、相対path指定時は<cwd>/<相対path>配下の3fileが生成される"
+source_lines = "tests/config_init.rs:50"
+
+[[condition]]
+id = "config.init-templates-from-example"
+target_function = "config::render_init_template(marker置換・前後検査)"
+source = "TASK-1 body + tmp/tasks/tm-1/design_config_init.md 3.2。2026-10-29コードレビュー指摘4・5対応で観測拡張"
+description = "生成されるpipeline.tomlは埋め込みtemplate(configs/pipeline.example.toml)とbyte一致。aws.tomlは全profileのcredentials_file値(marker)をcredential雛形絶対pathのTOML basic string符号化(\\→\\\\・\"→\\\"・制御文字は\\uXXXX)へ置換した内容となる。置換対象はcredentials_file値行のみでコメント中のquoted markerは保持される。path中の「\"」「\\」(\\n 2文字含む)・実改行・Unicode制御文字は符号化でescapeされparse復元後完全一致。path自身がmarker文字列を含む正常ケースはmarker残存検査をせずparse一致で受理。非UTF-8 pathは設定エラー2。置換前検査は全profile値==marker検査で、別値・キー欠落・型不正・空profiles・TOML parse失敗のいずれも内部エラー1(template正本の劣化検出) (unit)"
+given = "埋め込みtemplate(marker入り)と、path文字列中に「\"」「\\」・実改行・Unicode制御文字・marker文字列を含むcredential雛形pathでの置換、非UTF-8 path、quoted marker入りコメント行、および各種劣化template(全profile別値・部分別値・キー欠落・型不正・空profiles・parse失敗)"
+expect_return_shape = "正常系は生成aws.tomlのparse後credentials_fileが当該pathと完全一致(escape崩れなし・コメント行は保持)しpipeline.tomlはtemplateとbyte一致。非UTF-8は設定エラー(exit 2)。劣化templateは内部エラー(exit 1)で生成しない"
+source_lines = "tests/config_init.rs:322; tests/config_init_unit.rs:78"
+
+[[condition]]
+id = "config.init-existing-files-not-overwritten"
+target_function = "config::cmd_config_init(事前check)"
+source = "TASK-1 body + tmp/tasks/tm-1/design_config_init.md 3.3"
+description = "生成対象fileが既に存在する場合(通常file・dangling symlinkを含む。存在判定はsymlink_metadata)、存在file毎のerror表示+復旧手順案内(退避して再実行等)でexit 2し、いずれのfileも作成・変更しない(all-or-nothing) (integration)"
+given = "3対象のうち一部/全部に通常file・dangling symlinkを配置済みのconfig dir(AMAZING_BACKUP_HOME配下)でのconfig init実行"
+expect_return_shape = "exit 2・存在対象毎のerror行(復旧案内含む)・既存fileの内容・権限は不変・新規fileは1つも作成されない"
+source_lines = "tests/config_init.rs:85"
+
+[[condition]]
+id = "config.init-exclusive-create-and-rollback"
+target_function = "config::cmd_config_init(create_new・rollback)"
+source = "TASK-1 body + tmp/tasks/tm-1/design_config_init.md 3.3。2026-10-29コードレビュー指摘1・2対応で観測拡張"
+description = "生成はcreate_new(true)による排他的作成で行い(事前check後の競合で既存fileを上書きしない)、失敗時は生成済みfileに加えて排他的作成成功後の部分書込fileも削除して原状回復する(writer内部の後始末に加え、EEXIST(他processの競合file)を除き書込失敗対象pathの残存fileもrollback対象とする二段構え。initが作成したconfig dirが空になる場合はdirも削除。実行前から存在したfile・dir(空dir含む)・EEXIST競合fileの内容は不変) (unit, 失敗注入)"
+given = "生成処理への失敗注入(書込差替seam): 事前check通過後に実際に競合fileを配置してcreate_newがEEXISTとなる競合・排他的作成成功後に部分書込して失敗する書込途中失敗(1〜3file目)・実行前からの既存dir(無関係file入り・空)・新規dir不在"
+expect_return_shape = "いずれも失敗時は既存fileを上書きせず exit 2・writer成功分と部分書込fileは残らず(rollback・競合fileの内容は保持)・initが作成した空dirは除去され、実行前から存在したdir(空dir含む)・無関係file・競合fileは残る"
+source_lines = "tests/config_init_unit.rs:224"
+
+[[condition]]
+id = "config.init-credential-template-empty-and-private"
+target_function = "config::cmd_config_init(credential雛形生成)"
+source = "TASK-1 body + tmp/tasks/tm-1/design_config_init.md 3.4。2026-10-29コードレビュー指摘5対応で権限観測を分離・強化"
+description = "credential雛形はaccess_key_id/secret_access_keyが空値・schemaコメント付き・group/other権限なし(mode指定0600。mode & 0o077 == 0を検証)で生成される。権限観測はumask 022を明示した独立test(寛容なumask下でmode指定の欠落がgroup readableとして検出される。ssh-keygen等の他要因から分離し不在環境でも実行)。credential以外の設定が全て有効な状態では、空値のままのcredentialが空値検査固有のエラー(access_key_idが空)でexit 2となりS3 API呼び出しに到達しない (integration)"
+given = "config initで生成した直後のcredential雛形(umask 022下で生成しpermissionをmodeで観測)。および実在するSSH ed25519公開鍵・記述済みbucket・有効な対象file(credential以外の設定が全て有効)を用意し、credential雛形を空値のままにしたbackup push実行(fake seam未使用)"
+expect_return_shape = "雛形はumask 022下でもmode & 0o077 == 0・値は空。backup pushはcredential空値固有のエラー文を含む exit 2で、S3 API呼び出しを行わない"
+source_lines = "tests/config_init.rs:182; tests/config_init.rs:293"
+
+[[condition]]
+id = "config.init-stdout-artifacts-and-next-steps"
+target_function = "config::cmd_config_init(成功時出力)"
+source = "TASK-1 body + tmp/tasks/tm-1/design_config_init.md 3.6 + tmp/tasks/tm-4/design_docs_command.md 5章(docs参照のdocsコマンド参照への改訂)"
+description = "成功時のstdoutに生成3fileの絶対path(3.1の絶対化後)と次ステップ案内(credential値記述・bucket・public_keys)・docs参照(amazing-backup docs usage・docs configの案内。binary埋め込みのためrepo未cloneでも当該binary versionの手順書へ到達可能=2026-10-29 TASK-4でGitHub URL参照から改訂)が表示される (integration)"
+given = "config dirが空の状態(AMAZING_BACKUP_HOMEでfixtureへ向け)でのconfig init実行"
+expect_return_shape = "stdoutに3fileの絶対path・編集必須箇所の案内・amazing-backup docs usageのdocs参照を含み、exit 0"
+source_lines = "tests/config_init.rs:254"
 
 [[excluded]]
 item = "TASK-9設計3.6: credential保持structのDebug手動実装(値を***化)"
@@ -279,4 +357,18 @@ item = "実運用pipeline.toml(repo外~/.config/amazing-backup/)の[files]旧pat
 source = "TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md)4章3(実運用configの[files] key)・7.3(changelog内容案)"
 reason = "repo外の利用者側対応事項であり検証対象コードの振る舞い条件ではない。旧path key拒否の振る舞い自体はconfig.layout-and-categories-validationの追記caseで担保済み"
 decided_at = "2026-10-25"
+decided_by = "claude"
+
+[[excluded]]
+item = "config initのusage誤り(未知option・引数過多)のexit 64"
+source = "TASK-1 body + tmp/tasks/tm-1/design_config_init.md 3.7"
+reason = "clap parse→cli.rs run()の既存変換経路の挙動で、cli.usage-error-exit-64が共通coverする。init固有の分岐は存在しない(test-structure §8)"
+decided_at = "2026-10-29"
+decided_by = "claude"
+
+[[excluded]]
+item = "README Quick start・docs/usage_backup.md 2章のconfig init手順への置換"
+source = "TASK-1 body"
+reason = "docs更新でありコードの振る舞い条件ではない(既存docs運用系除外と同一扱い。TASK-1実装taskのdocs更新とTASK-3再構成で実施)"
+decided_at = "2026-10-29"
 decided_by = "claude"

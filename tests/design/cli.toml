@@ -67,15 +67,40 @@
 #   get-latest-version・list-files-summary・backup-pull-category-run-confirmation・
 #   backup-pull-scope-options-exclusiveはrel_path/--path言及なし(影響なし)。
 #   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseへ戻す。
+# 2026-10-29: TASK-2(completionsコマンド新設)対応でテスト先行の更新
+#   (tmp/tasks/tm-2/design_completions.md D-1〜D-5)。
+#   新規6件: completions-generates-shells(ABH空dir固定でも動作)・
+#   script-covers-current-vocabulary(Cli::command()から取得した現行語彙との実行時比較)・
+#   invalid-shell-usage-error(対象外shell・誤字は可能値列挙付き64)・
+#   missing-shell-usage-error(省略は列挙なし64)・help-listed(可視性)・
+#   output-write-error-exit-4(BrokenPipe=0/その他=4)。
+#   excludedへzsh実対話環境でのTAB補完効作確認(3点)を追加。
+#   実装前(cmd_completions・CompletionShell未実装)のためunit層test
+#   (tests/cli_completions_unit.rs)はcompile error・integration層test(tests/cli_bin.rs)は
+#   実行failを許容し[meta]はverified=false(実装後の全件pass確認時にtrueへ戻す)。
+# 2026-10-29: TASK-2実装に伴うtest期待値の事実修正(clap_complete 4.6実出力へ合わせる)。
+#   bash構造markerは_amazing-backup→_amazing__backup(bash generatorはbin nameのハイフンを
+#   二重下線へ置換する規約)・廃止語検査はscript全体の語scanからサブコマンド候補位置
+#   (zsh: commands配列name部・bash: opts語列・fish: -a値)の検査へ変更(help説明文中の
+#   英語流入〔backup push説明の「upload」〕は語彙でないため対象外)。
+#   cli area全test passを確認し[meta]verified=trueへ戻す。
+# 2026-10-29: TASK-2コードレビュー(テストの検出力)指摘3件対応。
+#   語彙包含は全体部分文字列containsから候補定義からの語彙抽出との語一致へ強化
+#   (zshはコマンド階層ごと: ..._commands配列とcase分岐でnode帰属を付けた_arguments行。
+#   fishのoptionは深さ3以上のnodeを生成しないgenerator仕様のため深さ2まで比較)。
+#   廃止語検査に抽出の非空担保(既知候補completions等の抽出確認)を追加。
+#   書込失敗のstderr契約(BrokenPipe=表示なし・ENOSPC=エラー表示)をbin subprocessで
+#   検証(/dev/full・相手close socketpairをstdoutへ接ぐ)。output-write-error条件は
+#   (unit, integration)の両層へ。
 
 [meta]
 feature = "cli"
 source_file = "src/cli.rs"
-verified = false
-verified_at = ""
-verified_by = ""
+verified = true
+verified_at = "2026-10-31"
+verified_by = "claude"
 test_command = "cargo test"
-source_hash = ""
+source_hash = "cb92195c7cea7b758e386bf085de13188398d13d"
 note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)"
 
 [[condition]]
@@ -85,7 +110,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-001(5章cli.rs・7.1
 description = "使用法誤り(引数誤り)は exit 64(clapのusage error既定 exit 2 を BackupError::Usage へremapし、設定エラー2と区別する) (unit)"
 given = "不明オプション・サブコマンド不足等のusage誤り実行"
 expect_return = "exit code 64"
-source_lines = "src/cli.rs:640"
+source_lines = "src/cli.rs:695"
 
 [[condition]]
 id = "cli.version-flag"
@@ -94,7 +119,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-002(2章共通オプ
 description = "--version でversion表示・exit 0となる (unit)"
 given = "amazing-backup --version 実行"
 expect_return_shape = "version文字列がstdoutへ表示され exit code 0"
-source_lines = "tests/cli_bin.rs:10"
+source_lines = "tests/cli_bin.rs:12"
 
 [[condition]]
 id = "cli.exit-code-mapping"
@@ -103,7 +128,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-003(終了コード�
 description = "終了コード区分(0/2/3/4/5)が7.1の仕様表どおりに出る(各サブコマンドの代表case) (unit)"
 given = "成功(対象なし・全skip含む)・設定エラー・対象エラー・処理エラー・転送エラーの各区画の代表ケース"
 expect_return_shape = "0(成功)・2(設定・環境)・3(対象)・4(処理)・5(転送)が各区画の代表ケースで出る"
-source_lines = "src/cli.rs:654; src/errors.rs:56"
+source_lines = "src/cli.rs:709; src/errors.rs:56"
 
 [[condition]]
 id = "cli.module-entrypoint-parity"
@@ -112,7 +137,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-004(5章lib.rs・mai
 description = "cargo run -- 経由でも install済みbin amazing-backup と同一挙動となる(結合testでは env!(\"CARGO_BIN_EXE_amazing-backup\") でbinを直接実行して検証) (unit)"
 given = "同一引数を lib経由(cli::run直接呼出)と bin amazing-backup で実行"
 expect_return_shape = "同一の出力・終了コードを返す"
-source_lines = "tests/cli_bin.rs:23"
+source_lines = "tests/cli_bin.rs:25"
 
 [[condition]]
 id = "cli.paths-required-usage-error"
@@ -121,7 +146,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-005(2026-10-08レビ
 description = "backup push のPATH位置引数0個はusage error扱いで exit 64。PATHは1個以上必須(--from-listは併用オプション)(旧plan/encryptの対象指定からbackup pushへの文言改訂・id不変) (unit)"
 given = "backup push をPATH無し(オプションのみ、または--from-listのみ)で実行するケースと、PATH 1個(+--from-list併用)のケース"
 expect_return = "PATH 0個は exit 64。PATH 1個(+--from-list併用を含む)はusage errorとならない"
-source_lines = "src/cli.rs:1000"
+source_lines = "src/cli.rs:1055"
 
 [[condition]]
 id = "cli.fake-s3-seam"
@@ -211,7 +236,7 @@ source = "TASK-19 body(get/pullの--out必須化・省略はusage 64)"
 description = "get/backup pullの--out(出力dir)は必須: 省略時はusage error 64(引数検査は設定読込・S3 API呼び出しより前)。旧既定data/restoreという概念は廃止 (integration)"
 given = "--outなしの get <term> 実行と --outなしの backup pull --all --yes 実行"
 expect_return_shape = "いずれも exit 64で、S3 API呼び出しは行われない"
-source_lines = "tests/cli_bin.rs:147"
+source_lines = "tests/cli_bin.rs:149"
 
 [[condition]]
 id = "cli.get-sha-mismatch-error"
@@ -426,7 +451,7 @@ source = "TASK-11 body(Phase B: 旧サブコマンド削除・新体系へ集約
 description = "旧サブコマンド(plan/encrypt/upload/verify/restore=restore request/status/download含む)は削除され、未知サブコマンドとしてusage error 64となる。機能はbackup push/pull・get/list/query/diff・manage jobs等へ集約済み (integration)"
 given = "plan・encrypt・upload・verify・restore request の各サブコマンド実行と、--help実行"
 expect_return_shape = "いずれの旧サブコマンドも exit 64(未知サブコマンド扱い)。--helpの文言に旧サブコマンドが現れない"
-source_lines = "tests/cli_bin.rs:105"
+source_lines = "tests/cli_bin.rs:107"
 
 [[condition]]
 id = "cli.format-option-default-human"
@@ -477,9 +502,9 @@ source_lines = "tests/phase_b_options.rs:106"
 id = "cli.aws-config-default-path"
 target_function = "clap定義(--aws-config既定値)"
 source = "TASK-11 body(Phase B低残件L-10: --aws-config既定pathの実装一致)+tmp/tasks/tm-10/design_s3_storage.md 3章(共通options)。TASK-19(XDG配置): 既定pathをXDG規定へ移行"
-description = "--aws-config省略時の既定pathはXDG規定path(config::resolve_app_paths): AMAZING_BACKUP_HOME指定時は$ABH/aws.toml・未指定時は$XDG_CONFIG_HOME/amazing-backup/aws.toml(未設定なら~/.config/amazing-backup/aws.toml)。旧既定configs/aws.toml(cwd基準)は廃止。規定pathにaws.tomlが無い場合は設定エラー2+template(configs/aws.example.toml)copy案内(config.default-config-missing-guidance) (integration)"
+description = "--aws-config省略時の既定pathはXDG規定path(config::resolve_app_paths): AMAZING_BACKUP_HOME指定時は$ABH/aws.toml・未指定時は$XDG_CONFIG_HOME/amazing-backup/aws.toml(未設定なら~/.config/amazing-backup/aws.toml)。旧既定configs/aws.toml(cwd基準)は廃止。規定pathにaws.tomlが無い場合は設定エラー2+config initによる生成案内(案内文はtemplate正本のrepo pathを併記。config.default-config-missing-guidance) (integration)"
 given = "AMAZING_BACKUP_HOME配下にaws.tomlを配置した環境と配置しない環境での--aws-config未指定の list files・backup push 実行、XDG_CONFIG_HOME配下に配置した環境での--aws-config未指定の list files 実行"
-expect_return_shape = "配置した環境($ABH・XDG_CONFIG_HOMEいずれか)では当該aws.tomlを読み込んで動作する。配置しない環境では設定エラー2+copy案内表示"
+expect_return_shape = "配置した環境($ABH・XDG_CONFIG_HOMEいずれか)では当該aws.tomlを読み込んで動作する。配置しない環境では設定エラー2+config init生成案内表示"
 source_lines = "tests/phase_b_options.rs:130"
 
 [[condition]]
@@ -644,9 +669,70 @@ given = "manage prune --category C --apply・manage prune --keep 2・list files 
 expect_return_shape = "いずれも exit 64(usage error)で、S3 API呼び出しは行われない"
 source_lines = "tests/storage_backup.rs:1662"
 
+[[condition]]
+id = "cli.completions-generates-shells"
+target_function = "cli::cmd_completions / clap_complete::generate"
+source = "TASK-2設計(tmp/tasks/tm-2/design_completions.md D-1〜D-3)"
+description = "completions <shell>(bash/zsh/fish)は対応shellの補完scriptをstdoutへ出力し exit 0。各shellの構造マーカーを含む(bash: _amazing__backup関数定義・clap_completeのbash generatorはbin nameのハイフンを二重下線へ置換する規約・zsh: #compdef amazing-backup行・fish: complete -c amazing-backup行)。設定に非依存: AMAZING_BACKUP_HOMEを空dirへ固定(規定pathにpipeline.toml・aws.toml無し)でも動作し、設定・S3由来の表示・API呼出は行わない (unit, integration)"
+given = "AMAZING_BACKUP_HOMEを空の一時dirへ固定した環境での、completions bash / completions zsh / completions fish の各実行(stdoutをunit側はWrite注入・integration側はbin subprocessで捕捉)"
+expect_return_shape = "いずれも exit 0・stdoutが非emptyで当該shellの構造マーカーを含む。stderrに設定・S3系のエラー・警告は出ない"
+source_lines = "tests/cli_bin.rs:170; tests/cli_completions_unit.rs:22"
+
+[[condition]]
+id = "cli.completions-script-covers-current-vocabulary"
+target_function = "cli::cmd_completions(生成内容の現行語彙追従)"
+source = "TASK-2設計(tmp/tasks/tm-2/design_completions.md D-1・D-5)"
+description = "生成される補完scriptの語彙は現行Command定義と一致する: テストはCli::command()から階層ごとに取得したsubcommand名・long option名と、script側の候補定義から抽出した語彙を語一致で比較して検査する(zshはコマンド階層ごと: subcommand候補は..._commands関数の配列・optionは_arguments指定行。bashはopts語列・fishは-a値/-l名。全体部分文字列containsは候補行の欠落を語の別箇所残留が隠すため不採用。固定の期待リストに頼らないため語彙追加・改名時にテスト側の更新なしで自動fail=追随を強制)。抽出結果が空になる生成形式変更で黙過しないよう既知候補(completions等)の抽出確認も行う。旧トップレベル語彙の回帰検出として、廃止語(plan/encrypt/upload/restore)はサブコマンド候補位置の語として含まれないことを検証する(help説明文中の英語流入は語彙ではないため対象外。verifyはbackup verify子コマンドとして現行scriptに現れるため廃止語から除外) (integration)"
+given = "completions zsh/bash/fish実行のstdoutと、テスト側でCli::command()から階層ごとに取得した現行subcommand/option語彙"
+expect_return_shape = "現行語彙が候補定義の語としてすべて含まれ、廃止語(plan/encrypt/upload/restore)は各shellのサブコマンド候補位置に語として含まれない"
+source_lines = "tests/cli_bin.rs:201"
+
+[[condition]]
+id = "cli.completions-invalid-shell-usage-error"
+target_function = "clap定義(CompletionsArgs.shell value_enum)"
+source = "TASK-2設計(tmp/tasks/tm-2/design_completions.md D-2・D-3)"
+description = "completionsのshell引数はbash/zsh/fishのみ受理: 対象外shell(elvish/powershell)・不明値(誤字)はusage error 64(InvalidValue: 可能値bash/zsh/fishの列挙付きusage表示。cli.usage-error-exit-64と同じcli::runの64変換経路。D-2対象外shellの明示的拒否) (integration)"
+given = "completions elvish / completions powershell / completions zshh(誤字)の各実行"
+expect_return = "いずれも exit 64でinvalid value表示(可能値bash/zsh/fishの列挙を含む)。補完scriptの出力は行われない"
+source_lines = "tests/cli_bin.rs:546"
+
+[[condition]]
+id = "cli.completions-missing-shell-usage-error"
+target_function = "clap定義(CompletionsArgs.shell必須位置引数)"
+source = "TASK-2設計(tmp/tasks/tm-2/design_completions.md D-3)"
+description = "completionsのshell引数省略はusage error 64(MissingRequiredArgument: 必須引数・usage表示。不正値(InvalidValue)とは表示が異なりpossible valuesの列挙は含まれない) (integration)"
+given = "completions(引数なし)実行"
+expect_return = "exit 64で必須引数のusage error表示。補完scriptの出力は行われない"
+source_lines = "tests/cli_bin.rs:576"
+
+[[condition]]
+id = "cli.completions-help-listed"
+target_function = "clap定義(Command::Completions可視variant・CompletionShell value_enum)"
+source = "TASK-2設計(tmp/tasks/tm-2/design_completions.md D-3)"
+description = "可視性: トップレベル--helpのsubcommand一覧にcompletionsが掲載され、completions --helpに<SHELL>引数の可能値bash/zsh/fishが表示される(発見可能性のためhiddenにしない=D-3) (integration)"
+given = "amazing-backup --help と amazing-backup completions --help の各実行"
+expect_return_shape = "前者のsubcommand一覧にcompletions行が含まれ、後者にbash・zsh・fishの3値の表示を含む"
+source_lines = "tests/cli_bin.rs:597"
+
+[[condition]]
+id = "cli.completions-output-write-error-exit-4"
+target_function = "cli::cmd_completions(stdout書き込み)"
+source = "TASK-2設計(tmp/tasks/tm-2/design_completions.md D-1・D-3)"
+description = "completionsの出力書き込み失敗の取扱い: 補完scriptはメモリへ一括生成後にwrite_allする(単一呼出)。書き込み失敗のうちBrokenPipeは| head等の通常運用のため正常終了扱い(exit 0・表示なし)。それ以外の書き込み失敗(ENOSPC等)はstderrへエラー表示+exit 4(処理エラー)。clap_complete::generateをstdoutへ直接渡す方式はwriter書き込み失敗がpanicになり得るため不採用。unit層は偽Write注入で戻り値を検証し、stderr表示契約(表示なし・エラー表示)はintegration層がbin subprocessのstdoutへ/dev/full(ENOSPC)・相手closeのsocketpair(BrokenPipe)を接いでstderrを捕捉して検証する (unit, integration)"
+given = "write_allがErr( BrokenPipe )を返す偽WriteとErr(その他)を返す偽Writeを注入したcmd_completions実行(unit)。stdoutへ/dev/full・相手closeのsocketpairを接いだbin実行(integration)"
+expect_return_shape = "BrokenPipeはexit 0・エラー表示なし。その他の失敗はexit 4・stderrへエラー表示"
+source_lines = "tests/cli_bin.rs:618; tests/cli_bin.rs:655; tests/cli_completions_unit.rs:47; tests/cli_completions_unit.rs:59"
+
 [[excluded]]
 item = "e2e統合シナリオ(初回push(新規発行→索引・manifest・metadata生成)→再push(skip)→touch再push(合流)→移動push(合流・locations 2)→内容変更push(新規発行)→title変更→pin add/rm→prune→reconcile→location rm→get各形態→diff(clean)の一連流れ)"
 source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 10章(e2e)"
 reason = "個別条件(同一CLI経路)の直列組合せであり新たな分岐を検証しない(test-structure §8)。逐次実行の流れの確認は実装段階の統合test(tests/storage_backup.rs等)で行う"
 decided_at = "2026-10-22"
+decided_by = "claude"
+
+[[excluded]]
+item = "zsh実対話環境でのTAB補完効作確認(README手順の実施・_amazing-backupがcompinitへ読み込まれ補完が効くこと: (1)amazing-backup <TAB>でsubcommand候補(completions含む) (2)amazing-backup query --<TAB>でoption候補 (3)amazing-backup completions <TAB>でbash/fish/zsh候補)"
+source = "TASK-2 body(zshは実動作確認・ユーザーshellはzsh)"
+reason = "対話shellのcompletion駆動はcargo testのtest構造では表現できない。実装段階の検証手順としてREADME手順をuser環境(zsh 5.9)で実施し上記3点を目視確認する。条件書の対象は生成内容の構造マーカー・語彙・引数error・可視性(cli.completions-generates-shells等)で担保"
+decided_at = "2026-10-28"
 decided_by = "claude"

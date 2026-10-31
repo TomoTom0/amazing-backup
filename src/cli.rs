@@ -32,6 +32,29 @@ pub enum Command {
     Manage(crate::storage::ManageArgs),
     /// 設定の編集対象表示(検証付き)
     Edit(crate::storage::EditArgs),
+    /// 設定file群の初期生成(規定pathへtemplate展開・既存file保護)
+    Config(crate::config::ConfigArgs),
+    /// shell補完scriptの生成(bash/zsh/fish)
+    Completions(CompletionsArgs),
+    /// 配布ドキュメントの出力(使用手順書・設定example・LLM/agent向け)
+    Docs(crate::docs::DocsArgs),
+}
+
+/// completionsサブコマンドの引数(TASK-2設計D-1・D-3: 位置引数`<shell>`+独自value_enum)。
+#[derive(clap::Args)]
+pub struct CompletionsArgs {
+    /// 生成対象のshell
+    #[arg(value_enum)]
+    pub shell: CompletionShell,
+}
+
+/// completionsの生成対象shell(TASK-2設計D-2: bash/zsh/fishの3つのみ受理。
+/// elvish/powershell/nushellは対象外=helpの可能値にも並ばない)。
+#[derive(clap::ValueEnum, Clone, Copy)]
+pub enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
 }
 
 /// `--date`の形式検証(backup verifyの対象日filter): `YYYY-MM-DD`(半角数字4-2-2)以外は
@@ -579,6 +602,35 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
     }
 }
 
+/// completions実装(TASK-2設計D-1・D-3): shell補完scriptを生成して`out`へ書き込む。
+/// 生成はメモリ(Vec<u8>)へ一括で行い、書き込みはwrite_all単一呼出に分離する
+/// (clap_complete::generateはwriter書き込み失敗がpanicになり得るためstdoutへは
+/// 直接生成しない)。書き込み失敗のうちBrokenPipeは`| head`等の先読み終了で
+/// 常に起きる通常運用のため正常終了(0)とし、それ以外は処理エラー4(stderrへ表示)。
+/// 生成元は`Cli::command()`(derive定義と単一の正本・build.rsは作らない)。
+/// 設定読込・S3 backend構築を行わない純粋出力command(設定不在環境でも動く)。
+pub fn cmd_completions(shell: CompletionShell, out: &mut dyn std::io::Write) -> i32 {
+    use clap::CommandFactory as _;
+
+    let mut cmd = Cli::command();
+    let name = cmd.get_name().to_string();
+    let shell_gen = match shell {
+        CompletionShell::Bash => clap_complete::Shell::Bash,
+        CompletionShell::Zsh => clap_complete::Shell::Zsh,
+        CompletionShell::Fish => clap_complete::Shell::Fish,
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    clap_complete::generate(shell_gen, &mut cmd, &name, &mut buf);
+    match out.write_all(&buf) {
+        Ok(()) => 0,
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => 0,
+        Err(e) => {
+            eprintln!("error: 補完scriptの出力に失敗: {e}");
+            4
+        }
+    }
+}
+
 /// dispatch(5章)。BackupErrorはmessage+exit code対応をstderrへ出力し、対応exit codeを返す。
 /// clapのusage errorは`BackupError::Usage`へ変換しexit 64(7.1)。
 pub fn run(argv: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
@@ -593,6 +645,9 @@ pub fn run(argv: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
             Command::Pin(a) => crate::storage::cmd_pin(&a),
             Command::Manage(a) => crate::storage::cmd_manage(&a),
             Command::Edit(a) => crate::storage::cmd_edit(&a),
+            Command::Config(a) => crate::config::cmd_config(&a),
+            Command::Completions(a) => cmd_completions(a.shell, &mut std::io::stdout()),
+            Command::Docs(a) => crate::docs::cmd_docs(&a, &mut std::io::stdout()),
         },
         Err(e) => {
             use clap::error::ErrorKind;

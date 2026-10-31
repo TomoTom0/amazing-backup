@@ -1,0 +1,122 @@
+# amazing-backup テスト設計条件書(docs エリア)
+# 出典: TASK-4 body + tmp/tasks/tm-4/design_docs_command.md 3章(決定)・3.9条件書草案
+# (設計レビュー指摘8件対応済みの正本)。条件本文は3.9の草案を正本どおり記載する。
+# 2026-10-29: TASK-4(docsサブコマンド新設)対応でテスト先行により新設(10条件+excluded 2件)。
+#   実装前(src/docs.rs未作成・docs/llm/*.md未作成)のため、本area条件のテストは
+#   compile error・実行failを許容する([meta]はverified=falseのまま)。
+#   unit観測のうち変換関数・正本sync・終了コード表一致はtests/docs_pages.rsへ、
+#   Write注入系のunit観測は実装工程でsrc/docs.rs内unit testへ追加する(design doc 3.9・5章)。
+
+[meta]
+feature = "docs"
+source_file = "src/docs.rs"
+verified = true
+verified_at = "2026-10-29"
+verified_by = "claude"
+test_command = "cargo test"
+source_hash = "46684f28a412c719222c19cd743815592ba86bba"
+note = "2026-10-29 TASK-4でテスト先行により新設し、実装(src/docs.rs新設・docs/llm/3file・cli/lib/config接続)後にcargo test全件pass・verify-conditions.py PASSを確認して検証記録。unit観測のうちWrite注入系(各ページ出力・config page・ページ一覧・書込失敗の偽Write注入)はsrc/docs.rs内unit testが担う"
+
+[[condition]]
+id = "docs.pages-stdout-verbatim-from-repository"
+target_function = "docs::cmd_docs_pages(usage/llm usage/llm skill/llm snippet)"
+source = "TASK-4 body + tmp/tasks/tm-4/design_docs_command.md 3.2/3.7"
+description = "docs usage・docs llm usage・docs llm skill・docs llm snippetは各正本(docs/usage_backup.md〔version行置換後〕・docs/llm/usage.md・docs/llm/skill.md・docs/llm/snippet.md)の内容をstdoutへそのまま(byte一致)出力し exit 0。行追加・装飾なし。設定に非依存(AMAZING_BACKUP_HOME空dirでも動作) (unit, integration)"
+given = "AMAZING_BACKUP_HOMEを空dirへ固定した環境での各ページ実行(stdoutをunit側はWrite注入・integration側はbin subprocessで捕捉し、repo正本file読込との比較)"
+expect_return_shape = "各ページ exit 0・stdout==正本(usageはversion置換後の内容)。stderrに設定・S3系の表示なし"
+source_lines = "src/docs.rs:193; tests/docs_pages.rs:265"
+
+[[condition]]
+id = "docs.usage-version-substituted"
+target_function = "docs::cmd_docs_pages(version行置換)"
+source = "TASK-4 body + tmp/tasks/tm-4/design_docs_command.md 3.4(設計レビュー指摘2対応)"
+description = "version行置換の検証は2層: (unit)変換関数へ正本と異なるversion literal(例: 9.9.9)を持つ合成入力を渡し、期待値はテスト側で独立に組み立てた文字列(実装の変換関数を使わない)とbyte比較する。検証点: `- 実装バージョン:`行が合成入力中ちょうど1行でその1行のみが置換される・対象行以外のbyteが一切変化しない・入力末尾の改行が保持される(正本literalとCARGO_PKG_VERSIONが一致する通常時は無変換出力でも置換検査を通るため、異なるversion入力による変換関数単独の検証が必須)。(integration)docs usage出力の「実装バージョン:」行の値がbinary自身のversion(clap --versionと同一source=CARGO_PKG_VERSION)と一致(正本から当該行が消えた・書式が変わって置換が作用しなくなったらfail) (unit, integration)"
+given = "変換関数への合成入力(異なるversion literal・対象行1行・末尾改行付き)とunit期待値(テスト側で独立組み立て)。およびdocs usage実行の出力とテスト側の env!(\"CARGO_PKG_VERSION\")"
+expect_return_shape = "unit: 変換出力==独立期待値(対象行のみ置換・他byte不変・末尾改行保持)。integration: 出力中の実装バージョン行が `実装バージョン: <CARGO_PKG_VERSION>` と一致"
+source_lines = "tests/docs_pages.rs:143; tests/docs_pages.rs:300; tests/docs_pages.rs:85"
+
+[[condition]]
+id = "docs.usage-doc-version-sync"
+target_function = "docs::usage_backup_version_literal(正本sync検査)"
+source = "TASK-4 body + tmp/tasks/tm-4/design_docs_command.md 3.4"
+description = "repo正本docs/usage_backup.mdの実装バージョンliteralはCARGO_PKG_VERSIONと一致し、かつ`- 実装バージョン:`行はfile中にちょうど1行である(release時のdocs更新忘れ=version置換の前提崩れと、対象行の重複化による置換の不定挙動をtestで検出) (unit)"
+given = "docs/usage_backup.mdの実装バージョン行の値と当該行のcount"
+expect_return = "値==CARGO_PKG_VERSION かつ 対象行count==1"
+source_lines = "tests/docs_pages.rs:198"
+
+[[condition]]
+id = "docs.config-marker-replaced"
+target_function = "docs::cmd_docs_pages(config)"
+source = "TASK-1 design doc 5章(TASK-4への要求) + tmp/tasks/tm-4/design_docs_command.md 3.3"
+description = "docs configは pipeline.example.toml全文+区切り行+aws.example.toml(marker __CREDENTIALS_FILE__ を ~/.config/amazing-backup/aws-credentials.toml へ置換したもの)の全文を出力する。出力中にmarker残存なし・全profileのcredentials_fileが例示path・置換はconfig initと同一経路(render_init_template。template劣化は内部エラー1) (unit, integration)"
+given = "docs config実行のstdout"
+expect_return_shape = "exit 0・出力に __CREDENTIALS_FILE__ を含まない・両file全文を含む(aws側は credentials_file = \"~/.config/amazing-backup/aws-credentials.toml\")・marker置換なしの正本との比較で当該行のみ差分"
+source_lines = "src/docs.rs:246; tests/docs_pages.rs:320"
+
+[[condition]]
+id = "docs.llm-usage-exit-code-table-consistent"
+target_function = "docs::cmd_docs_pages(llm usage)とusage_backup.md終了コード表の一致"
+source = "tmp/tasks/tm-4/design_docs_command.md 3.5(重複管理・設計レビュー指摘3対応)"
+description = "docs/llm/usage.mdの終了コード一覧とdocs/usage_backup.md終了コード一覧の一致を次の全点で検証する: (1)各表のcode集合が固定の期待集合{0,1,2,3,4,5,64}と完全一致(集合比較のみでは2と4の意味交換や両表の抽出失敗(空集合同士)を通すため固定期待を置く) (2)各表からcode→区分(成功/内部エラー/設定・環境/対象/検証/転送/使用法)の対応を抽出し両doc間で一致(codeと区分の交換を検出) (3)同一表内の同一code重複行の拒否 (4)抽出が空集合(表の不在・形式変更)の拒否。検出対象は終了コード表の乖離のみで、fail-fast/keep-going・dry-run既定・--out必須など表以外の事実の文言乖離は本条件の対象外(update-docs運用) (unit)"
+given = "両正本(include_str!埋め込み)から終了コード表のcode行・区分語を抽出する処理と、固定期待集合{0,1,2,3,4,5,64}"
+expect_return = "両表とも code集合==固定期待集合・code→区分対応が両doc間で一致・重複code行なし・抽出非空"
+source_lines = "tests/docs_pages.rs:217"
+
+[[condition]]
+id = "docs.llm-skill-skills-md-form"
+target_function = "docs::cmd_docs_pages(llm skill)"
+source = "TASK-4 body + tmp/tasks/tm-4/design_docs_command.md 3.6"
+description = "docs llm skillの出力はSKILL.mdとして有効: 先頭にfrontmatter(name: amazing-backup・triggerを含むdescription)を持ち ~/.claude/skills/amazing-backup/SKILL.md へredirect配置可能な最終形。本文に docs llm usage 参照・S3非干渉・索引・registryを更新する系の同時実行禁止の原則を含む (unit, integration)"
+given = "docs llm skill実行のstdout"
+expect_return_shape = "exit 0・先頭行が`---`・frontmatterにname/description・本文に`docs llm usage`の参照を含む"
+source_lines = "tests/docs_pages.rs:351"
+
+[[condition]]
+id = "docs.llm-snippet-pointer-form"
+target_function = "docs::cmd_docs_pages(llm snippet)"
+source = "TASK-4 body + tmp/tasks/tm-4/design_docs_command.md 3.6"
+description = "docs llm snippetの出力はCLAUDE.md/AGENTS.mdへ追記して使うpointer型の数行で、amazing-backup docs llm usage(契約)とdocs usage(手順)の参照を含む (unit, integration)"
+given = "docs llm snippet実行のstdout"
+expect_return_shape = "exit 0・`docs llm usage`の参照を含む・pointer型の短い出力(契約本文の内包なし)"
+source_lines = "tests/docs_pages.rs:405"
+
+[[condition]]
+id = "docs.page-list-no-args"
+target_function = "docs::cmd_docs(ページ一覧)"
+source = "TASK-4 body + tmp/tasks/tm-4/design_docs_command.md 3.7"
+description = "docs引数なしはページ一覧(usage/config/llm usage/llm skill/llm snippetの各説明)をstdoutへ出力し exit 0。docs llm引数なしはllm配下3ページの一覧+exit 0 (integration)"
+given = "docs / docs llm の各引数なし実行"
+expect_return_shape = "いずれも exit 0・stdoutに全ページ名とその説明を含む"
+source_lines = "src/docs.rs:285; tests/docs_pages.rs:432"
+
+[[condition]]
+id = "docs.invalid-syntax-usage-error"
+target_function = "clap定義(DocsArgs/DocsSub/LlmArgs/LlmSubのネスト・引数ゼロ)"
+source = "tmp/tasks/tm-4/design_docs_command.md 3.1/3.8(設計レビュー指摘6対応)"
+description = "docs系の構文誤りはusage error 64で本文(正本)を出力しない: 未知ページ(docs unknown・docs llm unknown)と余計な引数(docs usage extra等のページへの引数・option付与)はいずれもclapのInvalidSubcommand/TooManyValues等をcli::runの64変換経路で終了する。既存cli.usage-error-exit-64はroot階層の誤りのみを検証しており、新設のネストenum(Docs/Llm)が未知ページ・余計な引数を拒否することは本条件で検証する (integration)"
+given = "docs unknown / docs llm unknown / docs usage extra / docs config --flag の各実行"
+expect_return_shape = "いずれも exit 64でusage error表示。各正本の本文(doc本文)はstdoutへ出力されない"
+source_lines = "tests/docs_pages.rs:464"
+
+[[condition]]
+id = "docs.output-write-error-exit-4"
+target_function = "docs::cmd_docs_pages(write_all)"
+source = "TASK-2設計(cmd_completions)と同一契約 + tmp/tasks/tm-4/design_docs_command.md 3.8"
+description = "stdout書込失敗のうちBrokenPipeは exit 0・その他(ENOSPC等)はstderrへerror表示+exit 4 (unit, integration)"
+given = "偽Write注入(unit)と /dev/full・相手close socketpair接続(integration)による書込失敗"
+expect_return_shape = "BrokenPipe=0(表示なし)・ENOSPC等=exit 4+error表示"
+source_lines = "src/docs.rs:321; tests/docs_pages.rs:500; tests/docs_pages.rs:535"
+
+[[excluded]]
+item = "SKILL.mdを~/.claude/skills/へ実際に配置してのClaude Codeでのskill読込動作・snippetをCLAUDE.mdへ追記しての発火"
+source = "TASK-4 body + tmp/tasks/tm-4/design_docs_command.md 3.6"
+reason = "配布先(harness側)の動作検証でありamazing-backup binaryの振る舞いではない。出力内容の形式はdocs.llm-skill-skills-md-form・docs.llm-snippet-pointer-formで代替cover"
+decided_at = "2026-10-29"
+decided_by = "claude"
+
+[[excluded]]
+item = "docs/llm/usage.md・skill.md・snippet.mdの内容執筆(文書作成)自体の条件化"
+source = "tmp/tasks/tm-4/design_docs_command.md 3.5/3.6"
+reason = "docs更新でありコードの振る舞い条件ではない(既存docs運用系除外と同一扱い)。機械検証可能な側面(終了コード一致・frontmatter形式・pointer形式)は個別条件化済み"
+decided_at = "2026-10-29"
+decided_by = "claude"

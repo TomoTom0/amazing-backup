@@ -1424,10 +1424,7 @@ fn parse_failure_error_guides_index_rebuild() {
         }
         fx.rewrite_index(&v_old);
         let (code, _, stderr) = fx.list("files", &[]);
-        assert_eq!(
-            code, 2,
-            "旧schema={old_schema}索引は設定エラー2: {stderr}"
-        );
+        assert_eq!(code, 2, "旧schema={old_schema}索引は設定エラー2: {stderr}");
         assert!(
             stderr.contains("manage index rebuild"),
             "manage index rebuildの案内(schema={old_schema}拒否時): {stderr}"

@@ -610,8 +610,18 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
         // (schema≠3=設定エラー2+初期化と再pushの案内・必須field欠損=処理エラー4。
         // version_idはListObjectVersions補完があるため必須としない)
         const MANIFEST_FILE_REQUIRED_STR_FIELDS: [&str; 12] = [
-            "uuid", "title", "name", "category", "label", "source_path", "s3_key", "date",
-            "version_ts", "batch_id", "source_sha256", "age_sha256",
+            "uuid",
+            "title",
+            "name",
+            "category",
+            "label",
+            "source_path",
+            "s3_key",
+            "date",
+            "version_ts",
+            "batch_id",
+            "source_sha256",
+            "age_sha256",
         ];
         const MANIFEST_FILE_REQUIRED_NUM_FIELDS: [&str; 2] = ["source_size", "age_size"];
         let mut all: Vec<Rec> = Vec::new();

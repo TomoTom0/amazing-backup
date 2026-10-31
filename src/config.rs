@@ -355,7 +355,7 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
         let mut msg = format!("pipeline.tomlを読めない ({}): {e}", path.display());
         if is_default_path {
             msg.push_str(&format!(
-                "\n規定path({})にpipeline.tomlがありません。初回セットアップ: repoのconfigs/pipeline.example.tomlをこのpathへcopyして記述してください(--config PATHで別pathの明示指定も可)",
+                "\n規定path({})にpipeline.tomlがありません。初回セットアップ: amazing-backup config init で設定file群を生成してください(template正本: repoの configs/pipeline.example.toml。--config PATHで別pathの明示指定も可)",
                 path.display()
             ));
         }
@@ -522,7 +522,7 @@ pub fn load_aws_profile(
         let mut msg = format!("aws.tomlを読めない ({}): {e}", path.display());
         if is_default_path {
             msg.push_str(&format!(
-                "\n規定path({})にaws.tomlがありません。初回セットアップ: repoのconfigs/aws.example.tomlをこのpathへcopyして実際の値(bucket等)を記述してください(--aws-config PATHで別pathの明示指定も可)",
+                "\n規定path({})にaws.tomlがありません。初回セットアップ: amazing-backup config init で設定file群を生成してください(template正本: repoの configs/aws.example.toml。--aws-config PATHで別pathの明示指定も可)",
                 path.display()
             ));
         }
@@ -874,6 +874,338 @@ pub fn apply_cli_overrides(base: AwsConfig, ovr: &AwsOverrides) -> BackupResult<
         cfg.region = r.to_string();
     }
     Ok(cfg)
+}
+
+// ---------------------------------------------------------------------------
+// config init(TASK-1・tmp/tasks/tm-1/design_config_init.md 3章)
+
+/// configサブコマンド群の引数(design doc 3.5。Manage/Backupと同じネスト形式。
+/// `CtxArgs`(--config等)は持たない: initの生成先は常に規定path解決に従う)。
+#[derive(clap::Args, Debug)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub sub: ConfigSub,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum ConfigSub {
+    /// 設定file群の初期生成(規定pathへtemplate展開・既存file保護)
+    Init,
+}
+
+/// 埋め込みtemplateの正本はconfigs/*.example.toml(design doc 3.2。単一正本・
+/// src配下へ別正本は置かない。install経路(cargo install/mise/crates.io)のどれでも
+/// binary単体でtemplateが配布される)。pub(crate): docs config page(TASK-4)が同一の
+/// 埋め込みを参照する(include_str!の二重記載を避け埋め込み箇所を1つに保つ)。
+pub(crate) const INIT_PIPELINE_TEMPLATE: &str = include_str!("../configs/pipeline.example.toml");
+pub(crate) const INIT_AWS_TEMPLATE: &str = include_str!("../configs/aws.example.toml");
+
+/// aws.toml template内の`credentials_file`置換marker(design doc 3.2)。
+const CREDENTIALS_FILE_MARKER: &str = "__CREDENTIALS_FILE__";
+
+/// credential雛形の生成内容(design doc 3.4)。値は空値とし、記述するまで
+/// `load_credentials`の空値検査がS3 API呼び出し前に設定エラー2で弾く(fail-closed)。
+const INIT_CREDENTIALS_TEMPLATE: &str = "\
+# AWS credential(API key)ファイル(amazing-backup config init が生成)。
+# access_key_id / secret_access_key に実際の値を記述してください。
+# 記述するまで、S3へ接続するコマンド(backup push/pull・get・pin・manage等)は
+# 設定エラー2で弾かれます(credential値はerror文に表示されません)。
+# session_token は一時credentialを使う場合のみ記述します(省略可・未知キーは拒否)。
+# dev/prodでcredentialを分けたい場合はこのfileを複製・編集し、aws.tomlの各profileの
+# credentials_file へ複製先のpathを記述してください(docs/usage_backup.md 2.3)。
+[credentials]
+access_key_id = \"\"
+secret_access_key = \"\"
+# session_token = \"\"
+";
+
+/// TOML basic stringとして文字列を符号化する(design doc 3.2。TOML 1.0のescape規則:
+/// `\`→`\\`・`"`→`\"`・制御文字は`\uXXXX`)。単純文字列挿入ではpath中の`"`がTOMLを壊し
+/// `\`+`n`の2文字が改行と解釈されるため、値の挿入は必ずこの符号化を経由する。
+fn encode_toml_basic_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// TOML textをparseし`[aws.profiles.*].credentials_file`の値を列挙する
+/// (置換前後検査の共通部。parse失敗・profiles不在/空・credentials_file欠落・
+/// 非文字列値はすべてtemplate正本の劣化として内部エラー1)。
+fn collect_credentials_file_values(text: &str) -> BackupResult<Vec<String>> {
+    let v: toml::Value = toml::from_str(text).map_err(|e| {
+        BackupError::Internal(format!("aws.toml templateをTOMLとしてparseできない: {e}"))
+    })?;
+    let profiles = v
+        .get("aws")
+        .and_then(|a| a.get("profiles"))
+        .and_then(|p| p.as_table())
+        .ok_or_else(|| {
+            BackupError::Internal("aws.toml templateに[aws.profiles]が無い".to_string())
+        })?;
+    if profiles.is_empty() {
+        return Err(BackupError::Internal(
+            "aws.toml templateの[aws.profiles]が空".to_string(),
+        ));
+    }
+    let mut values = Vec::with_capacity(profiles.len());
+    for (name, profile) in profiles {
+        let cf = profile
+            .get("credentials_file")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| {
+                BackupError::Internal(format!(
+                    "aws.toml templateのprofile({name})に文字列値のcredentials_fileが無い"
+                ))
+            })?;
+        values.push(cf.to_string());
+    }
+    Ok(values)
+}
+
+/// template中の`credentials_file = "MARKER"`値行のみ、値を`quoted_replacement`へ
+/// 置換する(design doc 3.2。keyがcredentials_fileで値がquoted markerそのものの行を
+/// 選別するため、コメント中のquoted markerや他キーの同値文字列はそのまま保持される)。
+fn replace_marker_in_value_lines(template: &str, quoted_replacement: &str) -> String {
+    let quoted_marker = format!("\"{CREDENTIALS_FILE_MARKER}\"");
+    let mut out = String::with_capacity(template.len() + 64);
+    for (i, line) in template.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let mut split = line.splitn(2, '=');
+        let key = split.next().unwrap_or("").trim_end();
+        let value = split.next().unwrap_or("").trim();
+        if key == "credentials_file" && value == quoted_marker {
+            out.push_str(&line.replacen(&quoted_marker, quoted_replacement, 1));
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// aws.tomlの生成内容の組立(design doc 3.2の2段検査+符号化置換)。unit観測用にpub:
+/// - 置換前検査: 全profileの`credentials_file`値がmarkerと一致すること(template正本の
+///   劣化検出。不一致は`BackupError::Internal`(1))
+/// - 符号化置換: credential雛形pathをTOML basic string符号化した文字列へ
+/// - 置換後検査: 生成内容をparseし全profile値が期待pathと完全一致すること(Internal)
+/// - 非UTF-8 path: TOML(UTF-8 text)へ記述できないため設定エラー2
+pub fn render_init_template(template: &str, credentials_file: &Path) -> BackupResult<String> {
+    let expected = credentials_file.to_str().ok_or_else(|| {
+        BackupError::Config(format!(
+            "credential雛形pathがUTF-8で表現できないためaws.tomlを生成できない ({:?})",
+            credentials_file
+        ))
+    })?;
+    for v in collect_credentials_file_values(template)? {
+        if v != CREDENTIALS_FILE_MARKER {
+            return Err(BackupError::Internal(format!(
+                "aws.toml templateの置換前検査に失敗: credentials_file値({v:?})がmarkerと一致しない(template正本の劣化)"
+            )));
+        }
+    }
+    // 置換対象は`credentials_file = "MARKER"`の値行のみ(コメント中のquoted markerや
+    // 他キーの同値文字列は保持する)
+    let rendered = replace_marker_in_value_lines(
+        template,
+        &format!("\"{}\"", encode_toml_basic_string(expected)),
+    );
+    for v in collect_credentials_file_values(&rendered)? {
+        if v != expected {
+            return Err(BackupError::Internal(format!(
+                "aws.toml templateの置換後検査に失敗: credentials_file値({v:?})が期待pathと一致しない"
+            )));
+        }
+    }
+    Ok(rendered)
+}
+
+/// config initの生成対象3file(design doc 3.1。生成順=rollback対象順)。
+fn init_target_paths(config_dir: &Path) -> [PathBuf; 3] {
+    [
+        config_dir.join("pipeline.toml"),
+        config_dir.join("aws.toml"),
+        config_dir.join("aws-credentials.toml"),
+    ]
+}
+
+/// 生成処理本体(design doc 3.3)。書込を`write_file`へ委譲するseamで、unit testは
+/// 失敗注入(EEXIST競合・IO失敗)とrollbackをここで観測する:
+/// 1. 3対象の存在を`symlink_metadata()`で事前check(dangling symlinkも存在扱い)。
+///    1つでも存在すれば対象毎のerror+復旧案内の設定エラー2(all-or-nothing・書込なし)
+/// 2. 全対象が存在しなければ`create_dir_all`後に3fileを生成(排他的作成はwriter側の
+///    `create_new`が担る。事前check通過後の競合はwriter失敗として同じ経路へ落ちる)
+/// 3. 失敗時は生成済みfileを削除して原状回復(rollback。writer成功分に加え、書込失敗
+///    対象pathにfileが残っている場合(事前checkで存在しなかったため、この実行で作成が
+///    始まった部分書込file)もEEXIST(他processの競合file)を除いて削除する。この実行で
+///    作成したconfig dirが空になるならdirも削除。実行前から存在したfile・dirは不変)
+pub fn cmd_config_init_with_writer(
+    config_dir: &Path,
+    write_file: &mut dyn FnMut(&Path, &[u8], bool) -> std::io::Result<()>,
+) -> BackupResult<()> {
+    let targets = init_target_paths(config_dir);
+    let existing: Vec<&PathBuf> = targets
+        .iter()
+        .filter(|p| std::fs::symlink_metadata(p).is_ok())
+        .collect();
+    if !existing.is_empty() {
+        let mut msg =
+            String::from("生成対象のfileが既に存在するため初期化を中止しました(all-or-nothing):\n");
+        for p in &existing {
+            msg.push_str(&format!("  既存: {}\n", p.display()));
+        }
+        msg.push_str(
+            "既存fileを一時的に別dirへ退避して config init を再実行し、退避したfileを戻してください(不足fileだけ補われます)。または既存fileが不要なら削除して再実行してください",
+        );
+        return Err(BackupError::Config(msg));
+    }
+    let dir_existed = std::fs::symlink_metadata(config_dir).is_ok();
+    // aws.tomlの内容はfileを作る前に組み立てる(検査失敗時に書込対象を残さない)
+    let aws_content = render_init_template(INIT_AWS_TEMPLATE, &targets[2])?;
+    let contents: [(&PathBuf, &[u8], bool); 3] = [
+        (&targets[0], INIT_PIPELINE_TEMPLATE.as_bytes(), false),
+        (&targets[1], aws_content.as_bytes(), false),
+        (&targets[2], INIT_CREDENTIALS_TEMPLATE.as_bytes(), true),
+    ];
+    if let Err(e) = std::fs::create_dir_all(config_dir) {
+        return Err(BackupError::Config(format!(
+            "config dirを作れない ({}): {e}",
+            config_dir.display()
+        )));
+    }
+    let mut written: Vec<&PathBuf> = Vec::new();
+    for &(path, bytes, private) in &contents {
+        if let Err(e) = write_file(path, bytes, private) {
+            // 書込失敗対象pathにfileが残っていればrollback対象へ加える(事前checkで
+            // 存在しなかったため、この実行で作成が始まった部分書込file。EEXIST失敗は
+            // 他processが作った競合fileのため対象外=削除しない)
+            let mut rollback_targets = written.clone();
+            if e.kind() != std::io::ErrorKind::AlreadyExists
+                && std::fs::symlink_metadata(path).is_ok()
+            {
+                rollback_targets.push(path);
+            }
+            rollback_init(&rollback_targets, config_dir, dir_existed);
+            return Err(BackupError::Config(format!(
+                "設定fileの生成に失敗 ({}): {e}(生成済み分は削除して原状回復しました)",
+                path.display()
+            )));
+        }
+        written.push(path);
+    }
+    Ok(())
+}
+
+/// 生成失敗時の原状回復(design doc 3.3手順4)。rollback自体の失敗は警告表示にとどめ、
+/// 呼出側の終了コード(2)は維持する。
+fn rollback_init(written: &[&PathBuf], config_dir: &Path, dir_existed: bool) {
+    for p in written {
+        if let Err(e) = std::fs::remove_file(p) {
+            eprintln!("警告: rollback中のfile削除に失敗 ({}) : {e}", p.display());
+        }
+    }
+    if !dir_existed {
+        let empty = std::fs::read_dir(config_dir)
+            .map(|mut it| it.next().is_none())
+            .unwrap_or(false);
+        if empty {
+            if let Err(e) = std::fs::remove_dir(config_dir) {
+                eprintln!(
+                    "警告: rollback中の空config dir削除に失敗 ({}) : {e}",
+                    config_dir.display()
+                );
+            }
+        }
+    }
+}
+
+/// 1file分の排他的作成+書込(`create_new(true)`=上書き禁止の最終保護。
+/// `private=true`はcredential雛形: 作成時mode 0600指定=group/other禁止がumask非依存)。
+/// 排他的作成に成功したfileの書込失敗は、この場でfileを削除して部分書込を残さない
+/// (openがEEXIST等で失敗した場合はfileを作っていないため削除しない=競合file保護)。
+fn create_file_exclusive(path: &Path, contents: &[u8], private: bool) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    if private {
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    if let Err(e) = f.write_all(contents) {
+        drop(f);
+        if let Err(rm) = std::fs::remove_file(path) {
+            eprintln!(
+                "警告: 書込失敗した生成fileの削除に失敗 ({}) : {rm}",
+                path.display()
+            );
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// config initの実行(design doc 3.1・3.6)。生成先は`resolve_app_paths()`解決のconfig dir
+/// (=`aws_config`のparent)で、相対path解決(相対ABH)の場合は`cwd.join`で絶対化する
+/// (`canonicalize`は非存在path失敗・symlink解消の意図しない効果があるため不使用。
+/// 絶対化は表示・生成物記述のためで、resolve_app_paths自体の解決仕様は変更しない)。
+fn run_config_init() -> BackupResult<[PathBuf; 3]> {
+    let paths = resolve_app_paths();
+    let config_dir = paths
+        .aws_config
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let config_dir = if config_dir.is_absolute() {
+        config_dir
+    } else {
+        let cwd = std::env::current_dir()
+            .map_err(|e| BackupError::Config(format!("実行dir(cwd)を取得できない: {e}")))?;
+        cwd.join(config_dir)
+    };
+    cmd_config_init_with_writer(&config_dir, &mut create_file_exclusive)?;
+    Ok(init_target_paths(&config_dir))
+}
+
+/// config initのCLI入口(design doc 3.6・3.7)。成功はstdoutへ生成物一覧+次ステップ案内、
+/// 失敗はstderrへerror表示して対応exit code(生成系の失敗は2・template検査bugは1)。
+/// 成功時案内のdocs参照は`amazing-backup docs usage`(TASK-4。binary埋め込みのため
+/// repo未cloneでも当該binary versionの手順書へ到達できる。GitHub URLはHEAD版であり
+/// binary versionと異なる内容を読む可能性があった)。
+fn cmd_config_init() -> i32 {
+    match run_config_init() {
+        Ok([pipeline, aws, credentials]) => {
+            println!("生成: {}", pipeline.display());
+            println!("生成: {}", aws.display());
+            println!("生成: {} (permission 600)", credentials.display());
+            println!("次ステップ:");
+            println!("  1. aws-credentials.toml に access_key_id / secret_access_key を記述");
+            println!("  2. aws.toml の bucket を実際の値へ記述");
+            println!("  3. pipeline.toml の public_keys に SSH ed25519 公開鍵の絶対pathを記述");
+            println!(
+                "  詳細: amazing-backup docs usage(使用手順書)・amazing-backup docs config(設定例)"
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// configサブコマンドのdispatch(cli.rsの`Command::Config`から呼ばれる)。
+pub fn cmd_config(args: &ConfigArgs) -> i32 {
+    match &args.sub {
+        ConfigSub::Init => cmd_config_init(),
+    }
 }
 
 #[cfg(test)]

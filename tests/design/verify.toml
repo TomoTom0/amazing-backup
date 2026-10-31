@@ -40,7 +40,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-001(検査仕様は2
 description = "整合している状態で構造検査(既定段階)が全項目ok・exit 0となる (unit)"
 given = "正常なbackup push済registry・.age・manifestが揃った状態で backup verify 実行"
 expect_return = "exit code 0(全検査項目ok表示)"
-source_lines = "src/cli.rs:802"
+source_lines = "src/cli.rs:857"
 
 [[condition]]
 id = "verify.missing-or-size-mismatch-error"
@@ -49,7 +49,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-002(2.4-1・7.1のex
 description = "構造検査で .age 欠損・age_sizeと実sizeの不一致を検出し、検証エラー4(欠損も不一致と同じく4に統一)。age_sizeは実ファイルsizeと完全一致を要求し、実sizeが記録値未満(切り詰め)・超過(追記)のいずれも不一致としてexit 4となる(記録値未満を警告継続にしない) (unit)"
 given = ".age を削除したcaseと、age_size と異なる実sizeの .age のcase(実sizeが記録値を超過するcaseと未満に切り詰めるcaseの両方)の backup verify 実行"
 expect_return = "exit code 4(該当recordのsource_pathと期待/実測の詳細表示)"
-source_lines = "src/cli.rs:820"
+source_lines = "src/cli.rs:875"
 
 [[condition]]
 id = "verify.torn-write-and-bad-json-lines"
@@ -67,7 +67,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-004(2.4-2)。TASK-11
 description = "--checksum で .age の改変(byte追加)をsha256再計算により検出する (unit)"
 given = ".age へ1byte追加した状態で backup verify --checksum 実行"
 expect_return = "exit code 4(期待age_sha256と実測の不一致表示)"
-source_lines = "src/cli.rs:936"
+source_lines = "src/cli.rs:991"
 
 [[condition]]
 id = "verify.roundtrip-sha256-match"
@@ -103,7 +103,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-008(2.4)。TASK-11(P
 description = "backup verify はローカル整合検査であり aws設定(aws.toml)が一切なくても完結する (unit)"
 given = "aws.toml不在の環境で backup verify 実行"
 expect_return = "exit code 0"
-source_lines = "src/cli.rs:976"
+source_lines = "src/cli.rs:1031"
 
 [[condition]]
 id = "verify.unknown-record-type-skipped"
@@ -130,7 +130,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-011(2026-10-08レビ
 description = "backup verify --roundtrip はroundtrip開始前に秘密鍵ファイルの存在とageバイナリを事前検査し、不在なら設定・環境エラー2で即終了する(対象ファイルごとの復号失敗に紛れて検証エラー4とならない) (unit)"
 given = "秘密鍵ファイルが不在の状態、およびageバイナリがPATH上に無い状態での backup verify --roundtrip 実行"
 expect_return = "exit code 2(設定・環境エラー)"
-source_lines = "src/cli.rs:1050"
+source_lines = "src/cli.rs:1105"
 
 [[condition]]
 id = "verify.decrypt-error-includes-age-stderr"
@@ -148,7 +148,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-013(2.4-1・4.4。20
 description = "構造検査(既定段階)は各暗号化記録のage_pathの.age(manifestの.ageは含まない)のヘッダをparseし、ssh-ed25519 stanza識別子がregistry記録recipients指紋から導出したv1.2形式指紋prefix集合(記録指紋SHA256:<b64>のb64部をdecodeした32byteの先頭4byteをb64(paddingなし)符号化)と全単射で対応することを照合する。誤recipient鍵で作られた.age・stanza数不一致・識別子が指紋prefix形式(decode結果4byte)でない場合・記録指紋からprefixを導出できない場合(b64 decode不能・decode結果が32byte未満)・旧形式tagのみでv1.2形式stanzaを1つも持たない.ageは、いずれも検証エラー4(fail-closed。照合skipではなく) (unit)"
 given = "合成ageヘッダ(v1.2形式ssh-ed25519 stanza+`--- `終端)の.ageとrecipients記録をSHA256:<b64(32byte)>実形式の指紋で構成した、(a)正recipient(全単射一致)・(b)誤recipient指紋(stanzaは鍵Aのprefix・記録は鍵Bの指紋)・(c)stanza数不一致(ヘッダ2 stanza vs 記録1指紋)の3caseでの backup verify 実行"
 expect_return = "(a)はexit code 0、(b)(c)はexit code 4(recipient照合不一致の該当record特定表示)"
-source_lines = "src/cli.rs:873; tests/verify_roundtrip.rs:161"
+source_lines = "src/cli.rs:928; tests/verify_roundtrip.rs:161"
 
 [[condition]]
 id = "verify.swept-run-artifacts-excluded"

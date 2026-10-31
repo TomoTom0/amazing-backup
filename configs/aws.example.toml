@@ -1,6 +1,9 @@
-# aws.tomlのtemplate。このfileを~/.config/amazing-backup/aws.tomlへcopyして実際の値を
-# 記述する(XDG配置・TASK-19。$XDG_CONFIG_HOME設定時は $XDG_CONFIG_HOME/amazing-backup/aws.toml)。
-# credentialファイル(credentials_file)の相対pathは実行時のcwd基準。
+# aws.tomlのtemplate。`amazing-backup config init`がこの内容を規定path
+# (~/.config/amazing-backup/aws.toml)へ生成する(XDG配置・TASK-19。
+# $XDG_CONFIG_HOME設定時は $XDG_CONFIG_HOME/amazing-backup/aws.toml)。
+# initは各profileのcredentials_file値(marker)を生成したcredential雛形
+# ($config_dir/aws-credentials.toml)の絶対pathへ置換する。手動でこのfileを
+# 配置する場合はcredentials_fileを実pathへ書き換えること(markerのままでは使えない)。
 # 各keyの意味は docs/usage_backup.md 3.2 を参照。
 
 [aws]
@@ -21,7 +24,7 @@ bucket = "<dev-bucket>"
 region = "ap-northeast-1"
 prefix = "amazing-backup/"
 storage_class = "STANDARD"
-credentials_file = "configs/secret/aws-credentials/dev.toml"
+credentials_file = "__CREDENTIALS_FILE__"
 
 # prod系は用途別bucketの並列profile例(同一credentials_file共用)
 [aws.profiles.family]
@@ -30,4 +33,4 @@ bucket = "<prod-bucket-1>"
 region = "ap-northeast-1"
 prefix = "amazing-backup/"
 storage_class = "DEEP_ARCHIVE"
-credentials_file = "configs/secret/aws-credentials/prod.toml"
+credentials_file = "__CREDENTIALS_FILE__"
