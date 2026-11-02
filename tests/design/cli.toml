@@ -111,8 +111,8 @@ verified = true
 verified_at = "2026-11-03"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "a984ae34ce4f0e741edd8a89dde3f147772ad181"
-note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(--profile両file選択・backup verifyのaws.toml必須化・検査対象の実効bucket帰属絞り込み・recipients指紋表示はsrc/storage/backup.rs経由)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新"
+source_hash = "73cea824ff94378893d5c761de5bb520d5182c0c"
+note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(--profile両file選択・backup verifyのaws.toml必須化・検査対象の実効bucket帰属絞り込み・recipients指紋表示はsrc/storage/backup.rs経由)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新。2026-11-03 REVIEW-1(code review)指摘対応を反映しsource_hashを再更新"
 
 [[condition]]
 id = "cli.usage-error-exit-64"
@@ -121,7 +121,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-001(5章cli.rs・7.1
 description = "使用法誤り(引数誤り)は exit 64(clapのusage error既定 exit 2 を BackupError::Usage へremapし、設定エラー2と区別する) (unit)"
 given = "不明オプション・サブコマンド不足等のusage誤り実行"
 expect_return = "exit code 64"
-source_lines = "src/cli.rs:687"
+source_lines = "src/cli.rs:693"
 
 [[condition]]
 id = "cli.version-flag"
@@ -139,7 +139,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-003(終了コード�
 description = "終了コード区分(0/2/3/4/5)が7.1の仕様表どおりに出る(各サブコマンドの代表case) (unit)"
 given = "成功(対象なし・全skip含む)・設定エラー・対象エラー・処理エラー・転送エラーの各区画の代表ケース"
 expect_return_shape = "0(成功)・2(設定・環境)・3(対象)・4(処理)・5(転送)が各区画の代表ケースで出る"
-source_lines = "src/cli.rs:701; src/errors.rs:56"
+source_lines = "src/cli.rs:707; src/errors.rs:56"
 
 [[condition]]
 id = "cli.module-entrypoint-parity"
@@ -157,7 +157,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-005(2026-10-08レビ
 description = "backup push のPATH位置引数0個はusage error扱いで exit 64。PATHは1個以上必須(--from-listは併用オプション)(旧plan/encryptの対象指定からbackup pushへの文言改訂・id不変) (unit)"
 given = "backup push をPATH無し(オプションのみ、または--from-listのみ)で実行するケースと、PATH 1個(+--from-list併用)のケース"
 expect_return = "PATH 0個は exit 64。PATH 1個(+--from-list併用を含む)はusage errorとならない"
-source_lines = "src/cli.rs:1101"
+source_lines = "src/cli.rs:1107"
 
 [[condition]]
 id = "cli.fake-s3-seam"
@@ -606,7 +606,7 @@ source = "TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-8・2.9項目11・�
 description = "backup verifyはaws.toml必須(実効profile名の解決にload_aws_profileを流用=aws側解決chainと同一にする解決chainの単一化・偽装設定の検証も兼ねる。旧「aws不在でも構造検査可」からの破壊的変更)。aws.toml不在は設定エラー2+aws.tomlに言及するerror表示。credentialファイルの実在は不要(load_aws_profileはcredentials_fileの非空検査までで、file存在検査はS3書き込み系のrequire_ready/load_credentialsが担う)。verifyがS3接続しない・秘密値を扱わないことは不変 (integration, fake seam)"
 given = "(a)AMAZING_BACKUP_HOME配下にpipeline.toml・registry.jsonlのみでaws.tomlを置かない環境での backup verify (b)credentials_fileに不在pathを指定したaws.tomlでの backup verify の各実行"
 expect_return_shape = "(a)はexit 2+aws.tomlに言及するerror表示。(b)はcredentialファイル不在でも構造検査が完結しexit 0"
-source_lines = "tests/storage_backup.rs:1938"
+source_lines = "tests/storage_backup.rs:1962"
 
 [[condition]]
 id = "cli.backup-push-sha-merge-no-upload"

@@ -418,11 +418,30 @@ cargo test全件pass・verify-conditions.py PASSを確認
   (234条件すべてcover)。条件書4file(config・cli・verify・docs)の[meta]はverified=falseへreset
 - 条件数234(excluded 43件)
 
+2026-11-03: TASK-7実装完了(pipeline.toml profile化。src/config.rs・src/cli.rs・
+src/storage/{mod,backup,edit}.rs・configs/pipeline.example.toml・docs)。テスト側は前sessionの
+組立bug 5箇所(tests/common/mod.rs nest_section_under_profileのprofiles.前置・
+aws_same_bucket警告testのbackup2 purpose・旧形式(c)の--config重複経路・
+default guidance (b)のaws.toml残留・pipesel(2)の--key注入)をassertion不変のまま修正。
+cargo test全件pass(296件)・verify-conditions.py PASS。条件書4file
+(config・cli・verify・docs)の[meta]をverified=trueへ復帰(verified_at=2026-11-03。
+retention.tomlはverified=true維持でsource_hash更新)。
+2026-11-03: REVIEW-1(codex code review)指摘5件(高1/中2/低2)対応。
+高: backup verifyの検査対象をreduce済みでなく生記録(raw file_write records)から
+run単位で構築(同一identity_hashの複数bucket pushで旧writeがreduce後勝ちにより消え
+検査対象が失われる欠陥を解消。仮testでの再現確認済み)。中: verifyのbucket帰属判定で
+空s3_bucketを帰属不明として対象外化(record_bucket_matchedの旧記録救済はverifyでは
+不採用)・backup_verify_scoped_to_effective_bucketの観察強化(他bucket/帰属不明の
+identity_hashを別値へ+破損.age実配置で「他bucket側・帰属不明側の破損はexit 0=
+誤検査しない」「選択bucket側runの破損はexit 4」の正負を観察)。低: 旧経路encrypt記録の
+対象外警告へbatch id特定表示を追加・本READMEのTASK-7検証状況を実装後の最終状態へ更新。
+cargo test全件pass・verify-conditions.py PASSを確認
+
 ## 構成
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(15ファイル・234条件・excluded 43件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)とTASK-7(pipeline profile化: config新規8・cli新規4+verify/docs文言改訂・除外4)反映済み。TASK-1〜5・TASK-20・TASK-7分ともテスト作成済み(234条件すべてcover。TASK-7分は実装前のため赤) |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(15ファイル・234条件・excluded 43件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)とTASK-7(pipeline profile化: config新規8・cli新規4+verify/docs文言改訂・除外4)反映済み。TASK-1〜5・TASK-20・TASK-7分ともテスト作成済み(234条件すべてcover。TASK-7分も2026-11-03実装後に全件pass・条件書4fileの[meta]verified=true) |
 | tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(TASK-7 profile schema([profiles.dev]+追加profile)組立・AMAZING_BACKUP_HOMEによるXDG規定path統合・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
 | tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
@@ -436,14 +455,14 @@ cargo test全件pass・verify-conditions.py PASSを確認
 | tests/pin.rs | TASK-10/11 pinエリア(pin add/rm・write-once・backup時pin・skip対象への--pin・pin_removeのbucket照合) | 作成済み |
 | tests/retention.rs | TASK-10/11 retentionエリア(lifecycle NCVE/MPU abort・prune dry-run/保護/削除条件・併置排他)+TASK-18(lifecycle data/一括3rule・prune data/一括+aws.toml値化。category系3件は廃止で削除)+TASK-18追加仕様(manage resetの安全弁2件・dry-run既定・apply全消去・冪等) | 作成済み |
 | tests/storage_query.rs | 照会系CLI(query/get/list/diff・版特定・復元job・--format human/json)+TASK-18(探索語彙title/uuid・--source-path=source_path・復元先<out>/<title>・list files entity表示・--title・diff metadata除外。list categoriesは廃止で削除) | 作成済み(--format系・list jobs noncurrent版はPhase B実装前fail許容。TASK-18改訂分は実装前fail許容) |
-| tests/storage_backup.rs | 操作系CLI(backup push統合/dry-run・pull確認/範囲排他・versioning・索引不在・災害時動作)+keep_artifacts掃除+registry基準skip+TASK-18のbackup pushフロー12条件(sha合流・crash再PUT/孤児・title入力/変更/重複・registry喪失・廃止option拒否)+TASK-7(recipient指紋表示・verify対象の実効bucket絞り込み・verify aws必須の3test) | 作成済み(TASK-7分は実装前fail許容) |
-| tests/phase_b_options.rs | TASK-11 Phase BのCLI option系(--profile系3件・--aws-config既定path・索引GET転送エラー・manage jobs reissue)+再レビュー(旧記録bucket扱い・pin/entryのbucket分離)+prod 3bucket構成(3bucket分離・push接続先表示)+TASK-7(--profile共通選択: aws/pipeline両file・交叉なし) | 作成済み(TASK-7分は実装前fail許容) |
+| tests/storage_backup.rs | 操作系CLI(backup push統合/dry-run・pull確認/範囲排他・versioning・索引不在・災害時動作)+keep_artifacts掃除+registry基準skip+TASK-18のbackup pushフロー12条件(sha合流・crash再PUT/孤児・title入力/変更/重複・registry喪失・廃止option拒否)+TASK-7(recipient指紋表示・verify対象の実効bucket絞り込み・verify aws必須の3test) | 作成済み(TASK-7実装後に全件pass) |
+| tests/phase_b_options.rs | TASK-11 Phase BのCLI option系(--profile系3件・--aws-config既定path・索引GET転送エラー・manage jobs reissue)+再レビュー(旧記録bucket扱い・pin/entryのbucket分離)+prod 3bucket構成(3bucket分離・push接続先表示)+TASK-7(--profile共通選択: aws/pipeline両file・交叉なし) | 作成済み(TASK-7実装後に全件pass) |
 | tests/registry_storage.rs | TASK-18 registryエリア(schema2 records往復・旧schema拒否・sweep/location_remove・sha_uuid_lookup 3件。registry.jsonl直接編集+bin subprocessで観測) | 作成済み(実装前fail許容) |
 | tests/metadata_storage.rs | TASK-18 metadataエリア(MetadataDoc導出・変更時のみPUT・latest_source_path 3形態・title変更キーローテーション。metadata object実体とAPI呼び出し記録で観測) | 作成済み(実装前fail許容) |
-| tests/config_storage.rs | TASK-18 configエリア結合side([metadata]3値・[categories]拒否・[aws.lifecycle]必須/範囲+改訂2条件の結合観測)+TASK-7 pipeline profile化8条件(profile schema・検証2層・旧形式拒否等の結合観測) | 作成済み(TASK-7分は実装前fail許容) |
+| tests/config_storage.rs | TASK-18 configエリア結合side([metadata]3値・[categories]拒否・[aws.lifecycle]必須/範囲+改訂2条件の結合観測)+TASK-7 pipeline profile化8条件(profile schema・検証2層・旧形式拒否等の結合観測) | 作成済み(TASK-7実装後に全件pass) |
 | tests/config_init.rs | TASK-1 config initの結合side(生成path解決=ABH絶対/相対・既存file上書き保護=通常file/dangling symlink・credential雛形のmode 0600と空値・空credentialでのbackup push事前検査・stdout案内・生成fileと埋め込みtemplateのbyte一致/parse突合。bin subprocess+AMAZING_BACKUP_HOME) | 作成済み(TASK-1実装前fail許容) |
 | tests/config_init_unit.rs | TASK-1 config initのunit(render_init_templateのTOML basic string符号化=「"」「\」入りpathのparse復元一致と劣化template内部エラー1・cmd_config_init_with_writerの失敗注入= EEXIST競合/IO失敗によるrollback。lib API直呼び) | 作成済み(TASK-1実装前compile error許容) |
-| tests/docs_pages.rs | TASK-4 docsサブコマンド(unit 4: 変換関数substitute_version_lines合成入力9.9.9+test側独立期待値・対象行が入力末尾の改行あり/なし両caseの保持=レビュー指摘対応・正本version literal sync+対象行count==1・終了コード表の両doc一致(固定期待集合・code→区分・重複拒否・空集合拒否)。integration 8: bin subprocess+AMAZING_BACKUP_HOME空dir固定=各ページbyte一致・usage version行・config marker置換+区切り行・llm skill frontmatter・llm snippet pointer・ページ一覧・invalid syntax 64本文非出力・書込失敗BrokenPipe=0/ENOSPC=4(/dev/full・相手close socketpair)。Write注入系unit観測はsrc/docs.rs内unit test 4件が担う) | 作成済み(TASK-4実装後に全件pass。TASK-7のconfig-marker-replaced改訂分は実装前fail許容) |
+| tests/docs_pages.rs | TASK-4 docsサブコマンド(unit 4: 変換関数substitute_version_lines合成入力9.9.9+test側独立期待値・対象行が入力末尾の改行あり/なし両caseの保持=レビュー指摘対応・正本version literal sync+対象行count==1・終了コード表の両doc一致(固定期待集合・code→区分・重複拒否・空集合拒否)。integration 8: bin subprocess+AMAZING_BACKUP_HOME空dir固定=各ページbyte一致・usage version行・config marker置換+区切り行・llm skill frontmatter・llm snippet pointer・ページ一覧・invalid syntax 64本文非出力・書込失敗BrokenPipe=0/ENOSPC=4(/dev/full・相手close socketpair)。Write注入系unit観測はsrc/docs.rs内unit test 4件が担う) | 作成済み(TASK-4実装後に全件pass。TASK-7のconfig-marker-replaced改訂分も実装後に全件pass) |
 | src/**/*.rs 内 #[cfg(test)] | cargo単体test(S3実行はS3Backend fake(FakeS3)差替) | 作成済み |
 
 cargo testの階層: unit=src/各モジュール内`#[cfg(test)] mod tests`、

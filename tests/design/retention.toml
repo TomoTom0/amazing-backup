@@ -37,7 +37,7 @@ verified = true
 verified_at = "2026-10-23"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "a984ae34ce4f0e741edd8a89dde3f147772ad181"
+source_hash = "73cea824ff94378893d5c761de5bb520d5182c0c"
 note = "TASK-10(9章素案+設計3.2/5.2本文)の条件化。TASK-18で保持数管理がaws.toml [aws.lifecycle](noncurrent_days・keep_versions・mpu_abort_days)へ一元化(ハードコード禁止・承認事項7)し、lifecycleはdata/一括3rule(NCVE+MPU abort+DeleteMarkerSweep)、pruneはdata/一括(keep=aws.toml値)。source_fileはエリア主対象としてcli.rs(manage系コマンド)を指し、lifecycle構成のS3 API実体(src/s3.rs)と対象計算(src/index.rs)はtarget_functionで特定(config.tomlのCONF-005と同一運用)。2026-11-02 TASK-7(pipeline.toml profile化)でsrc/cli.rsが変更されたためsource_hashを更新(manage系コマンドの契約は不変・retention系testは全件pass)"
 
 [[condition]]

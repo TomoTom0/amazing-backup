@@ -213,18 +213,6 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
     else {
         return 2;
     };
-    // bucket一致規則の正本側(bucket帰属不明の旧記録=s3_bucket空文字は正本bucket相当)
-    let aws_path = args
-        .aws_config
-        .clone()
-        .unwrap_or_else(|| crate::config::resolve_app_paths().aws_config);
-    let canonical_bucket = match crate::config::canonical_bucket(&aws_path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return 2;
-        }
-    };
     let registry_path = cfg.registry_path.clone();
     let records = match crate::registry::load_registry(&registry_path) {
         Ok(r) => r,
@@ -233,69 +221,87 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
             return e.exit_code();
         }
     };
-    let reduced = crate::registry::reduce_records(&records);
 
-    // batch_id -> bucket帰属(TASK-7: manifest/index_upload recordのs3_bucketから導出)
+    // 検査対象は生記録(raw records)からrun単位で構築する(REVIEW-1指摘1: reduceは
+    // identity_hash単位の後勝ちのため、同一所在を複数bucket/複数runへpushすると旧
+    // file_write記録が消えて検査対象・対象外警告から失われる。verifyは記録された
+    // run成果物の検査でありreduceの最新状態参照は不要)
+    let date_matches = |batch_date: &str| {
+        args.date
+            .as_deref()
+            .map(|d| batch_date == d)
+            .unwrap_or(true)
+    };
+
+    // batch_id -> bucket帰属(TASK-7: manifest/index_upload recordのs3_bucketから導出。
+    // REVIEW-1指摘2: 空s3_bucketは帰属情報の欠損のため採用しない=帰属不明扱い。
+    // record_bucket_matchedの旧記録救済(空=正本bucket相当)はlist/query系の規則であり、
+    // verifyの絞り込みでは「帰属不明は対象外」(2.9項目10)を厳格に適用する)
     let mut batch_buckets: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for r in &records {
         match r {
             crate::registry::Record::ManifestV2(m) => {
-                batch_buckets
-                    .entry(m.batch_id.as_str())
-                    .or_insert(m.s3_bucket.as_str());
+                if !m.s3_bucket.is_empty() {
+                    batch_buckets
+                        .entry(m.batch_id.as_str())
+                        .or_insert(m.s3_bucket.as_str());
+                }
             }
             crate::registry::Record::IndexUpload(iu) => {
-                batch_buckets
-                    .entry(iu.run_id.as_str())
-                    .or_insert(iu.s3_bucket.as_str());
+                if !iu.s3_bucket.is_empty() {
+                    batch_buckets
+                        .entry(iu.run_id.as_str())
+                        .or_insert(iu.s3_bucket.as_str());
+                }
             }
             _ => {}
         }
     }
+    // 帰属一致=非空の帰属情報を持ち実効bucketと一致(mapに載らない=帰属記録が無い
+    // batch・空帰属のbatchは帰属不明として対象外)
+    let bucket_of_batch_matches =
+        |batch: &str| batch_buckets.get(batch).is_some_and(|b| *b == aws.bucket);
 
-    // 旧経路(encrypt)記録はbucket帰属が確定できないため検査対象外+警告
-    // (旧単一構成時代の遺物。profile別鍵での誤fail報告を防ぐ)
-    let encrypt_count = reduced
-        .encrypts
-        .iter()
-        .filter(|e| {
-            args.date
-                .as_deref()
-                .map(|d| e.batch_date == d)
-                .unwrap_or(true)
-        })
-        .count();
-    if encrypt_count > 0 {
-        println!(
-            "verify: 旧経路encrypt記録{encrypt_count}件はbucket帰属が確定できないため検査対象外です(旧単一構成時代の記録)"
-        );
-    }
+    // 対象外batchの一覧(batch id特定表示)
+    let mut excluded_batches: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
 
-    let writes_all: Vec<&crate::registry::FileWriteRecord> = reduced
-        .file_writes
+    // 旧経路(encrypt)記録はbucket帰属が確定できないため検査対象外+警告(旧単一構成
+    // 時代の遺物。profile別鍵での誤fail報告を防ぐ。REVIEW-1指摘4: batch idも特定表示)
+    let mut encrypt_batches: Vec<&str> = records
         .iter()
-        .filter(|w| {
-            args.date
-                .as_deref()
-                .map(|d| w.batch_date == d)
-                .unwrap_or(true)
+        .filter_map(|r| match r {
+            crate::registry::Record::Encrypt(e) if date_matches(&e.batch_date) => {
+                Some(e.batch_id.as_str())
+            }
+            _ => None,
         })
         .collect();
-    // 実効profileのbucketへ帰属するrunへ絞り込み(帰属不明=manifest/index_upload記録が
-    // 無いbatch・他bucket帰属のbatchは対象外+警告表示・batch id特定)。
-    // 帰属の判定はregistry::record_bucket_matchedと同一規則(s3_bucket欠損の旧記録は
-    // 正本bucket相当)。
-    let bucket_of_batch_matches = |batch: &str| {
-        batch_buckets.get(batch).is_some_and(|b| {
-            crate::registry::record_bucket_matched(b, &aws.bucket, &canonical_bucket)
+    encrypt_batches.sort_unstable();
+    encrypt_batches.dedup();
+    if !encrypt_batches.is_empty() {
+        println!(
+            "verify: 旧経路encrypt記録はbucket帰属が確定できないため検査対象外です(旧単一構成時代の記録。batch: {})",
+            encrypt_batches.join(", ")
+        );
+        for b in &encrypt_batches {
+            excluded_batches.insert(b);
+        }
+    }
+
+    // 新経路(file_write)記録: 生記録を--dateで絞り、実効profileのbucketへ帰属するrunへ
+    // 絞り込み(帰属不明=非空の帰属記録が無いbatch・他bucket帰属のbatchは対象外)
+    let writes_all: Vec<&crate::registry::FileWriteRecord> = records
+        .iter()
+        .filter_map(|r| match r {
+            crate::registry::Record::FileWrite(w) if date_matches(&w.batch_date) => Some(w),
+            _ => None,
         })
-    };
+        .collect();
     let (writes, excluded_writes): (Vec<&crate::registry::FileWriteRecord>, Vec<_>) = writes_all
         .into_iter()
         .partition(|w| bucket_of_batch_matches(&w.batch_id));
     // 対象外batchの特定はrun単位(manifest/index_upload記録の帰属から導出。file_writeが
-    // reduce等で残っていなくてもrunとして表示する)+帰属不明のfile_write記録
-    let mut excluded_batches: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    // 無いbatchもrunとして表示する)+帰属不明・他bucket帰属のfile_write記録
     for w in &excluded_writes {
         excluded_batches.insert(w.batch_id.as_str());
     }

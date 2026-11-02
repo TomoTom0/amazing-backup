@@ -1842,10 +1842,13 @@ fn backup_verify_scoped_to_effective_bucket() {
     assert_eq!(code, 0, "dev側push: {stdout}");
 
     // (1) 他bucket(bucket-3rd=dev/prodいずれの実効bucketでもない第三bucket)帰属run:
-    // manifest recordのs3_bucketで帰属づけたfile_write(age_pathはrun成果物dir不在)を
-    // registryへ直接構築
+    // manifest recordのs3_bucketで帰属づけたfile_writeをregistryへ直接構築
+    // (REVIEW-1指摘3: identity_hashは他記録と別値にする=reduceの対象外であることを
+    // 保証しfile_write自身のbucket絞り込みを観察可能にする。age fileも破損内容で
+    // 実際に配置し、誤検査すればexit 4になる)
     let other_batch = "0192-vscope-other-batch";
     let other_age = fx.out_dir.join(other_batch).join("other.age");
+    write_file(&other_age, b"tampered-other-age-content");
     let other_uuid = "0192a4f0-0000-7000-8000-000000000001";
     append_registry_line(
         &fx.registry,
@@ -1861,7 +1864,7 @@ fn backup_verify_scoped_to_effective_bucket() {
             "age_size": 1, "age_sha256": sha256_hex(b"vscope-other-age"),
             "recipients": ["SHA256:AAAA"],
             "category": "unfiled", "label": "",
-            "identity_hash": "deadbeef",
+            "identity_hash": "deadbee1",
             "s3_key": format!("amazing-backup/data/{other_uuid}/default.age"),
         }),
     );
@@ -1880,9 +1883,10 @@ fn backup_verify_scoped_to_effective_bucket() {
         }),
     );
     // (2) 帰属不明記録: file_writeのみ(upload未完のcrash残存相当・batch帰配の
-    // manifest/index_upload記録が無い)
+    // manifest/index_upload記録が無い。age fileは破損内容で実際に配置)
     let orphan_batch = "0192-vscope-orphan-batch";
     let orphan_age = fx.out_dir.join(orphan_batch).join("orphan.age");
+    write_file(&orphan_age, b"tampered-orphan-age-content");
     append_registry_line(
         &fx.registry,
         &serde_json::json!({
@@ -1897,18 +1901,18 @@ fn backup_verify_scoped_to_effective_bucket() {
             "age_size": 1, "age_sha256": sha256_hex(b"vscope-orphan-age"),
             "recipients": ["SHA256:BBBB"],
             "category": "unfiled", "label": "",
-            "identity_hash": "deadbeef",
+            "identity_hash": "deadbee2",
             "s3_key": "amazing-backup/data/0192a4f0-0000-7000-8000-000000000002/default.age",
         }),
     );
 
-    // 既定(実効profile=dev/bucket=it-bucket): 他bucket帰属・帰属不明の記録は
-    // 検査対象外+警告表示。対象run(dev)は検査される(exit 0)
+    // 既定(実効profile=dev/bucket=it-bucket): 他bucket帰属・帰属不明の記録(age破損済み)
+    // は検査対象外+警告表示のため誤検査しない(exit 0・対象runは検査される)
     let (code, stdout, stderr) = fx.bin(&["backup", "verify"], &[]);
     let combined = format!("{stdout}{stderr}");
     assert_eq!(
         code, 0,
-        "他bucket・帰属不明記録は検査対象外でexit 0(対象runは検査される): {combined}"
+        "他bucket・帰属不明記録はage破損があっても検査対象外でexit 0(誤検査しない): {combined}"
     );
     assert!(
         combined.contains("対象外"),
@@ -1919,14 +1923,34 @@ fn backup_verify_scoped_to_effective_bucket() {
         "対象外となったbatchの特定表示: {combined}"
     );
 
-    // --profile prod: 実効bucket=bucket-prod帰属のrunのみ検査。dev bucket帰属のrunは
-    // 対象外(対象runが無くてもexit 0+対象外警告)
+    // 正の対照(REVIEW-1指摘3): 選択bucket側(dev)runの破損は検出される(exit 4)
     let dev_batch = &run_batch_ids(&fx)[0];
+    let dev_age = fx
+        .registry_values()
+        .into_iter()
+        .find(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some("file_write")
+                && r.get("batch_id").and_then(|b| b.as_str()) == Some(dev_batch.as_str())
+        })
+        .map(|r| std::path::PathBuf::from(r["age_path"].as_str().unwrap()))
+        .expect("dev runのfile_write記録");
+    let mut tampered = std::fs::read(&dev_age).expect("dev runの.age読込");
+    tampered.push(b'X');
+    write_file(&dev_age, &tampered);
+    let (code, stdout, stderr) = fx.bin(&["backup", "verify"], &[]);
+    let combined = format!("{stdout}{stderr}");
+    assert_eq!(
+        code, 4,
+        "選択bucket帰属run(dev)の破損は検証エラー4として検出される: {combined}"
+    );
+
+    // --profile prod: 実効bucket=bucket-prod帰属のrunのみ検査。dev bucket帰属のrunは
+    // 破損していても対象外のため誤failしない(対象runが無くてもexit 0+対象外警告)
     let (code, stdout, stderr) = fx.bin(&["backup", "verify", "--profile", "prod"], &[]);
     let combined = format!("{stdout}{stderr}");
     assert_eq!(
         code, 0,
-        "--profile prodはprod bucket帰属runのみ検査(dev runは対象外): {combined}"
+        "--profile prodはprod bucket帰属runのみ検査(破損したdev runは対象外で誤failしない): {combined}"
     );
     assert!(combined.contains("対象外"), "対象外警告: {combined}");
     assert!(
