@@ -1718,3 +1718,284 @@ fn removed_options_are_rejected_with_usage_error() {
     }
     assert_eq!(fx.calls(), "", "S3 API呼び出しは行われない: {}", fx.calls());
 }
+
+// ---------------------------------------------------------------------------
+// TASK-7(pipeline.toml profile化・tmp/tasks/tm-7/design_pipeline_profile.md
+// D-5・D-8・2.9項目10/11)の条件群。テスト先行のため実装前の実行failを許容する。
+
+/// ssh-keygen -lfによる公開鍵指紋の独立oracle(SHA256:<base64 nopad>形式。
+/// fingerprint.rsの現行形式と同一)。
+fn ssh_fingerprint_of(pubkey: &std::path::Path) -> String {
+    let out = std::process::Command::new("ssh-keygen")
+        .arg("-lf")
+        .arg(pubkey)
+        .output()
+        .expect("ssh-keygen -lf 実行");
+    assert!(
+        out.status.success(),
+        "ssh-keygen -lf失敗: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .find(|t| t.starts_with("SHA256:"))
+        .unwrap_or_else(|| panic!("SHA256指紋が取れない: {}", String::from_utf8_lossy(&out.stdout)))
+        .to_string()
+}
+
+/// [covers:cli.backup-push-recipient-fingerprints-shown]
+/// backup push開始時の接続先表示に続けて、実効profileのrecipient指紋を表示する
+/// (TASK-7 D-5): 「recipients(N):」行+指紋全文(SHA256:<base64 nopad>)を鍵毎に1行。
+/// dry-run(暗号化しない)でも表示する(load時検証で計算済みの指紋を使用)。
+/// pin・manage系では表示しない(表示箇所はpush開始時の1箇所)。
+#[test]
+fn backup_push_shows_recipient_fingerprints() {
+    let Some(fx) = StorageFixture::new("sb-fpr", sb_opts()) else {
+        return;
+    };
+    // 第2 recipient鍵を追加(鍵毎1行表示の観察のため)
+    let (pub2, _sec2) = generate_ed25519_keypair(&fx.elsewhere, "fpr2");
+    fx.rewrite_pipeline_toml(&fx.pipeline_body().replace(
+        &format!("public_keys = [\"{}\"]", fx.public.display()),
+        &format!(
+            "public_keys = [\"{}\", \"{}\"]",
+            fx.public.display(),
+            pub2.display()
+        ),
+    ));
+    let f1 = ssh_fingerprint_of(&fx.public);
+    let f2 = ssh_fingerprint_of(&pub2);
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"fingerprints-plain");
+
+    // dry-runでも表示(暗号化しないがload時検証済み指紋のため表示可能)
+    let (code, stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
+    assert_eq!(code, 0, "dry-runはexit 0: {stdout}{stderr}");
+    assert!(
+        stdout.contains("recipients(2)"),
+        "recipients(2)行が表示される: {stdout}"
+    );
+    assert!(
+        stdout.contains(&f1) && stdout.contains(&f2),
+        "指紋全文が鍵毎に表示される({f1}, {f2}): {stdout}"
+    );
+    // 指紋は鍵毎に1行(指紋のみの行が2行ある)
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|l| l.trim_start().starts_with("SHA256:"))
+            .count(),
+        2,
+        "指紋行は鍵数と同じ2行: {stdout}"
+    );
+
+    // 通常実行でも同一表示(新規発行はtitle必須のためpty)
+    let Some((code, stdout)) = sb_push_titled(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "pushはexit 0: {stdout}");
+    assert!(
+        stdout.contains("recipients(2)") && stdout.contains(&f1) && stdout.contains(&f2),
+        "通常実行にも指紋表示: {stdout}"
+    );
+
+    // pin・manage系では表示しない(表示箇所はpush開始時の1箇所)
+    let (code, stdout, stderr) = fx.pin("add", "a.zip", &["--latest", "--as", "fprpin"]);
+    assert_eq!(code, 0, "pin addはexit 0: {stdout}{stderr}");
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        !combined.contains("recipients("),
+        "pin addではrecipient指紋表示を行わない: {combined}"
+    );
+}
+
+/// [covers:cli.verify-scoped-to-effective-bucket]
+/// backup verifyの検査対象は実効profileのbucketへ帰属するrunのみ(TASK-7 D-8・2.9項目10)。
+/// runのbucket帰属はmanifest/index_upload recordのs3_bucketから判定し、他bucket帰属の
+/// run・bucket帰属が確定できない記録(旧経路encrypt記録・upload未完でfile_writeのみの
+/// crash残存)は検査対象外+警告表示(別profileの正常な成果物を復号失敗で誤failしない)。
+/// CLI上既に受理している--profileが実効化され、--profile指定時は当該profileのbucket
+/// 帰属runのみが検査対象になる。
+#[test]
+fn backup_verify_scoped_to_effective_bucket() {
+    let Some(fx) = StorageFixture::new(
+        "sb-vscope",
+        StorageOpts {
+            extra_pipeline_profiles: vec!["prod".into()],
+            keep_artifacts: "always",
+            ..sb_opts()
+        },
+    ) else {
+        return;
+    };
+    // dev(active_profile・bucket=it-bucket)とprod(bucket-prod)の構成
+    fx.rewrite_aws_toml(&format!(
+        "{}\n[aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"bucket-prod\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{}\"\n",
+        fx.aws_toml_body(),
+        fx.credentials.display()
+    ));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"verify-scope-plain");
+    let Some((code, stdout)) = sb_push_titled(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "dev側push: {stdout}");
+
+    // (1) 他bucket(bucket-3rd=dev/prodいずれの実効bucketでもない第三bucket)帰属run:
+    // manifest recordのs3_bucketで帰属づけたfile_write(age_pathはrun成果物dir不在)を
+    // registryへ直接構築
+    let other_batch = "0192-vscope-other-batch";
+    let other_age = fx.out_dir.join(other_batch).join("other.age");
+    let other_uuid = "0192a4f0-0000-7000-8000-000000000001";
+    append_registry_line(
+        &fx.registry,
+        &serde_json::json!({
+            "schema": 3, "record_type": "file_write",
+            "recorded_at": "2026-11-02T00:00:00+09:00",
+            "batch_id": other_batch, "batch_date": jst_today(),
+            "uuid": other_uuid, "title": "other.zip",
+            "source_path": "/crafted/vscope/other.zip", "source_name": "other.zip",
+            "source_size": 1, "source_mtime": "2026-11-02T00:00:00+09:00",
+            "source_sha256": sha256_hex(b"vscope-other"),
+            "age_path": other_age.display().to_string(),
+            "age_size": 1, "age_sha256": sha256_hex(b"vscope-other-age"),
+            "recipients": ["SHA256:AAAA"],
+            "category": "unfiled", "label": "",
+            "identity_hash": "deadbeef",
+            "s3_key": format!("amazing-backup/data/{other_uuid}/default.age"),
+        }),
+    );
+    append_registry_line(
+        &fx.registry,
+        &serde_json::json!({
+            "schema": 2, "record_type": "manifest",
+            "recorded_at": "2026-11-02T00:00:01+09:00",
+            "batch_id": other_batch,
+            "s3_key": format!("amazing-backup/runs/{other_batch}/manifest.jsonl.age"),
+            "s3_bucket": "bucket-3rd", "s3_region": "ap-northeast-1",
+            "version_id": "vscope-other-vid", "s3_size": 1,
+            "s3_checksum_sha256": sha256_hex(b"vscope-other-manifest"),
+            "s3_checksum_type": "SHA256",
+            "uploaded_at": "2026-11-02T00:00:01+09:00",
+        }),
+    );
+    // (2) 帰属不明記録: file_writeのみ(upload未完のcrash残存相当・batch帰配の
+    // manifest/index_upload記録が無い)
+    let orphan_batch = "0192-vscope-orphan-batch";
+    let orphan_age = fx.out_dir.join(orphan_batch).join("orphan.age");
+    append_registry_line(
+        &fx.registry,
+        &serde_json::json!({
+            "schema": 3, "record_type": "file_write",
+            "recorded_at": "2026-11-02T00:00:02+09:00",
+            "batch_id": orphan_batch, "batch_date": jst_today(),
+            "uuid": "0192a4f0-0000-7000-8000-000000000002", "title": "orphan.zip",
+            "source_path": "/crafted/vscope/orphan.zip", "source_name": "orphan.zip",
+            "source_size": 1, "source_mtime": "2026-11-02T00:00:02+09:00",
+            "source_sha256": sha256_hex(b"vscope-orphan"),
+            "age_path": orphan_age.display().to_string(),
+            "age_size": 1, "age_sha256": sha256_hex(b"vscope-orphan-age"),
+            "recipients": ["SHA256:BBBB"],
+            "category": "unfiled", "label": "",
+            "identity_hash": "deadbeef",
+            "s3_key": "amazing-backup/data/0192a4f0-0000-7000-8000-000000000002/default.age",
+        }),
+    );
+
+    // 既定(実効profile=dev/bucket=it-bucket): 他bucket帰属・帰属不明の記録は
+    // 検査対象外+警告表示。対象run(dev)は検査される(exit 0)
+    let (code, stdout, stderr) = fx.bin(&["backup", "verify"], &[]);
+    let combined = format!("{stdout}{stderr}");
+    assert_eq!(
+        code, 0,
+        "他bucket・帰属不明記録は検査対象外でexit 0(対象runは検査される): {combined}"
+    );
+    assert!(
+        combined.contains("対象外"),
+        "対象外run・記録の警告表示: {combined}"
+    );
+    assert!(
+        combined.contains(other_batch) && combined.contains(orphan_batch),
+        "対象外となったbatchの特定表示: {combined}"
+    );
+
+    // --profile prod: 実効bucket=bucket-prod帰属のrunのみ検査。dev bucket帰属のrunは
+    // 対象外(対象runが無くてもexit 0+対象外警告)
+    let dev_batch = &run_batch_ids(&fx)[0];
+    let (code, stdout, stderr) = fx.bin(&["backup", "verify", "--profile", "prod"], &[]);
+    let combined = format!("{stdout}{stderr}");
+    assert_eq!(
+        code, 0,
+        "--profile prodはprod bucket帰属runのみ検査(dev runは対象外): {combined}"
+    );
+    assert!(combined.contains("対象外"), "対象外警告: {combined}");
+    assert!(
+        combined.contains(dev_batch.as_str()),
+        "dev bucket帰属run({dev_batch})が対象外として表示される: {combined}"
+    );
+}
+
+/// [covers:cli.verify-requires-aws-config]
+/// [covers:verify.runs-without-aws]
+/// backup verifyはaws.toml必須(TASK-7 2.9項目11: 実効profile名の解決にload_aws_profile
+/// を流用=解決chainの単一化)。aws.toml不在は設定エラー2。credentialファイルの実在は
+/// 不要(credentials_fileの非空検査まで・S3接続しない・秘密値非取扱いは不変)。
+#[test]
+fn backup_verify_requires_aws_config() {
+    let Some(fx) = StorageFixture::new("sb-vnoaws", sb_opts()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"verify-no-aws-plain");
+    let Some((code, stdout)) = sb_push_titled(&fx, &[&a], "a.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push: {stdout}");
+
+    let state_s = fx.state.display().to_string();
+    // (a) aws.tomlが規定pathに無い環境(pipeline.toml・registryは在る)では設定エラー2
+    let abh = fx.elsewhere.join("vnoaws-abh");
+    std::fs::create_dir_all(&abh).expect("ABH dir");
+    std::fs::copy(&fx.cfg, abh.join("pipeline.toml")).expect("pipeline.toml配置");
+    std::fs::copy(&fx.registry, abh.join("registry.jsonl")).expect("registry配置");
+    let (code, _stdout, stderr) = run_bin_env(
+        &["backup", "verify"],
+        &[
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+            ("AMAZING_BACKUP_HOME", abh.display().to_string().as_str()),
+        ],
+    );
+    assert_eq!(
+        code, 2,
+        "aws.toml不在のverifyは設定エラー2(実効profile解決のため必須): {stderr}"
+    );
+    assert!(
+        stderr.contains("aws.toml"),
+        "aws.toml必須のerrorであることがわかる: {stderr}"
+    );
+
+    // (b) credentials_fileが不在pathでも構造検査は完結(credentialファイルの実在検査は
+    // S3書き込み系のrequire_ready/load_credentialsが担う。verifyはS3接続しない)
+    let abh2 = fx.elsewhere.join("vnoaws-cred-abh");
+    std::fs::create_dir_all(&abh2).expect("ABH dir2");
+    std::fs::copy(&fx.cfg, abh2.join("pipeline.toml")).expect("pipeline.toml配置2");
+    std::fs::copy(&fx.registry, abh2.join("registry.jsonl")).expect("registry配置2");
+    let aws_body = fx
+        .aws_toml_body()
+        .replace(
+            &fx.credentials.display().to_string(),
+            "/nonexistent/amazing-backup-it-creds.toml",
+        );
+    write_file(&abh2.join("aws.toml"), aws_body.as_bytes());
+    let (code, stdout, stderr) = run_bin_env(
+        &["backup", "verify"],
+        &[
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+            ("AMAZING_BACKUP_HOME", abh2.display().to_string().as_str()),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "credentialファイル不在でも構造検査は完結: {stdout}{stderr}"
+    );
+}

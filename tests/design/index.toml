@@ -184,7 +184,7 @@ source = "TASK-11(Phase B)コードレビュー指摘L-6+tmp/tasks/tm-10/design_
 description = "索引parse失敗(不正JSON行・index_header/file entryのschema違反・index_header不在)のerror文には`manage index rebuild`による索引再構築の案内を含める(終了コードは検証エラー4のまま変更しない。索引objectが壊れている場合の回復経路を利用者へ示す)。TASK-18の索引schema=2化・TASK-20のschema=3化に伴い、旧schema(1・2)索引の読込はschema不一致として設定エラー2+rebuild案内で拒否される(旧索引の誤読防止) (integration, fake seam)"
 given = "索引objectをschema違反の平文(file entry必須field欠損)へ書き換えた状態と、旧schema=1索引(schema=1のindex_header)・旧schema=2索引(schema=2のindex_header)を配置した状態での list files 実行"
 expect_return_shape = "schema違反平文は exit 4(検証エラー)+rebuild案内。schema=1・schema=2索引はいずれも exit 2(設定エラー)+rebuild案内"
-source_lines = "src/index.rs:820; tests/index_storage.rs:1377"
+source_lines = "src/index.rs:820; tests/index_storage.rs:1384"
 
 [[condition]]
 id = "index.pins-bucket-isolated"
@@ -193,7 +193,7 @@ source = "TASK-11(Phase B)再レビュー指摘M-R1+tmp/tasks/tm-10/design_s3_st
 description = "索引pins[]の構築・復元はregistry記録のs3_bucket一致(registry::record_bucket_matchedと同一規則。欠損空文字は正本bucket相当)を伴う: (a) pin_write記録はs3_bucketが当該実行の実効bucketと一致するもののみ採用(同一prefix・別bucket構成で他方bucketのみのpinが当方bucketの索引へ混入せず、get --pinが当方bucketでNoSuchKeyの転送エラー5にならない) (b) pin_remove記録はs3_bucket一致するもののみ削除済み扱い(pin_s3_key一致のみでは照合しない。誤ったprofileでのpin rm等・他方bucketでの解除が正bucket側の索引からpinを消さない=pin object残留を防ぐ)。manage index rebuildのローカルregistryからのpins復元も同一規則 (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成での、(1)dev push+pin add(pm1)後のprod側pushで再構築されたprod側索引 (2)get --pin pm1 --profile prod と pin rm --pin pm1 --profile prod の各実行 (3)registryへ他方bucket(bucket-prod)のs3_bucketを持つpin_remove記録を混入した状態と正bucket(bucket-dev)のs3_bucketを持つpin_remove記録を混入した状態での、dev側索引再構築(all-skip push)と manage index rebuild"
 expect_return_shape = "(1)prod側索引の当該entry pins[]は空(dev側pm1は混入しない。dev側索引はpm1を保持) (2)いずれも exit 3(pin名は当該索引に無し)でpin objectへのS3 API呼び出し(取得・削除)を行わず、dev側索引pins[]・pin objectは不変 (3)他方bucketのpin_removeではpinは索引に残り、正bucketのpin_removeでは除去される。manage index rebuildの復元も同一結果"
-source_lines = "src/index.rs:614; tests/phase_b_options.rs:524; tests/pin.rs:651"
+source_lines = "src/index.rs:614; tests/phase_b_options.rs:551; tests/pin.rs:651"
 
 [[condition]]
 id = "index.entries-without-bucket-versions-excluded"
@@ -202,7 +202,7 @@ source = "TASK-11(Phase B)再レビュー指摘L-R1+tmp/tasks/tm-10/design_s3_st
 description = "file_write記録にs3_bucket字段が無いためentry組立はbucket不関だが、索引の意味論は「当該namespace(bucket)で管理されるfile」: 当該実効bucketと一致するfile_upload記録によるversions[]もbucket一致するpin_write記録によるpins[]も持たないentry(同一prefix・別bucket構成で他方bucketにしかuploadされていないfile等)は索引entriesへ載せない(list/query/diffの表示・getのname解決から除外。版が無いentryがgetで版なしエラーになる表示面の混入を防ぐ。データ破壊は無い) (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成でa.zipを両bucketへ・b.zipをdevのみへpushした状態での、prod側(--profile)からの list files・query・get・diff の各実行と、dev側(正本bucket)での list files 実行"
 expect_return_shape = "prod側はいずれもa.zipのみが現れb.zipは現れない(list files表示・query一致・getはname不在の対象エラー3・diffのentries数)。dev側は従来どおりa.zip・b.zip双方が現れる"
-source_lines = "src/index.rs:615; tests/phase_b_options.rs:617"
+source_lines = "src/index.rs:615; tests/phase_b_options.rs:650"
 
 [[condition]]
 id = "index.pin-readd-after-remove-wins"
@@ -220,7 +220,7 @@ source = "TASK-15 body(別bucket同名pin付与で先付けbucket側の索引か
 description = "索引pins[]構築のbucket分離は「他bucketのpin記録が混入しない」(index.pins-bucket-isolated)とともに「当方bucketのpin記録が他bucketの同名pin_writeで失われない」方向も含む: reduceのpin_writes/pin_removesのmap keyは(pin_s3_key, s3_bucket)組で、同一prefix・別bucket構成で同一fileへ同名pinを複数bucketへ付与しても、後bucketのpin_writeが先bucketのmap entryを上書きせず両bucketの索引pins[]にそれぞれのpinが載る(get --pin・list pinsで参照可能)。従来はpin_s3_key単位のHashMap(後勝ち単一entry)のため後bucketのwriteが先bucketのentryを上書きし、先付けbucket側の索引からpinが消えていた(pin_write記録がreduce結果から喪失するためbuild_entriesのbucket一致判定でも救えず、manage index rebuildでも回復しない=記録喪失。TASK-15) (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成でa.zipを両bucketへpushし、同一pin名pm1をdev(先付け)・prod(後付け)の順で両bucketへ付与した状態での、(1)prod側push(all-skip)後に再構築されたprod側索引と、dev側索引再構築(all-skip push)・list pins・get --pin pm1(dev・prod各profile)の各実行 (2)dev側索引object削除後の manage index rebuild 実行"
 expect_return_shape = "(1)dev側索引の当該entry pins[]にpm1(devのpin_write記録由来)が載り、prod側索引の当該entry pins[]にもpm1(prodのpin_write記録由来)が載る(created_atは各bucketの付与時刻。いずれも片側にのみ載る片寄りがない)。いずれのprofileでも list pins にpm1が現れ get --pin pm1 はexit 0で当該bucketのpin objectを取得できる (2)rebuild復元後のdev側索引pins[]にもpm1が含まれる"
-source_lines = "tests/index_storage.rs:1148"
+source_lines = "tests/index_storage.rs:1155"
 
 [[condition]]
 id = "index.pin-rm-multi-bucket-independent"
@@ -229,7 +229,7 @@ source = "TASK-15 body(goal: 各bucketの索引からそれぞれのpinが消え
 description = "同一file・同名pinを複数bucketへ付与した状態でのpin rmはbucket単位で独立して可能: 各bucketでの実行は当該bucketの索引pins[](当該bucketのpin_write記録由来)を参照してpin objectを削除・索引から除去し、他方bucketの索引pins[]・pin objectは不変(他方bucketで同名pinが引き続き参照できる)。従来は先付けbucket側の索引からpinが消えるため、当該bucketでpin rm不能(索引に無くpin名不在の対象エラー3)かつpin add不能(write-onceのhead検出で既存pin keyへのPUT拒否)のtrapになっていた(TASK-15 goalの「pin rmも可能」) (integration, fake seam)"
 given = "同一fileへ両bucketに同名pin(pm1)を付与した状態(index.pins-multi-bucket-same-name-keptのgivenと同一構成)での、(1)dev側(先付けbucket=従来索引から消えていた側)での pin rm --pin pm1 実行 (2)その後のprod側 get --pin pm1 --profile prod と pin rm --pin pm1 --profile prod の各実行"
 expect_return_shape = "(1)dev側pin rmはexit 0(索引pins[]に載っているためpin名不在の対象エラー3にならない)で、dev側索引pins[]からpm1が除かれdev bucketのpin objectも削除される (2)prod側索引pins[]はpm1を保持し(pin object不変) get --pin pm1 はexit 0。続くprod側 pin rm もexit 0でprod側索引から除去される。一方のbucketでの実行が他方bucketの索引pins[]・pin objectへ影響しない"
-source_lines = "tests/index_storage.rs:1266"
+source_lines = "tests/index_storage.rs:1273"
 
 [[excluded]]
 item = "pin rm後(再付与なし)のまま再構築・manage index rebuildを実行してもpinが索引から排除され続けることの新規条件化"
@@ -259,7 +259,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 5.4(build_entriesの組�
 description = "entity組立: 所在単位reduce済みfile_writesをuuidでgroupingしlocationsを組立(source_path・category・label=記録値・identity_hash・last_backup。並びはsource_path辞書順)。entityのtitleはentity_title導出=uuid一致file_write群のうちrecorded_at最大(ISO8601同形式文字列比較・同値ならVec後方=後勝ち)のtitle。同一内容2箇所以上所在は実体1つ(uuid)+locations複数になる。entityの維持条件(versions/pinsのbucket一致検査によるretain)は現行踏襲 (integration, fake seam)"
 given = "同一uuidへ2所在(異なるsource_path)のfile_writeと、同一recorded_atのfile_write 2件(記録順で後方が新title)を含むregistryからの索引再構築"
 expect_return_shape = "当該uuidのentryは1件でlocationsが2件(source_path辞書順)。titleはrecorded_at最大・同値なら記録順後方のfile_writeのtitle"
-source_lines = "src/index.rs:535; tests/index_storage.rs:1438"
+source_lines = "src/index.rs:535; tests/index_storage.rs:1442"
 
 [[condition]]
 id = "index.location-remove-excludes-and-revives"
@@ -268,7 +268,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(location_removeの�
 description = "location_removeの反映規則: build_entriesでfile_write(w)を除外する条件は「同identity_hashのlocation_remove(lr)が存在し lr.recorded_at >= w.recorded_at」。除去後に同pathを再backupすると新file_write(時刻が後)が勝って所在が復活する (integration, fake seam)"
 given = "(1)location_remove後に同pathを再backupしない状態 (2)location_remove後に同pathを再backup(新file_writeのrecorded_atが後)した状態、での索引再構築"
 expect_return_shape = "(1)当該pathのlocationはlocationsから除外される (2)所在が復活しlocationsに再登場する"
-source_lines = "src/index.rs:753; tests/index_storage.rs:1510"
+source_lines = "src/index.rs:753; tests/index_storage.rs:1514"
 
 [[condition]]
 id = "index.swept-versions-not-revived"
@@ -277,7 +277,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(sweep)・5.4・5.12�
 description = "sweep記録(manage index reconcileの実行記録)に含まれる{s3_key, version_id}は、以降の索引再構築(backup push等のbuild_entries)・manage index rebuildのいずれでもversions/pinsへ復活しない(prune除外と同じ除外集合。reconcileの効果がrebuildで失われるのを防ぐ=TASK-18でrebuildへ適用を追加) (integration, fake seam)"
 given = "版3件push→該当版をsweep記録で除去(reconcile相当のregistry状態)→backup push(all-skip)による索引再構築と manage index rebuild の各実行"
 expect_return_shape = "いずれの再構築でもsweep済みversion_idはversionsに含まれず、get --version-id <sweep済み版> はexit 3"
-source_lines = "src/index.rs:721; tests/index_storage.rs:1590"
+source_lines = "src/index.rs:721; tests/index_storage.rs:1594"
 
 [[condition]]
 id = "index.pins-connect-by-uuid"
@@ -286,7 +286,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.1・5.4(pinsはuuid照
 description = "索引pins[]への接続はuuid照合のみ: pin_writeのuuidがentityのuuidと一致すれば接続される(TASK-18以前のname+category+rel_path+folder完全一致の照合は廃止済み。所在記録値の変化・所在間の差異があっても同一uuidなら接続)。bucket一致規則(index.pins-bucket-isolated)・並びのs3_key sort・pin_remove反映は維持 (integration, fake seam)"
 given = "同一uuidのfile_write(category=A)とpin_write(pin_s3_key=data/{uuid}/pm1.age・記録上の所在情報がcategory=Aと異なる)を含むregistryからの索引再構築"
 expect_return_shape = "当該entityのpins[]にpm1が載り(get --pin・list pinsで参照可能)"
-source_lines = "tests/index_storage.rs:1659"
+source_lines = "tests/index_storage.rs:1663"
 
 [[condition]]
 id = "index.location-rm-command"
@@ -295,7 +295,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 6.2(manage location rm�
 description = "manage location rm <source_path> [--uuid <uuid>]: 索引からsource_path完全一致の所在を探し(--uuid指定でentity絞込。複数entityで同一pathはidentity_hash一意のため生じない)、不在は対象エラー3。実行はlocation_remove記録(registry)→索引再構築+upload→当該entityのmetadata sync(最新所在が変わった場合はlatest_source_path更新)。S3・実体(default.age・pin object)には触れない(所在は索引・registryの記録値のみ)。再backupすると所在が復活する(index.location-remove-excludes-and-revivesの規則) (integration, fake seam)"
 given = "2所在を持つentityへの location rm 実行と1所在のみのentityへの実行、不在path指定の実行、rm後の同path再backup"
 expect_return_shape = "rm後の索引locationsから当該pathが除外され(1所在のみのentityはlocationsが空になる)、metadataのlatest_source_pathが残所在へ更新され、S3へのAPI呼び出しは無く(default.age不変)、再backupで所在が復活する。不在pathは exit 3"
-source_lines = "tests/index_storage.rs:1714"
+source_lines = "tests/index_storage.rs:1718"
 
 [[condition]]
 id = "index.reconcile-swept-versions"
@@ -304,7 +304,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 6.3(manage index reconci
 description = "manage index reconcile: 既定dry-run(件数表示)・--applyで実行。read_index → ListObjectVersions(bucket, {prefix}data/)のpresent集合(key, version_id・delete marker除外)と突合し、索引versions[](version_id空のものはkey存在のみで判定)・pins[](key存在判定)のうちS3に存在しないもの(lifecycle消滅版)を特定 → sweep記録(registry)→索引再構築+upload。sweep記録により以降のbuild_entries・manage index rebuildでも当該版は復活しない(index.swept-versions-not-revived)。metadataは対象外(default.ageの現行版はlifecycleで消えないためmetadata.version_idが消失版を指すことはない) (integration, fake seam)"
 given = "索引versionsにS3へ存在しない版(lifecycle消滅を模擬)を含む状態での、--applyなし実行と--apply実行、およびapply後の manage index rebuild 実行"
 expect_return_shape = "--applyなしは件数表示のみで索引不変・S3削除なし。--applyは索引versions/pinsから該当版が除去されsweep記録がregistryへ追記される。apply後のrebuildでも該当版は復活しない"
-source_lines = "tests/index_storage.rs:1823"
+source_lines = "tests/index_storage.rs:1827"
 
 [[excluded]]
 item = "索引喪失時のmetadata列挙による最小復元(実体の身元+所在1件の最小索引構築)"

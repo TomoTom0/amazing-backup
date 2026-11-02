@@ -22,16 +22,26 @@
 #   description誤記を修正(keep_artifacts="all"→"always"。src/config.rsの列挙値はrun/always)。
 # 2026-10-23: TASK-19(XDG配置移行)対応でテスト先行の更新(TASK-19 body)。
 #   文言改訂1件(id不変): swept-run-artifacts-excluded(成果物dirをdata/out→XDG cache dirへ)。
+# 2026-11-02: TASK-7(pipeline.toml profile化)対応でテスト先行の更新
+#   (tmp/tasks/tm-7/design_pipeline_profile.md D-8・2.9項目11・§5)。
+#   文言改訂1件(id不変): runs-without-aws(aws.toml必須化: 実効profile名の解決に
+#   load_aws_profileを流用=解決chainの単一化。aws.toml不在は設定エラー2・
+#   credentialファイルの実在は不要・S3接続なし・秘密値非取扱いは不変。
+#   旧「aws設定が一切なくても完結・exit 0」は破壊的変更)。
+#   検査対象の実効bucket絞り込み・aws必須化の詳細条件はcli.toml側
+#   (cli.verify-scoped-to-effective-bucket・cli.verify-requires-aws-config)が担う。
+#   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseへ戻す
+#   (実装後に全件pass確認のうえ記録)。
 
 [meta]
 feature = "verify"
-source_file = "src/storage.rs"
+source_file = "src/cli.rs"
 verified = true
-verified_at = "2026-10-23"
+verified_at = "2026-11-03"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "1d7f20aba295cdb1b6862bd14605958ca4ccde61"
-note = "ローカル整合検査(構造検査・--checksum・--roundtrip)の条件群。TASK-11(Phase B)で旧verifyサブコマンド(src/cli.rs cmd_verify)が削除され、backup verify(設計3.2・8.5維持点)へ集約。registry読込は registry::load_registry"
+source_hash = "a984ae34ce4f0e741edd8a89dde3f147772ad181"
+note = "ローカル整合検査(構造検査・--checksum・--roundtrip)の条件群。TASK-11(Phase B)で旧verifyサブコマンド(src/cli.rs cmd_verify)が削除され、backup verify(設計3.2・8.5維持点)へ集約。registry読込は registry::load_registry。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(aws.toml必須化・検査対象の実効bucket帰属絞り込み。src/storage.rsはTASK-11のmodule分割(src/storage/)で既に消滅しており実体はsrc/cli.rs cmd_verifyのため同fileのhashを記録)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新"
 
 [[condition]]
 id = "verify.structure-check-ok"
@@ -40,7 +50,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-001(検査仕様は2
 description = "整合している状態で構造検査(既定段階)が全項目ok・exit 0となる (unit)"
 given = "正常なbackup push済registry・.age・manifestが揃った状態で backup verify 実行"
 expect_return = "exit code 0(全検査項目ok表示)"
-source_lines = "src/cli.rs:857"
+source_lines = "src/cli.rs:877"
 
 [[condition]]
 id = "verify.missing-or-size-mismatch-error"
@@ -49,7 +59,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-002(2.4-1・7.1のex
 description = "構造検査で .age 欠損・age_sizeと実sizeの不一致を検出し、検証エラー4(欠損も不一致と同じく4に統一)。age_sizeは実ファイルsizeと完全一致を要求し、実sizeが記録値未満(切り詰め)・超過(追記)のいずれも不一致としてexit 4となる(記録値未満を警告継続にしない) (unit)"
 given = ".age を削除したcaseと、age_size と異なる実sizeの .age のcase(実sizeが記録値を超過するcaseと未満に切り詰めるcaseの両方)の backup verify 実行"
 expect_return = "exit code 4(該当recordのsource_pathと期待/実測の詳細表示)"
-source_lines = "src/cli.rs:875"
+source_lines = "src/cli.rs:897"
 
 [[condition]]
 id = "verify.torn-write-and-bad-json-lines"
@@ -67,7 +77,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-004(2.4-2)。TASK-11
 description = "--checksum で .age の改変(byte追加)をsha256再計算により検出する (unit)"
 given = ".age へ1byte追加した状態で backup verify --checksum 実行"
 expect_return = "exit code 4(期待age_sha256と実測の不一致表示)"
-source_lines = "src/cli.rs:991"
+source_lines = "src/cli.rs:1025"
 
 [[condition]]
 id = "verify.roundtrip-sha256-match"
@@ -98,12 +108,12 @@ source_lines = "tests/verify_roundtrip.rs:88"
 
 [[condition]]
 id = "verify.runs-without-aws"
-target_function = "backup verify"
-source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-008(2.4)。TASK-11(Phase B): 旧verify削除によりbackup verify経路へ文言改訂"
-description = "backup verify はローカル整合検査であり aws設定(aws.toml)が一切なくても完結する (unit)"
-given = "aws.toml不在の環境で backup verify 実行"
-expect_return = "exit code 0"
-source_lines = "src/cli.rs:1031"
+target_function = "backup verify(load_config_or_exit / config::load_aws_profile)"
+source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-008(2.4)。TASK-11(Phase B): 旧verify削除によりbackup verify経路へ文言改訂。TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-8・2.9項目11・§5): aws.toml必須化(旧「aws不在でも構造検査可」からの破壊的変更)"
+description = "backup verify はローカル整合検査だがaws.tomlは必須(実効profile名の解決にload_aws_profileを流用=aws側解決chain(env・purpose・active_profile)と同一にし、verify経路での交叉事故を構造的に起こさないため)。aws.toml不在は設定エラー2。credentialファイルの実在は不要(load_aws_profileはcredentials_fileの非空検査までで、file存在検査はS3書き込み系のrequire_ready/load_credentialsが担う)。S3接続なし・秘密値非取扱いは不変(idは付与後不変のためruns-without-awsのまま) (integration, fake seam)"
+given = "AMAZING_BACKUP_HOME配下にpipeline.toml・registry.jsonlのみでaws.tomlを置かない環境での backup verify と、credentials_fileに不在pathを指定したaws.tomlでの backup verify の各実行"
+expect_return = "前者はexit code 2(aws.toml必須の設定エラー)。後者はcredentialファイル不在でも構造検査が完結しexit code 0"
+source_lines = "src/cli.rs:1069; tests/storage_backup.rs:1939"
 
 [[condition]]
 id = "verify.unknown-record-type-skipped"
@@ -130,7 +140,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-011(2026-10-08レビ
 description = "backup verify --roundtrip はroundtrip開始前に秘密鍵ファイルの存在とageバイナリを事前検査し、不在なら設定・環境エラー2で即終了する(対象ファイルごとの復号失敗に紛れて検証エラー4とならない) (unit)"
 given = "秘密鍵ファイルが不在の状態、およびageバイナリがPATH上に無い状態での backup verify --roundtrip 実行"
 expect_return = "exit code 2(設定・環境エラー)"
-source_lines = "src/cli.rs:1105"
+source_lines = "src/cli.rs:1151"
 
 [[condition]]
 id = "verify.decrypt-error-includes-age-stderr"
@@ -148,7 +158,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-013(2.4-1・4.4。20
 description = "構造検査(既定段階)は各暗号化記録のage_pathの.age(manifestの.ageは含まない)のヘッダをparseし、ssh-ed25519 stanza識別子がregistry記録recipients指紋から導出したv1.2形式指紋prefix集合(記録指紋SHA256:<b64>のb64部をdecodeした32byteの先頭4byteをb64(paddingなし)符号化)と全単射で対応することを照合する。誤recipient鍵で作られた.age・stanza数不一致・識別子が指紋prefix形式(decode結果4byte)でない場合・記録指紋からprefixを導出できない場合(b64 decode不能・decode結果が32byte未満)・旧形式tagのみでv1.2形式stanzaを1つも持たない.ageは、いずれも検証エラー4(fail-closed。照合skipではなく) (unit)"
 given = "合成ageヘッダ(v1.2形式ssh-ed25519 stanza+`--- `終端)の.ageとrecipients記録をSHA256:<b64(32byte)>実形式の指紋で構成した、(a)正recipient(全単射一致)・(b)誤recipient指紋(stanzaは鍵Aのprefix・記録は鍵Bの指紋)・(c)stanza数不一致(ヘッダ2 stanza vs 記録1指紋)の3caseでの backup verify 実行"
 expect_return = "(a)はexit code 0、(b)(c)はexit code 4(recipient照合不一致の該当record特定表示)"
-source_lines = "src/cli.rs:928; tests/verify_roundtrip.rs:161"
+source_lines = "src/cli.rs:956; tests/verify_roundtrip.rs:161"
 
 [[condition]]
 id = "verify.swept-run-artifacts-excluded"

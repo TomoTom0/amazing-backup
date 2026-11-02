@@ -13,13 +13,23 @@ pub struct EditArgs {
 
 pub fn cmd_edit(args: &EditArgs) -> i32 {
     let run = (|| -> BackupResult<i32> {
+        // TASK-7 D-3: aws.tomlを先に読み、その実効profile名でpipeline.tomlを読む。
         // --config省略時はXDG規定path(TASK-19)
+        let aws = config::load_aws_profile(
+            &super::aws_config_path(&args.ctx.aws_config),
+            args.ctx.profile.as_deref(),
+            None,
+        )?;
         let cfg_path = super::pipeline_config_path(&args.ctx.config);
-        let cfg = config::load_pipeline(&cfg_path)?;
+        let cfg = config::load_pipeline(&cfg_path, &aws.profile)?;
+        // 各対象の出力1行目に実効profile名を表示(TASK-7: 表示中のsectionが
+        // [profiles.<実効profile名>]配下のものであることを明示する)
         match args.target.as_str() {
             "metadata" => {
+                println!("実効profile: {}", cfg.profile);
                 println!(
-                    "[metadata] latest_source_path = {:?}({})",
+                    "[profiles.{}.metadata] latest_source_path = {:?}({})",
+                    cfg.profile,
                     match cfg.metadata.latest_source_path {
                         config::PathMode::Plain => "plain",
                         config::PathMode::Encrypted => "encrypted",
@@ -30,6 +40,7 @@ pub fn cmd_edit(args: &EditArgs) -> i32 {
                 println!("編集はpipeline.tomlを直接編集してください(保存後に検証されます)");
             }
             "files" => {
+                println!("実効profile: {}", cfg.profile);
                 println!("現在の[files]手動写像({}):", cfg_path.display());
                 for (name, m) in &cfg.files {
                     println!(
@@ -42,8 +53,10 @@ pub fn cmd_edit(args: &EditArgs) -> i32 {
                 }
             }
             "layout" => {
+                println!("実効profile: {}", cfg.profile);
                 println!(
-                    "[layout] unfiled_category={} auto_path_roots={}",
+                    "[profiles.{}.layout] unfiled_category={} auto_path_roots={}",
+                    cfg.profile,
                     cfg.layout.unfiled_category,
                     cfg.layout
                         .auto_path_roots
@@ -54,8 +67,10 @@ pub fn cmd_edit(args: &EditArgs) -> i32 {
                 );
             }
             "policy" => {
+                println!("実効profile: {}", cfg.profile);
                 println!(
-                    "[behavior] keep_artifacts = {:?}(cache dir({})配下のrun成果物)",
+                    "[profiles.{}.behavior] keep_artifacts = {:?}(cache dir({})配下のrun成果物)",
+                    cfg.profile,
                     match cfg.keep_artifacts {
                         config::KeepArtifacts::Run => "run",
                         config::KeepArtifacts::Always => "always",

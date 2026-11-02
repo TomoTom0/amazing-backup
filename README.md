@@ -28,8 +28,10 @@ amazing-backup config init
 # ~/.config/amazing-backup/ に pipeline.toml・aws.toml・aws-credentials.toml を生成
 # aws-credentials.toml: access_key_id / secret_access_key を記述
 # aws.toml: bucket等を記述
-# pipeline.toml: public_keys にSSH ed25519公開鍵の絶対path・verify.decrypt_key に
-#   秘密鍵の絶対pathを記述(照会・復元(list files・get等)は秘密鍵で索引を復号するため)
+# pipeline.toml: profileはaws.tomlのprofile名と同名対応([profiles.<name>])。
+#   [profiles.<name>.recipients].public_keys にSSH ed25519公開鍵の絶対path・
+#   [profiles.<name>.verify].decrypt_key に秘密鍵の絶対pathを記述
+#   (照会・復元(list files・get等)は秘密鍵で索引を復号するため)
 ```
 
 2. credential・鍵を用意(明示API key file・credential chain非依存):

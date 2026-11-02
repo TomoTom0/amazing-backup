@@ -92,16 +92,27 @@
 #   書込失敗のstderr契約(BrokenPipe=表示なし・ENOSPC=エラー表示)をbin subprocessで
 #   検証(/dev/full・相手close socketpairをstdoutへ接ぐ)。output-write-error条件は
 #   (unit, integration)の両層へ。
+# 2026-11-02: TASK-7(pipeline.toml profile化)対応でテスト先行の更新
+#   (tmp/tasks/tm-7/design_pipeline_profile.md D-3・D-5・D-6・D-8・2.9項目7/10/11・§5)。
+#   新規4件: profile-selects-pipeline-profile(--profile共通選択・decrypt_key既定)・
+#   backup-push-recipient-fingerprints-shown(指紋全文表示・dry-run含む)・
+#   verify-scoped-to-effective-bucket(検査対象絞り込み+帰属不明対象外警告)・
+#   verify-requires-aws-config(aws.toml必須化・credential実在不要)。
+#   文言改訂(id不変): profile-option-overrides-active(--profileは両file選択へ)・
+#   backup-push-connection-dest-shown(直後に指紋表示が続く旨)・
+#   disaster-recovery-reads(D-6影響なしの明確化)。
+#   実装前のため新規・改訂条件のテストは実行fail・StorageFixture新schema化により
+#   cli系結合test全体が赤になる([meta]はverified=falseへ戻し実装後に記録)。
 
 [meta]
 feature = "cli"
 source_file = "src/cli.rs"
 verified = true
-verified_at = "2026-10-31"
+verified_at = "2026-11-03"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "cb92195c7cea7b758e386bf085de13188398d13d"
-note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)"
+source_hash = "a984ae34ce4f0e741edd8a89dde3f147772ad181"
+note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(--profile両file選択・backup verifyのaws.toml必須化・検査対象の実効bucket帰属絞り込み・recipients指紋表示はsrc/storage/backup.rs経由)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新"
 
 [[condition]]
 id = "cli.usage-error-exit-64"
@@ -110,7 +121,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-001(5章cli.rs・7.1
 description = "使用法誤り(引数誤り)は exit 64(clapのusage error既定 exit 2 を BackupError::Usage へremapし、設定エラー2と区別する) (unit)"
 given = "不明オプション・サブコマンド不足等のusage誤り実行"
 expect_return = "exit code 64"
-source_lines = "src/cli.rs:695"
+source_lines = "src/cli.rs:687"
 
 [[condition]]
 id = "cli.version-flag"
@@ -128,7 +139,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-003(終了コード�
 description = "終了コード区分(0/2/3/4/5)が7.1の仕様表どおりに出る(各サブコマンドの代表case) (unit)"
 given = "成功(対象なし・全skip含む)・設定エラー・対象エラー・処理エラー・転送エラーの各区画の代表ケース"
 expect_return_shape = "0(成功)・2(設定・環境)・3(対象)・4(処理)・5(転送)が各区画の代表ケースで出る"
-source_lines = "src/cli.rs:709; src/errors.rs:56"
+source_lines = "src/cli.rs:701; src/errors.rs:56"
 
 [[condition]]
 id = "cli.module-entrypoint-parity"
@@ -146,7 +157,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-005(2026-10-08レビ
 description = "backup push のPATH位置引数0個はusage error扱いで exit 64。PATHは1個以上必須(--from-listは併用オプション)(旧plan/encryptの対象指定からbackup pushへの文言改訂・id不変) (unit)"
 given = "backup push をPATH無し(オプションのみ、または--from-listのみ)で実行するケースと、PATH 1個(+--from-list併用)のケース"
 expect_return = "PATH 0個は exit 64。PATH 1個(+--from-list併用を含む)はusage errorとならない"
-source_lines = "src/cli.rs:1055"
+source_lines = "src/cli.rs:1101"
 
 [[condition]]
 id = "cli.fake-s3-seam"
@@ -236,7 +247,7 @@ source = "TASK-19 body(get/pullの--out必須化・省略はusage 64)"
 description = "get/backup pullの--out(出力dir)は必須: 省略時はusage error 64(引数検査は設定読込・S3 API呼び出しより前)。旧既定data/restoreという概念は廃止 (integration)"
 given = "--outなしの get <term> 実行と --outなしの backup pull --all --yes 実行"
 expect_return_shape = "いずれも exit 64で、S3 API呼び出しは行われない"
-source_lines = "tests/cli_bin.rs:149"
+source_lines = "tests/cli_bin.rs:151"
 
 [[condition]]
 id = "cli.get-sha-mismatch-error"
@@ -394,7 +405,7 @@ source_lines = "tests/storage_backup.rs:602"
 [[condition]]
 id = "cli.disaster-recovery-reads"
 target_function = "照会系(list/query/get/diff)"
-source = "tmp/tasks/tm-10/design_s3_storage.md 2.4(災害時の動作保証)"
+source = "tmp/tasks/tm-10/design_s3_storage.md 2.4(災害時の動作保証)。TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-6): 災害時前提の対象・必要資産は不変(pipeline.toml不在時の--key必須挙動も維持。pipeline.tomlが在る場合のdecrypt_key既定は実効profileの[profiles.<name>.verify].decrypt_keyへ変わる=cli.profile-selects-pipeline-profile)"
 description = "query/get/list/diffはaws.toml(bucket/region/prefix)と秘密鍵のみで動作: 最初にsys/index.jsonl.ageをGET→復号→以降の操作は索引+s3 APIで完結する(作成環境資産=pipeline.toml・ローカルregistryに非依存。旧restore系の「作成環境資産に非依存」原則を継承。TASK-19 XDG配置後は--config省略時の規定pathにpipeline.tomlがあれば読むが、不在でも照会は成立する) (integration, fake seam)"
 given = "pipeline.toml未指定(規定pathにも無い)・ローカルregistry不在の状態での query・list files 実行(--keyに秘密鍵を指定)"
 expect_return_shape = "いずれも exit 0 で索引取得・復号・検索結果の表示が完結する"
@@ -451,7 +462,7 @@ source = "TASK-11 body(Phase B: 旧サブコマンド削除・新体系へ集約
 description = "旧サブコマンド(plan/encrypt/upload/verify/restore=restore request/status/download含む)は削除され、未知サブコマンドとしてusage error 64となる。機能はbackup push/pull・get/list/query/diff・manage jobs等へ集約済み (integration)"
 given = "plan・encrypt・upload・verify・restore request の各サブコマンド実行と、--help実行"
 expect_return_shape = "いずれの旧サブコマンドも exit 64(未知サブコマンド扱い)。--helpの文言に旧サブコマンドが現れない"
-source_lines = "tests/cli_bin.rs:107"
+source_lines = "tests/cli_bin.rs:109"
 
 [[condition]]
 id = "cli.format-option-default-human"
@@ -474,11 +485,20 @@ source_lines = "tests/storage_query.rs:985"
 [[condition]]
 id = "cli.profile-option-overrides-active"
 target_function = "全コマンド共通(--profile)/ config::load_aws_profile"
-source = "TASK-11 body(Phase B: --profile <name>はaws.toml active_profileの一時上書き・全コマンド共通)+tmp/tasks/tm-10/design_s3_storage.md 4.2(active_profile)"
-description = "--profile <name>: aws.tomlの[aws].active_profileを当該実行限り上書きする(全コマンド共通オプション)。指定profileのbucket/prefix/storage_class等で動作する (integration, fake seam)"
+source = "TASK-11 body(Phase B: --profile <name>はaws.toml active_profileの一時上書き・全コマンド共通)+tmp/tasks/tm-10/design_s3_storage.md 4.2(active_profile)。TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-3・§5): --profileはaws.tomlとpipeline.tomlの両方のprofile選択を兼ねる(詳細はcli.profile-selects-pipeline-profile)"
+description = "--profile <name>: aws.tomlの[aws].active_profileを当該実行限り上書きする(全コマンド共通オプション)。指定profileのbucket/prefix/storage_class等で動作する。TASK-7後は実効pipeline profileも同時に選択される(--profileが両fileを選択=交叉なし) (integration, fake seam)"
 given = "aws.tomlにprofiles.dev(active_profile指定)とprofiles.prodを定義した状態での、--profile prod指定の list files(照会系)と backup push(書き込み系)実行"
 expect_return_shape = "いずれもprod profileのbucket/prefixで動作する(索引key・object keyがprod側prefixで発行・参照される)"
-source_lines = "tests/phase_b_options.rs:23"
+source_lines = "tests/phase_b_options.rs:24"
+
+[[condition]]
+id = "cli.profile-selects-pipeline-profile"
+target_function = "config::load_pipeline(実効pipeline profile選択) / 照会系・getのdecrypt_key既定解決"
+source = "TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-3・D-6・§5)"
+description = "--profile <name>はaws.tomlとpipeline.tomlの両方を選択する(実効pipeline profileは常に実効aws profile名と同一=単一解決源。pipeline.toml独自の既定は置かないため「aws=dev・pipeline=family」のような交叉が構造的に起こらない)。--profile省略時はaws.toml active_profile側のpipeline profileが使われる。decrypt_keyの既定も実効profileの[profiles.<name>.verify].decrypt_keyへ変わる(解決規則 --key > 実効profileのdecrypt_key は不変) (integration, fake seam)"
+given = "dev(active_profile)とfamilyが独立した鍵pair・別bucketの[profiles.dev]/[profiles.family]構成での、(1)--profile family指定の backup push(索引objectの暗号化recipientの観察) (2)--key省略での get --profile family(復元) (3)--profile省略の backup push(dev側・索引の再暗号化観察)"
+expect_return_shape = "(1)索引objectはfamily側recipient(family秘密鍵)で復号できdev秘密鍵では復号できない (2)実効profile(family)のdecrypt_keyが既定で使われ索引・objectの復号までexit 0で完結する (3)索引はdev側recipient(dev秘密鍵)で復号できる"
+source_lines = "tests/phase_b_options.rs:903"
 
 [[condition]]
 id = "cli.profile-unknown-config-error"
@@ -487,7 +507,7 @@ source = "TASK-11 body(Phase B: 存在しないprofileは設定エラー2)"
 description = "--profileにaws.tomlへ存在しないprofile名を指定した場合は設定エラー2。S3 API呼び出しは行われない (integration, fake seam)"
 given = "存在しないprofile名を--profileに指定した list files・backup push の各実行"
 expect_return_shape = "いずれも exit 2でfake backendの呼び出し記録不存在(S3 API呼び出し前に検出)"
-source_lines = "tests/phase_b_options.rs:78"
+source_lines = "tests/phase_b_options.rs:87"
 
 [[condition]]
 id = "cli.profile-no-writeback"
@@ -496,7 +516,7 @@ source = "TASK-11 body(Phase B: active_profileの一時上書き)"
 description = "--profileは一時上書きでありaws.tomlファイルへは書戻さない(実行後も[aws].active_profileの値は不変。正本はaws.toml) (integration, fake seam)"
 given = "--profile prod指定の実行(aws.tomlのactive_profile=\"dev\")"
 expect_return_shape = "実行後のaws.tomlファイルの内容は実行前とbyte単位で同一"
-source_lines = "tests/phase_b_options.rs:106"
+source_lines = "tests/phase_b_options.rs:115"
 
 [[condition]]
 id = "cli.aws-config-default-path"
@@ -505,7 +525,7 @@ source = "TASK-11 body(Phase B低残件L-10: --aws-config既定pathの実装一�
 description = "--aws-config省略時の既定pathはXDG規定path(config::resolve_app_paths): AMAZING_BACKUP_HOME指定時は$ABH/aws.toml・未指定時は$XDG_CONFIG_HOME/amazing-backup/aws.toml(未設定なら~/.config/amazing-backup/aws.toml)。旧既定configs/aws.toml(cwd基準)は廃止。規定pathにaws.tomlが無い場合は設定エラー2+config initによる生成案内(案内文はtemplate正本のrepo pathを併記。config.default-config-missing-guidance) (integration)"
 given = "AMAZING_BACKUP_HOME配下にaws.tomlを配置した環境と配置しない環境での--aws-config未指定の list files・backup push 実行、XDG_CONFIG_HOME配下に配置した環境での--aws-config未指定の list files 実行"
 expect_return_shape = "配置した環境($ABH・XDG_CONFIG_HOMEいずれか)では当該aws.tomlを読み込んで動作する。配置しない環境では設定エラー2+config init生成案内表示"
-source_lines = "tests/phase_b_options.rs:130"
+source_lines = "tests/phase_b_options.rs:145"
 
 [[condition]]
 id = "cli.index-get-transfer-error"
@@ -514,7 +534,7 @@ source = "TASK-11 body(Phase B低残件: 索引GET転送エラーの終了コー
 description = "照会系の最初の索引GET(sys/index.jsonl.age)時のS3転送エラー(SDK error・network系等のS3 API失敗)は転送エラー5。索引404(不在)・復号失敗の設定エラー2(cli.index-missing-error)と分離する(索引配置ミスと転送障害の切り分け) (integration, fake seam)"
 given = "索引objectは存在する状態で索引GET(GetObject)へ失敗を注入(FAKE_S3_FAIL_CP_FOR等)した list files・get の各実行"
 expect_return_shape = "いずれも exit 5(転送エラー)。索引不在(404)・復号失敗の exit 2 とは区別される"
-source_lines = "tests/phase_b_options.rs:219"
+source_lines = "tests/phase_b_options.rs:234"
 
 [[condition]]
 id = "cli.manage-jobs-reissue"
@@ -523,7 +543,7 @@ source = "TASK-11 body(Phase B: manage jobs reissue・tier変更可・最小実�
 description = "manage jobs reissue <対象>: 対象objectの復元jobを再発行する(tier変更可。--tier指定時は当該tier・省略時は既定Standard)。tierはStandard/Bulkのallowlist検査(allowlist外はusage error 64)。復元済み・進行中の対象にも再発行できる(保持期間延長・tier切替用途) (integration, fake seam)"
 given = "復元済みobjectと進行中objectがある状態での manage jobs reissue <対象> --tier Bulk 実行と、--tier Expedited(不可値)指定・--tier省略の各実行"
 expect_return_shape = "--tier BulkはRestoreObjectが当該対象へtier=Bulkで再発行され呼び出し記録に残る。--tier Expeditedは exit 64でRestoreObject発行なし。--tier省略はtier=Standardで発行"
-source_lines = "tests/phase_b_options.rs:354"
+source_lines = "tests/phase_b_options.rs:375"
 
 [[condition]]
 id = "cli.profile-namespace-isolated-by-bucket"
@@ -532,7 +552,7 @@ source = "TASK-11(Phase B)コードレビュー指摘H-1+tmp/tasks/tm-10/design_
 description = "registry記録のs3_bucketと当該実行の実効bucketの一致によりnamespaceはbucket単位で分離される(同一prefix・別bucketの複数profile構成でprefix一致のみなら全経路が他方bucketの実績に惑わされるのを防ぐ)。対象は(a) backup pushのskip判定(他方bucket実績ではskipしない=bucket横断で1byteもuploadされないrunを作らない) (b) 索引versions構築(他方bucketのfile_upload記録をversionsへ混入させない) (c) 索引不在時の未書込namespace例外(他方bucketの書込実績では救済せず0件exit 0とする)。bucket一致規則はregistry::record_bucket_matchedと同一(記録s3_bucket欠損の旧記録は正本bucket=aws.toml active_profile相当として扱い、実効bucketが正本と一致する実行でのみ一致扱い) (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成での、(1)devでのbackup push後に同一内容を--profile prodでbackup pushする実行 (2)prod実行後の索引versionsのversion_id確認(registryのbucket別file_upload記録と突合) (3)索引objectを削除した状態での list files --profile prod(他方bucket実績のみ)と list files(正本bucket実績あり)の各実行 (4)file_upload記録のs3_bucketを空文字へ書き換えた旧形式記録での再push(dev=正本と一致する実効bucket・prod=一致しない実効bucket)の各実行"
 expect_return_shape = "(1)prod側pushはskipされずにfile uploadが行われexit 0(ok表示あり・skip表示なし) (2)索引versionsにはprod側bucketのfile_upload記録のversionのみが載る(dev側のversion_idは混入しない) (3)prod照会は未書込namespaceとして0件+exit 0(索引不在でも設定エラー2にならない)。正本bucket(書込実績あり)の照会は設定エラー2+rebuild案内 (4)dev側の再pushはskipされる(旧記録は正本bucket扱い・file keyへのPUTなし)。prod側(--profile)のpushはskipされずuploadされる"
-source_lines = "tests/phase_b_options.rs:282; tests/phase_b_options.rs:450"
+source_lines = "tests/phase_b_options.rs:297; tests/phase_b_options.rs:471"
 
 [[condition]]
 id = "cli.fake-s3-restore-validates-key-and-state"
@@ -550,16 +570,43 @@ source = "TASK-11 body(ユーザー指示2026-10-15: prodはyour-family-bucket/y
 description = "3つ以上のbucketを含む複数profile構成(dev + prod系の同一prefix・別bucket)でもnamespace分離はbucket単位で機能する(cli.profile-namespace-isolated-by-bucketのbucket一致規則はprofile数に依存しない=一致/不一致の2値判定のため)。prod系profile相互(family/baked等)でも、(a) backup pushのskip判定は他bucket実績ではskipしない(bucket横断で1byteもuploadされないrunを作らない) (b) 索引versions構築には当該bucketのfile_upload記録のみが載る(3bucket分の実績が同一registryに混在していても混入しない) (c) 索引不在時の未書込namespace例外もbucket単位で判定する (integration, fake seam)"
 given = "dev(active_profile)とprod系2profile(同一prefix・別bucket)を含むaws.toml構成での、(1)family profileでのbackup push後に同一内容をbaked profileでbackup pushする実行 (2)3bucketそれぞれへのfile_upload記録(registryのbucket別version_id)と、baked実行後に再構築された索引versionsの突合"
 expect_return_shape = "(1)baked側pushはskipされずにfile uploadが行われexit 0(ok表示あり) (2)索引versionsにはbaked bucketのfile_upload記録のversionのみが載る(dev・family bucketのversion_idは混入しない)"
-source_lines = "tests/phase_b_options.rs:696"
+source_lines = "tests/phase_b_options.rs:735"
 
 [[condition]]
 id = "cli.backup-push-connection-dest-shown"
 target_function = "cmd_backup_push(接続先表示)"
-source = "TASK-11 body(ユーザー指示2026-10-15: 3prod bucket構成の混同防止要件。誤接続先への書き込みに気づかせるため)+tmp/tasks/tm-10/design_s3_storage.md 4.2(混同防止)"
+source = "TASK-11 body(ユーザー指示2026-10-15: 3prod bucket構成の混同防止要件。誤接続先への書き込みに気づかせるため)+tmp/tasks/tm-10/design_s3_storage.md 4.2(混同防止)。TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-5): 接続先表示の直後にrecipient指紋表示が続く(指紋自体はcli.backup-push-recipient-fingerprints-shown)"
 description = "backup push(通常実行・--dry-run)は実行開始時に接続先を表示する: 実効profile名・bucket・prefix(3prod bucket構成で誤profile・誤bucketへの書き込みに気づかせるため)。表示は対象解決・S3 API呼び出しに先行して出るため、--dry-run(S3 API呼び出しなし)でも表示される (integration, fake seam)"
 given = "複数profileのaws.tomlでの、(1)--profile prod系指定の backup push --dry-run 実行 (2)--profile prod系指定の通常 backup push 実行 (3)既定(active_profile=dev)での backup push 実行"
 expect_return_shape = "いずれの実行でも接続先行(profile=・bucket=・prefix=を含む)が表示され、表示値は当該実行の実効profile(--profile指定時は指定profile・省略時はactive_profile)の値。(1)ではS3 API呼び出しは行われない"
-source_lines = "tests/phase_b_options.rs:760"
+source_lines = "tests/phase_b_options.rs:805"
+
+[[condition]]
+id = "cli.backup-push-recipient-fingerprints-shown"
+target_function = "cmd_backup_push(recipient指紋表示)"
+source = "TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-5・2.9項目7・§5)"
+description = "backup push開始時の接続先表示(cli.backup-push-connection-dest-shown)に続けて、実効profileのrecipient指紋を表示する: 「recipients(N):」行+指紋全文(SHA256:<base64 nopad>・fingerprint.rsの現行形式)を鍵毎に1行。指紋はload_pipelineが検証時に計算した値(PipelineConfig.recipient_fingerprints)を使いpush側で再計算しないため、dry-run(暗号化しない)でも表示される。表示箇所はpush開始時の1箇所のみで、pin・manage系では表示しない(誤鍵組での書き込みをbucket表示との並置で目視確認する気づきの提供。自動blockingではない) (integration, fake seam)"
+given = "2 recipient鍵のpipeline.tomlでの、(1) backup push --dry-run (2)通常 backup push (3) pin add の各実行"
+expect_return_shape = "(1)(2)は接続先表示の直後にrecipients(2)行と指紋全文が鍵毎1行(指紋のみの行が鍵数分)で表示される。(3)pin addの出力にrecipient指紋表示(recipients(行)が無い"
+source_lines = "tests/storage_backup.rs:1746"
+
+[[condition]]
+id = "cli.verify-scoped-to-effective-bucket"
+target_function = "backup verify(検査対象選択) / cli::cmd_verify"
+source = "TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-8・2.9項目10・§5)"
+description = "backup verifyの検査対象は実効profileのbucketへ帰属するrunのみ(profile別鍵の下で別profileの正常な成果物を復号失敗として誤報告しない)。runのbucket帰属はmanifest/index_upload recordのs3_bucket(batch_id→bucket)から判定する。bucket帰属が確定できない記録(旧経路encrypt記録・upload未完でfile_writeのみのcrash残存)と他bucket帰属のrunは検査対象外+警告表示(対象外となったbatchの特定表示付き)。CLI上既に受理している--profileが実効化され、--profile指定時は当該profileのbucket帰属runのみが検査対象になる(検査対象runが無くてもexit 0+対象外警告) (integration, fake seam)"
+given = "dev(active_profile・bucket=it-bucket)とprod(bucket-prod)の構成でdev側push済みの状態へ、(1)第三bucket帰属のmanifest recordで帰属づけたfile_write記録(2)file_writeのみの帰属不明記録(upload未完crash残存相当)をregistryへ直接構築した backup verify と、(3) backup verify --profile prod の各実行"
+expect_return_shape = "(1)はexit 0で当該batchが検査対象外の警告表示(「対象外」の語+batch idの特定)となり検証エラー4とならない。(3)はprod bucket帰属runのみ検査でdev bucket帰属run(devの実push分)が対象外として表示されexit 0"
+source_lines = "tests/storage_backup.rs:1812"
+
+[[condition]]
+id = "cli.verify-requires-aws-config"
+target_function = "backup verify(load_config_or_exit / config::load_aws_profile)"
+source = "TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-8・2.9項目11・§5)"
+description = "backup verifyはaws.toml必須(実効profile名の解決にload_aws_profileを流用=aws側解決chainと同一にする解決chainの単一化・偽装設定の検証も兼ねる。旧「aws不在でも構造検査可」からの破壊的変更)。aws.toml不在は設定エラー2+aws.tomlに言及するerror表示。credentialファイルの実在は不要(load_aws_profileはcredentials_fileの非空検査までで、file存在検査はS3書き込み系のrequire_ready/load_credentialsが担う)。verifyがS3接続しない・秘密値を扱わないことは不変 (integration, fake seam)"
+given = "(a)AMAZING_BACKUP_HOME配下にpipeline.toml・registry.jsonlのみでaws.tomlを置かない環境での backup verify (b)credentials_fileに不在pathを指定したaws.tomlでの backup verify の各実行"
+expect_return_shape = "(a)はexit 2+aws.tomlに言及するerror表示。(b)はcredentialファイル不在でも構造検査が完結しexit 0"
+source_lines = "tests/storage_backup.rs:1938"
 
 [[condition]]
 id = "cli.backup-push-sha-merge-no-upload"
@@ -676,7 +723,7 @@ source = "TASK-2設計(tmp/tasks/tm-2/design_completions.md D-1〜D-3)"
 description = "completions <shell>(bash/zsh/fish)は対応shellの補完scriptをstdoutへ出力し exit 0。各shellの構造マーカーを含む(bash: _amazing__backup関数定義・clap_completeのbash generatorはbin nameのハイフンを二重下線へ置換する規約・zsh: #compdef amazing-backup行・fish: complete -c amazing-backup行)。設定に非依存: AMAZING_BACKUP_HOMEを空dirへ固定(規定pathにpipeline.toml・aws.toml無し)でも動作し、設定・S3由来の表示・API呼出は行わない (unit, integration)"
 given = "AMAZING_BACKUP_HOMEを空の一時dirへ固定した環境での、completions bash / completions zsh / completions fish の各実行(stdoutをunit側はWrite注入・integration側はbin subprocessで捕捉)"
 expect_return_shape = "いずれも exit 0・stdoutが非emptyで当該shellの構造マーカーを含む。stderrに設定・S3系のエラー・警告は出ない"
-source_lines = "tests/cli_bin.rs:170; tests/cli_completions_unit.rs:22"
+source_lines = "tests/cli_bin.rs:172; tests/cli_completions_unit.rs:22"
 
 [[condition]]
 id = "cli.completions-script-covers-current-vocabulary"
@@ -685,7 +732,7 @@ source = "TASK-2設計(tmp/tasks/tm-2/design_completions.md D-1・D-5)"
 description = "生成される補完scriptの語彙は現行Command定義と一致する: テストはCli::command()から階層ごとに取得したsubcommand名・long option名と、script側の候補定義から抽出した語彙を語一致で比較して検査する(zshはコマンド階層ごと: subcommand候補は..._commands関数の配列・optionは_arguments指定行。bashはopts語列・fishは-a値/-l名。全体部分文字列containsは候補行の欠落を語の別箇所残留が隠すため不採用。固定の期待リストに頼らないため語彙追加・改名時にテスト側の更新なしで自動fail=追随を強制)。抽出結果が空になる生成形式変更で黙過しないよう既知候補(completions等)の抽出確認も行う。旧トップレベル語彙の回帰検出として、廃止語(plan/encrypt/upload/restore)はサブコマンド候補位置の語として含まれないことを検証する(help説明文中の英語流入は語彙ではないため対象外。verifyはbackup verify子コマンドとして現行scriptに現れるため廃止語から除外) (integration)"
 given = "completions zsh/bash/fish実行のstdoutと、テスト側でCli::command()から階層ごとに取得した現行subcommand/option語彙"
 expect_return_shape = "現行語彙が候補定義の語としてすべて含まれ、廃止語(plan/encrypt/upload/restore)は各shellのサブコマンド候補位置に語として含まれない"
-source_lines = "tests/cli_bin.rs:201"
+source_lines = "tests/cli_bin.rs:203"
 
 [[condition]]
 id = "cli.completions-invalid-shell-usage-error"
@@ -694,7 +741,7 @@ source = "TASK-2設計(tmp/tasks/tm-2/design_completions.md D-2・D-3)"
 description = "completionsのshell引数はbash/zsh/fishのみ受理: 対象外shell(elvish/powershell)・不明値(誤字)はusage error 64(InvalidValue: 可能値bash/zsh/fishの列挙付きusage表示。cli.usage-error-exit-64と同じcli::runの64変換経路。D-2対象外shellの明示的拒否) (integration)"
 given = "completions elvish / completions powershell / completions zshh(誤字)の各実行"
 expect_return = "いずれも exit 64でinvalid value表示(可能値bash/zsh/fishの列挙を含む)。補完scriptの出力は行われない"
-source_lines = "tests/cli_bin.rs:546"
+source_lines = "tests/cli_bin.rs:548"
 
 [[condition]]
 id = "cli.completions-missing-shell-usage-error"
@@ -703,7 +750,7 @@ source = "TASK-2設計(tmp/tasks/tm-2/design_completions.md D-3)"
 description = "completionsのshell引数省略はusage error 64(MissingRequiredArgument: 必須引数・usage表示。不正値(InvalidValue)とは表示が異なりpossible valuesの列挙は含まれない) (integration)"
 given = "completions(引数なし)実行"
 expect_return = "exit 64で必須引数のusage error表示。補完scriptの出力は行われない"
-source_lines = "tests/cli_bin.rs:576"
+source_lines = "tests/cli_bin.rs:578"
 
 [[condition]]
 id = "cli.completions-help-listed"
@@ -712,7 +759,7 @@ source = "TASK-2設計(tmp/tasks/tm-2/design_completions.md D-3)"
 description = "可視性: トップレベル--helpのsubcommand一覧にcompletionsが掲載され、completions --helpに<SHELL>引数の可能値bash/zsh/fishが表示される(発見可能性のためhiddenにしない=D-3) (integration)"
 given = "amazing-backup --help と amazing-backup completions --help の各実行"
 expect_return_shape = "前者のsubcommand一覧にcompletions行が含まれ、後者にbash・zsh・fishの3値の表示を含む"
-source_lines = "tests/cli_bin.rs:597"
+source_lines = "tests/cli_bin.rs:599"
 
 [[condition]]
 id = "cli.completions-output-write-error-exit-4"
@@ -721,7 +768,7 @@ source = "TASK-2設計(tmp/tasks/tm-2/design_completions.md D-1・D-3)"
 description = "completionsの出力書き込み失敗の取扱い: 補完scriptはメモリへ一括生成後にwrite_allする(単一呼出)。書き込み失敗のうちBrokenPipeは| head等の通常運用のため正常終了扱い(exit 0・表示なし)。それ以外の書き込み失敗(ENOSPC等)はstderrへエラー表示+exit 4(処理エラー)。clap_complete::generateをstdoutへ直接渡す方式はwriter書き込み失敗がpanicになり得るため不採用。unit層は偽Write注入で戻り値を検証し、stderr表示契約(表示なし・エラー表示)はintegration層がbin subprocessのstdoutへ/dev/full(ENOSPC)・相手closeのsocketpair(BrokenPipe)を接いでstderrを捕捉して検証する (unit, integration)"
 given = "write_allがErr( BrokenPipe )を返す偽WriteとErr(その他)を返す偽Writeを注入したcmd_completions実行(unit)。stdoutへ/dev/full・相手closeのsocketpairを接いだbin実行(integration)"
 expect_return_shape = "BrokenPipeはexit 0・エラー表示なし。その他の失敗はexit 4・stderrへエラー表示"
-source_lines = "tests/cli_bin.rs:618; tests/cli_bin.rs:655; tests/cli_completions_unit.rs:47; tests/cli_completions_unit.rs:59"
+source_lines = "tests/cli_bin.rs:620; tests/cli_bin.rs:657; tests/cli_completions_unit.rs:47; tests/cli_completions_unit.rs:59"
 
 [[excluded]]
 item = "e2e統合シナリオ(初回push(新規発行→索引・manifest・metadata生成)→再push(skip)→touch再push(合流)→移動push(合流・locations 2)→内容変更push(新規発行)→title変更→pin add/rm→prune→reconcile→location rm→get各形態→diff(clean)の一連流れ)"

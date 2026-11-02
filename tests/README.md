@@ -384,12 +384,46 @@ render_init_template再利用・Vec<u8>+write_allのBrokenPipe=0/その他4契�
 (無条件改行追加・改行欠落の両退行を検出)をtest側独立期待値で追加(unit 4件へ)。
 cargo test全件pass・verify-conditions.py PASSを確認
 
+2026-11-02: TASK-7(pipeline.toml profile化)対応でテスト先行の条件書更新・テストコード作成
+(tmp/tasks/tm-7/design_pipeline_profile.md D-1〜D-8・2.9項目1〜11・§5。
+残存決定事項11項目は2026-11-02ユーザー承認済み)。
+- config.toml: 新規8件(pipeline-profiles-schema・pipeline-profile-name-validated・
+  aws-profile-name-validated・pipeline-validation-layered・
+  pipeline-profile-required-for-effective-profile・pipeline-extra-profiles-ignored・
+  pipeline-legacy-format-migration-error・aws-same-bucket-multi-profile-warned)+
+  文言改訂12件(id不変: 各sectionの[profiles.<name>]配下化・指紋重複検査の選択profile内
+  限定化・[output]/[categories]拒否のprofile文脈化・init雛形2profile化・
+  同名対応案内1行追加等)+excluded 4件
+- cli.toml: 新規4件(profile-selects-pipeline-profile(--profileはaws/pipeline両fileを
+  選択=単一解決源・decrypt_key既定は実効profileのverify.decrypt_key)・
+  backup-push-recipient-fingerprints-shown(recipient指紋全文を鍵毎1行表示・dry-run含む・
+  pin addでは表示しない)・verify-scoped-to-effective-bucket(検査対象は実効profileの
+  bucket帰属runのみ+帰属不明記録は対象外警告)・verify-requires-aws-config(aws.toml必須・
+  credentialファイル実在不要))+文言改訂3件(id不変: profile-option-overrides-active・
+  backup-push-connection-dest-shown・disaster-recovery-reads)
+- verify.toml: runs-without-awsを文言改訂(id不変・aws.toml必須化: 不在は設定エラー2・
+  credentialファイルの実在は不要・S3接続なしは不変。cli.verify-requires-aws-configと
+  同一testがcover)
+- docs.toml: config-marker-replacedを文言改訂(id不変: pipeline.example.tomlは
+  [profiles.dev]+[profiles.family]の2profile新schema化・docs config pageはconfig initと
+  同一の埋め込みtemplateを出力するtemplate sync構成)
+- テスト追加・更新: tests/phase_b_options.rs(--profile共通選択1test)・
+  tests/storage_backup.rs(指紋表示・verify対象絞り込み・verify aws必須の3test)・
+  tests/config_storage.rs・tests/config_init.rs・tests/docs_pages.rs(TASK-7条件・改訂分)・
+  tests/common/mod.rs(StorageFixtureのpipeline.toml組立を[profiles.dev]配下の新schemaへ・
+  StorageOptsへextra_pipeline_profiles追加)
+- 実装前のため新規・改訂条件のテストは実行fail(赤)を許容。compileは通る
+  (129 pass/161 fail。failはStorageFixture新schema化により現行実装がpipeline.tomlを
+  設定エラー2で拒否する由来の実装待ち分)。verify-conditions.py PASS
+  (234条件すべてcover)。条件書4file(config・cli・verify・docs)の[meta]はverified=falseへreset
+- 条件数234(excluded 43件)
+
 ## 構成
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(15ファイル・222条件・excluded 39件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)反映済み。TASK-1〜5・TASK-20分ともテスト作成済み(222条件すべてcover) |
-| tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(新schema組立・AMAZING_BACKUP_HOMEによるXDG規定path統合・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(15ファイル・234条件・excluded 43件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)とTASK-7(pipeline profile化: config新規8・cli新規4+verify/docs文言改訂・除外4)反映済み。TASK-1〜5・TASK-20・TASK-7分ともテスト作成済み(234条件すべてcover。TASK-7分は実装前のため赤) |
+| tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(TASK-7 profile schema([profiles.dev]+追加profile)組立・AMAZING_BACKUP_HOMEによるXDG規定path統合・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
 | tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
 | tests/verify_roundtrip.rs | backup verify --roundtrip系(結合) | 作成済み(TASK-11 Phase Bでbackup verify経路へ書換。実装前fail許容) |
@@ -402,14 +436,14 @@ cargo test全件pass・verify-conditions.py PASSを確認
 | tests/pin.rs | TASK-10/11 pinエリア(pin add/rm・write-once・backup時pin・skip対象への--pin・pin_removeのbucket照合) | 作成済み |
 | tests/retention.rs | TASK-10/11 retentionエリア(lifecycle NCVE/MPU abort・prune dry-run/保護/削除条件・併置排他)+TASK-18(lifecycle data/一括3rule・prune data/一括+aws.toml値化。category系3件は廃止で削除)+TASK-18追加仕様(manage resetの安全弁2件・dry-run既定・apply全消去・冪等) | 作成済み |
 | tests/storage_query.rs | 照会系CLI(query/get/list/diff・版特定・復元job・--format human/json)+TASK-18(探索語彙title/uuid・--source-path=source_path・復元先<out>/<title>・list files entity表示・--title・diff metadata除外。list categoriesは廃止で削除) | 作成済み(--format系・list jobs noncurrent版はPhase B実装前fail許容。TASK-18改訂分は実装前fail許容) |
-| tests/storage_backup.rs | 操作系CLI(backup push統合/dry-run・pull確認/範囲排他・versioning・索引不在・災害時動作)+keep_artifacts掃除+registry基準skip+TASK-18のbackup pushフロー12条件(sha合流・crash再PUT/孤児・title入力/変更/重複・registry喪失・廃止option拒否) | 作成済み(TASK-18分は実装前fail許容) |
-| tests/phase_b_options.rs | TASK-11 Phase BのCLI option系(--profile系3件・--aws-config既定path・索引GET転送エラー・manage jobs reissue)+再レビュー(旧記録bucket扱い・pin/entryのbucket分離)+prod 3bucket構成(3bucket分離・push接続先表示) | 作成済み |
+| tests/storage_backup.rs | 操作系CLI(backup push統合/dry-run・pull確認/範囲排他・versioning・索引不在・災害時動作)+keep_artifacts掃除+registry基準skip+TASK-18のbackup pushフロー12条件(sha合流・crash再PUT/孤児・title入力/変更/重複・registry喪失・廃止option拒否)+TASK-7(recipient指紋表示・verify対象の実効bucket絞り込み・verify aws必須の3test) | 作成済み(TASK-7分は実装前fail許容) |
+| tests/phase_b_options.rs | TASK-11 Phase BのCLI option系(--profile系3件・--aws-config既定path・索引GET転送エラー・manage jobs reissue)+再レビュー(旧記録bucket扱い・pin/entryのbucket分離)+prod 3bucket構成(3bucket分離・push接続先表示)+TASK-7(--profile共通選択: aws/pipeline両file・交叉なし) | 作成済み(TASK-7分は実装前fail許容) |
 | tests/registry_storage.rs | TASK-18 registryエリア(schema2 records往復・旧schema拒否・sweep/location_remove・sha_uuid_lookup 3件。registry.jsonl直接編集+bin subprocessで観測) | 作成済み(実装前fail許容) |
 | tests/metadata_storage.rs | TASK-18 metadataエリア(MetadataDoc導出・変更時のみPUT・latest_source_path 3形態・title変更キーローテーション。metadata object実体とAPI呼び出し記録で観測) | 作成済み(実装前fail許容) |
-| tests/config_storage.rs | TASK-18 configエリア結合side([metadata]3値・[categories]拒否・[aws.lifecycle]必須/範囲+改訂2条件の結合観測。src側unit testは実装時に追従) | 作成済み(実装前fail許容) |
+| tests/config_storage.rs | TASK-18 configエリア結合side([metadata]3値・[categories]拒否・[aws.lifecycle]必須/範囲+改訂2条件の結合観測)+TASK-7 pipeline profile化8条件(profile schema・検証2層・旧形式拒否等の結合観測) | 作成済み(TASK-7分は実装前fail許容) |
 | tests/config_init.rs | TASK-1 config initの結合side(生成path解決=ABH絶対/相対・既存file上書き保護=通常file/dangling symlink・credential雛形のmode 0600と空値・空credentialでのbackup push事前検査・stdout案内・生成fileと埋め込みtemplateのbyte一致/parse突合。bin subprocess+AMAZING_BACKUP_HOME) | 作成済み(TASK-1実装前fail許容) |
 | tests/config_init_unit.rs | TASK-1 config initのunit(render_init_templateのTOML basic string符号化=「"」「\」入りpathのparse復元一致と劣化template内部エラー1・cmd_config_init_with_writerの失敗注入= EEXIST競合/IO失敗によるrollback。lib API直呼び) | 作成済み(TASK-1実装前compile error許容) |
-| tests/docs_pages.rs | TASK-4 docsサブコマンド(unit 4: 変換関数substitute_version_lines合成入力9.9.9+test側独立期待値・対象行が入力末尾の改行あり/なし両caseの保持=レビュー指摘対応・正本version literal sync+対象行count==1・終了コード表の両doc一致(固定期待集合・code→区分・重複拒否・空集合拒否)。integration 8: bin subprocess+AMAZING_BACKUP_HOME空dir固定=各ページbyte一致・usage version行・config marker置換+区切り行・llm skill frontmatter・llm snippet pointer・ページ一覧・invalid syntax 64本文非出力・書込失敗BrokenPipe=0/ENOSPC=4(/dev/full・相手close socketpair)。Write注入系unit観測はsrc/docs.rs内unit test 4件が担う) | 作成済み(TASK-4実装後に全件pass) |
+| tests/docs_pages.rs | TASK-4 docsサブコマンド(unit 4: 変換関数substitute_version_lines合成入力9.9.9+test側独立期待値・対象行が入力末尾の改行あり/なし両caseの保持=レビュー指摘対応・正本version literal sync+対象行count==1・終了コード表の両doc一致(固定期待集合・code→区分・重複拒否・空集合拒否)。integration 8: bin subprocess+AMAZING_BACKUP_HOME空dir固定=各ページbyte一致・usage version行・config marker置換+区切り行・llm skill frontmatter・llm snippet pointer・ページ一覧・invalid syntax 64本文非出力・書込失敗BrokenPipe=0/ENOSPC=4(/dev/full・相手close socketpair)。Write注入系unit観測はsrc/docs.rs内unit test 4件が担う) | 作成済み(TASK-4実装後に全件pass。TASK-7のconfig-marker-replaced改訂分は実装前fail許容) |
 | src/**/*.rs 内 #[cfg(test)] | cargo単体test(S3実行はS3Backend fake(FakeS3)差替) | 作成済み |
 
 cargo testの階層: unit=src/各モジュール内`#[cfg(test)] mod tests`、
@@ -438,12 +472,12 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | ファイル | feature | source_file(主対象) | 条件数 | 設計対応 |
 |---|---|---|---|---|
 | plan.toml | plan | src/targets.rs | 5 | PLAN-001〜009のうち対象解決共通経路5件(TASK-11でname override系等4件廃止→layout.*へ) |
-| config.toml | config | src/config.rs | 29 | CONF-001〜008 + TASK-9 credential系4件 + TASK-10 layout/prefix/keep_artifacts系4件 + TASK-18 3件([metadata]値・[categories]拒否・[aws.lifecycle]必須/範囲) + TASK-19 4件(XDG規定path解決・ABH一括上書き・規定path不在案内・[output]拒否)+TASK-1 config init 6件(生成path解決・template置換とescape符号化・既存file上書き保護・排他的作成とrollback・credential雛形空値/0600・stdout案内) |
+| config.toml | config | src/config.rs | 37 | CONF-001〜008 + TASK-9 credential系4件 + TASK-10 layout/prefix/keep_artifacts系4件 + TASK-18 3件([metadata]値・[categories]拒否・[aws.lifecycle]必須/範囲) + TASK-19 4件(XDG規定path解決・ABH一括上書き・規定path不在案内・[output]拒否)+TASK-1 config init 6件(生成path解決・template置換とescape符号化・既存file上書き保護・排他的作成とrollback・credential雛形空値/0600・stdout案内)+TASK-7 pipeline profile化8件(profile schema・profile名規則(pipeline/aws両側)・検証2層化・実効profile必須・余分profile無視・旧形式移行error・同一bucket警告) |
 | encrypt.toml | encrypt | src/crypto.rs | 16 | ENC系のうち共通暗号化経路16件(TASK-11で旧encrypt固有6件廃止。backup push経路で検証。TASK-18でschema2化等4件を文言改訂) |
 | fingerprint.toml | fingerprint | src/fingerprint.rs | 5 | FPR-001〜005 |
 | upload.toml | upload | src/s3.rs | 7 | UPL系のうちS3転送共通経路7件(TASK-11で旧upload固有16件廃止。backup push経路で検証) |
-| verify.toml | verify | src/storage.rs | 14 | VER-001〜013+M-1掃除済みrun(TASK-11でbackup verify経路へ文言改訂・id不変) |
-| cli.toml | cli | src/cli.rs | 65 | CLI-001〜006 + TASK-9/10系 + TASK-11 Phase B(旧サブコマンド削除・--format/--profile・manage jobs reissue・pull範囲排他等)+prod 3bucket構成(3bucket分離・push接続先表示)+TASK-18(探索語彙/復元先/pushフロー12新規・list categories廃止)+TASK-19(--out必須・--aws-config既定XDG化・data/out→cache)+TASK-2(completions 6件+除外1件) |
+| verify.toml | verify | src/storage.rs | 14 | VER-001〜013+M-1掃除済みrun(TASK-11でbackup verify経路へ文言改訂・id不変)+TASK-7(runs-without-awsをaws.toml必須化へ文言改訂・id不変) |
+| cli.toml | cli | src/cli.rs | 69 | CLI-001〜006 + TASK-9/10系 + TASK-11 Phase B(旧サブコマンド削除・--format/--profile・manage jobs reissue・pull範囲排他等)+prod 3bucket構成(3bucket分離・push接続先表示)+TASK-18(探索語彙/復元先/pushフロー12新規・list categories廃止)+TASK-19(--out必須・--aws-config既定XDG化・data/out→cache)+TASK-2(completions 6件+除外1件)+TASK-7(新規4件: --profile共通選択・recipient指紋表示・verify対象の実効bucket絞り込み・verify aws必須) |
 | restore.toml | restore | src/storage.rs | 5 | 復元job系共通経路5件(TASK-11で旧restore固有19件廃止。get/pull/list jobs経路で検証。平文衝突保護含む) |
 | layout.toml | layout | src/layout.rs | 11 | TASK-10設計1章(分類解決・検証。9章素案+label正規化) + TASK-18(UUIDv7・data領域key・validate_title。folder衝突廃止) |
 | index.toml | index | src/index.rs | 22 | TASK-10設計2章 + H-1/H-3 + TASK-11(version_ts供給源・未知record_type警告) + 再レビューM-R1(pins bucket分離)・L-R1(版・pin無しentry除外) + TASK-12(pin rm後の再付与) + TASK-15(別bucket同名pinの両bucket索引保持・bucket独立pin rm) + TASK-18(entity組立・location_remove・sweep除外・reconcile・location rm) |
@@ -451,7 +485,7 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | retention.toml | retention | src/cli.rs | 13 | TASK-10設計3.2・5.2 + TASK-11 L-8(prune併置排他)・L-2・L-4 + TASK-18(lifecycle data一括3rule・prune一括化。category系3件廃止)+TASK-18追加仕様manage reset 5件(設計8.1) |
 | registry.toml | registry | src/registry.rs | 6 | TASK-18設計3.2/5.3(schema2 records往復・旧schema拒否・sweep/location_remove・sha_uuid_lookup合流正本) |
 | metadata.toml | metadata | src/metadata.rs | 4 | TASK-18設計2章/5.5(MetadataDoc導出・変更時のみPUT・latest_source_path 3形態・title変更キーローテーション) |
-| docs.toml | docs | src/docs.rs | 10 | TASK-4設計3章・3.9(各ページbyte一致・version置換3段検出=変換関数unit/integration出力/正本sync・config marker置換=render_init_template再利用・終了コード表doc間一致・SKILL.md形式・snippet pointer形式・ページ一覧・invalid-syntax usage error 64・書込失敗0/4) |
+| docs.toml | docs | src/docs.rs | 10 | TASK-4設計3章・3.9(各ページbyte一致・version置換3段検出=変換関数unit/integration出力/正本sync・config marker置換=render_init_template再利用・終了コード表doc間一致・SKILL.md形式・snippet pointer形式・ページ一覧・invalid-syntax usage error 64・書込失敗0/4)+TASK-7(config-marker-replacedを2profile新schemaのtemplate syncへ文言改訂・id不変) |
 
 - 分割理由: test-structureの`[meta].source_file`(検証対象の実装ファイル・ファイル単位に1つ)が
   7エリアでそれぞれ別moduleに対応し、単一ファイルでは特定できないため。分割によりidの`<area>`部と

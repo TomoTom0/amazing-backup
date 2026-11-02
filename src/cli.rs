@@ -75,14 +75,31 @@ fn parse_date_arg(s: &str) -> Result<String, String> {
     }
 }
 
-/// 設定読込の共通部。失敗時はstderrへ出力してNone。
+/// 設定読込の共通部(verify用)。失敗時はstderrへ出力してNone。
 /// --config省略時はXDG規定path(TASK-19: resolve_app_paths)を読む。
-fn load_config_or_exit(config: &Option<PathBuf>) -> Option<crate::config::PipelineConfig> {
+/// TASK-7 D-3・2.9項目11: 実効profile名の解決にload_aws_profileを流用する
+/// (aws側解決chainと同一=単一化。verifyはaws.toml必須・credentialファイルの実在は不要)。
+/// 戻り値は実効profileのpipeline.toml解決結果と実効AwsConfig(bucket帰属判定に使う)。
+fn load_config_or_exit(
+    config: &Option<PathBuf>,
+    aws_config: &Option<PathBuf>,
+    profile: Option<&str>,
+) -> Option<(crate::config::PipelineConfig, crate::config::AwsConfig)> {
+    let aws_path = aws_config
+        .clone()
+        .unwrap_or_else(|| crate::config::resolve_app_paths().aws_config);
+    let aws = match crate::config::load_aws_profile(&aws_path, profile, None) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return None;
+        }
+    };
     let path = config
         .clone()
         .unwrap_or_else(|| crate::config::resolve_app_paths().pipeline_config);
-    match crate::config::load_pipeline(&path) {
-        Ok(cfg) => Some(cfg),
+    match crate::config::load_pipeline(&path, &aws.profile) {
+        Ok(cfg) => Some((cfg, aws)),
         Err(e) => {
             eprintln!("error: {e}");
             None
@@ -132,10 +149,19 @@ fn warn_endpoint_url_env() {
 // backup verify(ローカル整合検査・旧verify相当。設計3.2・2.4)
 
 /// backup verifyの引数(旧verifyサブコマンドの引数構造を継承)。
+/// TASK-7: CtxArgs経由で受理していた--aws-config/--profileが実効化される
+/// (引数形式は不変・実効profile名の解決にaws.tomlが必須となる)。
 #[derive(clap::Args)]
 pub struct VerifyArgs {
     #[arg(long)]
     pub config: Option<PathBuf>,
+    /// aws.toml(省略時はXDG規定path。実効profile名の解決に必須・TASK-7)
+    #[arg(long)]
+    pub aws_config: Option<PathBuf>,
+    /// aws.tomlとpipeline.tomlの両方のprofile選択(実効pipeline profileは実効aws
+    /// profile名と同一=単一解決源。TASK-7)
+    #[arg(long)]
+    pub profile: Option<String>,
     /// 当該batch_date分に限定(YYYY-MM-DD形式。形式不正はusage error 64)
     #[arg(long, value_parser = parse_date_arg)]
     pub date: Option<String>,
@@ -175,11 +201,29 @@ fn sha256_file(path: &Path) -> crate::errors::BackupResult<String> {
 }
 
 /// verify統括(旧2.4。registryの暗号化記録を対象としたローカル整合検査)。
-/// 旧経路の`encrypt`記録と新経路(backup push)の`file_write`記録の両方を検査する。
+/// TASK-7 D-8・2.9項目10/11: 検査対象は実効profileのbucketへ帰属するrunのみ
+/// (run帰属はmanifest/index_upload recordのs3_bucketから判定。bucket帰属が確定
+/// できない記録=旧経路encrypt記録・upload未完でfile_writeのみのcrash残存と
+/// 他bucket帰属runは検査対象外+警告表示・batch id特定表示。検査対象runが無くても
+/// exit 0)。実効profile名の解決にaws.tomlが必須(credentialファイルの実在は不要)。
 /// 戻り値はexit code。
 pub fn cmd_verify(args: &VerifyArgs) -> i32 {
-    let Some(cfg) = load_config_or_exit(&args.config) else {
+    let Some((cfg, aws)) =
+        load_config_or_exit(&args.config, &args.aws_config, args.profile.as_deref())
+    else {
         return 2;
+    };
+    // bucket一致規則の正本側(bucket帰属不明の旧記録=s3_bucket空文字は正本bucket相当)
+    let aws_path = args
+        .aws_config
+        .clone()
+        .unwrap_or_else(|| crate::config::resolve_app_paths().aws_config);
+    let canonical_bucket = match crate::config::canonical_bucket(&aws_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
     };
     let registry_path = cfg.registry_path.clone();
     let records = match crate::registry::load_registry(&registry_path) {
@@ -190,7 +234,28 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
         }
     };
     let reduced = crate::registry::reduce_records(&records);
-    let encrypts: Vec<&crate::registry::EncryptRecord> = reduced
+
+    // batch_id -> bucket帰属(TASK-7: manifest/index_upload recordのs3_bucketから導出)
+    let mut batch_buckets: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for r in &records {
+        match r {
+            crate::registry::Record::ManifestV2(m) => {
+                batch_buckets
+                    .entry(m.batch_id.as_str())
+                    .or_insert(m.s3_bucket.as_str());
+            }
+            crate::registry::Record::IndexUpload(iu) => {
+                batch_buckets
+                    .entry(iu.run_id.as_str())
+                    .or_insert(iu.s3_bucket.as_str());
+            }
+            _ => {}
+        }
+    }
+
+    // 旧経路(encrypt)記録はbucket帰属が確定できないため検査対象外+警告
+    // (旧単一構成時代の遺物。profile別鍵での誤fail報告を防ぐ)
+    let encrypt_count = reduced
         .encrypts
         .iter()
         .filter(|e| {
@@ -199,8 +264,14 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
                 .map(|d| e.batch_date == d)
                 .unwrap_or(true)
         })
-        .collect();
-    let writes: Vec<&crate::registry::FileWriteRecord> = reduced
+        .count();
+    if encrypt_count > 0 {
+        println!(
+            "verify: 旧経路encrypt記録{encrypt_count}件はbucket帰属が確定できないため検査対象外です(旧単一構成時代の記録)"
+        );
+    }
+
+    let writes_all: Vec<&crate::registry::FileWriteRecord> = reduced
         .file_writes
         .iter()
         .filter(|w| {
@@ -210,6 +281,42 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
                 .unwrap_or(true)
         })
         .collect();
+    // 実効profileのbucketへ帰属するrunへ絞り込み(帰属不明=manifest/index_upload記録が
+    // 無いbatch・他bucket帰属のbatchは対象外+警告表示・batch id特定)。
+    // 帰属の判定はregistry::record_bucket_matchedと同一規則(s3_bucket欠損の旧記録は
+    // 正本bucket相当)。
+    let bucket_of_batch_matches = |batch: &str| {
+        batch_buckets.get(batch).is_some_and(|b| {
+            crate::registry::record_bucket_matched(b, &aws.bucket, &canonical_bucket)
+        })
+    };
+    let (writes, excluded_writes): (Vec<&crate::registry::FileWriteRecord>, Vec<_>) = writes_all
+        .into_iter()
+        .partition(|w| bucket_of_batch_matches(&w.batch_id));
+    // 対象外batchの特定はrun単位(manifest/index_upload記録の帰属から導出。file_writeが
+    // reduce等で残っていなくてもrunとして表示する)+帰属不明のfile_write記録
+    let mut excluded_batches: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for w in &excluded_writes {
+        excluded_batches.insert(w.batch_id.as_str());
+    }
+    for batch in batch_buckets.keys() {
+        if !bucket_of_batch_matches(batch) {
+            excluded_batches.insert(batch);
+        }
+    }
+    if !excluded_batches.is_empty() {
+        println!(
+            "verify: 検査対象外 {}件(実効profile({})のbucket({})へ帰属しない・帰属が確定できないrun・記録。batch: {})",
+            excluded_batches.len(),
+            aws.profile,
+            aws.bucket,
+            excluded_batches
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     // 掃除済みrunの除外(M-1): keep_artifacts="run"既定では成功run末尾にcache dir(TASK-19
     // XDG配置の暗号化一時物dir)配下の<batch_id>/が掃除されるため、file_write記録の
@@ -246,7 +353,7 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
 
     let mut failures: Vec<String> = Vec::new();
 
-    // 段階1: 構造検査(2.4-1)。旧経路(encrypt)と新経路(file_write)で同一基準
+    // 段階1: 構造検査(2.4-1)
     let structure_age = |source_path: &str,
                          age_path: &str,
                          age_size: u64,
@@ -289,15 +396,6 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
             }
         }
     };
-    for e in &encrypts {
-        structure_age(
-            &e.source_path,
-            &e.age_path,
-            e.age_size,
-            &e.recipients,
-            &mut failures,
-        );
-    }
     for w in &writes {
         structure_age(
             &w.source_path,
@@ -307,19 +405,8 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
             &mut failures,
         );
     }
-    // manifest存在検査(encrypt記録: manifest_path。file_write記録: run dirのmanifest)
+    // manifest存在検査(file_write記録: run dirのmanifest)
     let mut seen_manifests = std::collections::HashSet::new();
-    for e in &encrypts {
-        if !seen_manifests.insert(e.manifest_path.clone()) {
-            continue;
-        }
-        if !Path::new(&e.manifest_path).is_file() {
-            failures.push(format!(
-                "{}: manifest不在 ({})",
-                e.source_path, e.manifest_path
-            ));
-        }
-    }
     for w in &writes {
         let Some(run_dir) = Path::new(&w.age_path).parent() else {
             continue;
@@ -336,21 +423,6 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
 
     // 段階2: --checksum(.ageのsha256再計算照合。2.4-2)
     if args.checksum {
-        for e in &encrypts {
-            match sha256_file(Path::new(&e.age_path)) {
-                Err(err) => {
-                    failures.push(format!("{}: .age読込失敗: {err}", e.source_path));
-                }
-                Ok(actual) => {
-                    if actual != e.age_sha256 {
-                        failures.push(format!(
-                            "{}: age_sha256不一致 expected={} actual={} ({})",
-                            e.source_path, e.age_sha256, actual, e.age_path
-                        ));
-                    }
-                }
-            }
-        }
         for w in &writes {
             match sha256_file(Path::new(&w.age_path)) {
                 Err(err) => {
@@ -370,6 +442,7 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
 
     // 段階3: --roundtrip(復号sha256照合 + manifest突合。2.4-3)
     if args.roundtrip {
+        // 鍵解決は --key > 実効profileの[profiles.<name>.verify].decrypt_key(D-6)
         let key = match args.key.clone().or_else(|| cfg.decrypt_key.clone()) {
             Some(k) => k,
             None => {
@@ -392,21 +465,6 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
             eprintln!("error: {e}");
             return 2;
         }
-        for e in &encrypts {
-            match crate::crypto::decrypt_sha256(Path::new(&e.age_path), &key) {
-                Err(err) => {
-                    failures.push(format!("{}: 復号に失敗: {err}", e.source_path));
-                }
-                Ok(actual) => {
-                    if actual != e.source_sha256 {
-                        failures.push(format!(
-                            "{}: source_sha256不一致 expected={} actual={} ({})",
-                            e.source_path, e.source_sha256, actual, e.age_path
-                        ));
-                    }
-                }
-            }
-        }
         for w in &writes {
             match crate::crypto::decrypt_sha256(Path::new(&w.age_path), &key) {
                 Err(err) => {
@@ -422,85 +480,7 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
                 }
             }
         }
-        // manifest復号→registry突合(旧経路: manifest_pathごとのバッチ。
-        // 新経路: run dirのmanifest.jsonl.ageをfile_write記録(batch)と突合)
-        let mut batches: Vec<(String, Vec<&crate::registry::EncryptRecord>)> = Vec::new();
-        for e in &encrypts {
-            match batches.iter_mut().find(|(mp, _)| *mp == e.manifest_path) {
-                Some(slot) => slot.1.push(e),
-                None => batches.push((e.manifest_path.clone(), vec![e])),
-            }
-        }
-        for (mp, recs) in &batches {
-            let plain = match crate::crypto::decrypt_bytes(Path::new(mp), &key) {
-                Ok(p) => p,
-                Err(err) => {
-                    failures.push(format!("{mp}: manifest復号に失敗: {err}"));
-                    continue;
-                }
-            };
-            let text = String::from_utf8_lossy(&plain);
-            let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-            if lines.is_empty() {
-                failures.push(format!("{mp}: manifestが空"));
-                continue;
-            }
-            let header: serde_json::Value = match serde_json::from_str(lines[0]) {
-                Ok(v) => v,
-                Err(err) => {
-                    failures.push(format!("{mp}: manifestヘッダのparseに失敗: {err}"));
-                    continue;
-                }
-            };
-            if header.get("record_type").and_then(|v| v.as_str()) != Some("batch") {
-                failures.push(format!("{mp}: manifestヘッダのrecord_typeがbatchでない"));
-            }
-            let file_count = header.get("file_count").and_then(|v| v.as_u64());
-            if file_count != Some(recs.len() as u64) {
-                failures.push(format!(
-                    "{mp}: manifestのfile_count不一致 manifest={file_count:?} registry={}",
-                    recs.len()
-                ));
-            }
-            if lines.len() - 1 != recs.len() {
-                failures.push(format!(
-                    "{mp}: manifestのファイルレコード数不一致 manifest={} registry={}",
-                    lines.len() - 1,
-                    recs.len()
-                ));
-            }
-            for line in &lines[1..] {
-                let fr: serde_json::Value = match serde_json::from_str(line) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        failures.push(format!("{mp}: manifestレコードのparseに失敗: {err}"));
-                        continue;
-                    }
-                };
-                let fr_age_path = fr.get("age_path").and_then(|v| v.as_str()).unwrap_or("");
-                let Some(rec) = recs.iter().find(|r| r.age_path == fr_age_path) else {
-                    failures.push(format!(
-                        "{mp}: manifestにregistry記録の無いファイルがある ({fr_age_path})"
-                    ));
-                    continue;
-                };
-                if fr.get("source_sha256").and_then(|v| v.as_str())
-                    != Some(rec.source_sha256.as_str())
-                {
-                    failures.push(format!(
-                        "{}: manifestのsource_sha256がregistryと不一致 ({})",
-                        rec.source_path, mp
-                    ));
-                }
-                if fr.get("age_sha256").and_then(|v| v.as_str()) != Some(rec.age_sha256.as_str()) {
-                    failures.push(format!(
-                        "{}: manifestのage_sha256がregistryと不一致 ({})",
-                        rec.source_path, mp
-                    ));
-                }
-            }
-        }
-        // 新経路(file_write)のmanifest突合: name一致でsource_sha256・age_sha256を照合
+        // manifest復号→registry突合(run dirのmanifest.jsonl.ageをfile_write記録(batch)と突合)
         let mut run_batches: Vec<(String, Vec<&crate::registry::FileWriteRecord>)> = Vec::new();
         for w in &writes {
             let Some(run_dir) = Path::new(&w.age_path).parent() else {
@@ -583,7 +563,7 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
         }
     }
 
-    let records_total = encrypts.len() + writes.len();
+    let records_total = writes.len();
     if failures.is_empty() {
         println!(
             "== verify == ok ({records_total}) records, checksum={}, roundtrip={}",
@@ -673,7 +653,7 @@ mod tests {
         set_path_env, write_file, write_test_ed25519_pub,
     };
 
-    /// pipeline.toml fixture(TASK-19 XDG配置後のschema: [output]無し。
+    /// pipeline.toml fixture(TASK-7 profile schema: [profiles.dev]配下。
     /// registry・cache dirはAMAZING_BACKUP_HOME解決のためtest側でset_amazing_backup_home)。
     fn pipeline_toml(dir: &Path) -> PathBuf {
         let pubkey = write_test_ed25519_pub(dir);
@@ -681,13 +661,25 @@ mod tests {
         write_file(
             &p,
             format!(
-                "[recipients]\npublic_keys = [\"{}\"]\n\
-                 [behavior]\nkeep_going = false\n\
-                 [verify]\ndecrypt_key = \"{}\"\n",
+                "[profiles.dev.recipients]\npublic_keys = [\"{}\"]\n\
+                 [profiles.dev.behavior]\nkeep_going = false\n\
+                 [profiles.dev.verify]\ndecrypt_key = \"{}\"\n",
                 pubkey.display(),
                 dir.join("unused-key").display(),
             )
             .as_bytes(),
+        );
+        p
+    }
+
+    /// aws.toml fixture(TASK-7: verifyは実効profile名解決のためaws.toml必須。
+    /// credentials_fileは非空なら実在不要=verifyはS3接続しないためdummy path)。
+    /// 実効profile=dev・bucket=unit-verify-bucket(verify_fixtureのmanifest帰属と対)。
+    fn aws_toml(dir: &Path) -> PathBuf {
+        let p = dir.join("aws.toml");
+        write_file(
+            &p,
+            b"[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"unit-verify-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"creds.toml\"\n",
         );
         p
     }
@@ -748,6 +740,8 @@ mod tests {
         let (reg, age, manifest) = verify_fixture(tmp.path());
         let args_ok = VerifyArgs {
             config: Some(pipeline_toml(tmp.path())),
+            aws_config: None,
+            profile: None,
             date: None,
             checksum: false,
             roundtrip: false,
@@ -809,25 +803,34 @@ mod tests {
         )
     }
 
-    /// verify用fixture: registry 1行 + .age + manifestを用意し(registry, .age, manifest)を返す。
+    /// verify用fixture: registry(file_write+manifestの2行=TASK-7のbucket帰属判定用)
+    /// + run dirの.age・manifest + aws.toml(実効profile解決に必須)を用意し
+    /// (registry, .age, manifest)を返す。
     /// .ageのage_size・age_sha256は実際に書き込むbyte列から導く(記録値と実sizeの完全一致。
     /// 設計2.4-1)。recipientsは実形式指紋(SHA256:<b64(32byte)>)で記録する。
+    /// manifest recordのs3_bucketはaws_toml fixtureのbucket(unit-verify-bucket)と対
+    /// (=実効profileのbucket帰属runとして検査対象になる)。
     fn verify_fixture_with(
         dir: &Path,
         age_bytes: &[u8],
         recipients: &[String],
     ) -> (PathBuf, PathBuf, PathBuf) {
-        let date_dir = dir.join("out").join("2026-10-08");
-        let age = date_dir.join("a.zip.age");
-        let manifest = date_dir.join("manifest.jsonl.age");
+        aws_toml(dir);
+        let batch_id = "20261008-abcdef01";
+        let run_dir = dir.join("out").join("2026-10-08");
+        let age = run_dir.join("a.zip.age");
+        let manifest = run_dir.join("manifest.jsonl.age");
         write_file(&age, age_bytes);
         write_file(&manifest, b"manifest-bytes");
-        let rec = serde_json::json!({
-            "schema": 1,
-            "record_type": "encrypt",
+        let uuid = "0192a4f0-0000-7000-8000-00000000aaaa";
+        let rec_w = serde_json::json!({
+            "schema": 3,
+            "record_type": "file_write",
             "recorded_at": "2026-10-08T10:00:00+09:00",
-            "batch_id": "20261008-abcdef01",
+            "batch_id": batch_id,
             "batch_date": "2026-10-08",
+            "uuid": uuid,
+            "title": "a.zip",
             "source_path": dir.join("a.zip"),
             "source_name": "a.zip",
             "source_size": 18,
@@ -837,10 +840,27 @@ mod tests {
             "age_size": age_bytes.len(),
             "age_sha256": sha256_hex(age_bytes),
             "recipients": recipients,
-            "manifest_path": manifest,
+            "category": "unfiled",
+            "label": "",
+            "identity_hash": "deadbeef",
+            "s3_key": format!("amazing-backup/data/{uuid}/default.age"),
+        });
+        let rec_m = serde_json::json!({
+            "schema": 2,
+            "record_type": "manifest",
+            "recorded_at": "2026-10-08T10:00:01+09:00",
+            "batch_id": batch_id,
+            "s3_key": format!("amazing-backup/sys/manifests/{batch_id}.jsonl.age"),
+            "s3_bucket": "unit-verify-bucket",
+            "s3_region": "ap-northeast-1",
+            "version_id": "vid-unit-1",
+            "s3_size": 14,
+            "s3_checksum_sha256": "",
+            "s3_checksum_type": "FULL_OBJECT",
+            "uploaded_at": "2026-10-08T10:00:01+09:00",
         });
         let reg = dir.join("registry.jsonl");
-        write_file(&reg, format!("{rec}\n").as_bytes());
+        write_file(&reg, format!("{rec_w}\n{rec_m}\n").as_bytes());
         (reg, age, manifest)
     }
 
@@ -864,6 +884,8 @@ mod tests {
         let _ = verify_fixture(tmp.path());
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp.path())),
+            aws_config: None,
+            profile: None,
             date: None,
             checksum: false,
             roundtrip: false,
@@ -886,6 +908,8 @@ mod tests {
         std::fs::remove_file(&age).expect("remove");
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp.path())),
+            aws_config: None,
+            profile: None,
             date: None,
             checksum: false,
             roundtrip: false,
@@ -902,6 +926,8 @@ mod tests {
         write_file(&age, &appended);
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp2.path())),
+            aws_config: None,
+            profile: None,
             date: None,
             checksum: false,
             roundtrip: false,
@@ -917,6 +943,8 @@ mod tests {
         write_file(&age, &bytes[..bytes.len() - 1]);
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp3.path())),
+            aws_config: None,
+            profile: None,
             date: None,
             checksum: false,
             roundtrip: false,
@@ -944,6 +972,8 @@ mod tests {
         let _ = verify_fixture(tmp.path());
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp.path())),
+            aws_config: None,
+            profile: None,
             date: None,
             checksum: false,
             roundtrip: false,
@@ -963,6 +993,8 @@ mod tests {
         );
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp.path())),
+            aws_config: None,
+            profile: None,
             date: None,
             checksum: false,
             roundtrip: false,
@@ -980,6 +1012,8 @@ mod tests {
         );
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp.path())),
+            aws_config: None,
+            profile: None,
             date: None,
             checksum: false,
             roundtrip: false,
@@ -1004,6 +1038,8 @@ mod tests {
         write_file(&age, &flipped);
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp.path())),
+            aws_config: None,
+            profile: None,
             date: None,
             checksum: true,
             roundtrip: false,
@@ -1020,6 +1056,8 @@ mod tests {
         write_file(&age, &appended);
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp2.path())),
+            aws_config: None,
+            profile: None,
             date: None,
             checksum: true,
             roundtrip: false,
@@ -1029,7 +1067,9 @@ mod tests {
     }
 
     /// [covers:verify.runs-without-aws]
-    /// verifyはaws CLI不在・aws.toml不在でも完結する(外部バイナリ不要をPATH排除で担保)。
+    /// verifyはaws.toml必須(TASK-7: 実効profile名の解決のため。破壊的変更)だが
+    /// 外部バイナリ不要は不変: PATHを空にしても(aws CLI・age等が不在でも)構造検査は
+    /// 完結する(credentialファイルの実在も不要=credentials_file非空検査まで)。
     #[test]
     fn verify_runs_without_aws() {
         // config_env_lockはpath_env_lockと同一のため1回の取得で足りる
@@ -1037,6 +1077,7 @@ mod tests {
         let _lock = path_env_lock();
         let tmp = TempDir::new("cli-vernoaws");
         let _abh = set_amazing_backup_home(tmp.path());
+        // fixtureのaws.tomlはcredentials_file="creds.toml"(実在しないpath)で書かれる
         let _ = verify_fixture(tmp.path());
         let empty_bin = tmp.path().join("empty-bin");
         std::fs::create_dir_all(&empty_bin).expect("empty bin");
@@ -1044,12 +1085,17 @@ mod tests {
 
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp.path())),
+            aws_config: None,
+            profile: None,
             date: None,
             checksum: false,
             roundtrip: false,
             key: None,
         });
-        assert_eq!(code, 0, "aws不在でも構造検査は完結");
+        assert_eq!(
+            code, 0,
+            "外部バイナリ不在・credentialファイル不在でも構造検査は完結"
+        );
     }
 
     /// [covers:cli.paths-required-usage-error]
@@ -1114,6 +1160,8 @@ mod tests {
         let _ = verify_fixture(tmp.path());
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp.path())),
+            aws_config: None,
+            profile: None,
             date: None,
             checksum: false,
             roundtrip: true,
@@ -1133,6 +1181,8 @@ mod tests {
         let _guard = set_path_env(empty_bin.to_str().unwrap());
         let code = cmd_verify(&VerifyArgs {
             config: Some(pipeline_toml(tmp2.path())),
+            aws_config: None,
+            profile: None,
             date: None,
             checksum: false,
             roundtrip: true,

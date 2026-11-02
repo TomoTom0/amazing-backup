@@ -112,6 +112,8 @@ pub fn cmd_backup(args: &BackupArgs) -> i32 {
             roundtrip,
         } => crate::cli::cmd_verify(&crate::cli::VerifyArgs {
             config: ctx.config.clone(),
+            aws_config: ctx.aws_config.clone(),
+            profile: ctx.profile.clone(),
             date: None,
             checksum: *checksum,
             roundtrip: *roundtrip,
@@ -271,19 +273,26 @@ fn cmd_backup_push(
         return e.exit_code();
     }
     let run = (|| -> BackupResult<i32> {
-        // pipeline.tomlは必須経路。--config省略時はXDG規定path(TASK-19)を読む
-        // (不在はcopy案内付き設定エラー2)
-        let cfg = config::load_pipeline(&super::pipeline_config_path(&ctx.config))?;
+        // TASK-7 D-3: aws.tomlを先に読み、その実効profile名でpipeline.toml(必須経路)を
+        // 読む。--config省略時はXDG規定path(TASK-19。不在はcopy案内付き設定エラー2)
         let aws = load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
+        let cfg = config::load_pipeline(&super::pipeline_config_path(&ctx.config), &aws.profile)?;
         // 正本profile(active_profile)のbucket(bucket一致規則の正本側)
         let canonical_bucket = config::canonical_bucket(&super::aws_config_path(&ctx.aws_config))?;
 
         // 接続先表示: 実効profile・bucket・prefixを実行の最初(対象解決・S3 API呼び出しに
-        // 先行)に表示し、誤profile・誤bucketへの書き込みに気づかせる。dry-runでも表示
+        // 先行)に表示し、誤profile・誤bucketへの書き込みに気づかせる。dry-runでも表示。
+        // 続けて実効profileのrecipient指紋を表示する(TASK-7 D-5: 「どこへ・誰の鍵で書くか」
+        // を1画面で確認させる。指紋はload_pipelineが検証時に計算した値を使い再計算しない
+        // ためdry-run(暗号化しない)でも表示可能)
         println!(
             "接続先: profile={} bucket={} prefix={}",
             aws.profile, aws.bucket, aws.prefix
         );
+        println!("recipients({}):", cfg.recipient_fingerprints.len());
+        for fp in &cfg.recipient_fingerprints {
+            println!("  {fp}");
+        }
 
         let targets = crate::targets::resolve_targets_storage(paths, from_list.as_deref())?;
         // from-listのtitle欄は引数形式検証として先に(usage 64・S3 API呼び出しに先行)
@@ -700,12 +709,8 @@ fn cmd_backup_push(
         // run manifest(file record schema=3: file upload後に構築。file recordにuuid/title入・
         // identity_hash/folder無しの所在記録と実s3_key+version_idを記録)
         if !uploaded.is_empty() {
-            // ヘッダのrecipientsは現在設定の指紋列
-            let mut current_fingerprints = Vec::with_capacity(cfg.public_keys.len());
-            for k in &cfg.public_keys {
-                let pk = crate::fingerprint::parse_ssh_pubkey(k)?;
-                current_fingerprints.push(crate::fingerprint::fingerprint(&pk));
-            }
+            // ヘッダのrecipientsは現在設定の指紋列(load時検証で計算済みの値。D-5)
+            let current_fingerprints = cfg.recipient_fingerprints.clone();
             let manifest_body = crate::manifest::build_manifest_v3(
                 &batch_id,
                 &now_jst(),

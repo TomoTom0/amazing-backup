@@ -1068,7 +1068,14 @@ fn setup_both_bucket_same_name_pin(
     tag: &str,
     plain: &[u8],
 ) -> Option<(StorageFixture, BothBucketPin)> {
-    let Some(fx) = StorageFixture::new(tag, StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new(
+        tag,
+        StorageOpts {
+            // TASK-7: --profile prodがpipeline.tomlの[profiles.prod]も選択するため
+            extra_pipeline_profiles: vec!["prod".into()],
+            ..StorageOpts::default()
+        },
+    ) else {
         return None;
     };
     fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));

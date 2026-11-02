@@ -42,7 +42,9 @@ pub struct CtxArgs {
     /// 復号用SSH ed25519秘密鍵(省略時はpipeline.toml [verify].decrypt_key)
     #[arg(long)]
     pub key: Option<PathBuf>,
-    /// aws.tomlの[aws].active_profileを当該実行限り上書き(aws.tomlへの書戻しはしない)
+    /// aws.tomlの[aws].active_profileを当該実行限り上書き(aws.tomlへの書戻しはしない)。
+    /// TASK-7: 実効pipeline profileも同時に選択する(実効pipeline profileは常に
+    /// 実効aws profile名と同一=単一解決源のため両fileの選択を兼ねる)
     #[arg(long)]
     pub profile: Option<String>,
     /// 出力形式(照会系9コマンド。既定human・jsonはstdout全体が単一JSON)
@@ -88,21 +90,25 @@ fn open_session_inner(
     ctx: &CtxArgs,
     require_pipeline: bool,
 ) -> Result<Session, crate::errors::BackupError> {
+    // TASK-7 D-3: aws.tomlを先に読み、その実効profile名でpipeline.tomlを読む
+    // (旧順序の入替。load_pipelineはaws実効profile名解決後の呼出が契約のため、
+    // ここが当該契約の保証点。aws側で一度だけ解決した名前を流用する)
+    let aws = load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
     let cfg = match &ctx.config {
-        Some(p) => Some(config::load_pipeline(p)?),
-        None if require_pipeline => {
-            Some(config::load_pipeline(&pipeline_config_path(&ctx.config))?)
-        }
+        Some(p) => Some(config::load_pipeline(p, &aws.profile)?),
+        None if require_pipeline => Some(config::load_pipeline(
+            &pipeline_config_path(&ctx.config),
+            &aws.profile,
+        )?),
         None => {
             let default_p = config::resolve_app_paths().pipeline_config;
             if default_p.is_file() {
-                Some(config::load_pipeline(&default_p)?)
+                Some(config::load_pipeline(&default_p, &aws.profile)?)
             } else {
                 None
             }
         }
     };
-    let aws = load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
     let canonical_bucket = config::canonical_bucket(&aws_config_path(&ctx.aws_config))?;
     let backend = crate::cli::select_backend(&aws)?;
     Ok(Session {
@@ -343,5 +349,101 @@ pub(crate) fn print_json(value: &serde_json::Value) {
     match serde_json::to_string(value) {
         Ok(s) => println!("{s}"),
         Err(e) => eprintln!("error: 内部エラー: JSON出力の組み立てに失敗: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::{
+        TempDir, config_env_lock, set_amazing_backup_home, write_file, write_test_ed25519_pub,
+    };
+
+    fn ctx_args() -> CtxArgs {
+        CtxArgs {
+            config: None,
+            aws_config: None,
+            key: None,
+            profile: None,
+            format: Format::Human,
+        }
+    }
+
+    fn aws_toml_body(bucket: &str) -> String {
+        format!(
+            "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"{bucket}\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"creds.toml\"\n"
+        )
+    }
+
+    /// TASK-7 D-3(open_session_innerの読込順序・unit test版契約検証):
+    /// aws.toml読込を先に行い、その実効profile名でpipeline.tomlを読む。
+    /// aws.toml不在+旧形式pipeline.tomlの環境ではaws.toml側のerrorが先に出る
+    /// (=pipelineを先に読む旧順序なら旧形式errorが出るため、error内容で順序を検証)。
+    #[test]
+    fn open_session_reads_aws_before_pipeline() {
+        let _env_lock = config_env_lock();
+        let tmp = TempDir::new("sess-order");
+        let _abh = set_amazing_backup_home(tmp.path());
+        let pubkey = write_test_ed25519_pub(tmp.path());
+        // 旧形式pipeline.toml(規定path)+aws.toml不在
+        write_file(
+            &tmp.path().join("pipeline.toml"),
+            format!("[recipients]\npublic_keys = [\"{}\"]\n", pubkey.display()).as_bytes(),
+        );
+        let e = open_session(&ctx_args())
+            .err()
+            .expect("aws.toml不在+旧形式pipelineはsession構築前に失敗");
+        let msg = match e {
+            crate::errors::BackupError::Config(m) => m,
+            other => panic!("期待した区分はConfig、実際は {other:?}"),
+        };
+        assert!(
+            msg.contains("aws.tomlを読めない"),
+            "aws.toml側のerrorが先(pipeline旧形式errorより前): {msg}"
+        );
+
+        // aws.toml配置後はpipeline側の旧形式検出error(案内は解決済み実効profile名)になる
+        write_file(
+            &tmp.path().join("aws.toml"),
+            aws_toml_body("order-bucket").as_bytes(),
+        );
+        let e = open_session(&ctx_args())
+            .err()
+            .expect("旧形式pipeline.tomlは設定エラー");
+        let msg = match e {
+            crate::errors::BackupError::Config(m) => m,
+            other => panic!("期待した区分はConfig、実際は {other:?}"),
+        };
+        assert!(
+            msg.contains("旧形式") && msg.contains("[profiles.dev"),
+            "aws解決後にpipelineを実効profile名で読む: {msg}"
+        );
+
+        // 両fileとも適合すればsessionが構築され、cfg.profileは実効aws profile名と同一
+        // (backend構築はfake seam envで実credential不要にする)
+        write_file(
+            &tmp.path().join("pipeline.toml"),
+            format!(
+                "[profiles.dev.recipients]\npublic_keys = [\"{}\"]\n",
+                pubkey.display()
+            )
+            .as_bytes(),
+        );
+        let state = tmp.path().join("fakestate");
+        std::fs::create_dir_all(&state).expect("fake state dir");
+        unsafe { std::env::set_var("AMAZING_BACKUP_FAKE_S3_STATE", &state) };
+        let result = open_session(&ctx_args());
+        unsafe { std::env::remove_var("AMAZING_BACKUP_FAKE_S3_STATE") };
+        let session = result.expect("適合状態はsession構築できる");
+        assert_eq!(session.aws.profile, "dev");
+        assert_eq!(
+            session
+                .cfg
+                .as_ref()
+                .expect("規定pathにあるpipelineを読む")
+                .profile,
+            "dev",
+            "cfg.profileは実効aws profile名と同一(単一解決源)"
+        );
     }
 }
