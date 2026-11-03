@@ -2442,4 +2442,44 @@ mod tests {
         assert_eq!(e.exit_code(), 2, "active_profile違反名は設定エラー2");
         assert!(msg.contains("bad_name"), "違反名がmessageに含まれる: {msg}");
     }
+
+    /// [covers:config.repo-pipeline-file-profile-schema]
+    /// git追跡の実運用file configs/pipeline.tomlの旧top-level形式への退行を機械検出する
+    /// 回帰test(2026-11-03 TASK-8 PR準備で同fileがTASK-7移行漏れの旧形式のまま残存して
+    /// いたことが判明した由来。template側byte一致testは存在したが実運用fileの検証は不在)。
+    /// load_pipelineを絶対path(CARGO_MANIFEST_DIR結合)でprofile "dev"により呼び、
+    /// errorになる場合は旧形式移行error・parse失敗・実効profile entry不在のいずれでも
+    /// ないことを検証する(=第1層のTOML parse・未知key・型不一致・profile名規則を通過し
+    /// profile解決に成功)。第2層の鍵file存在検査はrepoに鍵file(configs/secret/配下・
+    /// gitignore)が無い環境と有る環境で結果が変わるため期待値にしない: 鍵不在環境の
+    /// 鍵file不在errorも鍵在環境のOk(または鍵内容・指紋依存のerror)も本条件の対象外。
+    #[test]
+    fn load_pipeline_repo_pipeline_file_keeps_profile_schema() {
+        let repo_pipeline = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("configs")
+            .join("pipeline.toml");
+        assert!(
+            repo_pipeline.is_file(),
+            "git追跡の実運用fileが在る前提: {}",
+            repo_pipeline.display()
+        );
+        match load_pipeline(&repo_pipeline, "dev") {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("旧形式"),
+                    "repo追跡の実運用fileが旧top-level形式へ退行: {msg}"
+                );
+                assert!(
+                    !msg.contains("parseに失敗"),
+                    "repo追跡の実運用fileが現行schemaにparseできない(未知key・型不一致含む): {msg}"
+                );
+                assert!(
+                    !msg.contains("対応する[profiles.dev]がpipeline.tomlにありません"),
+                    "repo追跡の実運用fileに[profiles.dev]が無い: {msg}"
+                );
+            }
+        }
+    }
 }

@@ -95,7 +95,7 @@ repo内運用(configs/secret/)に鍵・credentialを置いている場合の、u
   $ ssh-keygen -t ed25519 -f configs/secret/keys/private/backup_ed25519_2 -N ""
   ```
 
-  生成した公開鍵(.pub)をpipeline.toml(repo内運用では`configs/pipeline.toml`)の`[recipients].public_keys`へ追加する
+  生成した公開鍵(.pub)をpipeline.toml(repo内運用では`configs/pipeline.toml`)の`[profiles.<name>.recipients].public_keys`へ追加する(TASK-7のprofile化によりsectionは`[profiles.<name>]`配下。`<name>`はaws.tomlのprofile名と同名)
 - 手動復元(usage_backup.md 9.3)で使う秘密鍵は、repo内運用では`configs/secret/keys/private/`配下の鍵を指定する(`age -d -i configs/secret/keys/private/backup_ed25519 ...`。旧9.3の鍵指定は`<秘密鍵>`汎用のため、この補足はrepo内運用向けの新規追加)。aws CLIの認証はamazing-backupと無関係(credential chain)のため別途設定する
 
 ## 5. 設計書・docs外の正本参照

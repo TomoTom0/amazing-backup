@@ -85,6 +85,12 @@
 #   実装形態の内部構造・既規定path config移行手順)。
 #   実装前のため新規・改訂条件のテストは実行fail・StorageFixture新schema化により
 #   config系結合test全体が赤になる([meta]はverified=falseへ戻し実装後に記録)。
+# 2026-11-03: TASK-8 PR準備でgit追跡の実運用file configs/pipeline.tomlが旧形式のまま
+#   残存(TASK-7のupdate漏れ)していたことが判明し[profiles.dev]配下へ移行。この形式退行を
+#   機械検出する回帰testとして新規1件: repo-pipeline-file-profile-schema
+#   (load_pipelineをrepoの実fileへprofile "dev"で呼び、旧形式移行error・parse失敗・
+#   実効profile entry不在のいずれでもない=第1層通過+profile解決成功を検証。
+#   鍵file(configs/secret/・gitignore)の在不在は環境で変わるため第2層の結果は期待値外)。
 
 [meta]
 feature = "config"
@@ -93,8 +99,8 @@ verified = true
 verified_at = "2026-11-03"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "26506925dbb31ac01c7030397b15b3ea561a7536"
-note = "CONF-005(from-list)は targets::parse_from_list が実体。source_fileはエリアの主対象(src/config.rs)を指し、実関数はtarget_functionで特定する。TASK-9でload_credentials(src/config.rs新設)が追加され、credential系条件(CONF-009〜012)もsrc/config.rsが実体。TASK-1のconfig init実装(cmd_config_init系)もsrc/config.rsが実体。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(pipeline profile化: [profiles.<name>]schema・検証2層・旧形式移行error・load_pipeline必須profile引数・aws profile名規則・同一bucket警告・init同名対応案内)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新"
+source_hash = "8914616e3252d69b483f10ed2a20dbc97a77d99d"
+note = "CONF-005(from-list)は targets::parse_from_list が実体。source_fileはエリアの主対象(src/config.rs)を指し、実関数はtarget_functionで特定する。TASK-9でload_credentials(src/config.rs新設)が追加され、credential系条件(CONF-009〜012)もsrc/config.rsが実体。TASK-1のconfig init実装(cmd_config_init系)もsrc/config.rsが実体。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(pipeline profile化: [profiles.<name>]schema・検証2層・旧形式移行error・load_pipeline必須profile引数・aws profile名規則・同一bucket警告・init同名対応案内)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新。2026-11-03 TASK-8 PR準備での実運用file形式退行検出を機にrepo-pipeline-file-profile-schemaを追加しcargo test全件pass(297件)・verify-conditions.py PASS(235条件)を確認・source_hashを更新"
 
 [[condition]]
 id = "config.xdg-default-paths"
@@ -419,6 +425,15 @@ description = "旧top-level形式(現行schema)のpipeline.tomlは専用の移�
 given = "(a)旧6section形式のpipeline.tomlでのdry-run (b)[profiles.dev]構成にtop-level [behavior]を残した併存状態でのdry-run (c)旧形式fileを--configで明示指定したdry-run"
 expect_return_shape = "いずれも exit 2+移行案内(「旧形式」の語+実効profile名[profiles.dev+該当section名を含む)"
 source_lines = "tests/config_storage.rs:584"
+
+[[condition]]
+id = "config.repo-pipeline-file-profile-schema"
+target_function = "config::load_pipeline(git追跡の実運用fileへの適合検査)"
+source = "tmp/tasks/tm-7/design_pipeline_profile.md D-2(旧top-level形式は専用移行errorで拒否)+2026-11-03 TASK-8 PR準備での更新漏れ検出(git追跡configs/pipeline.tomlを[profiles.dev]配下へ移行。template側byte一致testはTASK-7で存在したが実運用fileを検証するtestは不在だった)"
+description = "git追跡の実運用file configs/pipeline.tomlは現行profile schema([profiles.<name>]配下)に適合すること。旧top-level section(LEGACY_PIPELINE_SECTIONSの6 section)の残存はconfig.pipeline-legacy-format-migration-errorの移行error対象=schema退行であり、回帰testで機械検出する (unit)"
+given = "repoのconfigs/pipeline.toml(絶対path=CARGO_MANIFEST_DIR結合)へのload_pipeline呼び出し(profile \"dev\")。recipientsの鍵file(configs/secret/配下・gitignore)の在不在は実行環境で変わる"
+expect_return_shape = "Ok、またはErrの場合も旧形式移行error・parse失敗(deserialize失敗=未知key・型不一致を含む)・実効profile entry不在のいずれでもないerrorであること(=第1層のTOML parse・未知key・型不一致・profile名規則を通過しprofile \"dev\"の解決に成功。第2層の鍵file存在・ed25519形式・指紋重複の結果は環境依存のため期待値としない)"
+source_lines = "src/config.rs:2446"
 
 [[condition]]
 id = "config.aws-same-bucket-multi-profile-warned"
