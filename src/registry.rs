@@ -538,7 +538,8 @@ pub fn load_registry(path: &Path) -> BackupResult<Vec<Record>> {
 /// 計上値(除去行数・残行数)は`remove.len()`・`keep.len()`が正本。
 #[derive(Debug)]
 pub(crate) struct ResetRemoval {
-    /// 温存行(他bucket宛・共有uuid・crash残存file_write・prune/sweep系・未知record_type等)
+    /// 温存行(他bucket宛・共有uuidのfile_write・crash残存file_write・prune/sweep系・
+    /// 未知record_type等)
     pub(crate) keep: Vec<String>,
     /// 除去行(当該bucket由来行)
     pub(crate) remove: Vec<String>,
@@ -590,30 +591,30 @@ pub(crate) fn read_registry_lines(path: &Path) -> BackupResult<(Vec<String>, boo
 /// 同様に行番号付きProcess errorでreset中止(未知fieldはdeny_unknown_fieldsで検出)。
 /// 未知record_typeの行は温存(load_registryの「未知は警告のうえ無視」を書換でも再現)。
 /// 2-pass必須: Pass 1でfile_uploadのuuidを対象/非対象bucket集合へ収集し(file_writeは
-/// file_uploadより先に記録されるため順序非依存にする)、Pass 2でfile_writeと
-/// 共有uuidのfile_upload(非対象bucketにもuploadされたuuid・prod側所在情報として温存。
-/// 再PUT経路で同一uuidの複数bucket uploadは通常発生)の除去を確定する。
+/// file_uploadより先に記録されるため順序非依存にする)、Pass 2でfile_writeの除去を確定
+/// する。対象bucket宛のfile_upload行はuuid共有(非対象bucketにもuploadされたuuid)に
+/// 関わらず全て除去する(reset --applyがS3実体を削除するため、記録を温存すると
+/// registry-only skip(src/storage/backup.rs)が実在しないobjectを参照し続ける。
+/// 共有uuidの非対象bucket側所在情報は非対象bucket宛行の温存で保持される)。
 pub(crate) fn partition_reset_removal(
     lines: Vec<String>,
     bucket: &str,
     canonical: &str,
 ) -> BackupResult<ResetRemoval> {
-    let matched =
-        |record_bucket: &str| record_bucket_matched(record_bucket, bucket, canonical);
+    let matched = |record_bucket: &str| record_bucket_matched(record_bucket, bucket, canonical);
     let mut remove_flags = vec![false; lines.len()];
     let mut target_uuids: HashSet<String> = HashSet::new();
     let mut other_uuids: HashSet<String> = HashSet::new();
     // Pass 2へ持ち越す行(uuid収集完了後に除去確定)
-    let mut matched_uploads: Vec<(usize, String)> = Vec::new();
+    let mut matched_uploads: Vec<usize> = Vec::new();
     let mut file_writes: Vec<(usize, String)> = Vec::new();
     for (idx, line) in lines.iter().enumerate() {
         let lineno = idx + 1;
         if line.trim().is_empty() {
             continue; // 空行は温存(元行のまま)
         }
-        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| {
-            BackupError::Process(format!("registryの{lineno}行目が不正JSON : {e}"))
-        })?;
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| BackupError::Process(format!("registryの{lineno}行目が不正JSON : {e}")))?;
         let record_type = value
             .get("record_type")
             .and_then(|v| v.as_str())
@@ -622,7 +623,8 @@ pub(crate) fn partition_reset_removal(
             "file_upload" => {
                 let rec: FileUploadRecord = parse_known(value, lineno, "file_upload")?;
                 if matched(&rec.s3_bucket) {
-                    matched_uploads.push((idx, rec.uuid.clone()));
+                    // 対象bucket宛はuuid共有に関わらず除去(S3実体削除と整合)
+                    matched_uploads.push(idx);
                     target_uuids.insert(rec.uuid.clone());
                 } else {
                     other_uuids.insert(rec.uuid.clone());
@@ -683,12 +685,13 @@ pub(crate) fn partition_reset_removal(
             _ => {} // 未知record_typeは温存(行のまま)
         }
     }
-    // Pass 2: 対象bucketのみにuploadされたuuidの行のみ除去
-    // (共有uuid=非対象bucketにもuploadされたuuidは温存)
-    for (idx, uuid) in matched_uploads {
-        if !other_uuids.contains(&uuid) {
-            remove_flags[idx] = true;
-        }
+    // Pass 2: 対象bucket宛file_upload行はuuid共有に関わらず全て除去(reset --applyは
+    // S3実体を削除するため、記録残存はregistry-only skip(backup.rs)との不整合。
+    // 共有uuidの非対象bucket側所在情報は非対象bucket宛行が保持)。
+    // file_writeは対象bucketのみにuploadされたuuid(=他bucketでuploadが残るuuidの
+    // 再利用・crash残存)のみ除去。
+    for idx in matched_uploads {
+        remove_flags[idx] = true;
     }
     for (idx, uuid) in file_writes {
         if target_uuids.contains(&uuid) && !other_uuids.contains(&uuid) {
@@ -1379,7 +1382,8 @@ mod tests {
             "2026-10-01",
         ))
         .unwrap();
-        let unknown = "{\"schema\":99,\"record_type\":\"future_event\",\"detail\":\"x\"}".to_string();
+        let unknown =
+            "{\"schema\":99,\"record_type\":\"future_event\",\"detail\":\"x\"}".to_string();
 
         let dev_uuid = "dddddddd-0000-7000-8000-000000000001";
         let prod_uuid = "pppppppp-0000-7000-8000-000000000002";
@@ -1387,26 +1391,26 @@ mod tests {
         let crash_uuid = "cccccccc-0000-7000-8000-000000000004";
         let empty_bucket_uuid = "eeeeeeee-0000-7000-8000-000000000005";
         let lines = vec![
-            fw(dev_uuid),                            // 除去(dev uuid・対象bucketのみ)
-            fu(dev_uuid, "dev-bucket"),              // 除去
-            fu(empty_bucket_uuid, ""),               // 除去(s3_bucket欠損=正本bucket相当)
-            manifest("dev-bucket"),                  // 除去
-            index_upload("dev-bucket"),              // 除去
-            pin_write("dev-bucket"),                 // 除去
-            pin_remove("dev-bucket"),                // 除去
+            fw(dev_uuid),                                   // 除去(dev uuid・対象bucketのみ)
+            fu(dev_uuid, "dev-bucket"),                     // 除去
+            fu(empty_bucket_uuid, ""),                      // 除去(s3_bucket欠損=正本bucket相当)
+            manifest("dev-bucket"),                         // 除去
+            index_upload("dev-bucket"),                     // 除去
+            pin_write("dev-bucket"),                        // 除去
+            pin_remove("dev-bucket"),                       // 除去
             serde_json::to_string(&legacy_upload).unwrap(), // 除去(旧upload・uuid無し)
-            fu(prod_uuid, "prod-bucket"),            // 温存(他bucket宛)
-            fw(prod_uuid),                           // 温存(非対象bucket uuid)
-            fu(shared_uuid, "prod-bucket"),          // 温存(他bucket宛)
-            fu(shared_uuid, "dev-bucket"),           // 温存(共有uuid)
-            fw(shared_uuid),                         // 温存(共有uuidのfile_write)
-            fw(crash_uuid),                          // 温存(crash残存)
+            fu(prod_uuid, "prod-bucket"),                   // 温存(他bucket宛)
+            fw(prod_uuid),                                  // 温存(非対象bucket uuid)
+            fu(shared_uuid, "prod-bucket"),                 // 温存(他bucket宛)
+            fu(shared_uuid, "dev-bucket"),                  // 除去(対象bucket宛はuuid共有でも)
+            fw(shared_uuid),                                // 温存(共有uuidのfile_write)
+            fw(crash_uuid),                                 // 温存(crash残存)
             serde_json::to_string(&legacy_manifest_upload).unwrap(), // 温存(旧・他bucket宛)
-            prune.clone(),                           // 温存
-            sweep.clone(),                           // 温存
-            location_remove.clone(),                 // 温存
-            encrypt.clone(),                         // 温存
-            unknown.clone(),                         // 温存(未知record_type)
+            prune.clone(),                                  // 温存
+            sweep.clone(),                                  // 温存
+            location_remove.clone(),                        // 温存
+            encrypt.clone(),                                // 温存
+            unknown.clone(),                                // 温存(未知record_type)
         ];
         let removed = vec![
             fw(dev_uuid),
@@ -1417,12 +1421,12 @@ mod tests {
             pin_write("dev-bucket"),
             pin_remove("dev-bucket"),
             serde_json::to_string(&legacy_upload).unwrap(),
+            fu(shared_uuid, "dev-bucket"),
         ];
         let kept = vec![
             fu(prod_uuid, "prod-bucket"),
             fw(prod_uuid),
             fu(shared_uuid, "prod-bucket"),
-            fu(shared_uuid, "dev-bucket"),
             fw(shared_uuid),
             fw(crash_uuid),
             serde_json::to_string(&legacy_manifest_upload).unwrap(),
@@ -1434,7 +1438,10 @@ mod tests {
         ];
         let p = partition_reset_removal(lines, "dev-bucket", "dev-bucket").expect("行分離");
         assert_eq!(p.remove, removed, "除去=対象bucket由来行(行順保持)");
-        assert_eq!(p.keep, kept, "温存=他bucket宛・共有uuid・crash残存等(行順保持)");
+        assert_eq!(
+            p.keep, kept,
+            "温存=他bucket宛・共有uuidのfile_write・crash残存等(行順保持)"
+        );
     }
 
     /// TASK-25 2.2: partition_reset_removalのschema検証。不正JSON行と既知record_typeの
@@ -1462,12 +1469,8 @@ mod tests {
         // 既知record_typeのschema違反(deny_unknown_fieldsで未知fieldを検出・3行目)
         let mut v: serde_json::Value = serde_json::from_str(&good).unwrap();
         v["extra_field"] = serde_json::json!(1);
-        let e = partition_reset_removal(
-            vec![good, v.to_string()],
-            "test-bucket",
-            "test-bucket",
-        )
-        .unwrap_err();
+        let e = partition_reset_removal(vec![good, v.to_string()], "test-bucket", "test-bucket")
+            .unwrap_err();
         match &e {
             BackupError::Process(msg) => {
                 assert!(

@@ -1739,7 +1739,12 @@ fn ssh_fingerprint_of(pubkey: &std::path::Path) -> String {
     String::from_utf8_lossy(&out.stdout)
         .split_whitespace()
         .find(|t| t.starts_with("SHA256:"))
-        .unwrap_or_else(|| panic!("SHA256指紋が取れない: {}", String::from_utf8_lossy(&out.stdout)))
+        .unwrap_or_else(|| {
+            panic!(
+                "SHA256指紋が取れない: {}",
+                String::from_utf8_lossy(&out.stdout)
+            )
+        })
         .to_string()
 }
 
@@ -2004,12 +2009,10 @@ fn backup_verify_requires_aws_config() {
     std::fs::create_dir_all(&abh2).expect("ABH dir2");
     std::fs::copy(&fx.cfg, abh2.join("pipeline.toml")).expect("pipeline.toml配置2");
     std::fs::copy(&fx.registry, abh2.join("registry.jsonl")).expect("registry配置2");
-    let aws_body = fx
-        .aws_toml_body()
-        .replace(
-            &fx.credentials.display().to_string(),
-            "/nonexistent/amazing-backup-it-creds.toml",
-        );
+    let aws_body = fx.aws_toml_body().replace(
+        &fx.credentials.display().to_string(),
+        "/nonexistent/amazing-backup-it-creds.toml",
+    );
     write_file(&abh2.join("aws.toml"), aws_body.as_bytes());
     let (code, stdout, stderr) = run_bin_env(
         &["backup", "verify"],
@@ -2036,11 +2039,8 @@ fn push_from_list_only_resolves_targets() {
     let target = fx.data_root.join("fl-only.zip");
     write_file(&target, b"from-list-standalone");
     clear_calls(&fx);
-    let (code, stdout, stderr) = fx.push_from_list(
-        &[],
-        &[(&target, Some("fl-only-title"))],
-        &["--dry-run"],
-    );
+    let (code, stdout, stderr) =
+        fx.push_from_list(&[], &[(&target, Some("fl-only-title"))], &["--dry-run"]);
     assert_eq!(
         code, 0,
         "--from-list単独(位置引数0個)のbackup push --dry-runはexit 0: {stdout}{stderr}"
@@ -2057,7 +2057,12 @@ fn push_from_list_only_resolves_targets() {
         stdout.contains("plan: 1件"),
         "解決対象1件の集計表示: {stdout}{stderr}"
     );
-    assert_eq!(fx.calls(), "", "dry-runはS3 API呼び出し無し: {}", fx.calls());
+    assert_eq!(
+        fx.calls(),
+        "",
+        "dry-runはS3 API呼び出し無し: {}",
+        fx.calls()
+    );
 }
 
 /// [covers:plan.from-list-empty-warning]

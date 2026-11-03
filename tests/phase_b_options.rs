@@ -867,7 +867,13 @@ fn backup_push_shows_connection_destination() {
 /// dev/familyそれぞれへ独立鍵pairを割り当てた多profile構成のpipeline.toml・aws.toml
 /// へ書き換える(TASK-7: --profileがaws/pipeline両fileを選択する観察用。
 /// family側は別bucketとし、鍵も分離=namespace毎の暗号学的人格)。
-fn two_identity_config(fx: &StorageFixture, dev_pub: &Path, dev_sec: &Path, fam_pub: &Path, fam_sec: &Path) {
+fn two_identity_config(
+    fx: &StorageFixture,
+    dev_pub: &Path,
+    dev_sec: &Path,
+    fam_pub: &Path,
+    fam_sec: &Path,
+) {
     let root = fx.data_root.display();
     fx.rewrite_pipeline_toml(&format!(
         "[profiles.dev.recipients]\npublic_keys = [\"{}\"]\n\

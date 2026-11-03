@@ -504,7 +504,7 @@ source = "TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-3・D-6・§5)"
 description = "--profile <name>はaws.tomlとpipeline.tomlの両方を選択する(実効pipeline profileは常に実効aws profile名と同一=単一解決源。pipeline.toml独自の既定は置かないため「aws=dev・pipeline=family」のような交叉が構造的に起こらない)。--profile省略時はaws.toml active_profile側のpipeline profileが使われる。decrypt_keyの既定も実効profileの[profiles.<name>.verify].decrypt_keyへ変わる(解決規則 --key > 実効profileのdecrypt_key は不変) (integration, fake seam)"
 given = "dev(active_profile)とfamilyが独立した鍵pair・別bucketの[profiles.dev]/[profiles.family]構成での、(1)--profile family指定の backup push(索引objectの暗号化recipientの観察) (2)--key省略での get --profile family(復元) (3)--profile省略の backup push(dev側・索引の再暗号化観察)"
 expect_return_shape = "(1)索引objectはfamily側recipient(family秘密鍵)で復号できdev秘密鍵では復号できない (2)実効profile(family)のdecrypt_keyが既定で使われ索引・objectの復号までexit 0で完結する (3)索引はdev側recipient(dev秘密鍵)で復号できる"
-source_lines = "tests/phase_b_options.rs:903"
+source_lines = "tests/phase_b_options.rs:909"
 
 [[condition]]
 id = "cli.profile-unknown-config-error"
@@ -594,7 +594,7 @@ source = "TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-5・2.9項目7・§
 description = "backup push開始時の接続先表示(cli.backup-push-connection-dest-shown)に続けて、実効profileのrecipient指紋を表示する: 「recipients(N):」行+指紋全文(SHA256:<base64 nopad>・fingerprint.rsの現行形式)を鍵毎に1行。指紋はload_pipelineが検証時に計算した値(PipelineConfig.recipient_fingerprints)を使いpush側で再計算しないため、dry-run(暗号化しない)でも表示される。表示箇所はpush開始時の1箇所のみで、pin・manage系では表示しない(誤鍵組での書き込みをbucket表示との並置で目視確認する気づきの提供。自動blockingではない) (integration, fake seam)"
 given = "2 recipient鍵のpipeline.tomlでの、(1) backup push --dry-run (2)通常 backup push (3) pin add の各実行"
 expect_return_shape = "(1)(2)は接続先表示の直後にrecipients(2)行と指紋全文が鍵毎1行(指紋のみの行が鍵数分)で表示される。(3)pin addの出力にrecipient指紋表示(recipients(行)が無い"
-source_lines = "tests/storage_backup.rs:1746"
+source_lines = "tests/storage_backup.rs:1751"
 
 [[condition]]
 id = "cli.verify-scoped-to-effective-bucket"
@@ -603,7 +603,7 @@ source = "TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-8・2.9項目10・�
 description = "backup verifyの検査対象は実効profileのbucketへ帰属するrunのみ(profile別鍵の下で別profileの正常な成果物を復号失敗として誤報告しない)。runのbucket帰属はmanifest/index_upload recordのs3_bucket(batch_id→bucket)から判定する。bucket帰属が確定できない記録(旧経路encrypt記録・upload未完でfile_writeのみのcrash残存)と他bucket帰属のrunは検査対象外+警告表示(対象外となったbatchの特定表示付き)。CLI上既に受理している--profileが実効化され、--profile指定時は当該profileのbucket帰属runのみが検査対象になる(検査対象runが無くてもexit 0+対象外警告) (integration, fake seam)"
 given = "dev(active_profile・bucket=it-bucket)とprod(bucket-prod)の構成でdev側push済みの状態へ、(1)第三bucket帰属のmanifest recordで帰属づけたfile_write記録(2)file_writeのみの帰属不明記録(upload未完crash残存相当)をregistryへ直接構築した backup verify と、(3) backup verify --profile prod の各実行"
 expect_return_shape = "(1)はexit 0で当該batchが検査対象外の警告表示(「対象外」の語+batch idの特定)となり検証エラー4とならない。(3)はprod bucket帰属runのみ検査でdev bucket帰属run(devの実push分)が対象外として表示されexit 0"
-source_lines = "tests/storage_backup.rs:1812"
+source_lines = "tests/storage_backup.rs:1817"
 
 [[condition]]
 id = "cli.verify-requires-aws-config"
@@ -612,7 +612,7 @@ source = "TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-8・2.9項目11・�
 description = "backup verifyはaws.toml必須(実効profile名の解決にload_aws_profileを流用=aws側解決chainと同一にする解決chainの単一化・偽装設定の検証も兼ねる。旧「aws不在でも構造検査可」からの破壊的変更)。aws.toml不在は設定エラー2+aws.tomlに言及するerror表示。credentialファイルの実在は不要(load_aws_profileはcredentials_fileの非空検査までで、file存在検査はS3書き込み系のrequire_ready/load_credentialsが担う)。verifyがS3接続しない・秘密値を扱わないことは不変 (integration, fake seam)"
 given = "(a)AMAZING_BACKUP_HOME配下にpipeline.toml・registry.jsonlのみでaws.tomlを置かない環境での backup verify (b)credentials_fileに不在pathを指定したaws.tomlでの backup verify の各実行"
 expect_return_shape = "(a)はexit 2+aws.tomlに言及するerror表示。(b)はcredentialファイル不在でも構造検査が完結しexit 0"
-source_lines = "tests/storage_backup.rs:1962"
+source_lines = "tests/storage_backup.rs:1967"
 
 [[condition]]
 id = "cli.backup-push-sha-merge-no-upload"

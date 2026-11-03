@@ -937,7 +937,8 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
 /// devであること(AwsConfigのpurpose保持。prod等ではbucket指定によらず拒否)。
 /// apply操作: registry退避(全体copy)→list_versions(root prefix)でVersions・
 /// DeleteMarkers全件をdelete_object_version→当該bucket由来行のみ除去した
-/// registry再書込(温存: 他bucket宛・共有uuid・crash残存file_write・prune/sweep等)→
+/// registry再書込(温存: 他bucket宛・共有uuidのfile_write・crash残存file_write・
+/// prune/sweep等)→
 /// 再list_versionsで0件確認。S3Backend操作は既存のlist_versions・
 /// delete_object_versionのみ(新API追加なし)。
 fn cmd_manage_reset(ctx: &CtxArgs, apply: bool) -> i32 {
@@ -1040,10 +1041,7 @@ fn cmd_manage_reset(ctx: &CtxArgs, apply: bool) -> i32 {
         //    tail破棄。放置すると後続appendが未完行と連結しregistry破損)
         match partition {
             Some((p, torn_tail)) if p.remove.is_empty() && !torn_tail => {
-                println!(
-                    "registry再書込: 書換なし(除去0行・残{}行)",
-                    p.keep.len()
-                );
+                println!("registry再書込: 書換なし(除去0行・残{}行)", p.keep.len());
             }
             Some((p, torn_tail)) if p.keep.is_empty() => {
                 // 残0行(全行除去): 空fileを残さない→不在扱いで冪等性・既存テスト整合
@@ -1112,9 +1110,7 @@ fn registry_backup_path(bucket: &str) -> std::path::PathBuf {
         .with_timezone(&jst)
         .format("%Y%m%d")
         .to_string();
-    std::path::PathBuf::from(format!(
-        "./tmp/{ymd}_{bucket}_registry_before_reset.jsonl"
-    ))
+    std::path::PathBuf::from(format!("./tmp/{ymd}_{bucket}_registry_before_reset.jsonl"))
 }
 
 /// registry再書込(TASK-25 2.3): 残行を各行`\n`終端で書き出す

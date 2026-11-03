@@ -1130,8 +1130,7 @@ mod tests {
             "list.toml".into(),
         ]);
         assert_ne!(
-            code,
-            64,
+            code, 64,
             "--from-listのみはusage errorでない(実際は設定エラー2: pipeline設定ファイル不在)"
         );
 

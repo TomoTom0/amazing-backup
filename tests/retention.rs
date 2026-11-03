@@ -689,13 +689,10 @@ fn reset_backup_path(cwd: &std::path::Path) -> std::path::PathBuf {
 /// 表示から`<label>`直後の連続digit列を読む(無ければNone。
 /// `除去<N>行・残<M>行`形式のように`=`を挟まない表示用)。
 fn count_after_label(stdout: &str, label: &str) -> Option<i64> {
-    stdout
-        .split(label)
-        .nth(1)
-        .and_then(|rest| {
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            digits.parse::<i64>().ok()
-        })
+    stdout.split(label).nth(1).and_then(|rest| {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse::<i64>().ok()
+    })
 }
 
 /// 混在registryの構築(TASK-25 4章追加1): dev push済みregistryへ
@@ -703,6 +700,8 @@ fn count_after_label(stdout: &str, label: &str) -> Option<i64> {
 /// (dev bucket宛・prodのfile_uploadと同一uuid)+同uuidのfile_write・crash残存
 /// file_write(対応upload無しuuid)・prune/sweep/location_remove・旧encrypt・
 /// 未知record_type行をこの順で追記し、期待温存行(追記順)を返す。
+/// dev bucket宛の共有uuid file_uploadはreset --applyがS3実体を削除するため
+/// uuid共有でも除去側(温存期待から除外。prod側所在はprod bucket宛行が保持)。
 /// 追記行のJSON field名・schema値はsrc/registry.rsの各record structどおり
 /// (file_upload=2・file_write=3・prune=2・sweep/location_remove/encrypt=1)。
 fn append_mixed_records(fx: &StorageFixture) -> Vec<serde_json::Value> {
@@ -742,7 +741,8 @@ fn append_mixed_records(fx: &StorageFixture) -> Vec<serde_json::Value> {
     fw["s3_key"] = serde_json::json!(shared_key);
     let prod_fw = fw.clone();
     // 2. 共有uuidのfile_upload(dev bucket宛・prodのfile_uploadと同一uuid)+同uuidの
-    //    file_write(dev側所在)。uuidが両bucketのuploadに紐付くためfile_writeは温存
+    //    file_write(dev側所在)。file_uploadは対象bucket宛のためuuid共有でも除去側、
+    //    file_writeはuuidがprod側uploadにも紐付くため温存
     fu["s3_bucket"] = serde_json::json!(dev_bucket);
     fu["version_id"] = serde_json::json!("vid-dev-shared-1");
     let shared_fu = fu;
@@ -815,7 +815,10 @@ fn append_mixed_records(fx: &StorageFixture) -> Vec<serde_json::Value> {
     for r in &appended {
         append_registry_line(&fx.registry, r);
     }
-    appended
+    // 温存期待=appendedからdev bucket宛の共有uuid file_upload(3行目)を除外
+    let mut kept = appended;
+    kept.remove(2);
+    kept
 }
 
 /// registry末尾へ改行終端しないtorn行を追記する(crash途中writeの模擬)。
@@ -868,18 +871,20 @@ fn reset_rejects_non_dev_purpose_profile() {
 
 /// [covers:retention.reset-registry-preserves-other-bucket-records]
 /// 混在registryでのdev reset --apply(TASK-25 2.2・2.3・安全弁2廃止): 当該bucket
-/// 由来行(upload系記録+対象bucketのみにuploadされたuuidのfile_write)のみ除去して
-/// 再書込し、他bucket宛行・共有uuidのfile_write(prod側所在情報)・crash残存
-/// file_write・prune/sweep/location_remove・旧encrypt・未知record_type行は温存する
-/// (行順保持)。退避はfs::copyによる全体copy(bucket名入りの退避先名)。
+/// 由来行(upload系記録(対象bucket宛file_uploadはuuid共有でも全て)+対象bucketのみに
+/// uploadされたuuidのfile_write)のみ除去して再書込し、他bucket宛行・共有uuidの
+/// file_write(prod側所在情報)・crash残存file_write・prune/sweep/location_remove・
+/// 旧encrypt・未知record_type行は温存する(行順保持)。退避はfs::copyによる全体copy
+/// (bucket名入りの退避先名)。
 #[test]
 fn reset_rewrites_registry_bucket_scoped() {
     let Some((fx, work)) = reset_setup("ret-reset-mixed") else {
         return;
     };
     let dev_uuid = uuid_of_path(&fx, &fx.data_root.join("a.zip"));
-    // dev pushの全行(file_write/file_upload/manifest/index_upload)が除去対象
-    let dev_lines = fx.registry_values().len() as i64;
+    // dev pushの全行(file_write/file_upload/manifest/index_upload)+共有uuidのdev bucket
+    // 宛file_upload(S3実体削除との整合でuuid共有でも除去)が除去対象
+    let dev_lines = fx.registry_values().len() as i64 + 1;
     let kept = append_mixed_records(&fx);
     let before = std::fs::read_to_string(&fx.registry).expect("混在registryの読込");
 

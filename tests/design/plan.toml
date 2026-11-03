@@ -82,7 +82,7 @@ source = "TASK-23(--from-list単独許容化。tmp/tasks/tm-23/design_fromlist_s
 description = "--from-list単独(位置引数0個)で対象解決・実行される(usage 64とならない) (integration, fake seam)"
 given = "1件の[[targets]]を含むfrom-listのみを指定した backup push --dry-run 実行"
 expect_return_shape = "from-listの対象が解決・予測表示され exit 0"
-source_lines = "tests/storage_backup.rs:2027"
+source_lines = "tests/storage_backup.rs:2030"
 
 [[condition]]
 id = "plan.from-list-empty-warning"
@@ -91,4 +91,4 @@ source = "TASK-23(--from-list単独許容化。tmp/tasks/tm-23/design_fromlist_s
 description = "from-listの[[targets]]0件(空リスト)指定は警告表示+exit 0(usage 64・対象エラー3としない) (integration, fake seam)"
 given = "[[targets]]0件のfrom-listのみを指定した backup push 実行"
 expect_return_shape = "警告表示+exit 0。S3 API呼び出し・暗号化は行われない"
-source_lines = "tests/storage_backup.rs:2063"
+source_lines = "tests/storage_backup.rs:2068"
