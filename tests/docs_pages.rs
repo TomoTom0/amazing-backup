@@ -346,6 +346,16 @@ fn docs_config_outputs_pipeline_and_marker_replaced_aws() {
         stdout.contains("credentials_file = \"~/.config/amazing-backup/aws-credentials.toml\""),
         "全profileのcredentials_fileが固定例示pathへ置換されている: {stdout}"
     );
+    // TASK-7: pipeline.example.tomlは[profiles.dev]+[profiles.family]の2profile構成へ
+    // 新schema化され、docs config pageは同一の埋め込みtemplateを出力する(template sync)
+    assert!(
+        stdout.contains("[profiles.dev]"),
+        "docs configのpipeline部は新schemaの[profiles.dev]を含む: {stdout}"
+    );
+    assert!(
+        stdout.contains("[profiles.family]"),
+        "docs configのpipeline部は新schemaの[profiles.family]を含む: {stdout}"
+    );
 }
 
 /// [covers:docs.llm-skill-skills-md-form]

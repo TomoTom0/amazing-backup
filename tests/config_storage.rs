@@ -337,7 +337,10 @@ fn default_config_missing_shows_init_guidance() {
         ("AMAZING_BACKUP_HOME", abh_s.as_str()),
     ];
 
-    // (a) 規定pathにpipeline.tomlが無い: backup verifyの--config省略は案内付き設定エラー2
+    // (a) 規定pathにpipeline.tomlが無い: backup verifyの--config省略は案内付き設定エラー2。
+    // TASK-7でverifyはaws.toml必須(実効profile解決)となるためaws.tomlのみ配置して
+    // pipeline.toml不在側の観察とする(aws不在branchは(b)がcover)
+    std::fs::copy(&fx.aws_toml, empty_abh.join("aws.toml")).expect("aws.tomlのみ配置");
     let (code, _stdout, stderr) = run_bin_env(&["backup", "verify"], &env);
     assert_eq!(code, 2, "規定pipeline.toml不在は設定エラー2: {stderr}");
     assert!(
@@ -345,7 +348,8 @@ fn default_config_missing_shows_init_guidance() {
         "config initによる生成の案内: {stderr}"
     );
 
-    // (b) 規定pathにaws.tomlが無い: --aws-config省略は案内付き設定エラー2
+    // (b) 規定pathにaws.tomlが無い: (a)で配置したaws.tomlを削除し「何も置かない」状態へ
+    std::fs::remove_file(empty_abh.join("aws.toml")).expect("(a)で配置したaws.tomlを削除");
     let (code, _stdout, stderr) = run_bin_env(&["list", "files", "--key", "k"], &env);
     assert_eq!(code, 2, "規定aws.toml不在は設定エラー2: {stderr}");
     assert!(
@@ -353,7 +357,9 @@ fn default_config_missing_shows_init_guidance() {
         "config initによる生成の案内: {stderr}"
     );
 
-    // (c) 明示指定pathの不在は案内無しの設定エラー2
+    // (c) 明示指定pathの不在は案内無しの設定エラー2(TASK-7でverifyはaws.tomlを先に
+    // 読むため、aws.tomlを配置し直して明示指定側(pipeline.toml)の不在のみを観察する)
+    std::fs::copy(&fx.aws_toml, empty_abh.join("aws.toml")).expect("(c)用にaws.tomlを再配置");
     let (code, _stdout, stderr) = run_bin_env(
         &["backup", "verify", "--config", "/nonexistent/pipeline.toml"],
         &env,
@@ -362,5 +368,334 @@ fn default_config_missing_shows_init_guidance() {
     assert!(
         !stderr.contains("config init"),
         "明示指定には生成案内を出さない: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TASK-7(pipeline.toml profile化・tmp/tasks/tm-7/design_pipeline_profile.md
+// D-1〜D-3・D-7)の条件群。テスト先行のため実装前の実行failを許容する。
+
+/// [covers:config.pipeline-profiles-schema]
+/// pipeline.tomlのtop-levelは[profiles.<name>]のみ(TASK-7 D-1): 現行6sectionは
+/// すべて[profiles.<name>]配下へ移動し、top-level共通値は置かない。profile内の
+/// 各sectionの必須・省略時既定・検証規則は現行と同一(recipients必須・他section省略可)。
+#[test]
+fn pipeline_profiles_schema_accepted() {
+    // [profiles.dev](全section) + [profiles.family](recipients+verifyのみ=省略可)の
+    // 構成が受理され動作する(top-levelにはいかなるsectionも置かない)
+    let Some(fx) = StorageFixture::new("cfg-prof-schema", StorageOpts::default()) else {
+        return;
+    };
+    let root = fx.data_root.display();
+    fx.rewrite_pipeline_toml(&format!(
+        "[profiles.dev.recipients]\npublic_keys = [\"{}\"]\n\
+         [profiles.dev.verify]\ndecrypt_key = \"{}\"\n\
+         [profiles.dev.layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [\"{root}\"]\n\
+         [profiles.family.recipients]\npublic_keys = [\"{}\"]\n\
+         [profiles.family.verify]\ndecrypt_key = \"{}\"\n",
+        fx.public.display(),
+        fx.secret.display(),
+        fx.public.display(),
+        fx.secret.display(),
+    ));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"profile-schema-plain");
+    let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
+    assert_eq!(code, 0, "profile schema構成は受理されdry-runはexit 0: {stderr}");
+}
+
+/// [covers:config.pipeline-profile-name-validated]
+/// pipeline profile名の規則は ^[a-z0-9][a-z0-9-]{0,63}$(category名規則と同一)。
+/// 違反は設定エラー2(第1層=全profile一括検証。未選択profileの違反でも弾く)。
+#[test]
+fn pipeline_profile_name_validated() {
+    let Some(fx) = StorageFixture::new("cfg-prof-name", StorageOpts::default()) else {
+        return;
+    };
+    // (profile名, 期待exit code)
+    let over64 = "x".repeat(65);
+    let max63 = "x".repeat(63);
+    let cases: &[(&str, i32)] = &[
+        ("BadName", 2),   // 大文字
+        ("-lead", 2),     // 先頭ハイフン
+        ("a_b", 2),       // アンダースコア
+        (over64.as_str(), 2), // 64文字超
+        (max63.as_str(), 0),  // 63文字は適合(未選択でもschema検査は通る)
+        ("dev-2", 0),     // 小文字+数字+ハイフン
+    ];
+    for (i, (name, want)) in cases.iter().enumerate() {
+        let Some(fx) = StorageFixture::new(&format!("cfg-prof-name-{i}"), StorageOpts::default())
+        else {
+            return;
+        };
+        // aws.tomlのactive_profileはdevのまま=違反名profileは未選択。それでも
+        // 第1層(deserialize)の名前規則は全profileへ及ぶ
+        fx.rewrite_pipeline_toml(&format!(
+            "[profiles.dev.recipients]\npublic_keys = [\"{}\"]\n\
+             [profiles.{name}.recipients]\npublic_keys = [\"{}\"]\n",
+            fx.public.display(),
+            fx.public.display(),
+        ));
+        let a = fx.data_root.join("a.zip");
+        write_file(&a, b"profile-name-plain");
+        let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
+        assert_eq!(code, *want, "profile名({name})はexit {want}: {stderr}");
+        if *want == 2 {
+            assert!(
+                stderr.contains(name),
+                "違反profile名({name})がerror文に現れる: {stderr}"
+            );
+        }
+    }
+}
+
+/// [covers:config.aws-profile-name-validated]
+/// aws.tomlのprofile名にもpipelineと同一の規則 ^[a-z0-9][a-z0-9-]{0,63}$ を適用する
+/// (TASK-7 2.9項目6: 同名対応の構造的保証。違反名は設定エラー2)。
+#[test]
+fn aws_profile_name_validated() {
+    let Some(fx) = StorageFixture::new("cfg-awsname", StorageOpts::default()) else {
+        return;
+    };
+    // active_profileと[aws.profiles.<name>]のkeyのみ違反値へ(purpose等は無関係)
+    fx.rewrite_aws_toml(
+        &fx.aws_toml_body()
+            .replace("active_profile = \"dev\"", "active_profile = \"BadName\"")
+            .replace("[aws.profiles.dev]", "[aws.profiles.BadName]"),
+    );
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"aws-name-plain");
+    // (a) active_profile側の違反
+    let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
+    assert_eq!(code, 2, "違反aws profile名は設定エラー2: {stderr}");
+    assert!(
+        stderr.contains("BadName"),
+        "違反profile名がerror文に現れる: {stderr}"
+    );
+    // (b) --profileでの違反名指定も同一に設定エラー2(S3 API呼び出し前)
+    let (code, _stdout, stderr) = fx.list_env("files", &["--profile", "BadName"], &[]);
+    assert_eq!(code, 2, "--profile違反名は設定エラー2: {stderr}");
+    assert_eq!(fx.calls(), "", "S3 API呼び出しは行われない: {}", fx.calls());
+}
+
+/// [covers:config.pipeline-validation-layered]
+/// 検証は2層(TASK-7 D-1): 第1層(TOML parse・未知key拒否・型不一致・profile名規則)は
+/// 全profileへ一括適用(未選択profileの未知keyも設定エラー2)。第2層(recipients必須・
+/// 空配列拒否・鍵file存在・ed25519形式・指紋重複)は選択profileのみ(未選択profileの
+/// 鍵pathの実在性は検証しない=dummy鍵path・同一path重複を置ける)。
+#[test]
+fn pipeline_validation_is_layered() {
+    // (A) 第1層: 未選択profileの未知keyは設定エラー2
+    let Some(fx) = StorageFixture::new("cfg-layer1", StorageOpts::default()) else {
+        return;
+    };
+    fx.rewrite_pipeline_toml(&format!(
+        "[profiles.dev.recipients]\npublic_keys = [\"{}\"]\n\
+         [profiles.family.recipients]\npublic_keys = [\"{}\"]\nunknown_key = 1\n",
+        fx.public.display(),
+        fx.public.display(),
+    ));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"layer1-plain");
+    let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
+    assert_eq!(code, 2, "未選択profileの未知keyは設定エラー2(第1層): {stderr}");
+    assert!(
+        stderr.contains("unknown_key"),
+        "未知キー名がerror文に現れる: {stderr}"
+    );
+
+    // (B) 第2層: 未選択profileの鍵は実在検査しない(dummy絶対path・同一path重複を許容)
+    let Some(fx) = StorageFixture::new("cfg-layer2", StorageOpts::default()) else {
+        return;
+    };
+    let dummy = "/nonexistent/amazing-backup-it-dummy.pub";
+    fx.rewrite_pipeline_toml(&format!(
+        "[profiles.dev.recipients]\npublic_keys = [\"{}\"]\n\
+         [profiles.family.recipients]\npublic_keys = [\"{dummy}\", \"{dummy}\"]\n\
+         [profiles.family.verify]\ndecrypt_key = \"/nonexistent/amazing-backup-it-dummy-key\"\n",
+        fx.public.display(),
+    ));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"layer2-plain");
+    let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
+    assert_eq!(
+        code, 0,
+        "未選択profileのdummy鍵path・重複は設定エラーにしない(第2層は選択profileのみ): {stderr}"
+    );
+}
+
+/// [covers:config.pipeline-profile-required-for-effective-profile]
+/// 実効aws profile名に対応する[profiles.<name>]がpipeline.tomlに無い場合は設定エラー2
+/// (利用可能なpipeline profile一覧をerror文へ表示)。--profile省略時(active_profile)・
+/// 照会系(pipeline.tomlが在るが実効profileのentryが無い)でも救済しない
+/// (タイポの握りつぶし防止=2.9項目5)。
+#[test]
+fn pipeline_profile_required_for_effective_profile() {
+    let Some(fx) = StorageFixture::new("cfg-prof-missing", StorageOpts::default()) else {
+        return;
+    };
+    // pipeline.tomlにはfamilyのみ(実効aws profile=devのentryが無い)
+    fx.rewrite_pipeline_toml(&format!(
+        "[profiles.family.recipients]\npublic_keys = [\"{}\"]\n",
+        fx.public.display()
+    ));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"prof-missing-plain");
+    // (a) 書き込み系(backup push)
+    let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
+    assert_eq!(code, 2, "実効profile(dev)のentry不在は設定エラー2: {stderr}");
+    assert!(
+        stderr.contains("family"),
+        "利用可能なpipeline profile一覧(family)がerror文に表示される: {stderr}"
+    );
+    // (b) 照会系(list files)でも--key救済は無く設定エラー2
+    let (code, _stdout, stderr) = fx.list("files", &[]);
+    assert_eq!(code, 2, "照会系でも実効profileのentry不在は設定エラー2: {stderr}");
+    assert!(
+        stderr.contains("family"),
+        "照会系でも一覧表示: {stderr}"
+    );
+    assert_eq!(fx.calls(), "", "S3 API呼び出しは行われない: {}", fx.calls());
+}
+
+/// [covers:config.pipeline-extra-profiles-ignored]
+/// pipeline.tomlにaws.toml側へ存在しない余分なprofileがあっても、選択されない限り
+/// エラーとしない(2.9項目4。第1層の構文・schema検証は及ぶ=config.pipeline-validation-layered)。
+#[test]
+fn pipeline_extra_profiles_ignored() {
+    let Some(fx) = StorageFixture::new("cfg-prof-extra", StorageOpts::default()) else {
+        return;
+    };
+    let dummy = "/nonexistent/amazing-backup-it-dummy.pub";
+    fx.rewrite_pipeline_toml(&format!(
+        "[profiles.dev.recipients]\npublic_keys = [\"{}\"]\n\
+         [profiles.spare.recipients]\npublic_keys = [\"{dummy}\"]\n",
+        fx.public.display(),
+    ));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"prof-extra-plain");
+    let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
+    assert_eq!(
+        code, 0,
+        "aws.tomlに存在しない余分profile(spare)は選択されない限りエラーにしない: {stderr}"
+    );
+}
+
+/// [covers:config.pipeline-legacy-format-migration-error]
+/// 旧top-level形式(現行schema)は専用の移行案内errorで設定エラー2(D-2):
+/// 「旧形式です。各sectionを[profiles.<実効profile名>]配下へ移動してください」+該当
+/// section名。案内のprofile名は解決済みの実効profile名。旧sectionが1つでもtop-levelに
+/// 残っていれば[profiles]併存時でも同じ案内error(部分的な移行状態を許さない)。
+/// この判定は--configで指定する任意fileにも同じく適用される。
+#[test]
+fn pipeline_legacy_format_rejected_with_migration_guidance() {
+    let old_format = |fx: &StorageFixture| {
+        format!(
+            "[recipients]\npublic_keys = [\"{}\"]\n[behavior]\nkeep_going = false\n",
+            fx.public.display()
+        )
+    };
+    // (a) 純旧形式(規定pathのpipeline.toml)
+    let Some(fx) = StorageFixture::new("cfg-legacy-a", StorageOpts::default()) else {
+        return;
+    };
+    fx.rewrite_pipeline_toml(&old_format(&fx));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"legacy-a-plain");
+    let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
+    assert_eq!(code, 2, "旧top-level形式は設定エラー2: {stderr}");
+    assert!(
+        stderr.contains("旧形式") && stderr.contains("[profiles.dev"),
+        "移行案内(旧形式+実効profile名): {stderr}"
+    );
+    assert!(
+        stderr.contains("recipients"),
+        "該当section名(recipients)が案内に含まれる: {stderr}"
+    );
+
+    // (b) [profiles]併存+top-levelに旧sectionが1つ残っている状態も同一の案内error
+    let Some(fx) = StorageFixture::new("cfg-legacy-b", StorageOpts::default()) else {
+        return;
+    };
+    fx.rewrite_pipeline_toml(&format!(
+        "{}[behavior]\nkeep_going = false\n",
+        fx.pipeline_body()
+    ));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"legacy-b-plain");
+    let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
+    assert_eq!(code, 2, "部分的な移行状態(併存)は設定エラー2: {stderr}");
+    assert!(
+        stderr.contains("旧形式") && stderr.contains("behavior"),
+        "併存時も旧形式案内+残存section名(behavior): {stderr}"
+    );
+
+    // (c) --configで指定する任意fileにも同一判定を適用(単一の--configのみ渡す=
+    // StorageFixture::pushは--configを注入するためここでは直接実行)
+    let Some(fx) = StorageFixture::new("cfg-legacy-c", StorageOpts::default()) else {
+        return;
+    };
+    let legacy = fx.elsewhere.join("legacy-pipeline.toml");
+    write_file(&legacy, old_format(&fx).as_bytes());
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"legacy-c-plain");
+    let legacy_s = legacy.display().to_string();
+    let a_s = a.display().to_string();
+    let aws_s = fx.aws_toml.display().to_string();
+    let (code, _stdout, stderr) = fx.bin(
+        &[
+            "backup",
+            "push",
+            "--config",
+            &legacy_s,
+            "--aws-config",
+            &aws_s,
+            "--dry-run",
+            &a_s,
+        ],
+        &[],
+    );
+    assert_eq!(code, 2, "--config任意fileの旧形式も設定エラー2: {stderr}");
+    assert!(
+        stderr.contains("旧形式") && stderr.contains("[profiles.dev"),
+        "任意fileにも同一の移行案内を適用: {stderr}"
+    );
+}
+
+/// [covers:config.aws-same-bucket-multi-profile-warned]
+/// aws.tomlで複数profileが同一bucketを参照する場合はstderr警告+処理継続(D-7・2.9項目8。
+/// 現行のdev+prod3bucket構成=別bucket構成では発火しない)。警告は同一aws.toml内の
+/// bucket重複の検出のみ(別file・recipient差し替えの検出限界は設計D-7の記載どおり)。
+#[test]
+fn aws_same_bucket_profiles_warned() {
+    // (a) 同一bucketを2profileが参照: stderr警告+処理継続(exit 0)
+    let Some(fx) = StorageFixture::new("cfg-samebkt", StorageOpts::default()) else {
+        return;
+    };
+    fx.rewrite_aws_toml(&format!(
+        "{}\n[aws.profiles.backup2]\npurpose = \"prod\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{}\"\n",
+        fx.aws_toml_body(),
+        fx.credentials.display()
+    ));
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"same-bucket-plain");
+    let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
+    assert_eq!(code, 0, "警告は処理を止めない(処理継続): {stderr}");
+    assert!(
+        stderr.contains("同一bucket"),
+        "同一bucket複数profile参照のstderr警告: {stderr}"
+    );
+
+    // (b) 別bucket構成(現行のdev+prod3bucket相当)では警告しない
+    let Some(fx) = StorageFixture::new("cfg-diffbkt", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"diff-bucket-plain");
+    let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
+    assert_eq!(code, 0, "別bucket構成はexit 0: {stderr}");
+    assert!(
+        !stderr.contains("同一bucket"),
+        "別bucket構成では警告しない: {stderr}"
     );
 }

@@ -11,8 +11,14 @@ pub const APP_DIR_NAME: &str = "amazing-backup";
 
 /// `pipeline.toml`相当(3.2・TASK-10設計4.1)。registry・cache dirのpathはXDG規定
 /// 解決(TASK-19: [output]廃止・設定fileからは指定不可)。
+/// TASK-7 profile化: 実効profileの`[profiles.<name>]`配下のみを解決済み値として持つ。
 #[derive(Debug)]
 pub struct PipelineConfig {
+    /// 実効pipeline profile名(常に実効aws profile名と同一=単一解決源。TASK-7 D-3)
+    pub profile: String,
+    /// load時検証で計算済みのrecipient指紋列(SHA256:<base64 nopad>。
+    /// 表示・manifest header記録に使いpush側で再計算しない。TASK-7 D-5)
+    pub recipient_fingerprints: Vec<String>,
     /// SSH ed25519公開鍵path列挙(1-of-N recipient)
     pub public_keys: Vec<std::path::PathBuf>,
     /// 暗号化一時物の集約dir(XDG cache dir。旧data/out。成功run後に掃除が既定)
@@ -208,12 +214,26 @@ impl std::fmt::Debug for AwsCredentials {
     }
 }
 
-/// pipeline.tomlのschema(3.2・TASK-10設計4.1。未知キー・型不一致拒否の厳格検証)。
+/// pipeline.tomlのschema(TASK-7 profile化。未知キー・型不一致拒否の厳格検証)。
+/// top-levelは`[profiles.<name>]`のみを持つ(D-1。top-level共通値の併置は置かない)。
+/// 検証は2層: 第1層(deserialize時に全profile一括)=TOML parse・未知key拒否・型不一致・
+/// profile名規則。第2層(選択profileのみ)=recipients必須・空配列拒否・鍵file存在・
+/// ed25519形式・指紋重複(重複の検査範囲はprofile内限定)。
 /// TASK-10追加分([layout]・[files])は省略可能。TASK-19で[output]は廃止
 /// (存在したら未知キー拒否・registry/cache dir pathはXDG規定path固定)。
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PipelineFile {
+    profiles: std::collections::BTreeMap<String, ProfileFile>,
+}
+
+/// `[profiles.<name>]`配下のschema(現行6fieldをそのまま保持。TASK-7 D-1の実装形態)。
+/// recipientsは第2層(選択profileのみ)で必須検証するためdeserialize時は省略可
+/// (未選択profileのschema検証は構文面のみ=未選択profileにdummy鍵pathを置ける)。
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileFile {
+    #[serde(default)]
     recipients: RecipientsFile,
     #[serde(default)]
     behavior: BehaviorFile,
@@ -237,7 +257,7 @@ struct MetadataFile {
     latest_source_path: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RecipientsFile {
     public_keys: Vec<String>,
@@ -345,11 +365,48 @@ struct CredentialsSection {
     session_token: Option<String>,
 }
 
+/// pipeline profile名の規則(TASK-7 D-1・2.9項目6: aws profile名へも同一規則を適用)。
+/// `^[a-z0-9][a-z0-9-]{0,63}$`(category名規則と同一。予約語sys拒否は無い)。
+fn validate_profile_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("空です".to_string());
+    }
+    if name.len() > 64 {
+        return Err("64文字を超えています".to_string());
+    }
+    let mut chars = name.chars();
+    let first = chars.next().expect("non-empty");
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return Err("先頭は小文字英数字のみです".to_string());
+    }
+    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err("使えるのは小文字英数字と-のみです".to_string());
+    }
+    Ok(())
+}
+
+/// 旧top-level形式(TASK-7化以前のschema)のsection名。
+const LEGACY_PIPELINE_SECTIONS: [&str; 6] = [
+    "recipients",
+    "behavior",
+    "verify",
+    "metadata",
+    "layout",
+    "files",
+];
+
 /// pipeline.tomlを読み、厳格schema検証(未知キー・型不一致拒否)・
 /// 空検査・公開鍵の存在とed25519形式検証・指紋重複検査(3.2)を行う。
 /// registry・cache dirのpathはXDG規定解決(TASK-19: [output]廃止・設定fileから指定不可)。
 /// 規定pathにfileが無い場合はcopy案内を添える(config.default-config-missing-guidance)。
-pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
+/// TASK-7 D-3: `profile_name`は必須(Optionにしない=解決漏れ状態を型で表現しない)。
+/// 契約「呼出側は必ずaws.tomlの実効profile名解決後に呼ぶ」(open_session_inner・
+/// cmd_backup_push・verifyの全経路がこの順序を保証)。
+/// 検証は2層(D-1): 第1層(deserialize時・全profile一括)=TOML parse・未知key・型不一致・
+/// profile名規則。第2層(選択profileのみ)=recipients必須・空配列拒否・鍵file存在・
+/// ed25519形式・指紋重複+各sectionの値検証(keep_artifacts列挙値・category名規則・
+/// auto_path_roots絶対path・latest_source_path列挙値・files写像)。
+pub fn load_pipeline(path: &Path, profile_name: &str) -> BackupResult<PipelineConfig> {
     let is_default_path = *path == resolve_app_paths().pipeline_config;
     let text = std::fs::read_to_string(path).map_err(|e| {
         let mut msg = format!("pipeline.tomlを読めない ({}): {e}", path.display());
@@ -361,6 +418,24 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
         }
         BackupError::Config(msg)
     })?;
+    // 旧top-level形式の検出(D-2): parse前にTOMLを覗き、top-levelに旧section名が1つでも
+    // 残っていれば([profiles]併存時も=部分的な移行状態を許さない)専用の移行案内error。
+    // 案内のprofile名はactive_profile記述値でなく解決済みの実効profile名(引数)。
+    // この判定は--configで指定する任意fileにも同じく適用される(経路で分岐しない)。
+    if let Ok(peek) = toml::from_str::<toml::Value>(&text) {
+        let legacy: Vec<&str> = LEGACY_PIPELINE_SECTIONS
+            .iter()
+            .copied()
+            .filter(|name| peek.get(*name).is_some())
+            .collect();
+        if !legacy.is_empty() {
+            return Err(BackupError::Config(format!(
+                "pipeline.tomlが旧形式です。top-levelの旧section({})を[profiles.{profile_name}]配下へ移動してください({})",
+                legacy.join("/"),
+                path.display()
+            )));
+        }
+    }
     let parsed: PipelineFile = toml::from_str(&text).map_err(|e| {
         BackupError::Config(format!(
             "pipeline.tomlのparseに失敗 ({}): {e}",
@@ -368,16 +443,40 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
         ))
     })?;
 
-    if parsed.recipients.public_keys.is_empty() {
-        return Err(BackupError::Config(
-            "[recipients].public_keysが空です(1つ以上のSSH ed25519公開鍵を指定してください)"
-                .to_string(),
-        ));
+    // 第1層: profile名規則は全profile一括で適用(未選択profileの違反でも弾く)
+    for name in parsed.profiles.keys() {
+        if let Err(detail) = validate_profile_name(name) {
+            return Err(BackupError::Config(format!(
+                "[profiles.{name}]のprofile名が規則に違反しています(^[a-z0-9][a-z0-9-]{{0,63}}$・{detail})",
+            )));
+        }
     }
 
-    let mut public_keys = Vec::with_capacity(parsed.recipients.public_keys.len());
-    let mut fingerprints = Vec::with_capacity(parsed.recipients.public_keys.len());
-    for key in &parsed.recipients.public_keys {
+    // 選択profileの解決(緩いかんおう: 実効aws profile名と同名1:1。entry不在は設定エラー2
+    // +利用可能profile一覧表示。余分profileは選択されない限り無視=第2層検証を適用しない)
+    let prof = parsed.profiles.get(profile_name).ok_or_else(|| {
+        BackupError::Config(format!(
+            "実効profile({profile_name})に対応する[profiles.{profile_name}]がpipeline.tomlにありません(利用可能なpipeline profile: {}) ({})",
+            parsed
+                .profiles
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("/"),
+            path.display()
+        ))
+    })?;
+
+    // ---- 第2層(選択profileのみ)の検証 ----
+    if prof.recipients.public_keys.is_empty() {
+        return Err(BackupError::Config(format!(
+            "[profiles.{profile_name}.recipients].public_keysが空です(1つ以上のSSH ed25519公開鍵を指定してください)"
+        )));
+    }
+
+    let mut public_keys = Vec::with_capacity(prof.recipients.public_keys.len());
+    let mut fingerprints = Vec::with_capacity(prof.recipients.public_keys.len());
+    for key in &prof.recipients.public_keys {
         let key_path = std::path::PathBuf::from(key);
         if !key_path.is_file() {
             return Err(BackupError::Config(format!(
@@ -397,43 +496,46 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
         public_keys.push(key_path);
     }
 
-    let decrypt_key = if parsed.verify.decrypt_key.trim().is_empty() {
+    let decrypt_key = if prof.verify.decrypt_key.trim().is_empty() {
         None
     } else {
-        Some(std::path::PathBuf::from(parsed.verify.decrypt_key))
+        Some(std::path::PathBuf::from(prof.verify.decrypt_key.as_str()))
     };
 
     // TASK-10設計4.1・4.2: keep_artifacts列挙値(TASK-19 XDG配置で[behavior]へ移設)
-    let keep_artifacts = match parsed.behavior.keep_artifacts.as_deref() {
+    let keep_artifacts = match prof.behavior.keep_artifacts.as_deref() {
         None => KeepArtifacts::Run,
         Some(v) => KeepArtifacts::parse(v).ok_or_else(|| {
             BackupError::Config(format!(
-                "[behavior].keep_artifactsが不正です: {v:?}(許容値: run/always)"
+                "[profiles.{profile_name}.behavior].keep_artifactsが不正です: {v:?}(許容値: run/always)"
             ))
         })?,
     };
 
     // TASK-10設計4.2: layout・categories・filesの検証
-    let unfiled_category = match parsed.layout.unfiled_category.trim() {
+    let unfiled_category = match prof.layout.unfiled_category.trim() {
         "" => "unfiled".to_string(),
         t => t.to_string(),
     };
-    crate::layout::validate_category_name(&unfiled_category)
-        .map_err(|e| BackupError::Config(format!("[layout].unfiled_categoryが不正です: {e}")))?;
+    crate::layout::validate_category_name(&unfiled_category).map_err(|e| {
+        BackupError::Config(format!(
+            "[profiles.{profile_name}.layout].unfiled_categoryが不正です: {e}"
+        ))
+    })?;
 
-    let mut auto_path_roots = Vec::with_capacity(parsed.layout.auto_path_roots.len());
-    for root in &parsed.layout.auto_path_roots {
+    let mut auto_path_roots = Vec::with_capacity(prof.layout.auto_path_roots.len());
+    for root in &prof.layout.auto_path_roots {
         let p = std::path::PathBuf::from(root);
         if !p.is_absolute() {
             return Err(BackupError::Config(format!(
-                "[layout].auto_path_rootsは絶対pathで指定してください: {root:?}"
+                "[profiles.{profile_name}.layout].auto_path_rootsは絶対pathで指定してください: {root:?}"
             )));
         }
         auto_path_roots.push(p);
     }
 
     // [metadata](TASK-18 2.2): latest_source_pathは3値。省略時plain
-    let latest_source_path = match parsed
+    let latest_source_path = match prof
         .metadata
         .as_ref()
         .and_then(|m| m.latest_source_path.as_deref())
@@ -444,7 +546,7 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
         Some("none") => PathMode::None,
         Some(v) => {
             return Err(BackupError::Config(format!(
-                "[metadata].latest_source_pathが不正です: {v:?}(許容値: plain/encrypted/none)"
+                "[profiles.{profile_name}.metadata].latest_source_pathが不正です: {v:?}(許容値: plain/encrypted/none)"
             )));
         }
     };
@@ -452,7 +554,7 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
     // TASK-18 5.15: files.categoryの定義存在検証は廃止(category語彙は記録値として
     // 自由化)しvalidate_category_nameによる文字列検証のみへ置換
     let mut files = std::collections::BTreeMap::new();
-    for (name, mapping) in &parsed.files {
+    for (name, mapping) in &prof.files {
         if name.is_empty() || name.contains('/') {
             return Err(BackupError::Config(format!(
                 "[files]のkeyはbasename(拡張子付き・/を含まない)を指定してください: {name:?}"
@@ -474,10 +576,12 @@ pub fn load_pipeline(path: &Path) -> BackupResult<PipelineConfig> {
     // registry・cache dirはXDG規定解決(TASK-19: [output]廃止・env上書きのみ)
     let paths = resolve_app_paths();
     Ok(PipelineConfig {
+        profile: profile_name.to_string(),
+        recipient_fingerprints: fingerprints,
         public_keys,
         output_dir: paths.cache_dir,
         registry_path: paths.registry,
-        keep_going: parsed.behavior.keep_going,
+        keep_going: prof.behavior.keep_going,
         decrypt_key,
         keep_artifacts,
         layout: LayoutConfig {
@@ -537,6 +641,41 @@ pub fn load_aws_profile(
             "[aws].profilesが空です(最低1つのprofileを定義してください。{})",
             path.display()
         )));
+    }
+
+    // TASK-7 2.9項目6: aws profile名へもpipelineと同一の名前規則を適用する
+    // (同名対応の構造的保証。違反名は設定エラー2=既存環境への破壊的変更は§5明記どおり)
+    for name in parsed.aws.profiles.keys() {
+        if let Err(detail) = validate_profile_name(name) {
+            return Err(BackupError::Config(format!(
+                "[aws.profiles.{name}]のprofile名が規則に違反しています(^[a-z0-9][a-z0-9-]{{0,63}}$・{detail}。pipeline.tomlの[profiles.<name>]と同名対応のため)"
+            )));
+        }
+    }
+
+    // TASK-7 D-7: 同一aws.toml内で複数profileが同一bucketを参照する場合の警告
+    // (stderr・処理継続)。検出限界: 同一aws.toml内のbucket重複のみ(同一profileでの
+    // 鍵変更・別fileからの書込み・prefix違いの同名bucketは検出できない。警告は
+    // recipient不一致の証明でも網羅的防止でもなく、最終検知はpushのrecipients指紋表示)
+    {
+        let mut by_bucket: std::collections::BTreeMap<&str, Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for (name, p) in &parsed.aws.profiles {
+            if !p.bucket.trim().is_empty() {
+                by_bucket.entry(p.bucket.as_str()).or_default().push(name);
+            }
+        }
+        let dups: Vec<String> = by_bucket
+            .iter()
+            .filter(|(_, names)| names.len() > 1)
+            .map(|(bucket, names)| format!("bucket {bucket}: profile {}", names.join("/")))
+            .collect();
+        if !dups.is_empty() {
+            eprintln!(
+                "WARNING: aws.tomlの複数profileが同一bucketを参照しています({})。索引はbucket+prefix単位で毎push時に実行時recipientにより再暗号化されるため、同一(bucket, prefix)を別recipient構成が書くと他方の秘密鍵で索引が読めなくなります。recipient構成の最終確認はbackup push開始時のrecipients指紋表示で行ってください",
+                dups.join("・")
+            );
+        }
     }
 
     let env_profile = std::env::var("AMAZING_BACKUP_AWS_PROFILE")
@@ -604,6 +743,13 @@ pub fn load_aws_profile(
             .unwrap_or_default()
     };
 
+    // 解決済み実効profile名へも名前規則を適用(--profile/env/active_profile・purpose解決の
+    // いずれの経路で選択された違反名も設定エラー2)
+    if let Err(detail) = validate_profile_name(&selected_name) {
+        return Err(BackupError::Config(format!(
+            "aws profile名が規則に違反しています: {selected_name}(^[a-z0-9][a-z0-9-]{{0,63}}$・{detail})"
+        )));
+    }
     let prof = parsed.aws.profiles.get(&selected_name).ok_or_else(|| {
         BackupError::Config(format!(
             "指定profileが見つからない: {selected_name} ({}。利用可能: {})",
@@ -1190,6 +1336,9 @@ fn cmd_config_init() -> i32 {
             println!("  2. aws.toml の bucket を実際の値へ記述");
             println!("  3. pipeline.toml の public_keys に SSH ed25519 公開鍵の絶対pathを記述");
             println!(
+                "  4. pipeline.toml のprofileはaws.tomlのprofile名と同名対応です([profiles.<name>]をaws.tomlの[aws.profiles.<name>]と同じ名前で並べます)"
+            );
+            println!(
                 "  詳細: amazing-backup docs usage(使用手順書)・amazing-backup docs config(設定例)"
             );
             0
@@ -1223,11 +1372,12 @@ mod tests {
         }
     }
 
+    /// TASK-7 profile schema: 有効なpipeline.toml本文([profiles.dev]配下)。
     fn valid_pipeline_toml(dir: &std::path::Path, pub1: &str) -> String {
         format!(
-            "[recipients]\npublic_keys = [\"{pub1}\"]\n\
-             [behavior]\nkeep_going = false\n\
-             [verify]\ndecrypt_key = \"{}\"\n",
+            "[profiles.dev.recipients]\npublic_keys = [\"{pub1}\"]\n\
+             [profiles.dev.behavior]\nkeep_going = false\n\
+             [profiles.dev.verify]\ndecrypt_key = \"{}\"\n",
             dir.join("nokey").display(),
         )
     }
@@ -1242,10 +1392,17 @@ mod tests {
             valid_pipeline_toml(tmp.path(), &pubkey.display().to_string()).as_bytes(),
         );
 
-        let cfg = load_pipeline(&cfg_path).expect("有効なpipeline.tomlは読み込める");
+        let cfg = load_pipeline(&cfg_path, "dev").expect("有効なpipeline.tomlは読み込める");
         assert_eq!(cfg.public_keys, vec![pubkey]);
         assert!(!cfg.keep_going);
         assert_eq!(cfg.decrypt_key, Some(tmp.path().join("nokey")));
+        // TASK-7: 実効profile名とload時検証で計算済みのrecipient指紋を保持する
+        assert_eq!(cfg.profile, "dev");
+        assert_eq!(
+            cfg.recipient_fingerprints,
+            vec![crate::testutil::TEST_ED25519_FINGERPRINT.to_string()],
+            "load時計算済み指紋を保持"
+        );
     }
 
     /// [covers:config.xdg-default-paths]
@@ -1326,7 +1483,7 @@ mod tests {
             &cfg_path,
             valid_pipeline_toml(tmp.path(), &pubkey.display().to_string()).as_bytes(),
         );
-        let cfg = load_pipeline(&cfg_path).expect("読み込める");
+        let cfg = load_pipeline(&cfg_path, "dev").expect("読み込める");
         assert_eq!(cfg.registry_path, tmp.path().join("registry.jsonl"));
         assert_eq!(cfg.output_dir, tmp.path().join("cache"));
     }
@@ -1371,7 +1528,8 @@ mod tests {
     }
 
     /// [covers:config.output-section-rejected]
-    /// [output]は廃止: 存在したら未知キー扱いの設定エラー2。
+    /// [output]は廃止: 存在したら未知キー扱いの設定エラー2。TASK-7後はtop-level・
+    /// profile内のいずれに置いても未知keyとして設定エラー2。
     #[test]
     fn load_pipeline_rejects_output_section() {
         let tmp = TempDir::new("conf-out-reject");
@@ -1391,8 +1549,12 @@ mod tests {
                 "[output]\ndir = \"out\"\nregistry = \"reg.jsonl\"\n",
             ),
             ("out-keep.toml", "[output]\nkeep_artifacts = \"run\"\n"),
+            (
+                "out-in-profile.toml",
+                "[profiles.dev.output]\ndir = \"out\"\n",
+            ),
         ] {
-            let e = load_pipeline(&write_cfg(name, section)).unwrap_err();
+            let e = load_pipeline(&write_cfg(name, section), "dev").unwrap_err();
             let msg = config_error(&e);
             assert_eq!(e.exit_code(), 2, "[output]存在({name})は設定エラー2");
             assert!(msg.contains("output"), "未知キー名を含む: {msg}");
@@ -1406,27 +1568,33 @@ mod tests {
         let tmp = TempDir::new("conf-invalid");
 
         // 1. ファイル不在
-        let e = load_pipeline(&tmp.path().join("absent.toml")).unwrap_err();
+        let e = load_pipeline(&tmp.path().join("absent.toml"), "dev").unwrap_err();
         config_error(&e);
         assert_eq!(e.exit_code(), 2);
 
         // 2. TOML parseエラー
         let bad = tmp.path().join("bad.toml");
-        write_file(&bad, b"[recipients\npublic_keys = [\n");
-        let e = load_pipeline(&bad).unwrap_err();
+        write_file(&bad, b"[profiles.dev.recipients\npublic_keys = [\n");
+        let e = load_pipeline(&bad, "dev").unwrap_err();
         let msg = config_error(&e);
         assert!(
             msg.contains("bad.toml") || !msg.is_empty(),
             "parseエラーの詳細: {msg}"
         );
 
-        // 3. 未知キー
+        // 3. 未知キー(top-level・profile内とも未知key扱い)
         let pubkey = write_test_ed25519_pub(tmp.path());
         let unknown = tmp.path().join("unknown.toml");
         let body = valid_pipeline_toml(tmp.path(), &pubkey.display().to_string())
             + "[extra_section]\nfoo = 1\n";
         write_file(&unknown, body.as_bytes());
-        let e = load_pipeline(&unknown).unwrap_err();
+        let e = load_pipeline(&unknown, "dev").unwrap_err();
+        config_error(&e);
+        let in_profile = tmp.path().join("unknown-in-profile.toml");
+        let body = valid_pipeline_toml(tmp.path(), &pubkey.display().to_string())
+            + "[profiles.dev.extra]\nfoo = 1\n";
+        write_file(&in_profile, body.as_bytes());
+        let e = load_pipeline(&in_profile, "dev").unwrap_err();
         config_error(&e);
 
         // 4. 型不一致(public_keysに文字列)
@@ -1436,7 +1604,7 @@ mod tests {
             "public_keys = \"not-an-array\"",
         );
         write_file(&typebad, body.as_bytes());
-        let e = load_pipeline(&typebad).unwrap_err();
+        let e = load_pipeline(&typebad, "dev").unwrap_err();
         config_error(&e);
     }
 
@@ -1454,7 +1622,7 @@ mod tests {
             "public_keys = []",
         );
         write_file(&empty, body.as_bytes());
-        let e = load_pipeline(&empty).unwrap_err();
+        let e = load_pipeline(&empty, "dev").unwrap_err();
         config_error(&e);
 
         // 2. 鍵ファイル不在
@@ -1462,7 +1630,7 @@ mod tests {
         let body = valid_pipeline_toml(tmp.path(), &absent_key.display().to_string());
         let missing = tmp.path().join("missingkey.toml");
         write_file(&missing, body.as_bytes());
-        let e = load_pipeline(&missing).unwrap_err();
+        let e = load_pipeline(&missing, "dev").unwrap_err();
         let msg = config_error(&e);
         assert!(
             msg.contains("absent.pub"),
@@ -1478,7 +1646,7 @@ mod tests {
         let body = valid_pipeline_toml(tmp.path(), &rsa_path.display().to_string());
         let rsa_cfg = tmp.path().join("rsakey.toml");
         write_file(&rsa_cfg, body.as_bytes());
-        let e = load_pipeline(&rsa_cfg).unwrap_err();
+        let e = load_pipeline(&rsa_cfg, "dev").unwrap_err();
         config_error(&e);
     }
 
@@ -1496,7 +1664,7 @@ mod tests {
             &format!("public_keys = [\"{0}\", \"{0}\"]", pubkey.display()),
         );
         write_file(&same, body.as_bytes());
-        let e = load_pipeline(&same).unwrap_err();
+        let e = load_pipeline(&same, "dev").unwrap_err();
         config_error(&e);
 
         // 2. 同一鍵blobを異path(copy)に置いて列挙
@@ -1512,7 +1680,7 @@ mod tests {
             ),
         );
         write_file(&diff, body.as_bytes());
-        let e = load_pipeline(&diff).unwrap_err();
+        let e = load_pipeline(&diff, "dev").unwrap_err();
         config_error(&e);
     }
 
@@ -1799,8 +1967,8 @@ mod tests {
     }
 
     /// TASK-10設計4.1の拡張schema([layout]/[files]/keep_artifacts)を含むpipeline.toml
-    /// 本文。keep_artifactsは[behavior]配下(TASK-19 XDG配置で[output]廃止に伴う移設)。
-    /// 以降に[layout]と追加断片(extra)を繋ぐ。
+    /// 本文(TASK-7 profile化で[profiles.dev]配下)。keep_artifactsは[behavior]配下
+    /// (TASK-19 XDG配置で[output]廃止に伴う移設)。以降に追加断片(extra)を繋ぐ。
     fn task10_pipeline_toml(
         dir: &std::path::Path,
         pub1: &str,
@@ -1813,10 +1981,10 @@ mod tests {
             format!("keep_artifacts = \"{keep_artifacts}\"\n")
         };
         format!(
-            "[recipients]\npublic_keys = [\"{pub1}\"]\n\
-             [behavior]\nkeep_going = false\n{keep_line}\
-             [verify]\ndecrypt_key = \"{}\"\n\
-             [layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [\"/home/tomo/data\"]\n\
+            "[profiles.dev.recipients]\npublic_keys = [\"{pub1}\"]\n\
+             [profiles.dev.behavior]\nkeep_going = false\n{keep_line}\
+             [profiles.dev.verify]\ndecrypt_key = \"{}\"\n\
+             [profiles.dev.layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [\"/home/tomo/data\"]\n\
              {extra}",
             dir.join("nokey").display(),
         )
@@ -1845,10 +2013,10 @@ mod tests {
                 tmp.path(),
                 &pub_s,
                 "run",
-                "[files.\"travel.zip\"]\ncategory = \"photos\"\nlabel = \"2020-2023/travel\"\n",
+                "[profiles.dev.files.\"travel.zip\"]\ncategory = \"photos\"\nlabel = \"2020-2023/travel\"\n",
             ),
         );
-        load_pipeline(&valid).expect("適正な拡張schemaは読み込める");
+        load_pipeline(&valid, "dev").expect("適正な拡張schemaは読み込める");
 
         // files.categoryの[categories]未定義値は受理される(記録値として自由化)
         let p = write_cfg(
@@ -1857,10 +2025,10 @@ mod tests {
                 tmp.path(),
                 &pub_s,
                 "run",
-                "[files.\"x.zip\"]\ncategory = \"ghost\"\nlabel = \"a\"\n",
+                "[profiles.dev.files.\"x.zip\"]\ncategory = \"ghost\"\nlabel = \"a\"\n",
             ),
         );
-        load_pipeline(&p).expect("未定義category値は文字列検査のみで受理");
+        load_pipeline(&p, "dev").expect("未定義category値は文字列検査のみで受理");
 
         // files写像label先頭の_sys(旧予約衝突検査)は受理される(検証廃止)
         let p = write_cfg(
@@ -1869,44 +2037,48 @@ mod tests {
                 tmp.path(),
                 &pub_s,
                 "run",
-                "[files.\"x.zip\"]\ncategory = \"unfiled\"\nlabel = \"_sys/x\"\n",
+                "[profiles.dev.files.\"x.zip\"]\ncategory = \"unfiled\"\nlabel = \"_sys/x\"\n",
             ),
         );
-        load_pipeline(&p).expect("_sys先頭のfiles写像labelは受理される");
+        load_pipeline(&p, "dev").expect("_sys先頭のfiles写像labelは受理される");
 
         // files.categoryの名前規則違反(_sys・BadName)は設定エラー2
         for (name, extra) in [
             (
                 "cat-sys",
-                "[files.\"x.zip\"]\ncategory = \"_sys\"\nlabel = \"a\"\n",
+                "[profiles.dev.files.\"x.zip\"]\ncategory = \"_sys\"\nlabel = \"a\"\n",
             ),
             (
                 "cat-uppercase",
-                "[files.\"x.zip\"]\ncategory = \"BadName\"\nlabel = \"a\"\n",
+                "[profiles.dev.files.\"x.zip\"]\ncategory = \"BadName\"\nlabel = \"a\"\n",
             ),
         ] {
             let p = write_cfg(
                 &format!("t10-{name}.toml"),
                 task10_pipeline_toml(tmp.path(), &pub_s, "run", extra),
             );
-            let e = load_pipeline(&p).unwrap_err();
+            let e = load_pipeline(&p, "dev").unwrap_err();
             config_error(&e);
             assert_eq!(e.exit_code(), 2, "category名違反({name})は設定エラー2");
         }
 
-        // [categories]セクション自体の存在は設定エラー2(廃止・未知キー拒否)
-        let p = write_cfg(
-            "t10-categories.toml",
-            task10_pipeline_toml(
-                tmp.path(),
-                &pub_s,
-                "run",
-                "[categories.unfiled]\nkeep = 5\n",
+        // [categories]セクション自体の存在は設定エラー2(廃止・未知キー拒否。
+        // TASK-7後はtop-level・profile内のいずれに置いても未知key)
+        for (name, extra) in [
+            ("categories-toplevel", "[categories.unfiled]\nkeep = 5\n"),
+            (
+                "categories-in-profile",
+                "[profiles.dev.categories.unfiled]\nkeep = 5\n",
             ),
-        );
-        let e = load_pipeline(&p).unwrap_err();
-        config_error(&e);
-        assert_eq!(e.exit_code(), 2, "[categories]存在は設定エラー2");
+        ] {
+            let p = write_cfg(
+                &format!("t10-{name}.toml"),
+                task10_pipeline_toml(tmp.path(), &pub_s, "run", extra),
+            );
+            let e = load_pipeline(&p, "dev").unwrap_err();
+            config_error(&e);
+            assert_eq!(e.exit_code(), 2, "[categories]存在({name})は設定エラー2");
+        }
 
         // auto_path_rootsに相対path
         let body = task10_pipeline_toml(tmp.path(), &pub_s, "run", "").replace(
@@ -1914,7 +2086,7 @@ mod tests {
             "auto_path_roots = [\"relative/path\"]",
         );
         let p = write_cfg("t10-relroot.toml", body);
-        let e = load_pipeline(&p).unwrap_err();
+        let e = load_pipeline(&p, "dev").unwrap_err();
         config_error(&e);
         assert_eq!(e.exit_code(), 2, "auto_path_roots相対pathは設定エラー2");
 
@@ -1924,7 +2096,7 @@ mod tests {
             "unfiled_category = \"Unfiled\"",
         );
         let p = write_cfg("t10-badunfiled.toml", body);
-        let e = load_pipeline(&p).unwrap_err();
+        let e = load_pipeline(&p, "dev").unwrap_err();
         config_error(&e);
         assert_eq!(e.exit_code(), 2, "unfiled_category規則違反は設定エラー2");
     }
@@ -1946,25 +2118,31 @@ mod tests {
             p
         };
         // セクション・キー省略はplain既定
-        let cfg = load_pipeline(&write_cfg("meta-default.toml", "")).expect("省略はplain");
+        let cfg = load_pipeline(&write_cfg("meta-default.toml", ""), "dev").expect("省略はplain");
         assert_eq!(cfg.metadata.latest_source_path, PathMode::Plain);
         for (v, want) in [
             ("plain", PathMode::Plain),
             ("encrypted", PathMode::Encrypted),
             ("none", PathMode::None),
         ] {
-            let cfg = load_pipeline(&write_cfg(
-                &format!("meta-{v}.toml"),
-                &format!("[metadata]\nlatest_source_path = \"{v}\"\n"),
-            ))
+            let cfg = load_pipeline(
+                &write_cfg(
+                    &format!("meta-{v}.toml"),
+                    &format!("[profiles.dev.metadata]\nlatest_source_path = \"{v}\"\n"),
+                ),
+                "dev",
+            )
             .unwrap_or_else(|e| panic!("{v}は許容: {e}"));
             assert_eq!(cfg.metadata.latest_source_path, want);
         }
         // 不正値
-        let e = load_pipeline(&write_cfg(
-            "meta-monthly.toml",
-            "[metadata]\nlatest_source_path = \"monthly\"\n",
-        ))
+        let e = load_pipeline(
+            &write_cfg(
+                "meta-monthly.toml",
+                "[profiles.dev.metadata]\nlatest_source_path = \"monthly\"\n",
+            ),
+            "dev",
+        )
         .unwrap_err();
         config_error(&e);
         assert_eq!(e.exit_code(), 2, "不正値は設定エラー2");
@@ -2075,6 +2253,7 @@ mod tests {
     /// [covers:config.keep-artifacts-enum]
     /// [behavior].keep_artifactsは列挙値 "run"|"always"(省略時はrun既定)。
     /// TASK-19 XDG配置で[output]廃止に伴い[behavior]へ移設。その他の値は設定エラー2。
+    /// TASK-7後は[profiles.<name>.behavior]配下。
     #[test]
     fn load_pipeline_validates_keep_artifacts_enum() {
         let tmp = TempDir::new("conf-t10-keepart");
@@ -2089,17 +2268,218 @@ mod tests {
 
         for value in ["run", "always"] {
             let p = write_cfg(&format!("keepart-{value}.toml"), value);
-            load_pipeline(&p)
+            load_pipeline(&p, "dev")
                 .unwrap_or_else(|e| panic!("keep_artifacts={value}は読み込めるべき: {e}"));
         }
         // キー省略は既定run扱いで読み込める
         let p = write_cfg("keepart-default.toml", "");
-        load_pipeline(&p).expect("keep_artifacts省略は既定値扱い");
+        load_pipeline(&p, "dev").expect("keep_artifacts省略は既定値扱い");
 
         // 不正値
         let p = write_cfg("keepart-monthly.toml", "monthly");
-        let e = load_pipeline(&p).unwrap_err();
+        let e = load_pipeline(&p, "dev").unwrap_err();
         config_error(&e);
         assert_eq!(e.exit_code(), 2, "keep_artifacts不正値は設定エラー2");
+    }
+
+    // -----------------------------------------------------------------------
+    // TASK-7(pipeline.toml profile化)のunit test群。schema・検証2層・旧形式検出・
+    // 選択解決・aws側名前規則(src/cli.rs・tests/config_storage.rsの結合側と対)
+
+    /// TASK-7 D-1〜D-3: 実効profileのentry選択・profile欄保持・余分profile無視。
+    /// load_pipelineは必須のprofile_name引数を取り(契約: aws実効profile名解決後に
+    /// 呼ぶ)、選択profileのみ第2層検証(鍵実在)を適用する。
+    #[test]
+    fn load_pipeline_selects_effective_profile() {
+        let tmp = TempDir::new("conf-t7-select");
+        let pubkey = write_test_ed25519_pub(tmp.path());
+        let pub_s = pubkey.display().to_string();
+        let body = format!(
+            "[profiles.dev.recipients]\npublic_keys = [\"{pub_s}\"]\n\
+             [profiles.dev.verify]\ndecrypt_key = \"{}\"\n\
+             [profiles.family.recipients]\npublic_keys = [\"/nonexistent/family-dummy.pub\"]\n",
+            tmp.path().join("nokey").display(),
+        );
+        let p = tmp.path().join("pipeline.toml");
+        write_file(&p, body.as_bytes());
+
+        // dev選択: dev側の値が解決される(余分profile familyのdummy鍵は第2層検査外)
+        let cfg = load_pipeline(&p, "dev").expect("dev選択は読み込める");
+        assert_eq!(cfg.profile, "dev");
+        assert_eq!(cfg.public_keys, vec![pubkey]);
+        assert_eq!(
+            cfg.recipient_fingerprints,
+            vec![crate::testutil::TEST_ED25519_FINGERPRINT.to_string()]
+        );
+
+        // family選択: 選択profileのdummy鍵は第2層検証(存在検査)で設定エラー2
+        let e = load_pipeline(&p, "family").unwrap_err();
+        let msg = config_error(&e);
+        assert_eq!(e.exit_code(), 2, "選択profileの鍵不在は設定エラー2");
+        assert!(
+            msg.contains("/nonexistent/family-dummy.pub"),
+            "対象鍵pathがmessageに含まれる: {msg}"
+        );
+    }
+
+    /// TASK-7 D-1: 実効aws profile名に対応するentryが無い場合は設定エラー2
+    /// (利用可能profile一覧表示)。
+    #[test]
+    fn load_pipeline_missing_profile_entry_lists_available() {
+        let tmp = TempDir::new("conf-t7-missing");
+        let pubkey = write_test_ed25519_pub(tmp.path());
+        let body = format!(
+            "[profiles.family.recipients]\npublic_keys = [\"{}\"]\n",
+            pubkey.display()
+        );
+        let p = tmp.path().join("pipeline.toml");
+        write_file(&p, body.as_bytes());
+        let e = load_pipeline(&p, "dev").unwrap_err();
+        let msg = config_error(&e);
+        assert_eq!(e.exit_code(), 2, "実効profile entry不在は設定エラー2");
+        assert!(msg.contains("family"), "利用可能一覧表示: {msg}");
+    }
+
+    /// TASK-7 D-1: profile名規則(第1層=全profile一括。未選択profileの違反でも弾く)。
+    #[test]
+    fn load_pipeline_validates_profile_names_layer1() {
+        let tmp = TempDir::new("conf-t7-name");
+        let pubkey = write_test_ed25519_pub(tmp.path());
+        let pub_s = pubkey.display().to_string();
+        for (name, ok) in [
+            ("BadName", false),
+            ("-lead", false),
+            ("a_b", false),
+            (&"x".repeat(65), false),
+            (&"x".repeat(63), true),
+            ("dev-2", true),
+        ] {
+            let body = format!(
+                "[profiles.dev.recipients]\npublic_keys = [\"{pub_s}\"]\n\
+                 [profiles.{name}.recipients]\npublic_keys = [\"{pub_s}\"]\n"
+            );
+            let p = tmp.path().join(format!("name-{}.toml", name.len()));
+            write_file(&p, body.as_bytes());
+            let result = load_pipeline(&p, "dev");
+            if ok {
+                result.unwrap_or_else(|e| panic!("profile名({name})は適合: {e}"));
+            } else {
+                let e = result.unwrap_err();
+                let msg = config_error(&e);
+                assert_eq!(e.exit_code(), 2, "profile名({name})違反は設定エラー2");
+                assert!(msg.contains(name), "違反名がmessageに含まれる: {msg}");
+            }
+        }
+    }
+
+    /// TASK-7 D-2: 旧top-level形式は専用の移行案内error(旧形式の語+解決済み実効
+    /// profile名+該当section名)。[profiles]併存時も同一案内。
+    #[test]
+    fn load_pipeline_rejects_legacy_format_with_guidance() {
+        let tmp = TempDir::new("conf-t7-legacy");
+        let pubkey = write_test_ed25519_pub(tmp.path());
+        let pub_s = pubkey.display().to_string();
+        // (a) 純旧形式
+        let old =
+            format!("[recipients]\npublic_keys = [\"{pub_s}\"]\n[behavior]\nkeep_going = false\n");
+        let p = tmp.path().join("legacy.toml");
+        write_file(&p, old.as_bytes());
+        let e = load_pipeline(&p, "prod-x").unwrap_err();
+        let msg = config_error(&e);
+        assert_eq!(e.exit_code(), 2, "旧形式は設定エラー2");
+        assert!(msg.contains("旧形式"), "旧形式の語: {msg}");
+        assert!(
+            msg.contains("[profiles.prod-x"),
+            "案内は解決済み実効profile名: {msg}"
+        );
+        assert!(msg.contains("recipients"), "該当section名: {msg}");
+
+        // (b) [profiles]併存+top-levelに旧sectionが1つ残っている状態
+        let mixed = format!(
+            "[profiles.dev.recipients]\npublic_keys = [\"{pub_s}\"]\n[behavior]\nkeep_going = false\n"
+        );
+        let p = tmp.path().join("mixed.toml");
+        write_file(&p, mixed.as_bytes());
+        let e = load_pipeline(&p, "dev").unwrap_err();
+        let msg = config_error(&e);
+        assert_eq!(e.exit_code(), 2, "併存状態も設定エラー2");
+        assert!(
+            msg.contains("旧形式") && msg.contains("behavior"),
+            "併存時も旧形式案内+残存section名: {msg}"
+        );
+    }
+
+    /// TASK-7 2.9項目6: aws profile名へも同一規則([aws.profiles]key・--profile/env指定値)。
+    #[test]
+    fn load_aws_validates_profile_names() {
+        let _env_lock = config_env_lock();
+        let tmp = TempDir::new("conf-t7-awsname");
+        let base = "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\n";
+
+        // (a) [aws.profiles.<name>]のkey違反(dev適合+BadName違反の2profile・未選択でも弾く)
+        let body = "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n[aws.profiles.dev]\nbucket = \"b\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\n\n[aws.profiles.BadName]\nbucket = \"b2\"\nregion = \"r\"\ncredentials_file = \"c.toml\"\n";
+        let p = tmp.path().join("aws-badkey.toml");
+        write_file(&p, body.as_bytes());
+        let e = load_aws(&p).unwrap_err();
+        let msg = config_error(&e);
+        assert_eq!(e.exit_code(), 2, "[aws.profiles]key違反は設定エラー2");
+        assert!(msg.contains("BadName"), "違反名がmessageに含まれる: {msg}");
+
+        // (b) --profile指定値の違反(load_aws_profileのprofile_name引数)
+        let p = tmp.path().join("aws-ok.toml");
+        write_file(&p, base.as_bytes());
+        let e = load_aws_profile(&p, Some("BadName"), None).unwrap_err();
+        let msg = config_error(&e);
+        assert_eq!(e.exit_code(), 2, "--profile違反名は設定エラー2");
+        assert!(msg.contains("BadName"), "違反名がmessageに含まれる: {msg}");
+
+        // (c) active_profile記述値の違反
+        let body = base.replace("active_profile = \"dev\"", "active_profile = \"bad_name\"");
+        let p = tmp.path().join("aws-badactive.toml");
+        write_file(&p, body.as_bytes());
+        let e = load_aws(&p).unwrap_err();
+        let msg = config_error(&e);
+        assert_eq!(e.exit_code(), 2, "active_profile違反名は設定エラー2");
+        assert!(msg.contains("bad_name"), "違反名がmessageに含まれる: {msg}");
+    }
+
+    /// [covers:config.repo-pipeline-file-profile-schema]
+    /// git追跡の実運用file configs/pipeline.tomlの旧top-level形式への退行を機械検出する
+    /// 回帰test(2026-11-03 TASK-8 PR準備で同fileがTASK-7移行漏れの旧形式のまま残存して
+    /// いたことが判明した由来。template側byte一致testは存在したが実運用fileの検証は不在)。
+    /// load_pipelineを絶対path(CARGO_MANIFEST_DIR結合)でprofile "dev"により呼び、
+    /// errorになる場合は旧形式移行error・parse失敗・実効profile entry不在のいずれでも
+    /// ないことを検証する(=第1層のTOML parse・未知key・型不一致・profile名規則を通過し
+    /// profile解決に成功)。第2層の鍵file存在検査はrepoに鍵file(configs/secret/配下・
+    /// gitignore)が無い環境と有る環境で結果が変わるため期待値にしない: 鍵不在環境の
+    /// 鍵file不在errorも鍵在環境のOk(または鍵内容・指紋依存のerror)も本条件の対象外。
+    #[test]
+    fn load_pipeline_repo_pipeline_file_keeps_profile_schema() {
+        let repo_pipeline = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("configs")
+            .join("pipeline.toml");
+        assert!(
+            repo_pipeline.is_file(),
+            "git追跡の実運用fileが在る前提: {}",
+            repo_pipeline.display()
+        );
+        match load_pipeline(&repo_pipeline, "dev") {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("旧形式"),
+                    "repo追跡の実運用fileが旧top-level形式へ退行: {msg}"
+                );
+                assert!(
+                    !msg.contains("parseに失敗"),
+                    "repo追跡の実運用fileが現行schemaにparseできない(未知key・型不一致含む): {msg}"
+                );
+                assert!(
+                    !msg.contains("対応する[profiles.dev]がpipeline.tomlにありません"),
+                    "repo追跡の実運用fileに[profiles.dev]が無い: {msg}"
+                );
+            }
+        }
     }
 }

@@ -4,40 +4,66 @@
 # AMAZING_BACKUP_HOME指定時(テスト/CI用)は $ABH/pipeline.toml。
 # 相対path(public_keys・decrypt_key)を書いた場合は実行時のcwd基準で解決される
 # (install後はcwdが不定のため、例示は絶対path)。
+# TASK-7 profile化: top-levelは[profiles.<name>]のみ。profile名はaws.tomlの
+# [aws.profiles.<name>]と同名対応(実効aws profileで選択される。--profileは両fileの
+# 選択を兼ねる)。
 # 各keyの意味は docs/usage_backup.md 3.1 を参照。
 
-[recipients]
+[profiles.dev]
+
+[profiles.dev.recipients]
 # SSH ed25519公開鍵のpath列挙(1-of-N。全鍵で暗号化し、いずれか1鍵で復号可能)
-# 1つ以上必須。ed25519形式のみ許容
+# 1つ以上必須。ed25519形式のみ許容(profile毎に独立)
 public_keys = [
-  "/home/yourname/.config/amazing-backup/keys/backup_ed25519.pub",
+  "/home/yourname/.config/amazing-backup/keys/dev_ed25519.pub",
 ]
 
-[behavior]
-# per-file失敗時も継続する既定値(CLIの--keep-goingで上書きon)
+[profiles.dev.behavior]
+# per-file失敗時も継続する既定値(backup pushの--keep-goingで上書きon)
 keep_going = false
 # 暗号化一時物(cache dir=~/.cache/amazing-backup/配下の.age)の保持policy
 # "run"(run成功後に当該run分を掃除・既定) | "always"(全保持)
 # keep_artifacts = "run"
 
-[verify]
+[profiles.dev.verify]
 # --roundtrip検証で使う秘密鍵path(秘密そのものではなくpath参照)
-decrypt_key = "/home/yourname/.config/amazing-backup/keys/backup_ed25519"
+decrypt_key = "/home/yourname/.config/amazing-backup/keys/dev_ed25519"
 
-[metadata]
+[profiles.dev.metadata]
 # metadata_{title}.jsonのlatest_source_path掲載形式
 # "plain"(path文字列そのまま・既定) | "encrypted"(age暗号化object) | "none"(null・掲載しない)
 latest_source_path = "plain"
 
-[layout]
+[profiles.dev.layout]
 # 写像/roots不一致時のcategory(既定"unfiled")
 unfiled_category = "unfiled"
 # source_path相対化のroot列挙(順序優先・絶対path。省略可)
 auto_path_roots = ["/home/yourname/data"]
 
-# [files."travel.zip"]     # 手動写像(省略可)
-# category = "photos"      # category名規則を満たす任意の文字列(記録値として自由化)
-# label = "2020-2023/travel" # label(""でlabelなし)
+# [profiles.dev.files."travel.zip"]   # 手動写像(省略可)
+# category = "photos"                 # category名規則を満たす任意の文字列(記録値として自由化)
+# label = "2020-2023/travel"           # label(""でlabelなし)
+
+# 第2profile例(aws.example.tomlの[aws.profiles.family]と対。追加profileは
+# [profiles.<name>]を複製して鍵等を差し替える)
+[profiles.family]
+
+[profiles.family.recipients]
+public_keys = [
+  "/home/yourname/.config/amazing-backup/keys/family_ed25519.pub",
+  # 第2recipient(秘密鍵の地理的第二保管場所)を併用する場合は列挙
+  # "/home/yourname/.config/amazing-backup/keys/family_2nd.pub",
+]
+
+[profiles.family.verify]
+decrypt_key = "/home/yourname/.config/amazing-backup/keys/family_ed25519"
+
+[profiles.family.metadata]
+latest_source_path = "encrypted"
+
+[profiles.family.layout]
+unfiled_category = "unfiled"
+auto_path_roots = ["/mnt/nas/family"]
 
 # 廃止section(存在したら設定エラー2):
 #   [output]   registry・暗号化一時物dirのpathはXDG規定path固定(TASK-19)

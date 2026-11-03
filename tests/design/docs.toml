@@ -6,16 +6,24 @@
 #   compile error・実行failを許容する([meta]はverified=falseのまま)。
 #   unit観測のうち変換関数・正本sync・終了コード表一致はtests/docs_pages.rsへ、
 #   Write注入系のunit観測は実装工程でsrc/docs.rs内unit testへ追加する(design doc 3.9・5章)。
+# 2026-11-02: TASK-7(pipeline.toml profile化)対応でテスト先行の更新
+#   (tmp/tasks/tm-7/design_pipeline_profile.md D-4・D-8・§5)。
+#   文言改訂1件(id不変): config-marker-replaced(pipeline.example.tomlは[profiles.dev]+
+#   [profiles.family]の2profile新schema化(aws.example.tomlと対)・docs config pageは
+#   config initと同一の埋め込みtemplateを出力するtemplate sync構成。tests/docs_pages.rsへ
+#   [profiles.dev]・[profiles.family]を含む旨のassert追加)。
+#   実装前のため改訂期待値のテストは実行failを許容し[meta]はverified=falseへ戻す
+#   (実装後に全件pass確認のうえ記録)。
 
 [meta]
 feature = "docs"
 source_file = "src/docs.rs"
 verified = true
-verified_at = "2026-10-29"
+verified_at = "2026-11-03"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "46684f28a412c719222c19cd743815592ba86bba"
-note = "2026-10-29 TASK-4でテスト先行により新設し、実装(src/docs.rs新設・docs/llm/3file・cli/lib/config接続)後にcargo test全件pass・verify-conditions.py PASSを確認して検証記録。unit観測のうちWrite注入系(各ページ出力・config page・ページ一覧・書込失敗の偽Write注入)はsrc/docs.rs内unit testが担う"
+source_hash = "6b0fedb691a14210bf3e5185a6901200e92db373"
+note = "2026-10-29 TASK-4でテスト先行により新設し、実装(src/docs.rs新設・docs/llm/3file・cli/lib/config接続)後にcargo test全件pass・verify-conditions.py PASSを確認して検証記録。unit観測のうちWrite注入系(各ページ出力・config page・ページ一覧・書込失敗の偽Write注入)はsrc/docs.rs内unit testが担う。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(pipeline.example.toml新schema化は単一正本configs/のinclude_str!参照でdocs config pageは自動追従・src/docs.rs自体の変更は無し)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新"
 
 [[condition]]
 id = "docs.pages-stdout-verbatim-from-repository"
@@ -47,10 +55,10 @@ source_lines = "tests/docs_pages.rs:198"
 [[condition]]
 id = "docs.config-marker-replaced"
 target_function = "docs::cmd_docs_pages(config)"
-source = "TASK-1 design doc 5章(TASK-4への要求) + tmp/tasks/tm-4/design_docs_command.md 3.3"
-description = "docs configは pipeline.example.toml全文+区切り行+aws.example.toml(marker __CREDENTIALS_FILE__ を ~/.config/amazing-backup/aws-credentials.toml へ置換したもの)の全文を出力する。出力中にmarker残存なし・全profileのcredentials_fileが例示path・置換はconfig initと同一経路(render_init_template。template劣化は内部エラー1) (unit, integration)"
-given = "docs config実行のstdout"
-expect_return_shape = "exit 0・出力に __CREDENTIALS_FILE__ を含まない・両file全文を含む(aws側は credentials_file = \"~/.config/amazing-backup/aws-credentials.toml\")・marker置換なしの正本との比較で当該行のみ差分"
+source = "TASK-1 design doc 5章(TASK-4への要求) + tmp/tasks/tm-4/design_docs_command.md 3.3。TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-4・D-8・§5): pipeline.example.toml新schema化に伴うtemplate sync"
+description = "docs configは pipeline.example.toml全文+区切り行+aws.example.toml(marker __CREDENTIALS_FILE__ を ~/.config/amazing-backup/aws-credentials.toml へ置換したもの)の全文を出力する。pipeline.example.tomlはTASK-7で[profiles.dev]+[profiles.family]の2profile新schema化(aws.example.tomlのprofile構成と対)され、docs config pageはconfig initと同一の埋め込みtemplateを出力する(単一正本configs/pipeline.example.tomlのinclude_str!参照のため雛形の新schema化で自動追従するtemplate sync構成)。出力中にmarker残存なし・全profileのcredentials_fileが例示path・置換はconfig initと同一経路(render_init_template。template劣化は内部エラー1) (unit, integration)"
+given = "docs config実行のstdout(出力のpipeline部に新schemaの[profiles.dev]・[profiles.family]が含まれることの確認を含む)"
+expect_return_shape = "exit 0・出力に __CREDENTIALS_FILE__ を含まない・両file全文を含む(aws側は credentials_file = \"~/.config/amazing-backup/aws-credentials.toml\")・pipeline部は[profiles.dev]と[profiles.family]を含む(新schema)・marker置換なしの正本との比較で当該行のみ差分"
 source_lines = "src/docs.rs:246; tests/docs_pages.rs:320"
 
 [[condition]]
@@ -69,7 +77,7 @@ source = "TASK-4 body + tmp/tasks/tm-4/design_docs_command.md 3.6"
 description = "docs llm skillの出力はSKILL.mdとして有効: 先頭にfrontmatter(name: amazing-backup・triggerを含むdescription)を持ち ~/.claude/skills/amazing-backup/SKILL.md へredirect配置可能な最終形。本文に docs llm usage 参照・S3非干渉・索引・registryを更新する系の同時実行禁止の原則を含む (unit, integration)"
 given = "docs llm skill実行のstdout"
 expect_return_shape = "exit 0・先頭行が`---`・frontmatterにname/description・本文に`docs llm usage`の参照を含む"
-source_lines = "tests/docs_pages.rs:351"
+source_lines = "tests/docs_pages.rs:361"
 
 [[condition]]
 id = "docs.llm-snippet-pointer-form"
@@ -78,7 +86,7 @@ source = "TASK-4 body + tmp/tasks/tm-4/design_docs_command.md 3.6"
 description = "docs llm snippetの出力はCLAUDE.md/AGENTS.mdへ追記して使うpointer型の数行で、amazing-backup docs llm usage(契約)とdocs usage(手順)の参照を含む (unit, integration)"
 given = "docs llm snippet実行のstdout"
 expect_return_shape = "exit 0・`docs llm usage`の参照を含む・pointer型の短い出力(契約本文の内包なし)"
-source_lines = "tests/docs_pages.rs:405"
+source_lines = "tests/docs_pages.rs:415"
 
 [[condition]]
 id = "docs.page-list-no-args"
@@ -87,7 +95,7 @@ source = "TASK-4 body + tmp/tasks/tm-4/design_docs_command.md 3.7"
 description = "docs引数なしはページ一覧(usage/config/llm usage/llm skill/llm snippetの各説明)をstdoutへ出力し exit 0。docs llm引数なしはllm配下3ページの一覧+exit 0 (integration)"
 given = "docs / docs llm の各引数なし実行"
 expect_return_shape = "いずれも exit 0・stdoutに全ページ名とその説明を含む"
-source_lines = "src/docs.rs:285; tests/docs_pages.rs:432"
+source_lines = "src/docs.rs:285; tests/docs_pages.rs:442"
 
 [[condition]]
 id = "docs.invalid-syntax-usage-error"
@@ -96,7 +104,7 @@ source = "tmp/tasks/tm-4/design_docs_command.md 3.1/3.8(設計レビュー指摘
 description = "docs系の構文誤りはusage error 64で本文(正本)を出力しない: 未知ページ(docs unknown・docs llm unknown)と余計な引数(docs usage extra等のページへの引数・option付与)はいずれもclapのInvalidSubcommand/TooManyValues等をcli::runの64変換経路で終了する。既存cli.usage-error-exit-64はroot階層の誤りのみを検証しており、新設のネストenum(Docs/Llm)が未知ページ・余計な引数を拒否することは本条件で検証する (integration)"
 given = "docs unknown / docs llm unknown / docs usage extra / docs config --flag の各実行"
 expect_return_shape = "いずれも exit 64でusage error表示。各正本の本文(doc本文)はstdoutへ出力されない"
-source_lines = "tests/docs_pages.rs:464"
+source_lines = "tests/docs_pages.rs:474"
 
 [[condition]]
 id = "docs.output-write-error-exit-4"
@@ -105,7 +113,7 @@ source = "TASK-2設計(cmd_completions)と同一契約 + tmp/tasks/tm-4/design_d
 description = "stdout書込失敗のうちBrokenPipeは exit 0・その他(ENOSPC等)はstderrへerror表示+exit 4 (unit, integration)"
 given = "偽Write注入(unit)と /dev/full・相手close socketpair接続(integration)による書込失敗"
 expect_return_shape = "BrokenPipe=0(表示なし)・ENOSPC等=exit 4+error表示"
-source_lines = "src/docs.rs:321; tests/docs_pages.rs:500; tests/docs_pages.rs:535"
+source_lines = "src/docs.rs:321; tests/docs_pages.rs:510; tests/docs_pages.rs:545"
 
 [[excluded]]
 item = "SKILL.mdを~/.claude/skills/へ実際に配置してのClaude Codeでのskill読込動作・snippetをCLAUDE.mdへ追記しての発火"

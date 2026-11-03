@@ -29,7 +29,7 @@ amazing-backup get <title|uuid> [--path P] [--version V] [--version-id ID] [--pi
                      --out DIR [--tier Standard|Bulk] [--days N] [--yes]
 amazing-backup backup push [--from-list FILE] [--dry-run] [--pin <版名>] [--keep-going] <PATH> [<PATH> ...]
 amazing-backup backup pull (--all | --category C | --run ID) --out DIR [--tier T] [--days N] [--dry-run] [--yes]
-amazing-backup backup verify [--checksum] [--roundtrip] [--key PATH]
+amazing-backup backup verify [--config PATH] [--aws-config PATH] [--profile NAME] [--checksum] [--roundtrip] [--key PATH]
 amazing-backup pin add <title|uuid> [--latest | --version V] --as <版名>
 amazing-backup pin rm <title|uuid> --pin <版名>
 amazing-backup manage prune [--dry-run | --apply]
@@ -42,6 +42,10 @@ amazing-backup manage reset [--apply]
 ```
 
 `<PATH>`は対象アーカイブ(`.zip`/`.7z`。1個以上必須)。titleは実体の人間用ラベル(64文字以内・UTF-8可。新規発行時必須)。uuidはUUIDv7発行キー(hyphenated lowercase 36字)。
+
+- **`--profile NAME`はaws.tomlとpipeline.tomlの両方のprofileを選択する**(実効pipeline profileは常に実効aws profile名と同一。pipeline.tomlは`[profiles.<name>]`配下のprofile構成で、`<name>`はaws.tomlの`[aws.profiles.<name>]`と同名対応)
+- **backup verifyはaws.toml必須**(実効profile名の解決のため。credentialファイルの実在は不要・S3接続はしない)。検査対象は実効profileのbucketへ帰属するrunのみ(帰属不明記録・他bucket帰属runは対象外+batch id特定の警告表示)
+- backup pushは実行開始時に接続先(実効profile・bucket・prefix)とrecipient指紋(`recipients(N):`+指紋全文を鍵毎1行)を表示する(dry-runを含む。出力の指紋列が意図した鍵組か確認してから書き込むこと)
 
 ## 3. 出力契約(--format json)
 
@@ -109,9 +113,10 @@ bucketへの操作はamazing-backup経由のみ。**aws CLI・SDK直接・AWS Co
 
 照会・復元(list/query/get/diff/backup pull)は**aws.toml(bucket/region/prefix/credentials_file)・API keyファイル・いずれか1本の秘密鍵**で動作する(ローカルregistry・cache dir・pipeline.tomlは不要)。
 
-- **pipeline.tomlが規定pathに無い場合は`--key <秘密鍵path>`が必須**(既定`[verify].decrypt_key`が読めないため)
+- **pipeline.tomlが規定pathに無い場合は`--key <秘密鍵path>`が必須**(既定=実効profileの`[profiles.<name>.verify].decrypt_key`が読めないため)
 - 新環境では**age binary v1.2系も必要**(索引・実体の復号に使用)
-- **新環境で`config init`を使う場合の注意**: initはpipeline.tomlも生成し、生成直後の`[recipients].public_keys`は実在しないpathのdummyである。照会系は規定pathのpipeline.tomlを「在れば読む」ため、dummyのままでは**`--key`指定でも設定エラー2になる**。退避済み公開鍵pathへの置換かpipeline.tomlの退避が必要
+- `--profile <name> --key <path>`の組でaws/pipeline両方の選択が一貫する(`--profile`が両fileを選択するため交叉は構造的に起きない)
+- **新環境で`config init`を使う場合の注意**: initはpipeline.tomlも生成し、生成直後の各profile(`[profiles.<name>.recipients]`)の`public_keys`は実在しないpathのdummyである。照会系は規定pathのpipeline.tomlを「在れば読む」ため、dummyのままでは**`--key`指定でも設定エラー2になる**。退避済み公開鍵pathへの置換かpipeline.tomlの退避が必要
 - 復元job発行はexit 0で冪等(約12〜48h後の再実行で取得が進む)
 
 ## 11. 詳細参照

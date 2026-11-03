@@ -28,10 +28,12 @@ fn version_flag_prints_and_exits_zero() {
 #[test]
 fn bin_and_lib_entrypoint_parity() {
     let tmp = TestDir::new("cli-parity");
+    // pipeline.tomlはTASK-7 profile schema([profiles.dev]配下。aws.tomlの
+    // active_profile=devと同名対応)
     let bad_cfg = tmp.path().join("pipeline.toml");
     write_file(
         &bad_cfg,
-        b"[recipients]\npublic_keys = []\n[behavior]\nkeep_going = false\n",
+        b"[profiles.dev.recipients]\npublic_keys = []\n[profiles.dev.behavior]\nkeep_going = false\n",
     );
     // 対象エラー3用の正常pipeline(実在する鍵)とaws.toml
     let (public, _secret) = generate_ed25519_keypair(tmp.path(), "k1");
@@ -39,7 +41,7 @@ fn bin_and_lib_entrypoint_parity() {
     write_file(
         &ok_cfg,
         format!(
-            "[recipients]\npublic_keys = [\"{}\"]\n[behavior]\nkeep_going = false\n",
+            "[profiles.dev.recipients]\npublic_keys = [\"{}\"]\n[profiles.dev.behavior]\nkeep_going = false\n",
             public.display()
         )
         .as_bytes(),

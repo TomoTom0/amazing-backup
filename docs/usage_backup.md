@@ -84,12 +84,13 @@ $ amazing-backup config init
   1. aws-credentials.toml に access_key_id / secret_access_key を記述
   2. aws.toml の bucket を実際の値へ記述
   3. pipeline.toml の public_keys に SSH ed25519 公開鍵の絶対pathを記述
+  4. pipeline.toml のprofileはaws.tomlのprofile名と同名対応です([profiles.<name>]をaws.tomlの[aws.profiles.<name>]と同じ名前で並べます)
   詳細: amazing-backup docs usage(使用手順書)・amazing-backup docs config(設定例)
 ```
 
 - 生成対象fileが1つでも既に存在する場合(通常file・dangling symlink含む)は、対象毎のerror+復旧案内を表示してall-or-nothingで中止する(exit 2・既存fileは一切変更しない)
 - 規定pathに設定fileが無い状態でコマンドを実行すると設定エラー2+`config init`による生成案内が表示される
-- 初回の鍵準備: 暗号鍵(SSH ed25519鍵pair)をまだ持っていない場合は、8.3の手順1で鍵pairを生成する。生成したらpipeline.toml(規定path)の`[recipients].public_keys`を**生成した公開鍵(.pub)のpathへ置換**する(生成直後の雛形は存在しないpathのdummyのため、置換しないままでは設定エラー2)。あわせて`[verify].decrypt_key`へ生成した秘密鍵のpathを記述する(照会・復元の`--key`省略時の既定)
+- 初回の鍵準備: 暗号鍵(SSH ed25519鍵pair)をまだ持っていない場合は、8.3の手順1で鍵pairを生成する。生成したらpipeline.toml(規定path)の`[profiles.<name>.recipients].public_keys`を**生成した公開鍵(.pub)のpathへ置換**する(生成直後の雛形は存在しないpathのdummyのため、置換しないままでは設定エラー2)。あわせて`[profiles.<name>.verify].decrypt_key`へ生成した秘密鍵のpathを記述する(照会・復元の`--key`省略時の既定。`<name>`は実効aws profile名と同名)
 - `--config PATH` / `--aws-config PATH` で明示指定した場合はcwd基準の相対pathも可(規定pathより優先)
 - `AMAZING_BACKUP_HOME`環境変数(テスト/CI用)を指定すると規定pathをすべて`$ABH/`配下へ統合できる(`$ABH/pipeline.toml`・`$ABH/aws.toml`・`$ABH/registry.jsonl`・`$ABH/cache/`)
 - pipeline.toml内の相対path(public_keys・decrypt_key)とaws.tomlの`credentials_file`の相対pathは**実行時のcwd基準**で解決される(XDG配置後も維持。生成直後の設定はcwd非依存の絶対pathで書かれる)
@@ -134,64 +135,92 @@ secret_access_key = "<secret access key>" # 必須
 
 ### 3.1 `pipeline.toml`(規定path: `~/.config/amazing-backup/pipeline.toml`)
 
-暗号化・分類・metadataの設定(秘密を含まない)。全項目を掲げる(`[layout]`/`[files]`/`[metadata]`/`keep_artifacts`は省略時に既定で動く)。**`[output]`sectionはTASK-19(XDG配置)で廃止**(存在したら設定エラー2。registry・暗号化一時物dirのpathはXDG規定path固定・2.2)。`[categories]`はTASK-18で廃止(保持数はaws.toml `[aws.lifecycle]`へ移管・3.2):
+暗号化・分類・metadataの設定(秘密を含まない)。**TASK-7でprofile化**: top-levelは`[profiles.<name>]`のみを持ち、現行6section(`[recipients]`/`[behavior]`/`[verify]`/`[metadata]`/`[layout]`/`[files]`)はすべて`[profiles.<name>]`配下に置く(profile毎に独立した暗号鍵・分類設定=namespace毎の暗号学的人格)。**profile名はaws.tomlの`[aws.profiles.<name>]`と同名対応**(実効aws profile名で選択される。`--profile`はaws.tomlとpipeline.tomlの両方の選択を兼ねる・5.1)。全項目を掲げる(`[layout]`/`[files]`/`[metadata]`/`keep_artifacts`は省略時に既定で動く。`[recipients]`のみ必須)。**`[output]`sectionはTASK-19(XDG配置)で廃止**(存在したら設定エラー2。registry・暗号化一時物dirのpathはXDG規定path固定・2.2)。`[categories]`はTASK-18で廃止(保持数はaws.toml `[aws.lifecycle]`へ移管・3.2):
 
 ```toml
-[recipients]
+[profiles.dev]
+
+[profiles.dev.recipients]
 # SSH ed25519公開鍵のpath列挙(1-of-N。全鍵で暗号化し、いずれか1鍵で復号可能)
-# 相対pathは実行時cwd基準。1つ以上必須。ed25519形式のみ許容
+# 相対pathは実行時cwd基準。1つ以上必須。ed25519形式のみ許容(profile毎に独立)
 public_keys = [
-  "/home/yourname/.config/amazing-backup/keys/backup_ed25519.pub",
+  "/home/yourname/.config/amazing-backup/keys/dev_ed25519.pub",
 ]
 
-[behavior]
+[profiles.dev.behavior]
 # per-file失敗時も継続する既定値(backup pushの--keep-goingで上書きon)
 keep_going = false
 # 暗号化一時物(cache dir配下の.age)の保持policy。
 # "run"(run成功後に当該run分を掃除・既定) | "always"(全保持)
 # keep_artifacts = "run"
 
-[verify]
+[profiles.dev.verify]
 # 復号検証で使う秘密鍵path(秘密そのものではなくpath参照。相対pathは実行時cwd基準)
-decrypt_key = "/home/yourname/.config/amazing-backup/keys/backup_ed25519"
+decrypt_key = "/home/yourname/.config/amazing-backup/keys/dev_ed25519"
 
-[metadata]
+[profiles.dev.metadata]
 # metadata_<title>.jsonのlatest_source_path掲載形式
 # "plain"(path文字列そのまま・既定) | "encrypted"(age暗号化object) | "none"(null・掲載しない)
 latest_source_path = "plain"
 
-[layout]
+[profiles.dev.layout]
 # 写像/roots不一致時のcategory(既定"unfiled")
 unfiled_category = "unfiled"
 # source_path相対化のroot列挙(順序優先・絶対path。省略可)
 auto_path_roots = ["/home/yourname/data"]
 
-[files."travel.zip"]     # 手動写像(省略可)
-category = "photos"      # category名規則を満たす任意の文字列(定義管理は廃止・記録値として自由化)
-label = "2020-2023/travel" # label(""でlabelなし)
+# [profiles.dev.files."travel.zip"]  # 手動写像(省略可)
+# category = "photos"                 # category名規則を満たす任意の文字列(記録値として自由化)
+# label = "2020-2023/travel"           # label(""でlabelなし)
+
+# 第2profile例(aws.tomlの[aws.profiles.family]と対。追加profileは[profiles.<name>]を
+# 複製して鍵等を差し替える)
+[profiles.family]
+
+[profiles.family.recipients]
+public_keys = [
+  "/home/yourname/.config/amazing-backup/keys/family_ed25519.pub",
+]
+
+[profiles.family.verify]
+decrypt_key = "/home/yourname/.config/amazing-backup/keys/family_ed25519"
+
+[profiles.family.metadata]
+latest_source_path = "encrypted"
+
+[profiles.family.layout]
+unfiled_category = "unfiled"
+auto_path_roots = ["/mnt/nas/family"]
 ```
 
 各キーの説明:
 
 | キー | 意味 |
 |---|---|
-| `[recipients].public_keys` | recipient公開鍵(SSH ed25519)のpath列挙。1-of-N。鍵の追加手順は8.3 |
-| `[behavior].keep_going` | per-file失敗時も継続する既定値。`--keep-going`でonに上書き |
-| `[behavior].keep_artifacts` | cache dir(`~/.cache/amazing-backup/`)配下の`.age`保持policy。`run`(既定: run成功後に当該run分を掃除)/`always`(全保持)。TASK-19で`[output]`廃止に伴い`[behavior]`へ移設 |
-| `[verify].decrypt_key` | 復号用秘密鍵のpath参照。get/pull/verifyの`--key`省略時の既定 |
-| `[metadata].latest_source_path` | metadata_<title>.jsonの最新所在掲載形式。`plain`(既定)/`encrypted`/`none` |
-| `[layout].unfiled_category` | 分類解決のfallback先category(既定`unfiled`) |
-| `[layout].auto_path_roots` | source_pathを相対化するroot列挙(最初に一致したrootを採用) |
-| `[files."<basename>"]` | 手動写像。`category`(必須・category名規則の文字列検査のみ)と`label`(所在label・空文字列=なし) |
+| `[profiles.<name>]` | profile定義のroot。`<name>`は`^[a-z0-9][a-z0-9-]{0,63}$`(category名規則と同一・aws.tomlのprofile名と同名対応) |
+| `[profiles.<name>.recipients].public_keys` | 当該profileのrecipient公開鍵(SSH ed25519)のpath列挙。1-of-N。鍵の追加手順は8.3 |
+| `[profiles.<name>.behavior].keep_going` | per-file失敗時も継続する既定値。`--keep-going`でonに上書き |
+| `[profiles.<name>.behavior].keep_artifacts` | cache dir(`~/.cache/amazing-backup/`)配下の`.age`保持policy。`run`(既定: run成功後に当該run分を掃除)/`always`(全保持)。TASK-19で`[output]`廃止に伴い`[behavior]`へ移設 |
+| `[profiles.<name>.verify].decrypt_key` | 復号用秘密鍵のpath参照。get/pull/verifyの`--key`省略時の既定(**実効profileのもの**が使われる) |
+| `[profiles.<name>.metadata].latest_source_path` | metadata_<title>.jsonの最新所在掲載形式。`plain`(既定)/`encrypted`/`none` |
+| `[profiles.<name>.layout].unfiled_category` | 分類解決のfallback先category(既定`unfiled`) |
+| `[profiles.<name>.layout].auto_path_roots` | source_pathを相対化するroot列挙(最初に一致したrootを採用) |
+| `[profiles.<name>.files."<basename>"]` | 手動写像。`category`(必須・category名規則の文字列検査のみ)と`label`(所在label・空文字列=なし) |
 
-省略時の既定: `[layout]`全体省略時はunfiled_category="unfiled"+auto_path_roots=[]・`[metadata]`省略時はlatest_source_path="plain"・`keep_artifacts`省略時は"run"。`[categories]`・`[output]`セクションの存在は未知キーとして設定エラー2(静的に廃止を確定。registry・cache dirのpathはXDG規定path固定)。
+省略時の既定: `[layout]`全体省略時はunfiled_category="unfiled"+auto_path_roots=[]・`[metadata]`省略時はlatest_source_path="plain"・`keep_artifacts`省略時は"run"。`[recipients]`のみ必須(選択profileに対して)。`[categories]`・`[output]`セクションの存在は(top-level・profile内のいずれでも)未知キーとして設定エラー2(静的に廃止を確定。registry・cache dirのpathはXDG規定path固定)。
 
-検証規則(違反はすべて設定エラー・終了コード2):
+**旧形式(top-level 6section)からの移行手順**(手動編集。移行支援commandは無い。旧形式のまま読み込むと専用の移行案内error(設定エラー2)になる):
 
-- ファイル不在・TOML parseエラー・未知キー・型不一致
-- `public_keys`空配列・鍵ファイル不在・`ssh-ed25519`以外の形式・指紋の重複
-- category名規則違反(`^[a-z0-9][a-z0-9-]{0,63}$`。予約領域`sys`・旧表記`_sys`は拒否。files写像とunfiled_categoryに適用)
-- auto_path_rootsが絶対pathでない・keep_artifacts列挙値外・latest_source_path列挙値外・`[output]`sectionの存在
+1. 現行の6section(`[recipients]`/`[behavior]`/`[verify]`/`[metadata]`/`[layout]`/`[files]`)を、現在のaws.tomlの実効profile名(通常は`active_profile`の値)の`[profiles.<name>]`配下へネストする(例: `[recipients]` → `[profiles.dev.recipients]`。error文の案内もこの形式)
+2. 追加profileを作る場合は`[profiles.<name>]`を複製して鍵等を差し替える(aws.toml側へ同名の`[aws.profiles.<name>]`を併せて用意・3.2)
+3. 旧sectionが1つでもtop-levelに残っている状態(部分的な移行)は同じく移行案内errorになるため、すべてのsectionを移動し切ること
+
+検証規則(違反はすべて設定エラー・終了コード2)。検証は2層:
+
+- 第1層(全profile一括・deserialize時): ファイル不在・TOML parseエラー・未知キー・型不一致・profile名規則(未選択profileの違反でも弾く)
+- 第2層(選択profileのみ): `[recipients]`必須・`public_keys`空配列・鍵ファイル不在・`ssh-ed25519`以外の形式・指紋の重複(検査範囲は選択profile内限定。未選択profileの鍵pathの実在性は検証しない=dummy鍵pathを置ける)
+- 値検査(選択profileのみ): category名規則違反(`^[a-z0-9][a-z0-9-]{0,63}$`。予約領域`sys`・旧表記`_sys`は拒否。files写像とunfiled_categoryに適用)・auto_path_rootsが絶対pathでない・keep_artifacts列挙値外・latest_source_path列挙値外
+- 実効aws profile名に対応する`[profiles.<name>]`が無い場合は設定エラー2(利用可能なpipeline profile一覧がerror文に表示される。pipeline.tomlが単一profileでも名前一致は必須。aws.toml側に存在しない余分なprofileは選択されない限り無視)
 
 ### 3.2 `aws.toml`(規定path: `~/.config/amazing-backup/aws.toml`)
 
@@ -256,8 +285,11 @@ credentials_file = "/home/yourname/.config/amazing-backup/aws-credentials.toml"
 - **prod系3profileのcredentials_fileは共通1本**(同一AWS account運用を想定し同一ファイルを参照。2.3の複製・編集でbucket別credentialへ分割する場合もschema上profile毎に独立したkeyのためaws.tomlの書換えのみで対応できる)
 - **test profileは廃止**(旧`test`/共用bucket your-dev-bucket構成の解除)
 - `[aws.lifecycle]`の3キーは必須(省略は設定エラー2・コード内に既定値なし)。profile横断で同一構成のため`[aws]`直下に一元化
-- profileの切替は`active_profile`書換えまたは`--profile`オプション(5.1。当該実行限りの一時上書き)。prod系の書き込みは`--profile family`等の明示指定を推奨(8.2)
-- 検証規則(設定エラー2): prefix形式違反・storage_class allowlist外・bucket/region/credentials_fileの空・前後空白付き値・credentialファイルの不在・不正・lifecycle値の範囲違反(keep_versions 1〜100・noncurrent_days/mpu_abort_days 1以上・DEEP_ARCHIVE profileでnoncurrent_days<180)
+- **aws profile名にもpipelineと同一の名前規則 `^[a-z0-9][a-z0-9-]{0,63}$` を適用する**(TASK-7: pipeline.tomlの`[profiles.<name>]`と同名対応の構造的保証。違反名は設定エラー2)。規則違反名を持つ既存aws.tomlは新binaryで設定エラー2になる(破壊的変更)ため、次の手順で改名する: (1) `[aws.profiles.<name>]`のkeyを規則適合名へ変更 (2) `[aws].active_profile`の値を変更 (3) `--profile`指定・env `AMAZING_BACKUP_AWS_PROFILE`の指定値を変更 (4) pipeline.tomlの`[profiles.<name>]`も同じ新名へ変更(credentialファイルのpath・bucket等は不変)
+- **profile追加時はpipeline.tomlへ対応する`[profiles.<name>]`entryを併せて作る**(3.1。aws.tomlだけprofileを増やしpipeline側entryを置かないと、当該profile選択時に設定エラー2になる)
+- 複数profileが同一bucketを参照する場合は警告をstderrへ表示する(処理は継続・8.2の運用規則を参照)
+- profileの切替は`active_profile`書換えまたは`--profile`オプション(5.1。当該実行限りの一時上書き・aws.tomlとpipeline.tomlの両方を選択)。prod系の書き込みは`--profile family`等の明示指定を推奨(8.2)
+- 検証規則(設定エラー2): prefix形式違反・storage_class allowlist外・bucket/region/credentials_fileの空・前後空白付き値・credentialファイルの不在・不正・lifecycle値の範囲違反(keep_versions 1〜100・noncurrent_days/mpu_abort_days 1以上・DEEP_ARCHIVE profileでnoncurrent_days<180)・profile名規則違反(`[aws.profiles]`のkey・active_profile・`--profile`/env指定値のすべてに適用)
 
 **エンドポイント確定性の注記**: SDKは環境変数`AWS_ENDPOINT_URL`/`AWS_ENDPOINT_URL_S3`を解釈して接続先endpointを切替え得る。amazing-backupは起動時にこれらのenvが設定されていれば警告をstderrへ表示する(処理は継続)。意図した検証用構成か誤設定かは利用者側で確認すること。
 
@@ -336,14 +368,14 @@ s3://<bucket>/<prefix>/
 
 | option | 既定 | 意味 |
 |---|---|---|
-| `--config PATH` | XDG規定path(2.2) | pipeline.toml。省略時は`~/.config/amazing-backup/pipeline.toml`(在れば読む)。照会系は規定pathに無くても動作(9章)。backup push・pin・manageの一部(prune/index/location rm/reset)・backup verify・editは規定path読込が必須(不在は`config init`生成案内付き設定エラー2) |
-| `--aws-config PATH` | XDG規定path(2.2) | aws.toml。省略時は`~/.config/amazing-backup/aws.toml` |
-| `--key PATH` | pipeline.toml `[verify].decrypt_key` | 復号用SSH ed25519秘密鍵。索引の復号に使うためlist/query/get/diff・pull・pinのすべてで使用(pipeline.tomlが規定pathに無い場合は必須・9.1)。どちらにも無ければ設定エラー2 |
-| `--profile NAME` | aws.toml `[aws].active_profile` | 当該実行限りprofileを上書き(aws.tomlへの書戻しはしない) |
+| `--config PATH` | XDG規定path(2.2) | pipeline.toml。省略時は`~/.config/amazing-backup/pipeline.toml`(在れば読む)。照会系・backup pullは規定pathに無くても動作(9章。`--key`必須)。backup push・pin・manageの一部(prune/index/location rm/reset)・backup verify・editは規定path読込が必須(不在は`config init`生成案内付き設定エラー2) |
+| `--aws-config PATH` | XDG規定path(2.2) | aws.toml。省略時は`~/.config/amazing-backup/aws.toml`(backup verifyも含め全コマンドで読み込まれる・5.8) |
+| `--key PATH` | 実効profileの`[profiles.<name>.verify].decrypt_key` | 復号用SSH ed25519秘密鍵。索引の復号に使うためlist/query/get/diff・pull・pinのすべてで使用(pipeline.tomlが規定pathに無い場合・実効profileのentryが読めない場合は必須・9.1)。どちらにも無ければ設定エラー2 |
+| `--profile NAME` | aws.toml `[aws].active_profile` | 当該実行限りprofileを上書き(aws.tomlへの書戻しはしない)。**aws.tomlとpipeline.tomlの両方のprofileを選択する**(実効pipeline profileは常に実効aws profile名と同一のため「aws=dev・pipeline=family」のような交叉は構造的に起きない・3.1) |
 | `--format human|json` | `human` | 照会系8コマンド(list 5種・query・get・diff)の出力形式。`json`はstdout全体が単一JSON(人間向け通知はstderr) |
 | `--dry-run` | なし | 実行予定のみ表示(backup push/pullが対応。manage系は`--apply`方式でdry-runが既定・5.10) |
 
-backup verifyのみ旧形式の`--config`/`--key`/`--checksum`/`--roundtrip`を扱う(5.8)。
+backup verifyのみ旧形式の`--config`/`--key`/`--checksum`/`--roundtrip`を扱う(5.8。`--aws-config`/`--profile`も受理する)。
 
 ### 5.2 list — 一覧(照会)
 
@@ -422,11 +454,11 @@ amazing-backup backup push [--from-list FILE] [--dry-run] [--pin <版名>] [--ke
 | `--from-list` | なし | 対象リストtoml(3.3)。位置引数と併用可(和集合)。title欄は新規発行時の実体ラベル |
 | `--dry-run` | なし | 予測表示のみ(旧plan相当。対象ごとのskip/re-put/merge/new予測と合計sizeを表示。新規発行予測でtitle未指定は警告。暗号化せず平文sha256のみ計算しS3 API呼び出しも行わない) |
 | `--pin` | なし | backup時ピン(当該runの版を同時にpin名keyへもupload) |
-| `--keep-going` | 設定`[behavior].keep_going` | per-file失敗でも継続 |
+| `--keep-going` | 設定`[profiles.<name>.behavior].keep_going` | per-file失敗でも継続 |
 
 動作:
 
-1. pin名検証(規則違反はusage 64) -> pipeline.toml必須検査 -> **接続先表示(実効profile・bucket・prefix。dry-runを含む全実行で表示)** -> 対象解決(存在・拡張子・重複) -> from-listのtitle欄検証 -> 分類解決(4.2)
+1. pin名検証(規則違反はusage 64) -> **aws.toml読込(実効profile解決) -> pipeline.toml読込(実効profileの`[profiles.<name>]`)** -> **接続先表示(実効profile・bucket・prefix。dry-runを含む全実行で表示)とrecipient指紋表示(`recipients(N):`行+指紋全文`SHA256:<base64>`を鍵毎1行。「どこへ・誰の鍵で書くか」を1画面で確認する。dry-runでも表示)** -> 対象解決(存在・拡張子・重複) -> from-listのtitle欄検証 -> 分類解決(4.2)
 2. `--dry-run`なら予測表示で終了0
 3. bucketのversioning確認(無効は設定エラー2)
 4. per-file: 所在skip判定(registry基準。identity_hash+size+mtime一致のfile_write成功記録と同一uuidのbucket一致file_upload記録があればskip) -> crash残存(file_writeのみ記録済み)は同uuidへ再PUT -> age暗号化 -> sha照合(run内map・registryのbucket一致lookup) -> 一致なら既存実体へ**合流**(file_write追記のみ・uploadなし) / 不一致なら新規発行(UUIDv7発行・title必須: from-listのtitle欄・ttyなら対話入力・非ttyでtitle無しは当該対象の失敗=対象エラー3。記録順序は file_write追記 -> PUT -> file_upload追記) -> `data/<uuid>/default.age`へupload(64MiB超はmultipart)
@@ -453,16 +485,21 @@ amazing-backup backup pull (--all | --category C | --run ID) --out DIR [--tier T
 ### 5.8 backup verify — ローカル整合検査
 
 ```
-amazing-backup backup verify [--config PATH] [--checksum] [--roundtrip] [--key PATH]
+amazing-backup backup verify [--config PATH] [--aws-config PATH] [--profile NAME]
+                             [--checksum] [--roundtrip] [--key PATH]
 ```
 
-registryとcache dir(`~/.cache/amazing-backup/`)のrun成果物(`.age`)の整合を検証する(S3接続なし・aws不要)。旧経路(encrypt記録)と新経路(file_write記録)の両方を検査する。
+registryとcache dir(`~/.cache/amazing-backup/`)のrun成果物(`.age`)の整合を検証する(S3接続なし)。
+
+- **aws.toml必須(TASK-7)**: 実効profile名の解決にaws.tomlを読む(aws側解決chain(env・purpose・active_profile)と同一経路のため、verify経路での交叉事故が構造的に起きない。旧「aws不在でも構造検査可」からの破壊的変更)。credentialファイルの実在は不要(値の検査はS3書き込み系のみで行う)。verify自体はS3接続しない・秘密値を扱わないのは不変
+- **検査対象は実効profileのbucketへ帰属するrunのみ**(TASK-7 profile別鍵の下で、別profileの正常な成果物を復号失敗として誤報告しないため)。runのbucket帰属はmanifest/index_upload recordの`s3_bucket`から判定する。bucket帰属が確定できない記録(旧経路encrypt記録・upload未完でfile_writeのみのcrash残存)と他bucket帰属のrunは検査対象外とし、対象外となったbatch idを特定表示した警告を出す(検査対象runが無くてもexit 0)
+- `--profile`指定時は当該profileのbucket帰属runのみが検査対象になる
 
 | option | 意味 |
 |---|---|
 | `--checksum` | `.age`のsha256を再計算してregistry記録と照合 |
 | `--roundtrip` | 秘密鍵で復号し平文sha256をregistry記録と照合(平文は書き出さない)。manifest復号+registry突合も行う |
-| `--key` | 復号用秘密鍵(`--roundtrip`時必須。省略時は設定`[verify].decrypt_key`) |
+| `--key` | 復号用秘密鍵(`--roundtrip`時必須。省略時は実効profileの`[profiles.<name>.verify].decrypt_key`) |
 
 検証段階は 構造検査(既定: `.age`のsize完全一致・ヘッダrecipient照合・manifest存在) -> `--checksum` -> `--roundtrip` の順。不一致は検証エラー4。秘密鍵・ageバイナリ不在は設定エラー2。
 
@@ -511,7 +548,7 @@ amazing-backup manage reset [--apply]
 amazing-backup edit metadata|files|layout|policy
 ```
 
-対応設定sectionの現在値を表示する(検証付き読込)。`metadata`は`[metadata].latest_source_path`の掲載形式、`policy`は`[behavior].keep_artifacts`(cache dirの掃除policy。保持数はaws.toml `[aws.lifecycle]`側で管理)。編集自体はpipeline.tomlの直接編集で行う(保存時に検証される)。対象外の指定はusage 64。
+対応設定sectionの現在値を表示する(検証付き読込)。各対象の出力1行目に**実効profile名**を表示する(TASK-7: 表示中のsectionが`[profiles.<実効profile名>]`配下のものであることを明示)。`metadata`は`[profiles.<n>.metadata].latest_source_path`の掲載形式、`policy`は`[profiles.<n>.behavior].keep_artifacts`(cache dirの掃除policy。保持数はaws.toml `[aws.lifecycle]`側で管理)。編集自体はpipeline.tomlの直接編集で行う(保存時に検証される)。対象外の指定はusage 64。
 
 ### 5.12 completions — shell補完script
 
@@ -578,7 +615,7 @@ fail-fastが既定(最初のエラーで中止。ただし対象解決段階の�
 
    per-fileの`ok`/`skip`/`merge`/`re-put`行とrun summary(`run <batch_id>: ok=N skip=N failed=N`)が出る。大容量(数十GiB以上)では時間がかかる(進捗はper-file完了行単位)。中断した場合は再実行で再開(skip判定・crash残存のuuid再利用により二重暗号化・二重uploadは起きない)
 
-4. **ローカル整合検査(任意・S3不要)**:
+4. **ローカル整合検査(任意・S3接続なし。aws.tomlは必須)**:
 
    ```console
    $ amazing-backup backup verify --roundtrip
@@ -651,13 +688,14 @@ get/pullは出力先の既存平文を保護する:
   - `family` -> `your-family-bucket`
   - `baked` -> `your-baked-bucket`
   - `atara` -> `your-atara-bucket`
-- 切替は`active_profile`の書換え(恒久)または`--profile <name>`(当該実行限り)。**誤投入防止のため、prod系への書き込みは`--profile family`等を明示した実行を推奨**(active_profileはdev固定運用)
-- **backup pushは実行開始時に接続先(実効profile・bucket・prefix)を表示**する(5.6。dry-runでも表示)。表示を確認してから書き込みを続けることで誤bucketへの投入に気づける
+- TASK-7 profile化: pipeline.tomlの`[profiles.<name>]`がaws.tomlの各profileと同名対応し、profile毎に独立したrecipient鍵・分類設定を持つ(3.1)。切替は`active_profile`の書換え(恒久)または`--profile <name>`(当該実行限り・**aws/pipeline両fileの選択を兼ねる**)。**誤投入防止のため、prod系への書き込みは`--profile family`等を明示した実行を推奨**(active_profileはdev固定運用)
+- **backup pushは実行開始時に接続先(実効profile・bucket・prefix)とrecipient指紋を表示**する(5.6。dry-runでも表示)。表示を確認してから書き込みを続けることで誤bucket・誤鍵組への投入に気づける
 - **名前空間の分離はbucket単位で働く(混同防止)**。prod系3bucketは同一prefix(`amazing-backup/`)を共有するが、ローカルregistry(`~/.local/state/amazing-backup/registry.jsonl`)は単一でも記録の参照(skip判定・索引versions/pins構築・未書込namespace判定・pin解決)はすべて**bucket一致で分離**される。他bucketの書込実績では誤ってskipしない・索引へ他bucketの版やpinが混入しない・未書込救済判定に他bucket実績が採用されない、が構造的に保証される(bucket横断で1byteもuploadされないrunは作れない)
+- **運用規則: 同一(bucket, prefix)を別recipient構成(別pipeline profile)で書かないこと**。索引object keyはbucket+prefixで決まり、索引は毎push時に実行時のrecipientsで全体再暗号化されて同keyへ上書きされるため、別recipient構成が交互に書くと他方の秘密鍵で索引が読めなくなる。1bucket(=1namespace)に対するrecipient構成は1つのprofileで管理する。aws.toml内で複数profileが同一bucketを参照する場合は起動時に警告する(検出できるのは同一aws.toml内のbucket重複のみ。同一profileでの鍵差し替え・別aws設定fileからの書込みは検出できないため、最終検知はpush開始時のrecipients指紋表示による)
 
 ### 8.3 recipient鍵の管理
 
-初回の鍵導入(雛形のdummy path置換と`[verify].decrypt_key`の記述)は2.2の手順で行う。以下は運用中への鍵の追加・管理の手順である。
+初回の鍵導入(雛形のdummy path置換と`[profiles.<name>.verify].decrypt_key`の記述)は2.2の手順で行う。以下は運用中への鍵の追加・管理の手順である。鍵の追加・確認は**対象profileの`[profiles.<name>]`に対して**行う(profile毎に鍵pairが独立・3.1)。
 
 1. 新規ed25519鍵pairを生成する(passphraseなし。配置先は任意の絶対path。例では`~/.config/amazing-backup/keys/`):
 
@@ -666,26 +704,30 @@ get/pullは出力先の既存平文を保護する:
    $ ssh-keygen -t ed25519 -f ~/.config/amazing-backup/keys/backup_ed25519_2 -N ""
    ```
 
-2. pipeline.toml(規定path)の `[recipients].public_keys` へ公開鍵(.pub)のpathを追加する
-3. `amazing-backup backup push --dry-run` を実行して設定エラーが出ないことを確認する(鍵ファイルの不在・形式違い・指紋の重複は設定読込時の設定エラー2で検出される。dry-runは暗号化しないため指紋そのものの表示は無い)
+2. pipeline.toml(規定path)の対象profile `[profiles.<name>.recipients].public_keys` へ公開鍵(.pub)のpathを追加する
+3. `amazing-backup backup push --dry-run --profile <対象profile>` を実行して設定エラーが出ないことと、表示される`recipients(N):`の指紋列が意図した鍵組であることを確認する(鍵ファイルの不在・形式違い・指紋の重複は設定読込時の設定エラー2で検出される。指紋はload時検証で計算済みのためdry-run(暗号化しない)でも全文表示される)
 
 追加以降の書き込みは新recipient構成で暗号化される(索引・manifestも同様)。
 
 - **遡及**: S3へ投入済みのobjectは暗号化時のrecipient構成のまま変わらない。全量を新構成にしたい場合は新たなrunで再pushする(旧objectの削除は`manage prune`や手運用)
-- **旧鍵の温存**: 鍵を追加しても旧秘密鍵を廃棄すると、旧recipient構成で暗号化されたobjectを復元できなくなる。追加後も旧鍵は保管し続けること
-- **第2recipientの運用要件**: 「S3と秘密鍵のみ」の災害前提が成立するには秘密鍵が単一machineにしか無い状態を解消する必要がある。第2recipient(秘密鍵の地理的第二保管場所)の登録・保管を運用要件とする
+- **旧鍵の温存**: 鍵を追加しても旧秘密鍵を廃棄すると、旧recipient構成で暗号化されたobjectを復元できなくなる。追加後も旧鍵は保管し続けること。独立鍵導入後は全profileを復旧するのに各profileが必要とする鍵の揃い(現行鍵+旧鍵+第二保管鍵)が必要になる(9.1)
+- **第2recipientの運用要件**: 「S3と秘密鍵のみ」の災害前提が成立するには秘密鍵が単一machineにしか無い状態を解消する必要がある。第2recipient(秘密鍵の地理的第二保管場所)の登録・保管を運用要件とする(**profile単位で満たす**: 各profileのpublic_keysに第二保管場所の公開鍵を列挙する)
 
 ## 9. 災害時の手順
 
 ### 9.1 前提(作成環境の資産は不要)
 
-照会・復元(list/query/get/diff/backup pull)は**aws.toml(bucket/region/prefix/credentials_file)とAPI keyファイルといずれか1本の秘密鍵のみ**で動作する。最初に`sys/index.jsonl.age`を取得・復号し、以降の操作は索引+S3 APIで完結する(ローカルregistry・cache dir・pipeline.tomlは不要)。pipeline.tomlが規定pathに無い場合は`[verify].decrypt_key`が読めないため、**list/query/get/diff・backup pullのすべてで`--key <秘密鍵path>`が必須**になる。
+照会・復元(list/query/get/diff/backup pull)は**aws.toml(bucket/region/prefix/credentials_file)とAPI keyファイルといずれか1本の秘密鍵のみ**で動作する。最初に`sys/index.jsonl.age`を取得・復号し、以降の操作は索引+S3 APIで完結する(ローカルregistry・cache dir・pipeline.tomlは不要)。pipeline.tomlが規定pathに無い場合は実効profileの`[profiles.<name>.verify].decrypt_key`が読めないため、**list/query/get/diff・backup pullのすべてで`--key <秘密鍵path>`が必須**になる。
+
+- 災害時の新環境では`--profile <name> --key <path>`の組でaws/pipeline両方の選択が一貫する(`--profile`が両fileを選択するため、片方だけ間違える経路が存在しない・8.3)
+- **「秘密鍵1本」は条件付き**: 復元対象の世代が旧recipient構成で暗号化されていれば旧秘密鍵も必要(8.3の旧鍵温存)。独立鍵導入後は**全profileを復旧するには各profileが必要とする鍵の揃い(現行鍵+旧鍵+第二保管鍵)が必要**になる(対象profileの現行recipient構成の鍵だけでは旧世代・他profileの復元はできない)
+- backup push・pin・manageの一部・backup verify・editはpipeline.toml必須の操作(5.1)のため災害時前提の対象外(現行と同じ位置づけ)
 
 新環境での必要資産: amazing-backup binary(README.md Install節のinstall手順)・age binary v1.2系(2.1。索引・実体の復号に使用)・aws.toml(規定path`~/.config/amazing-backup/aws.toml`へ配置・`--aws-config`での明示指定も可)・credentialファイル・秘密鍵。repoのcloneは不要。
 
-**新環境で`config init`を使う場合の注意**: `config init`はpipeline.tomlも同時に生成し、生成直後のpipeline.tomlは存在しないpathの公開鍵(dummy)を含む。照会系は規定pathのpipeline.tomlを「在れば読む」ため、dummyのままでは`--key`を指定しても設定エラー2になる。次のいずれかを行うこと:
+**新環境で`config init`を使う場合の注意**: `config init`はpipeline.tomlも同時に生成し、生成直後のpipeline.tomlは存在しないpathの公開鍵(dummy)をprofile構成の中に含む。照会系は規定pathのpipeline.tomlを「在れば読む」ため、dummyのままでは`--key`を指定しても設定エラー2になる。次のいずれかを行うこと:
 
-- pipeline.tomlの`[recipients].public_keys`を退避済み公開鍵のpathへ置換する(あわせて`[verify].decrypt_key`へ秘密鍵pathを記述すれば`--key`省略可)
+- pipeline.tomlの対象profile(`[profiles.<name>.recipients]`。`<name>`は復元対象のaws profile名と同名)の`public_keys`を退避済み公開鍵のpathへ置換する(あわせて`[profiles.<name>.verify].decrypt_key`へ秘密鍵pathを記述すれば`--key`省略可)
 - pipeline.tomlを規定pathから退避(移動・改名)する(照会系は規定pathに無ければ読まずに動作する)
 
 ### 9.2 索引が読めない場合

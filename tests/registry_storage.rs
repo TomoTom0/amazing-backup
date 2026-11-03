@@ -439,6 +439,8 @@ fn sha_uuid_lookup_is_scoped_by_bucket() {
         StorageOpts {
             no_categories: true,
             aws_lifecycle: aws_lifecycle_toml(180, 10, 7),
+            // TASK-7: (2)の--profile prod実行がpipeline.tomlの[profiles.prod]を選択するため
+            extra_pipeline_profiles: vec!["prod".into()],
             ..StorageOpts::default()
         },
     ) else {

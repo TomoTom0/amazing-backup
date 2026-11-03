@@ -1,8 +1,10 @@
 # 実運用用のpipeline.toml(XDG配置後の正本は ~/.config/amazing-backup/pipeline.toml。
 # このrepo側のfileは移行時の写し元・configs/pipeline.example.tomlはtemplate)。
 # 相対pathは実行時のcwd基準。
+# TASK-7 profile化: top-levelは[profiles.<name>]のみ。profile名はaws.tomlの
+# [aws.profiles.<name>]と同名対応(実効aws profileで選択される)。
 
-[recipients]
+[profiles.dev.recipients]
 # SSH ed25519公開鍵のpath列挙(1-of-N。全鍵で暗号化し、いずれか1鍵で復号可能)
 # 相対pathはrepo root(cwd)基準。1つ以上必須。ed25519形式のみ許容
 public_keys = [
@@ -10,17 +12,17 @@ public_keys = [
   "configs/secret/keys/private/backup_ed25519_2nd.pub",
 ]
 
-[behavior]
+[profiles.dev.behavior]
 # per-file失敗時も継続する既定値(CLIの--keep-goingで上書きon)
 keep_going = false
 # 暗号化一時物(cache dir)の保持policy。 "run"(既定) | "always"
 # keep_artifacts = "run"
 
-[verify]
+[profiles.dev.verify]
 # --roundtrip検証で使う秘密鍵path(秘密そのものではなくpath参照。configs/secret/はgitignore済み)
 decrypt_key = "configs/secret/keys/private/backup_ed25519"
 
-[metadata]
+[profiles.dev.metadata]
 # metadata_{title}.jsonのlatest_source_path掲載形式(TASK-18 2.2)
 # plain: path文字列そのまま / encrypted: age暗号化object / none: null(掲載しない)
 latest_source_path = "encrypted"

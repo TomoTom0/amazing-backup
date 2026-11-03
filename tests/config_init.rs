@@ -213,10 +213,11 @@ fn config_init_credential_template_empty_and_private() {
     );
 
     // credential以外を有効化(public_keys=実在鍵・bucket=記述済み値)してbackup push:
-    // 空値credentialは固有のエラー文でexit 2(S3 API呼び出し前に停止)
+    // 空値credentialは固有のエラー文でexit 2(S3 API呼び出し前に停止)。
+    // TASK-7: 生成pipeline.tomlは[profiles.dev]配下のschemaのため当該箇所へ書き換える
     let (public, _secret) = generate_ed25519_keypair(tmp.path(), "k1");
     rewrite_toml(&abh.join("pipeline.toml"), |v| {
-        v["recipients"]["public_keys"] =
+        v["profiles"]["dev"]["recipients"]["public_keys"] =
             toml::Value::Array(vec![toml::Value::String(public.display().to_string())]);
     });
     rewrite_toml(&abh.join("aws.toml"), |v| {
@@ -284,6 +285,11 @@ fn config_init_stdout_artifacts_and_next_steps() {
         stdout.contains("amazing-backup docs usage"),
         "docs参照のdocs usage案内: {stdout}"
     );
+    // TASK-7: pipeline.tomlのprofileはaws.tomlのprofile名と同名対応の案内1行
+    assert!(
+        stdout.contains("同名"),
+        "pipeline.tomlとaws.tomlのprofile名同名対応の案内: {stdout}"
+    );
 }
 
 unsafe extern "C" {
@@ -321,7 +327,9 @@ fn config_init_credential_permission_under_umask_022() {
 
 /// [covers:config.init-templates-from-example]
 /// 生成されるpipeline.tomlは埋め込みtemplate(configs/pipeline.example.toml)とbyte一致。
-/// 生成aws.tomlはmarker残存なし・TOMLとしてparse可能・parse後の全profile
+/// TASK-7 D-4: templateは[profiles.dev]+[profiles.family]の2profile構成
+/// (aws.example.tomlと対)へ新schema化される。dummy鍵path(存在しない絶対path)は
+/// 現行挙動を踏襲。生成aws.tomlはmarker残存なし・TOMLとしてparse可能・parse後の全profile
 /// credentials_fileは生成したcredential雛形の絶対pathと完全一致(design doc 3.2の
 /// 統合側観測。escape境界・劣化template検出のunit観測はtests/config_init_unit.rs)。
 #[test]
@@ -335,6 +343,38 @@ fn config_init_templates_match_embedded_example() {
         generated, template,
         "pipeline.tomlは埋め込みtemplateとbyte一致"
     );
+
+    // TASK-7: templateは[profiles.dev]+[profiles.family]の2profile構成で、各profileの
+    // recipients.public_keysはdummy鍵path(存在しないpath。生成直後は設定エラー2になる
+    // 状態を維持=9.1の注意文面と同じ前提)
+    let text = String::from_utf8_lossy(&generated).into_owned();
+    let v: toml::Value = toml::from_str(&text).expect("生成pipeline.tomlはTOMLとしてparse可能");
+    let profiles = v
+        .get("profiles")
+        .and_then(|p| p.as_table())
+        .expect("top-level [profiles]");
+    let names: Vec<&str> = profiles.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        vec!["dev", "family"],
+        "pipeline.toml雛形は[profiles.dev]+[profiles.family]の2profile(aws.example.tomlと対): {text}"
+    );
+    for name in ["dev", "family"] {
+        let keys = profiles
+            .get(name)
+            .and_then(|p| p.get("recipients"))
+            .and_then(|r| r.get("public_keys"))
+            .and_then(|k| k.as_array())
+            .unwrap_or_else(|| panic!("profile({name})のrecipients.public_keys: {text}"));
+        assert!(!keys.is_empty(), "profile({name})のpublic_keysは空でない: {text}");
+        for k in keys {
+            let path = k.as_str().unwrap_or_default();
+            assert!(
+                !Path::new(path).exists(),
+                "profile({name})のpublic_keysはdummy鍵path(存在しないpath): {path}"
+            );
+        }
+    }
 
     // aws.toml: marker残存なし・parse後の全profile credentials_fileは雛形pathと完全一致
     let text = std::fs::read_to_string(abh.join("aws.toml")).expect("aws.toml読込");

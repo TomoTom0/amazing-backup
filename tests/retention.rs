@@ -683,12 +683,19 @@ fn reset_rejects_non_dev_purpose_profile() {
         return;
     };
     // aws.tomlへprod/purposeのprofileを追加し実効profileへ指定(dev側と同一bucket・
-    // prefixでもpurpose違反で拒否=bucket指定によらないことを観察)
+    // prefixでもpurpose違反で拒否=bucket指定によらないことを観察)。
+    // TASK-7: --profile prod1はpipeline.tomlの[profiles.prod1]も選択するため
+    // 同名profileをpipeline側へも追加する(purpose安全弁の検証であるため鍵はdevと同一)
     fx.rewrite_aws_toml(&format!(
         "{}\n[aws.profiles.prod1]\npurpose = \"prod\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\nprefix = \"{}\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{}\"\n",
         fx.aws_toml_body(),
         fx.prefix,
         fx.credentials.display()
+    ));
+    fx.rewrite_pipeline_toml(&format!(
+        "{}{}",
+        fx.pipeline_body(),
+        pipeline_profile_section("prod1", &fx.public, &fx.secret)
     ));
     clear_calls(&fx);
     // 既定dry-runの実行でも安全弁は先に判定される

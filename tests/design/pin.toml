@@ -132,4 +132,4 @@ source = "TASK-11(Phase B)再レビュー指摘M-R1+tmp/tasks/tm-10/design_s3_st
 description = "get --pin・pin rmのpin解決は当該実行の実効bucketの索引pins[](bucket一致規則で構築されたもの=index.pins-bucket-isolated)に限る: 誤ったprofileでの実行は当方索引にpinが無いためpin名不在の対象エラー3で拒否され、pin objectへのS3 API呼び出し(取得・削除)は行われない(共有registryの他方bucket記録を経由して正bucket側のpin object・索引が変更されない) (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成でdev側にのみpin(pm1)が付与済みの状態での、get --pin pm1 --profile prod と pin rm --pin pm1 --profile prod の各実行"
 expect_return_shape = "いずれも exit 3(pin名は当該索引に無しの表示)でpin objectへのS3 API呼び出しは行われず、dev側索引のpins[]・pin objectは不変"
-source_lines = "tests/phase_b_options.rs:523"
+source_lines = "tests/phase_b_options.rs:550"

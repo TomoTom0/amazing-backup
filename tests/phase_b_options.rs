@@ -6,6 +6,7 @@
 mod common;
 
 use common::*;
+use std::path::Path;
 
 /// calls.logを空にする(以降の呼び出しのみを観測する)。
 fn clear_calls(fx: &StorageFixture) {
@@ -26,7 +27,15 @@ fn two_profile_aws_toml(fx: &StorageFixture) -> String {
 /// (object key・索引keyが指定profile側prefixで発行・参照される)。
 #[test]
 fn profile_option_overrides_active_profile() {
-    let Some(fx) = StorageFixture::new("pb-profile", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new(
+        "pb-profile",
+        StorageOpts {
+            // TASK-7: --profileはpipeline.tomlの[profiles.<name>]も選択するため
+            // prod側のentryを用意する(aws.tomlのprodと同名対応)
+            extra_pipeline_profiles: vec!["prod".into()],
+            ..StorageOpts::default()
+        },
+    ) else {
         return;
     };
     fx.rewrite_aws_toml(&two_profile_aws_toml(&fx));
@@ -108,7 +117,13 @@ fn profile_unknown_name_is_config_error() {
 /// (実行後も[aws].active_profileの値は不変。正本はaws.toml)。
 #[test]
 fn profile_option_does_not_write_back_to_aws_toml() {
-    let Some(fx) = StorageFixture::new("pb-profnowrite", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new(
+        "pb-profnowrite",
+        StorageOpts {
+            extra_pipeline_profiles: vec!["prod".into()],
+            ..StorageOpts::default()
+        },
+    ) else {
         return;
     };
     let body = two_profile_aws_toml(&fx);
@@ -287,7 +302,13 @@ fn upload_ids_for_bucket(fx: &StorageFixture, s3_key: &str, bucket: &str) -> Vec
 /// 正本bucket=active_profile相当として扱う)。
 #[test]
 fn profile_namespace_isolated_by_bucket() {
-    let Some(fx) = StorageFixture::new("pb-nsbkt", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new(
+        "pb-nsbkt",
+        StorageOpts {
+            extra_pipeline_profiles: vec!["prod".into()],
+            ..StorageOpts::default()
+        },
+    ) else {
         return;
     };
     fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));
@@ -454,7 +475,13 @@ fn rewrite_file_upload_buckets_empty(fx: &StorageFixture) {
 /// 実効bucket≠正本(--profile prod)のpushではskipされずuploadされる。
 #[test]
 fn legacy_empty_bucket_upload_record_treated_as_canonical() {
-    let Some(fx) = StorageFixture::new("pb-legacybkt", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new(
+        "pb-legacybkt",
+        StorageOpts {
+            extra_pipeline_profiles: vec!["prod".into()],
+            ..StorageOpts::default()
+        },
+    ) else {
         return;
     };
     fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));
@@ -527,7 +554,13 @@ fn index_pin_names(entry: &serde_json::Value) -> Vec<String> {
 /// 索引に限る(誤profileではpin名不在のexit 3・正bucket側の索引pins[]とpin objectは不変)。
 #[test]
 fn pin_namespace_isolated_by_bucket() {
-    let Some(fx) = StorageFixture::new("pb-pinbkt", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new(
+        "pb-pinbkt",
+        StorageOpts {
+            extra_pipeline_profiles: vec!["prod".into()],
+            ..StorageOpts::default()
+        },
+    ) else {
         return;
     };
     fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));
@@ -620,7 +653,13 @@ fn pin_namespace_isolated_by_bucket() {
 /// 現れず、dev側(正本bucket)の照会は従来どおり双方が現れる。
 #[test]
 fn entries_without_bucket_versions_excluded_from_query() {
-    let Some(fx) = StorageFixture::new("pb-orphan", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new(
+        "pb-orphan",
+        StorageOpts {
+            extra_pipeline_profiles: vec!["prod".into()],
+            ..StorageOpts::default()
+        },
+    ) else {
         return;
     };
     fx.rewrite_aws_toml(&same_prefix_diff_bucket_aws_toml(&fx));
@@ -701,7 +740,13 @@ fn three_bucket_aws_toml(fx: &StorageFixture) -> String {
 /// dev/family版はbaked索引へ混入しない)。
 #[test]
 fn multi_bucket_profiles_isolated() {
-    let Some(fx) = StorageFixture::new("pb-3bkt", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new(
+        "pb-3bkt",
+        StorageOpts {
+            extra_pipeline_profiles: vec!["family".into(), "baked".into()],
+            ..StorageOpts::default()
+        },
+    ) else {
         return;
     };
     fx.rewrite_aws_toml(&three_bucket_aws_toml(&fx));
@@ -763,7 +808,13 @@ fn multi_bucket_profiles_isolated() {
 /// 表示され(S3 API呼び出しに先行)、dry-runではS3 API呼び出しは行われない。
 #[test]
 fn backup_push_shows_connection_destination() {
-    let Some(fx) = StorageFixture::new("pb-dest", StorageOpts::default()) else {
+    let Some(fx) = StorageFixture::new(
+        "pb-dest",
+        StorageOpts {
+            extra_pipeline_profiles: vec!["family".into(), "baked".into()],
+            ..StorageOpts::default()
+        },
+    ) else {
         return;
     };
     fx.rewrite_aws_toml(&three_bucket_aws_toml(&fx));
@@ -810,5 +861,125 @@ fn backup_push_shows_connection_destination() {
             && l.contains("bucket=bucket-dev")
             && l.contains("prefix=amazing-backup/")),
         "profile省略時はactive_profile(dev)の接続先が表示される: {stdout}"
+    );
+}
+
+/// dev/familyそれぞれへ独立鍵pairを割り当てた多profile構成のpipeline.toml・aws.toml
+/// へ書き換える(TASK-7: --profileがaws/pipeline両fileを選択する観察用。
+/// family側は別bucketとし、鍵も分離=namespace毎の暗号学的人格)。
+fn two_identity_config(fx: &StorageFixture, dev_pub: &Path, dev_sec: &Path, fam_pub: &Path, fam_sec: &Path) {
+    let root = fx.data_root.display();
+    fx.rewrite_pipeline_toml(&format!(
+        "[profiles.dev.recipients]\npublic_keys = [\"{}\"]\n\
+         [profiles.dev.verify]\ndecrypt_key = \"{}\"\n\
+         [profiles.dev.layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [\"{root}\"]\n\
+         [profiles.family.recipients]\npublic_keys = [\"{}\"]\n\
+         [profiles.family.verify]\ndecrypt_key = \"{}\"\n\
+         [profiles.family.layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [\"{root}\"]\n",
+        dev_pub.display(),
+        dev_sec.display(),
+        fam_pub.display(),
+        fam_sec.display(),
+    ));
+    fx.rewrite_aws_toml(&format!(
+        "[aws]\nactive_profile = \"dev\"\n[aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\n\
+         [aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"bucket-dev\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n\n\
+         [aws.profiles.family]\npurpose = \"prod\"\nbucket = \"bucket-family\"\nregion = \"ap-northeast-1\"\nprefix = \"amazing-backup/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{creds}\"\n",
+        creds = fx.credentials.display()
+    ));
+}
+
+/// age -dが秘密鍵で失敗するか(索引objectの暗号化recipientの独立観察用oracle)。
+fn age_decrypt_fails(age: &Path, age_file: &Path, secret: &Path) -> bool {
+    std::process::Command::new(age)
+        .args(["-d", "-i"])
+        .arg(secret)
+        .arg(age_file)
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+}
+
+/// [covers:cli.profile-selects-pipeline-profile]
+/// --profile <name>はaws.tomlとpipeline.tomlの両方を選択する(TASK-7 D-3: 実効pipeline
+/// profileは常に実効aws profile名と同一=単一解決源。「aws=dev・pipeline=family」のような
+/// 交叉が構造的に起こらない)。--profile省略時はactive_profile側のpipeline profileが
+/// 使われる。decrypt_keyの既定も実効profileの[profiles.<name>.verify].decrypt_key
+/// (D-6: --key > 実効profileのdecrypt_keyは不変)。
+#[test]
+fn profile_option_selects_pipeline_profile() {
+    let Some(fx) = StorageFixture::new("pb-pipesel", StorageOpts::default()) else {
+        return;
+    };
+    // dev/familyで独立した鍵pair(誤鍵組=交叉の検出は索引objectの復号可否で観察)
+    let (dev_pub, dev_sec) = generate_ed25519_keypair(&fx.elsewhere, "sel-dev");
+    let (fam_pub, fam_sec) = generate_ed25519_keypair(&fx.elsewhere, "sel-family");
+    two_identity_config(&fx, &dev_pub, &dev_sec, &fam_pub, &fam_sec);
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"pipe-select-plain");
+
+    // (1) --profile family: 索引はfamily側recipient(family鍵)で暗号化される
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &["--profile", "family"])
+    else {
+        return;
+    };
+    assert_eq!(code, 0, "family pushはexit 0: {stdout}");
+    let index = fx.object_path(&fx.index_key());
+    let plain = age_decrypt(&fx.age, &index, &fam_sec);
+    assert!(
+        String::from_utf8_lossy(&plain).contains("a.zip"),
+        "索引はfamily鍵で復号できる(--profileがpipeline側もfamilyへ選択): {}",
+        String::from_utf8_lossy(&plain)
+    );
+    assert!(
+        age_decrypt_fails(&fx.age, &index, &dev_sec),
+        "family鍵で暗号化された索引はdev秘密鍵では復号できない(交叉なし)"
+    );
+
+    // (2) get --profile family(--key省略): 実効profile(family)のdecrypt_keyが既定で
+    // 使われ、索引・objectの復号まで完結する(D-6)。--key無し(--key省略)で実行するため
+    // StorageFixture::get_env(--key注入付き)でなく直接実行する
+    let out = fx.elsewhere.join("pipesel-out");
+    let cfg_s = fx.cfg.display().to_string();
+    let aws_s = fx.aws_toml.display().to_string();
+    let out_s = out.display().to_string();
+    let (code, stdout, stderr) = fx.bin(
+        &[
+            "get",
+            "a.zip",
+            "--config",
+            &cfg_s,
+            "--aws-config",
+            &aws_s,
+            "--profile",
+            "family",
+            "--out",
+            &out_s,
+        ],
+        &[],
+    );
+    assert_eq!(
+        code, 0,
+        "get --profile family(--key省略)はfamilyのdecrypt_keyでexit 0: {stdout}{stderr}"
+    );
+    assert_eq!(
+        std::fs::read(out.join("a.zip")).expect("復元file"),
+        b"pipe-select-plain".to_vec(),
+        "復号成果物"
+    );
+
+    // (3) --profile省略: active_profile(dev)側のpipeline profileが使われる
+    // (dev bucketは未書込のため索引は再暗号化されdev鍵へ切り替わる)
+    let b = fx.data_root.join("b.zip");
+    write_file(&b, b"pipe-select-plain-b");
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&b], "b.zip", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "dev(既定)pushはexit 0: {stdout}");
+    let plain = age_decrypt(&fx.age, &index, &dev_sec);
+    assert!(
+        String::from_utf8_lossy(&plain).contains("b.zip"),
+        "索引はdev鍵で復号できる(省略時はactive_profile側のpipeline profile): {}",
+        String::from_utf8_lossy(&plain)
     );
 }

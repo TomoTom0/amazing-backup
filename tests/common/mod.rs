@@ -345,7 +345,8 @@ pub struct StorageFixture {
     /// AMAZING_BACKUP_HOME(TASK-19 XDG配置: 規定path一括上書きの統合root。
     /// pipeline.toml・aws.toml・registry.jsonl・cache/がこの配下へ解決される)
     pub home: PathBuf,
-    /// pipeline.toml(新schema: [layout]/[files]/[metadata]/[behavior]込み)
+    /// pipeline.toml(TASK-7 profile schema: [profiles.dev]配下に
+    /// [layout]/[files]/[metadata]/[behavior]込み+optsの追加profile分)
     pub cfg: PathBuf,
     pub aws_toml: PathBuf,
     /// fake S3 state dir
@@ -390,12 +391,17 @@ pub struct StorageOpts {
     /// [categories]セクション自体を出力しない(TASK-18で[categories]は廃止・
     /// 存在時設定エラー2となるための新体系向け組立。既定false=現行実装向け)
     pub no_categories: bool,
+    /// pipeline.tomlへ[profiles.dev]の他に追加するprofile名列(TASK-7 profile schema。
+    /// aws.tomlを多profile構成へ書き換えるtestで、--profile対象のpipeline profileを
+    /// 用意するため。追加profileはrecipients+verifyのみの最小構成・鍵はdevと同一)
+    pub extra_pipeline_profiles: Vec<String>,
 }
 
 impl Default for StorageOpts {
     fn default() -> Self {
         // TASK-18後の既定: [categories]は廃止(存在時は設定エラー2)のため出力せず、
-        // [aws.lifecycle]3キーは必須のため既定で含める(設計5.15・7章)
+        // [aws.lifecycle]3キーは必須のため既定で含める(設計5.15・7章)。
+        // TASK-7後の既定: pipeline.tomlは[profiles.dev]1profile構成
         StorageOpts {
             storage_class: "STANDARD",
             keep_artifacts: "run",
@@ -405,6 +411,7 @@ impl Default for StorageOpts {
             metadata_section: String::new(),
             aws_lifecycle: aws_lifecycle_toml(180, 10, 7),
             no_categories: true,
+            extra_pipeline_profiles: Vec::new(),
         }
     }
 }
@@ -454,17 +461,25 @@ impl StorageFixture {
         } else {
             format!("keep_artifacts = \"{}\"\n", opts.keep_artifacts)
         };
-        let cfg_body = format!(
-            "[recipients]\npublic_keys = [\"{}\"]\n\
-             [behavior]\nkeep_going = false\n{keep_line}\
-             [verify]\ndecrypt_key = \"{}\"\n\
-             [layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [{roots_toml}]\n\
-             {categories_part}{}{}",
+        // TASK-7(pipeline profile化): 全sectionは[profiles.dev]配下へ。files・metadata・
+        // categories断片はtop-level section header形式のまま渡させるため、ここで
+        // profile配下のheaderへ組み込み直す(aws.tomlのactive_profileは"dev"のため
+        // 既定の実効pipeline profileはdev)
+        let files_part = nest_section_under_profile("dev", &opts.files);
+        let metadata_part = nest_section_under_profile("dev", &opts.metadata_section);
+        let categories_part = nest_section_under_profile("dev", &categories_part);
+        let mut cfg_body = format!(
+            "[profiles.dev.recipients]\npublic_keys = [\"{}\"]\n\
+             [profiles.dev.behavior]\nkeep_going = false\n{keep_line}\
+             [profiles.dev.verify]\ndecrypt_key = \"{}\"\n\
+             [profiles.dev.layout]\nunfiled_category = \"unfiled\"\nauto_path_roots = [{roots_toml}]\n\
+             {categories_part}{files_part}{metadata_part}",
             public.display(),
             secret.display(),
-            opts.files,
-            opts.metadata_section,
         );
+        for name in &opts.extra_pipeline_profiles {
+            cfg_body.push_str(&pipeline_profile_section(name, &public, &secret));
+        }
         let cfg = home.join("pipeline.toml");
         write_file(&cfg, cfg_body.as_bytes());
 
@@ -855,6 +870,32 @@ pub fn storage_aws_toml_body(
     format!(
         "[aws]\nactive_profile = \"dev\"\n\n[aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"{bucket}\"\nregion = \"ap-northeast-1\"\nprefix = \"{prefix}\"\nstorage_class = \"{storage_class}\"\ncredentials_file = \"{}\"\n",
         credentials_file.display()
+    )
+}
+
+/// pipeline.toml断片のtop-level section header([metadata]・[files."x.zip"]等)を
+/// `[profiles.<name>.<section>]`へ組み込み直す(TASK-7 profile化に伴うStorageFixtureの
+/// 組立helper。断片はsection header行とkey行のみで構成される前提=既存testの渡し方)。
+fn nest_section_under_profile(profile: &str, fragment: &str) -> String {
+    let mut out = String::new();
+    for line in fragment.split_inclusive('\n') {
+        if let Some(rest) = line.strip_prefix('[') {
+            out.push_str(&format!("[profiles.{profile}.{rest}"));
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// 1profile分のpipeline.toml断片(TASK-7新schema。recipients+verifyのみの最小構成)。
+/// aws.tomlを多profileへ書き換えたtestで、pipeline側にも同名profileを後付けする際に
+/// 使う(StorageOpts.extra_pipeline_profilesで生成時に足すこともできる)。
+pub fn pipeline_profile_section(name: &str, public: &Path, secret: &Path) -> String {
+    format!(
+        "[profiles.{name}.recipients]\npublic_keys = [\"{}\"]\n[profiles.{name}.verify]\ndecrypt_key = \"{}\"\n",
+        public.display(),
+        secret.display()
     )
 }
 
