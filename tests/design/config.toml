@@ -217,7 +217,7 @@ source = "TASK-9 SDK移行設計 3.3・9.2(tmp/tasks/tm-9/design_sdk_migration.m
 description = "aws.tomlの[aws].credentials_fileキー(credentialファイルpath)は必須キー。pathの相対解決はcwd基準(TASK-19 XDG配置後も維持。--aws-config自体の既定pathはXDG規定path)。キー欠落・空値は設定エラー2(明示的に与えたAPI keyという要件に合致し、書き漏れを即検出) (integration, fake seam)"
 given = "credentials_fileキーを書かないaws.toml・空値を書いたaws.tomlでbackup push実行"
 expect_return_shape = "いずれも exit 2(設定エラー)。S3 API呼び出しは行われない"
-source_lines = "src/config.rs:1724; tests/s3_backend.rs:66"
+source_lines = "src/config.rs:1724; tests/s3_backend.rs:73"
 
 [[condition]]
 id = "config.credentials-file-schema"
@@ -226,7 +226,7 @@ source = "TASK-9 SDK移行設計 3.1・3.2(tmp/tasks/tm-9/design_sdk_migration.m
 description = "credentialファイルschema: [credentials]テーブル配下はaccess_key_id/secret_access_key必須・session_token省略可(一時credential用)・deny_unknown_fields(未知キー拒否)。TOML parse失敗・[credentials]テーブル不在・必須キー欠落・空値・前後空白付き値は設定エラー2。session_token省略時も正常動作する (integration, fake seam)"
 given = "正しい形式(session_token省略)のcredentialファイルと、不正TOML・未知キー・access_key_id欠落・空値・前後空白付き値の各credentialファイルでbackup push実行"
 expect_return_shape = "正しい形式はexit 0(S3 API呼び出しまで到達)。不正系はいずれも exit 2(設定エラー)"
-source_lines = "src/config.rs:1843; tests/s3_backend.rs:90"
+source_lines = "src/config.rs:1843; tests/s3_backend.rs:97"
 
 [[condition]]
 id = "config.credentials-fail-closed"
@@ -235,7 +235,7 @@ source = "TASK-9 SDK移行設計 3.5(tmp/tasks/tm-9/design_sdk_migration.md 3章
 description = "fail-closed: credentials_fileが指すcredentialファイル不在・読込不能は設定エラー2で、credential chain(IMDS/env/~/.aws)へのfallbackは一切行わない(誤って別環境のcredentialで意図しないAWS accountへ接続する事故を構造的に防止) (integration, fake seam)"
 given = "credentials_fileに不在pathを指定したaws.tomlでbackup push実行"
 expect_return_shape = "exit 2(設定エラー)。fallbackせず失敗し、S3 API呼び出しは行われない"
-source_lines = "src/config.rs:1921; src/s3.rs:2051; tests/s3_backend.rs:163"
+source_lines = "src/config.rs:1921; src/s3.rs:2125; tests/s3_backend.rs:170"
 
 [[condition]]
 id = "config.credentials-value-not-leaked"
@@ -244,7 +244,7 @@ source = "TASK-9 SDK移行設計 3.6・12.4(tmp/tasks/tm-9/design_sdk_migration.
 description = "credential値の非露出: 設定エラー時のerror文はcredentialファイルのpathのみを表示し、access_key_id/secret_access_key/session_tokenの値を含まない。正常時・転送エラー時の出力にも値は現れない(SDK呼び出し結果はmap_sdk_errorでBackupError化しunwrap/expect禁止によりpanic経路でもSdkError Debug展開しない) (integration, fake seam)"
 given = "credential値へ一意の検出用文字列を埋め込んだcredentialファイルで、設定エラー(schema違反)となるbackup push実行と、fake seamで正常完了するbackup push実行・失敗注入(FAKE_S3_FAIL_CP_FOR)で転送エラーとなる実行"
 expect_return_shape = "いずれの実行のstdout/stderrにも検出用文字列(credential値)が現れない"
-source_lines = "tests/s3_backend.rs:193"
+source_lines = "tests/s3_backend.rs:200"
 
 [[condition]]
 id = "config.layout-and-categories-validation"
@@ -379,7 +379,7 @@ source = "tmp/tasks/tm-7/design_pipeline_profile.md D-1(profile名規則はcateg
 description = "pipeline profile名の規則は ^[a-z0-9][a-z0-9-]{0,63}$。違反(大文字・先頭ハイフン・アンダースコア・64文字超)は設定エラー2。この検証は第1層(deserialize時に全profile一括)のため未選択profileの違反でも弾く(違反profile名がerror文に現れる) (integration)"
 given = "違反名プロファイル(BadName・-lead・a_b・64文字超)と適合名(63文字・dev-2)を[profiles.<name>]へ置いたpipeline.tomlでの backup push --dry-run 実行"
 expect_return_shape = "違反名は exit 2(error文に違反profile名を含む)。適合名は受理される"
-source_lines = "tests/config_storage.rs:407"
+source_lines = "tests/config_storage.rs:410"
 
 [[condition]]
 id = "config.aws-profile-name-validated"
@@ -388,7 +388,7 @@ source = "tmp/tasks/tm-7/design_pipeline_profile.md 2.9項目6(aws名規則導�
 description = "aws.tomlのprofile名([aws.profiles.<name>]のkey・active_profile・--profile/env指定値)にもpipelineと同一の名前規則 ^[a-z0-9][a-z0-9-]{0,63}$ を適用する。違反名は設定エラー2(既存のdev/family/baked/ataraは適合。規則違反名を持つ既存環境は改名が必要=破壊的変更は§5明記どおり) (integration)"
 given = "active_profileと[aws.profiles.BadName]を含むaws.tomlでの backup push --dry-run 実行と、--profile BadName指定の list files 実行"
 expect_return_shape = "いずれも exit 2(error文に違反profile名を含む)。--profile違反名はS3 API呼び出し前に検出される"
-source_lines = "tests/config_storage.rs:452"
+source_lines = "tests/config_storage.rs:455"
 
 [[condition]]
 id = "config.pipeline-validation-layered"
@@ -397,7 +397,7 @@ source = "tmp/tasks/tm-7/design_pipeline_profile.md D-1(検証の2層化)・3章
 description = "pipeline.tomlの検証は2層: 第1層(全profile一括・deserialize時に適用)=TOML parse・未知key拒否・型不一致・profile名規則。第2層(選択profileのみ)=[recipients]必須・空配列拒否・鍵fileの存在・ed25519形式検証・指紋重複。未選択profileの鍵pathの実在性は検証しない(存在しないdummy鍵path・同一path重複を未選択profileに置ける=移行途中・検証環境構成の妨げにならない) (integration)"
 given = "未選択profile([profiles.family])に未知keyを置いたpipeline.tomlでのdry-run、および未選択profileのrecipientsへ存在しないdummy鍵pathを重複列挙したpipeline.tomlでのdry-run"
 expect_return_shape = "未選択profileの未知keyは exit 2(第1層・error文に未知キー名)。未選択profileのdummy鍵path・重複は exit 0(第2層は選択profileのみ)"
-source_lines = "tests/config_storage.rs:481"
+source_lines = "tests/config_storage.rs:484"
 
 [[condition]]
 id = "config.pipeline-profile-required-for-effective-profile"
@@ -406,7 +406,7 @@ source = "tmp/tasks/tm-7/design_pipeline_profile.md D-1(緩いかんおう)・D-
 description = "実効aws profile名に対応する[profiles.<name>]がpipeline.tomlに無い場合は設定エラー2(利用可能なpipeline profile一覧をerror文に表示)。照会系(pipeline.tomlが在るが実効profileのentryが無い)でも「pipeline.toml無し」と同様の--key救済はせず設定エラー2(タイポの握りつぶし防止)。pipeline.tomlが単一profileでも名前一致は必須 (integration)"
 given = "pipeline.tomlに[profiles.family]のみ置いた(実効aws profile=devのentryが無い)状態での backup push --dry-run と list files(--key指定)の各実行"
 expect_return_shape = "いずれも exit 2+利用可能profile一覧(family)の表示。S3 API呼び出しは行われない"
-source_lines = "tests/config_storage.rs:527"
+source_lines = "tests/config_storage.rs:533"
 
 [[condition]]
 id = "config.pipeline-extra-profiles-ignored"
@@ -415,7 +415,7 @@ source = "tmp/tasks/tm-7/design_pipeline_profile.md D-1・2.9項目4(余分profi
 description = "pipeline.tomlにaws.toml側へ存在しない余分なprofileがあっても、選択されない限りエラーとしない(第1層の構文・schema検証は及ぶ=config.pipeline-validation-layered。完全一致強制はaws.tomlへ使用しないprofileを置く自由を失わせるため選択時検証に緩める) (integration)"
 given = "[profiles.dev](選択)に加えaws.tomlへ存在しない[profiles.spare](schema適合・dummy鍵path)を置いたpipeline.tomlでの backup push --dry-run 実行"
 expect_return_shape = "exit 0(余分profileは選択されない限りエラーにしない)"
-source_lines = "tests/config_storage.rs:561"
+source_lines = "tests/config_storage.rs:570"
 
 [[condition]]
 id = "config.pipeline-legacy-format-migration-error"
@@ -424,7 +424,7 @@ source = "tmp/tasks/tm-7/design_pipeline_profile.md D-2・2.9項目2(専用error
 description = "旧top-level形式(現行schema)のpipeline.tomlは専用の移行案内errorで設定エラー2: 「旧形式です。各sectionを[profiles.<実効profile名>]配下へ移動してください」+該当section名。案内のprofile名は[aws].active_profileの記述値でなく解決済みの実効profile名(--profile/env/purpose解決後)。旧sectionが1つでもtop-levelに残っていれば[profiles]併存時でも同一の案内error(部分的な移行状態を許さない)。この判定は--configで指定する任意fileにも同じく適用される([output]/[categories]廃止と同じく旧形式の併存許容はしない) (integration)"
 given = "(a)旧6section形式のpipeline.tomlでのdry-run (b)[profiles.dev]構成にtop-level [behavior]を残した併存状態でのdry-run (c)旧形式fileを--configで明示指定したdry-run"
 expect_return_shape = "いずれも exit 2+移行案内(「旧形式」の語+実効profile名[profiles.dev+該当section名を含む)"
-source_lines = "tests/config_storage.rs:584"
+source_lines = "tests/config_storage.rs:593"
 
 [[condition]]
 id = "config.repo-pipeline-file-profile-schema"
@@ -442,7 +442,7 @@ source = "tmp/tasks/tm-7/design_pipeline_profile.md D-7・2.9項目8(stderr警�
 description = "aws.tomlで複数profileが同一bucketを参照する場合はstderrへ警告+処理継続(exit 0。現行のdev+prod3bucket構成=別bucket構成では発火しない)。警告が検出できるのは同一aws.toml内のbucket重複のみで、同一profileでの鍵変更・別のaws設定fileからの書込みは検出できない(警告はrecipient不一致の証明でも網羅的防止でもなく、最終検知はrecipient指紋表示=cli.backup-push-recipient-fingerprints-shownに依存) (integration)"
 given = "同一bucket(it-bucket)を2profile(dev/backup2)が参照するaws.tomlでの backup push --dry-run と、別bucketの通常構成でのdry-run"
 expect_return_shape = "同一bucket構成は exit 0+stderrへ同一bucket警告表示。別bucket構成は警告なし"
-source_lines = "tests/config_storage.rs:665"
+source_lines = "tests/config_storage.rs:674"
 
 [[excluded]]
 item = "pipeline.tomlへのschema version field導入"

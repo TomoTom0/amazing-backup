@@ -401,7 +401,10 @@ fn pipeline_profiles_schema_accepted() {
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"profile-schema-plain");
     let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
-    assert_eq!(code, 0, "profile schema構成は受理されdry-runはexit 0: {stderr}");
+    assert_eq!(
+        code, 0,
+        "profile schema構成は受理されdry-runはexit 0: {stderr}"
+    );
 }
 
 /// [covers:config.pipeline-profile-name-validated]
@@ -416,12 +419,12 @@ fn pipeline_profile_name_validated() {
     let over64 = "x".repeat(65);
     let max63 = "x".repeat(63);
     let cases: &[(&str, i32)] = &[
-        ("BadName", 2),   // 大文字
-        ("-lead", 2),     // 先頭ハイフン
-        ("a_b", 2),       // アンダースコア
+        ("BadName", 2),       // 大文字
+        ("-lead", 2),         // 先頭ハイフン
+        ("a_b", 2),           // アンダースコア
         (over64.as_str(), 2), // 64文字超
         (max63.as_str(), 0),  // 63文字は適合(未選択でもschema検査は通る)
-        ("dev-2", 0),     // 小文字+数字+ハイフン
+        ("dev-2", 0),         // 小文字+数字+ハイフン
     ];
     for (i, (name, want)) in cases.iter().enumerate() {
         let Some(fx) = StorageFixture::new(&format!("cfg-prof-name-{i}"), StorageOpts::default())
@@ -498,7 +501,10 @@ fn pipeline_validation_is_layered() {
     let a = fx.data_root.join("a.zip");
     write_file(&a, b"layer1-plain");
     let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
-    assert_eq!(code, 2, "未選択profileの未知keyは設定エラー2(第1層): {stderr}");
+    assert_eq!(
+        code, 2,
+        "未選択profileの未知keyは設定エラー2(第1層): {stderr}"
+    );
     assert!(
         stderr.contains("unknown_key"),
         "未知キー名がerror文に現れる: {stderr}"
@@ -543,18 +549,21 @@ fn pipeline_profile_required_for_effective_profile() {
     write_file(&a, b"prof-missing-plain");
     // (a) 書き込み系(backup push)
     let (code, _stdout, stderr) = fx.push(&[&a], &["--dry-run"], &[]);
-    assert_eq!(code, 2, "実効profile(dev)のentry不在は設定エラー2: {stderr}");
+    assert_eq!(
+        code, 2,
+        "実効profile(dev)のentry不在は設定エラー2: {stderr}"
+    );
     assert!(
         stderr.contains("family"),
         "利用可能なpipeline profile一覧(family)がerror文に表示される: {stderr}"
     );
     // (b) 照会系(list files)でも--key救済は無く設定エラー2
     let (code, _stdout, stderr) = fx.list("files", &[]);
-    assert_eq!(code, 2, "照会系でも実効profileのentry不在は設定エラー2: {stderr}");
-    assert!(
-        stderr.contains("family"),
-        "照会系でも一覧表示: {stderr}"
+    assert_eq!(
+        code, 2,
+        "照会系でも実効profileのentry不在は設定エラー2: {stderr}"
     );
+    assert!(stderr.contains("family"), "照会系でも一覧表示: {stderr}");
     assert_eq!(fx.calls(), "", "S3 API呼び出しは行われない: {}", fx.calls());
 }
 

@@ -4,7 +4,7 @@
 //! (dev初期化でregistryごと消えるため互換層は不要)。
 
 use crate::errors::{BackupError, BackupResult};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// `record_type: "encrypt"`のレコード(旧経路の管理event。schema不変)。
@@ -533,6 +533,197 @@ pub fn load_registry(path: &Path) -> BackupResult<Vec<Record>> {
     Ok(records)
 }
 
+/// reset --applyのregistry行分離結果(TASK-25 2.2)。`keep`・`remove`とも元の行文字列
+/// のまま(行順保持。Record経由の再serializeは未知record_type行を落とすため不採用)。
+/// 計上値(除去行数・残行数)は`remove.len()`・`keep.len()`が正本。
+#[derive(Debug)]
+pub(crate) struct ResetRemoval {
+    /// 温存行(他bucket宛・共有uuidのfile_write・crash残存file_write・prune/sweep系・
+    /// 未知record_type等)
+    pub(crate) keep: Vec<String>,
+    /// 除去行(当該bucket由来行)
+    pub(crate) remove: Vec<String>,
+}
+
+/// registry全行の読込(reset再書込用・TASK-25 2.2): 各行を元の文字列のまま返す。
+/// 改行終端しない最終行はtorn writeとして除外し`torn_tail_present=true`を返す
+/// (load_registryと同解釈。退避の全体copyに残るため証跡喪失なし)。
+/// 読込error取扱いもload_registryと同一(不在のみ空・UTF-8違反やread errorはProcess error)。
+pub(crate) fn read_registry_lines(path: &Path) -> BackupResult<(Vec<String>, bool)> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), false)); // 不在は空(呼び出し側は退避・再書込ともskip)
+        }
+        Err(e) => {
+            return Err(BackupError::Process(format!(
+                "registryを読めない ({}) : {e}",
+                path.display()
+            )));
+        }
+    };
+    if bytes.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    let text = String::from_utf8(bytes).map_err(|e| {
+        BackupError::Process(format!("registryがUTF-8でない ({}): {e}", path.display()))
+    })?;
+    // 改行終端でない最終行はtorn writeとして除外(呼び出し側の再書込で破棄)
+    let (body, torn_tail_present) = if text.ends_with('\n') {
+        (&text[..text.len() - 1], false)
+    } else {
+        match text.rfind('\n') {
+            Some(pos) => (&text[..pos], true),
+            None => ("", true),
+        }
+    };
+    let lines: Vec<String> = if body.is_empty() {
+        Vec::new()
+    } else {
+        body.split('\n').map(str::to_string).collect()
+    };
+    Ok((lines, torn_tail_present))
+}
+
+/// reset --applyのregistry除去判定(TASK-25 2.2・pure関数)。
+/// 行単位のserde_json::Value判定+元行のまま保持(出力への再serializeは不採用)。
+/// 既知record_typeの行は対応structへdeserializeして検証し、違反はload_registryと
+/// 同様に行番号付きProcess errorでreset中止(未知fieldはdeny_unknown_fieldsで検出)。
+/// 未知record_typeの行は温存(load_registryの「未知は警告のうえ無視」を書換でも再現)。
+/// 2-pass必須: Pass 1でfile_uploadのuuidを対象/非対象bucket集合へ収集し(file_writeは
+/// file_uploadより先に記録されるため順序非依存にする)、Pass 2でfile_writeの除去を確定
+/// する。対象bucket宛のfile_upload行はuuid共有(非対象bucketにもuploadされたuuid)に
+/// 関わらず全て除去する(reset --applyがS3実体を削除するため、記録を温存すると
+/// registry-only skip(src/storage/backup.rs)が実在しないobjectを参照し続ける。
+/// 共有uuidの非対象bucket側所在情報は非対象bucket宛行の温存で保持される)。
+pub(crate) fn partition_reset_removal(
+    lines: Vec<String>,
+    bucket: &str,
+    canonical: &str,
+) -> BackupResult<ResetRemoval> {
+    let matched = |record_bucket: &str| record_bucket_matched(record_bucket, bucket, canonical);
+    let mut remove_flags = vec![false; lines.len()];
+    let mut target_uuids: HashSet<String> = HashSet::new();
+    let mut other_uuids: HashSet<String> = HashSet::new();
+    // Pass 2へ持ち越す行(uuid収集完了後に除去確定)
+    let mut matched_uploads: Vec<usize> = Vec::new();
+    let mut file_writes: Vec<(usize, String)> = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        let lineno = idx + 1;
+        if line.trim().is_empty() {
+            continue; // 空行は温存(元行のまま)
+        }
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| BackupError::Process(format!("registryの{lineno}行目が不正JSON : {e}")))?;
+        let record_type = value
+            .get("record_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        match record_type {
+            "file_upload" => {
+                let rec: FileUploadRecord = parse_known(value, lineno, "file_upload")?;
+                if matched(&rec.s3_bucket) {
+                    // 対象bucket宛はuuid共有に関わらず除去(S3実体削除と整合)
+                    matched_uploads.push(idx);
+                    target_uuids.insert(rec.uuid.clone());
+                } else {
+                    other_uuids.insert(rec.uuid.clone());
+                }
+            }
+            "upload" => {
+                let rec: UploadRecord = parse_known(value, lineno, "upload")?;
+                if matched(&rec.s3_bucket) {
+                    remove_flags[idx] = true;
+                }
+            }
+            "manifest_upload" => {
+                let rec: ManifestUploadRecord = parse_known(value, lineno, "manifest_upload")?;
+                if matched(&rec.s3_bucket) {
+                    remove_flags[idx] = true;
+                }
+            }
+            "file_write" => {
+                let rec: FileWriteRecord = parse_known(value, lineno, "file_write")?;
+                file_writes.push((idx, rec.uuid));
+            }
+            "manifest" => {
+                let rec: ManifestV2Record = parse_known(value, lineno, "manifest")?;
+                if matched(&rec.s3_bucket) {
+                    remove_flags[idx] = true;
+                }
+            }
+            "index_upload" => {
+                let rec: IndexUploadRecord = parse_known(value, lineno, "index_upload")?;
+                if matched(&rec.s3_bucket) {
+                    remove_flags[idx] = true;
+                }
+            }
+            "pin_write" => {
+                let rec: PinWriteRecord = parse_known(value, lineno, "pin_write")?;
+                if matched(&rec.s3_bucket) {
+                    remove_flags[idx] = true;
+                }
+            }
+            "pin_remove" => {
+                let rec: PinRemoveRecord = parse_known(value, lineno, "pin_remove")?;
+                if matched(&rec.s3_bucket) {
+                    remove_flags[idx] = true;
+                }
+            }
+            "encrypt" => {
+                let _: EncryptRecord = parse_known(value, lineno, "encrypt")?;
+            }
+            "prune" => {
+                let _: PruneRecord = parse_known(value, lineno, "prune")?;
+            }
+            "sweep" => {
+                let _: SweepRecord = parse_known(value, lineno, "sweep")?;
+            }
+            "location_remove" => {
+                let _: LocationRemoveRecord = parse_known(value, lineno, "location_remove")?;
+            }
+            _ => {} // 未知record_typeは温存(行のまま)
+        }
+    }
+    // Pass 2: 対象bucket宛file_upload行はuuid共有に関わらず全て除去(reset --applyは
+    // S3実体を削除するため、記録残存はregistry-only skip(backup.rs)との不整合。
+    // 共有uuidの非対象bucket側所在情報は非対象bucket宛行が保持)。
+    // file_writeは対象bucketのみにuploadされたuuid(=他bucketでuploadが残るuuidの
+    // 再利用・crash残存)のみ除去。
+    for idx in matched_uploads {
+        remove_flags[idx] = true;
+    }
+    for (idx, uuid) in file_writes {
+        if target_uuids.contains(&uuid) && !other_uuids.contains(&uuid) {
+            remove_flags[idx] = true;
+        }
+    }
+    let mut keep = Vec::new();
+    let mut remove = Vec::new();
+    for (idx, line) in lines.into_iter().enumerate() {
+        if remove_flags[idx] {
+            remove.push(line);
+        } else {
+            keep.push(line);
+        }
+    }
+    Ok(ResetRemoval { keep, remove })
+}
+
+/// 既知record_type行のschema検証(partition_reset_removal用・load_registryと同等の
+/// 行番号付きProcess error。pathは呼び出し側文脈で付与しないため行番号のみ)。
+fn parse_known<T: serde::de::DeserializeOwned>(
+    value: serde_json::Value,
+    lineno: usize,
+    record_type: &str,
+) -> BackupResult<T> {
+    serde_json::from_value(value).map_err(|e| {
+        BackupError::Process(format!(
+            "registryの{lineno}行目の{record_type}記録がschema違反 : {e}"
+        ))
+    })
+}
+
 /// reduce規則の適用。
 pub fn reduce_records(records: &[Record]) -> Reduced {
     let mut reduced = Reduced::default();
@@ -1053,5 +1244,276 @@ mod tests {
         assert_eq!(entity_title(&reduced, "u1").as_deref(), Some("B"));
         assert_eq!(entity_title(&reduced, "u2").as_deref(), Some("X"));
         assert_eq!(entity_title(&reduced, "u3"), None);
+    }
+
+    /// TASK-25 2.2: partition_reset_removalの行分離判定(混在行・未知record_type・
+    /// 旧upload無uuid・共有uuid)。対象bucket(dev)由来のupload系記録と対象bucketのみに
+    /// uploadされたuuidのfile_writeは除去し、他bucket宛行・共有uuidのfile_uploadと
+    /// file_write・crash残存file_write(対応upload無し)・prune/sweep/location_remove・
+    /// 旧encrypt・未知record_type行は温存する(行順保持)。
+    #[test]
+    fn partition_reset_removal_rules() {
+        let fu = |uuid: &str, bucket: &str| {
+            serde_json::to_string(&FileUploadRecord {
+                schema: 2,
+                record_type: "file_upload".into(),
+                recorded_at: "2026-10-26T10:00:00+09:00".into(),
+                batch_id: "20261026-abcdef01".into(),
+                version_ts: "2026-10-26T10:00:00+09:00".into(),
+                uuid: uuid.into(),
+                title: "t".into(),
+                s3_key: format!("amazing-backup/data/{uuid}/default.age"),
+                s3_bucket: bucket.into(),
+                s3_region: "r".into(),
+                version_id: format!("vid-{uuid}"),
+                s3_size: 1,
+                s3_checksum_sha256: "c".into(),
+                s3_checksum_type: "FULL_OBJECT".into(),
+                source_sha256: "s".into(),
+                age_sha256: "a".into(),
+                source_size: 1,
+                age_size: 1,
+                uploaded_at: "u".into(),
+            })
+            .unwrap()
+        };
+        let fw = |uuid: &str| {
+            serde_json::to_string(&FileWriteRecord {
+                schema: 3,
+                record_type: "file_write".into(),
+                recorded_at: "2026-10-26T09:00:00+09:00".into(),
+                batch_id: "20261026-abcdef01".into(),
+                batch_date: "2026-10-26".into(),
+                uuid: uuid.into(),
+                title: "t".into(),
+                source_path: format!("/p/{uuid}"),
+                source_name: "a.zip".into(),
+                source_size: 1,
+                source_mtime: "m".into(),
+                source_sha256: "s".into(),
+                age_path: "a".into(),
+                age_size: 1,
+                age_sha256: "x".into(),
+                recipients: vec![],
+                category: "c".into(),
+                label: "".into(),
+                identity_hash: format!("i{uuid}"),
+                s3_key: format!("amazing-backup/data/{uuid}/default.age"),
+            })
+            .unwrap()
+        };
+        let manifest = |bucket: &str| {
+            serde_json::to_string(&ManifestV2Record {
+                schema: 1,
+                record_type: "manifest".into(),
+                recorded_at: "2026-10-26T10:00:00+09:00".into(),
+                batch_id: "20261026-abcdef01".into(),
+                s3_key: "amazing-backup/sys/manifests/x".into(),
+                s3_bucket: bucket.into(),
+                s3_region: "r".into(),
+                version_id: "v".into(),
+                s3_size: 1,
+                s3_checksum_sha256: "c".into(),
+                s3_checksum_type: "FULL_OBJECT".into(),
+                uploaded_at: "u".into(),
+            })
+            .unwrap()
+        };
+        let index_upload = |bucket: &str| {
+            serde_json::to_string(&IndexUploadRecord {
+                schema: 1,
+                record_type: "index_upload".into(),
+                recorded_at: "2026-10-26T10:00:00+09:00".into(),
+                run_id: "run1".into(),
+                s3_key: "amazing-backup/sys/index.age".into(),
+                s3_bucket: bucket.into(),
+                version_id: "v".into(),
+                s3_size: 1,
+                s3_checksum_sha256: "c".into(),
+                s3_checksum_type: "FULL_OBJECT".into(),
+                uploaded_at: "u".into(),
+            })
+            .unwrap()
+        };
+        let pin_write = |bucket: &str| {
+            serde_json::to_string(&PinWriteRecord {
+                schema: 2,
+                record_type: "pin_write".into(),
+                recorded_at: "2026-10-26T10:00:00+09:00".into(),
+                uuid: "u".into(),
+                pin: "weekly".into(),
+                pin_s3_key: "amazing-backup/data/u/weekly.age".into(),
+                source_s3_key: "amazing-backup/data/u/default.age".into(),
+                source_version_id: "v".into(),
+                date: "2026-10-26".into(),
+                source_sha256: "s".into(),
+                age_sha256: "a".into(),
+                source_size: 1,
+                s3_bucket: bucket.into(),
+                s3_size: 1,
+                s3_checksum_sha256: "c".into(),
+                uploaded_at: "u".into(),
+            })
+            .unwrap()
+        };
+        let pin_remove = |bucket: &str| {
+            serde_json::to_string(&PinRemoveRecord {
+                schema: 2,
+                record_type: "pin_remove".into(),
+                recorded_at: "2026-10-26T10:00:00+09:00".into(),
+                uuid: "u".into(),
+                pin: "weekly".into(),
+                pin_s3_key: "amazing-backup/data/u/weekly.age".into(),
+                s3_bucket: bucket.into(),
+            })
+            .unwrap()
+        };
+        // 旧upload(uuid無し)・旧manifest_upload: bucket一致で除去/温存(紐付け不要)
+        let mut legacy_upload = upload_rec("2026-10-01/a.zip.age", "2026-10-01/a.zip.age", "c");
+        legacy_upload.s3_bucket = "dev-bucket".into();
+        let mut legacy_manifest_upload = manifest_upload_rec("m", "mk");
+        legacy_manifest_upload.s3_bucket = "prod-bucket".into();
+        let prune = "{\"schema\":2,\"record_type\":\"prune\",\"recorded_at\":\"2026-10-26T09:00:00+09:00\",\"deleted\":[{\"s3_key\":\"k\",\"version_id\":\"v1\"}]}".to_string();
+        let sweep = "{\"schema\":1,\"record_type\":\"sweep\",\"recorded_at\":\"2026-10-26T09:00:00+09:00\",\"reason\":\"lifecycle\",\"deleted\":[{\"s3_key\":\"k\",\"version_id\":\"v1\"}]}".to_string();
+        let location_remove = "{\"schema\":1,\"record_type\":\"location_remove\",\"recorded_at\":\"2026-10-26T09:00:00+09:00\",\"uuid\":\"u\",\"identity_hash\":\"abcd0001\",\"source_path\":\"/p\"}".to_string();
+        let encrypt = serde_json::to_string(&encrypt_rec(
+            "2026-10-01/a.zip.age",
+            "/data/a.zip",
+            "2026-10-01",
+        ))
+        .unwrap();
+        let unknown =
+            "{\"schema\":99,\"record_type\":\"future_event\",\"detail\":\"x\"}".to_string();
+
+        let dev_uuid = "dddddddd-0000-7000-8000-000000000001";
+        let prod_uuid = "pppppppp-0000-7000-8000-000000000002";
+        let shared_uuid = "ssssssss-0000-7000-8000-000000000003";
+        let crash_uuid = "cccccccc-0000-7000-8000-000000000004";
+        let empty_bucket_uuid = "eeeeeeee-0000-7000-8000-000000000005";
+        let lines = vec![
+            fw(dev_uuid),                                   // 除去(dev uuid・対象bucketのみ)
+            fu(dev_uuid, "dev-bucket"),                     // 除去
+            fu(empty_bucket_uuid, ""),                      // 除去(s3_bucket欠損=正本bucket相当)
+            manifest("dev-bucket"),                         // 除去
+            index_upload("dev-bucket"),                     // 除去
+            pin_write("dev-bucket"),                        // 除去
+            pin_remove("dev-bucket"),                       // 除去
+            serde_json::to_string(&legacy_upload).unwrap(), // 除去(旧upload・uuid無し)
+            fu(prod_uuid, "prod-bucket"),                   // 温存(他bucket宛)
+            fw(prod_uuid),                                  // 温存(非対象bucket uuid)
+            fu(shared_uuid, "prod-bucket"),                 // 温存(他bucket宛)
+            fu(shared_uuid, "dev-bucket"),                  // 除去(対象bucket宛はuuid共有でも)
+            fw(shared_uuid),                                // 温存(共有uuidのfile_write)
+            fw(crash_uuid),                                 // 温存(crash残存)
+            serde_json::to_string(&legacy_manifest_upload).unwrap(), // 温存(旧・他bucket宛)
+            prune.clone(),                                  // 温存
+            sweep.clone(),                                  // 温存
+            location_remove.clone(),                        // 温存
+            encrypt.clone(),                                // 温存
+            unknown.clone(),                                // 温存(未知record_type)
+        ];
+        let removed = vec![
+            fw(dev_uuid),
+            fu(dev_uuid, "dev-bucket"),
+            fu(empty_bucket_uuid, ""),
+            manifest("dev-bucket"),
+            index_upload("dev-bucket"),
+            pin_write("dev-bucket"),
+            pin_remove("dev-bucket"),
+            serde_json::to_string(&legacy_upload).unwrap(),
+            fu(shared_uuid, "dev-bucket"),
+        ];
+        let kept = vec![
+            fu(prod_uuid, "prod-bucket"),
+            fw(prod_uuid),
+            fu(shared_uuid, "prod-bucket"),
+            fw(shared_uuid),
+            fw(crash_uuid),
+            serde_json::to_string(&legacy_manifest_upload).unwrap(),
+            prune,
+            sweep,
+            location_remove,
+            encrypt,
+            unknown,
+        ];
+        let p = partition_reset_removal(lines, "dev-bucket", "dev-bucket").expect("行分離");
+        assert_eq!(p.remove, removed, "除去=対象bucket由来行(行順保持)");
+        assert_eq!(
+            p.keep, kept,
+            "温存=他bucket宛・共有uuidのfile_write・crash残存等(行順保持)"
+        );
+    }
+
+    /// TASK-25 2.2: partition_reset_removalのschema検証。不正JSON行と既知record_typeの
+    /// schema違反(未知field等)はload_registryと同様に行番号付きProcess errorで中断。
+    #[test]
+    fn partition_reset_removal_rejects_bad_lines() {
+        let good = serde_json::to_string(&upload_rec("p", "k", "c")).unwrap();
+        // 不正JSON行(2行目)
+        let e = partition_reset_removal(
+            vec![good.clone(), "not-json-at-all".to_string()],
+            "test-bucket",
+            "test-bucket",
+        )
+        .unwrap_err();
+        match &e {
+            BackupError::Process(msg) => {
+                assert!(
+                    msg.contains("2行目") && msg.contains("不正JSON"),
+                    "行番号付きの不正JSONエラー: {msg}"
+                );
+            }
+            other => panic!("期待した区分はProcess、実際は {other:?}"),
+        }
+        assert_eq!(e.exit_code(), 4);
+        // 既知record_typeのschema違反(deny_unknown_fieldsで未知fieldを検出・3行目)
+        let mut v: serde_json::Value = serde_json::from_str(&good).unwrap();
+        v["extra_field"] = serde_json::json!(1);
+        let e = partition_reset_removal(vec![good, v.to_string()], "test-bucket", "test-bucket")
+            .unwrap_err();
+        match &e {
+            BackupError::Process(msg) => {
+                assert!(
+                    msg.contains("2行目") && msg.contains("schema違反"),
+                    "行番号付きのschema違反エラー: {msg}"
+                );
+            }
+            other => panic!("期待した区分はProcess、実際は {other:?}"),
+        }
+    }
+
+    /// TASK-25 2.2: read_registry_linesのtorn tail検出。改行終端しない最終行は
+    /// 除外してtorn_tail_present=trueを返す(退避の全体copyに残るため証跡喪失なし)。
+    #[test]
+    fn read_registry_lines_detects_torn_tail() {
+        let tmp = TempDir::new("reg-reset-lines");
+        let reg = tmp.path().join("registry.jsonl");
+
+        // 不在は空・torn無し
+        assert_eq!(
+            read_registry_lines(&reg).expect("不在registry"),
+            (Vec::<String>::new(), false)
+        );
+        // 改行終端する2行: torn無し
+        write_file(&reg, b"{\"a\":1}\n{\"b\":2}\n");
+        assert_eq!(
+            read_registry_lines(&reg).expect("読込"),
+            (
+                vec!["{\"a\":1}".to_string(), "{\"b\":2}".to_string()],
+                false
+            )
+        );
+        // 末尾に改行終端しないtorn行: 除外してtorn_tail_present=true
+        write_file(&reg, b"{\"a\":1}\n{\"schema\":2,\"record_type\":\"file_up");
+        assert_eq!(
+            read_registry_lines(&reg).expect("torn writeは読込errorにしない"),
+            (vec!["{\"a\":1}".to_string()], true)
+        );
+        // 全体がtorn(改行なし1行のみ): 0行・torn_tail_present=true
+        write_file(&reg, b"torn-only");
+        assert_eq!(
+            read_registry_lines(&reg).expect("全体tornも読込errorにしない"),
+            (Vec::<String>::new(), true)
+        );
     }
 }

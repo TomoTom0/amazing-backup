@@ -68,7 +68,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-003(規則は4.1注�
 description = "registryの不正JSON行を検出。改行終端でない最終行はtorn writeとして警告のうえ除外され処理継続する (unit)"
 given = "不正JSON行を含むregistryと、改行終端しない最終行(torn write)を含むregistry"
 expect_return_shape = "不正JSON行は行番号付きでProcessError、torn write最終行は警告のうえ除外され残り行の読込が継続する"
-source_lines = "src/registry.rs:788"
+source_lines = "src/registry.rs:979"
 
 [[condition]]
 id = "verify.checksum-detects-mutation"
@@ -113,7 +113,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-008(2.4)。TASK-11(P
 description = "backup verify はローカル整合検査だがaws.tomlは必須(実効profile名の解決にload_aws_profileを流用=aws側解決chain(env・purpose・active_profile)と同一にし、verify経路での交叉事故を構造的に起こさないため)。aws.toml不在は設定エラー2。credentialファイルの実在は不要(load_aws_profileはcredentials_fileの非空検査までで、file存在検査はS3書き込み系のrequire_ready/load_credentialsが担う)。S3接続なし・秘密値非取扱いは不変(idは付与後不変のためruns-without-awsのまま) (integration, fake seam)"
 given = "AMAZING_BACKUP_HOME配下にpipeline.toml・registry.jsonlのみでaws.tomlを置かない環境での backup verify と、credentials_fileに不在pathを指定したaws.tomlでの backup verify の各実行"
 expect_return = "前者はexit code 2(aws.toml必須の設定エラー)。後者はcredentialファイル不在でも構造検査が完結しexit code 0"
-source_lines = "src/cli.rs:1075; tests/storage_backup.rs:1963"
+source_lines = "src/cli.rs:1075; tests/storage_backup.rs:1968"
 
 [[condition]]
 id = "verify.unknown-record-type-skipped"
@@ -122,7 +122,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-009(規則は4.1注�
 description = "registry内の未知record_type行は警告のうえ無視され読込が継続する(将来のschema追加への前方互換。Phase A以降の既知種は旧3種(encrypt/upload/manifest_upload)+新種(file_write/file_upload/manifest/index_upload/pin_write/pin_remove/prune)等の増加を含む) (unit)"
 given = "未知record_typeの行を既知レコードに混在させたregistry"
 expect_return_shape = "未知record_typeの行は警告表示のうえ結果から除外され、残り行の読込・reduceは継続する(読込エラーとならない)"
-source_lines = "src/registry.rs:824"
+source_lines = "src/registry.rs:1015"
 
 [[condition]]
 id = "verify.registry-read-error-propagates"
@@ -131,7 +131,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-010(2026-10-08レビ
 description = "registry読込のread errorは ErrorKind::NotFound のみ「空」として扱い、他のread error(directory指定によるEISDIR・権限不足等)はProcessエラーとして伝播する(初回実行以外の読込失敗を黙って空扱いにしない) (unit)"
 given = "registry pathに実fileでないpath(directory)を指定した読込"
 expect_throw = "ProcessError(exit code 4)。ファイル不在(NotFound)のみ空配列を返す"
-source_lines = "src/registry.rs:762"
+source_lines = "src/registry.rs:953"
 
 [[condition]]
 id = "verify.roundtrip-env-error-exit-2"
@@ -140,7 +140,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 VER-011(2026-10-08レビ
 description = "backup verify --roundtrip はroundtrip開始前に秘密鍵ファイルの存在とageバイナリを事前検査し、不在なら設定・環境エラー2で即終了する(対象ファイルごとの復号失敗に紛れて検証エラー4とならない) (unit)"
 given = "秘密鍵ファイルが不在の状態、およびageバイナリがPATH上に無い状態での backup verify --roundtrip 実行"
 expect_return = "exit code 2(設定・環境エラー)"
-source_lines = "src/cli.rs:1157"
+source_lines = "src/cli.rs:1161"
 
 [[condition]]
 id = "verify.decrypt-error-includes-age-stderr"

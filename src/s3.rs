@@ -291,12 +291,7 @@ impl RealS3 {
                 .await
             {
                 Ok(resp) => {
-                    parts.push(
-                        aws_sdk_s3::types::CompletedPart::builder()
-                            .part_number(part_number)
-                            .e_tag(resp.e_tag().map(str::to_string).unwrap_or_default())
-                            .build(),
-                    );
+                    parts.push(Self::completed_part(part_number, &resp));
                 }
                 Err(err) => {
                     self.abort_multipart_best_effort(bucket, key, &upload_id)
@@ -320,9 +315,43 @@ impl RealS3 {
             .multipart_upload(completed)
             .send()
             .await
-            .map_err(|err| map_sdk_error("CompleteMultipartUpload", bucket, key, err))?;
+            .map_err(|err| {
+                // 診断詳細化(TASK-26): SdkError::ServiceErrorはDisplayが「service error」止まりのため
+                // code/message/http statusを抽出する。恒久実装はTASK-26で全操作へ統合する
+                let mut detail = err.to_string();
+                if let aws_smithy_runtime_api::client::result::SdkError::ServiceError(se) = &err {
+                    use aws_sdk_s3::error::ProvideErrorMetadata;
+                    let e = se.err();
+                    detail = format!(
+                        "service error code={:?} message={:?} meta={:?}",
+                        e.code(),
+                        e.message(),
+                        e.meta()
+                    );
+                }
+                BackupError::Transfer(format!(
+                    "S3 CompleteMultipartUpload失敗(bucket={bucket}, key={key}): {detail}"
+                ))
+            })?;
         // Complete応答のVersionId(versioning有効bucket。無い場合は空文字)
         Ok(resp.version_id().map(str::to_string).unwrap_or_default())
+    }
+
+    /// UploadPart応答からCompleteMultipartUpload要求のCompletedPartを組む(TASK-26)。
+    /// CreateMultipartUpload/UploadPartへchecksum_algorithm SHA256を指定したMPUでは
+    /// 実S3仕様上、Complete要求の全partへchecksum_sha256が必須(欠落は
+    /// 「The complete request must include the checksum for each part」のInvalidRequest
+    /// で拒否される)。UploadPart要求にはSDKがpart bytesのSHA256を計算・添付しており、
+    /// 応答のChecksumSHA256をそのまま各partへ引き継ぐ(e_tagと同様に応答側の値を使う)。
+    fn completed_part(
+        part_number: i32,
+        resp: &aws_sdk_s3::operation::upload_part::UploadPartOutput,
+    ) -> aws_sdk_s3::types::CompletedPart {
+        aws_sdk_s3::types::CompletedPart::builder()
+            .part_number(part_number)
+            .e_tag(resp.e_tag().map(str::to_string).unwrap_or_default())
+            .set_checksum_sha256(resp.checksum_sha256().map(str::to_string))
+            .build()
     }
 
     /// part失敗時のbest-effort abort(失敗してもwarn表示のみ。設計5.7)。
@@ -1433,9 +1462,17 @@ impl S3Backend for FakeS3 {
                 "s3 CreateMultipartUpload bucket={bucket} key={key} storage_class={storage_class} checksum=SHA256"
             ));
             let data = std::fs::read(src).map_err(|e| src_read_error("UploadPart", key, src, e))?;
+            let part_size = part_size_for(size);
+            // UploadPart応答(実S3と同じくpart bytesのSHA256をbase64で返す・TASK-26)から
+            // Complete要求の各partを組む。組立は実装と同じRealS3::completed_partを通すため、
+            // Complete側へのchecksum引き継ぎ漏れはfake経路でもComplete受付検査で落ちる
+            let mut parts: Vec<aws_sdk_s3::types::CompletedPart> = Vec::new();
             for part_number in 1..=multipart_part_count(size) {
+                let start = ((part_number - 1) * part_size) as usize;
+                let end = (part_number * part_size).min(size) as usize;
+                let checksum = Self::sha256_b64(&data[start..end]);
                 self.record(&format!(
-                    "s3 UploadPart bucket={bucket} key={key} part_number={part_number} checksum=SHA256"
+                    "s3 UploadPart bucket={bucket} key={key} part_number={part_number} checksum=SHA256 part_sha256={checksum}"
                 ));
                 if self.fail_cp.as_deref() == Some(key) {
                     // part失敗 → Abort発火(Completeは実行しない)
@@ -1444,9 +1481,24 @@ impl S3Backend for FakeS3 {
                     ));
                     return Err(fail());
                 }
+                let resp = aws_sdk_s3::operation::upload_part::UploadPartOutput::builder()
+                    .e_tag(format!("\"fake-etag-{part_number}\""))
+                    .checksum_sha256(checksum)
+                    .build();
+                parts.push(RealS3::completed_part(part_number as i32, &resp));
+            }
+            // Complete受付検査(実S3仕様どおり・TASK-26): CreateMultipartUploadが
+            // checksum_algorithm SHA256を指定したMPUのComplete要求は全partへchecksum_sha256必須
+            if let Some(i) = parts.iter().position(|p| p.checksum_sha256().is_none()) {
+                return Err(BackupError::Transfer(format!(
+                    "S3 CompleteMultipartUpload失敗(bucket={bucket}, key={key}): InvalidRequest: The upload was created using a sha256 checksum. The complete request must include the checksum for each part. It was missing for part {} in the request.",
+                    i + 1
+                )));
             }
             self.record(&format!(
-                "s3 CompleteMultipartUpload bucket={bucket} key={key}"
+                "s3 CompleteMultipartUpload bucket={bucket} key={key} parts={} parts_with_checksum={}",
+                parts.len(),
+                parts.iter().filter(|p| p.checksum_sha256().is_some()).count()
             ));
             Ok(self.store_new_version(key, &data, "put", storage_class))
         } else {
@@ -1932,6 +1984,28 @@ mod tests {
         let ps = part_size_for(huge);
         assert!(ps > PART_SIZE_BYTES, "part size切り上げ");
         assert!(huge.div_ceil(ps) <= MAX_PARTS, "part数は上限内");
+    }
+
+    /// [covers:upload.multipart-complete-part-checksum]
+    /// UploadPart応答のchecksum_sha256はCompleteMultipartUpload要求の当該partへ
+    /// 引き継がれる(TASK-26): CreateMultipartUpload/UploadPartへchecksum_algorithm
+    /// SHA256を指定したMPUでComplete要求のpart checksumが欠落すると、実S3は
+    /// InvalidRequestで拒否する(2026-10-26実機エラー)。結合側のfake経路検証は
+    /// tests/s3_backend.rsが担う(fakeのComplete受付検査も同じ仕様を強制する)。
+    #[test]
+    fn completed_part_carries_upload_part_checksum() {
+        let resp = aws_sdk_s3::operation::upload_part::UploadPartOutput::builder()
+            .e_tag("\"etag-1\"")
+            .checksum_sha256(sha256_b64(b"part-1-bytes"))
+            .build();
+        let part = RealS3::completed_part(1, &resp);
+        assert_eq!(part.part_number(), Some(1));
+        assert_eq!(part.e_tag(), Some("\"etag-1\""));
+        assert_eq!(
+            part.checksum_sha256(),
+            Some(sha256_b64(b"part-1-bytes").as_str()),
+            "Complete要求のpartへUploadPart応答のchecksum_sha256を引き継ぐ(TASK-26)"
+        );
     }
 
     /// [covers:cli.fake-s3-seam]

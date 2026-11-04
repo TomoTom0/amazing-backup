@@ -29,16 +29,39 @@
 #   新規5件: reset-dev-purpose-guard・reset-prod-registry-records-guard・
 #   reset-dry-run-default・reset-apply-clears-versions-and-registry・reset-idempotent。
 #   実装前のため新規条件のテストは実行failを許容。
+# 2026-10-26: TASK-25(manage resetのregistry bucket限定化=案B+dev検証ABH分離=案F)対応で
+#   テスト先行の条件書更新(tmp/tasks/tm-25/design_reset_bucket_scoped.md 5章)。
+#   文言改訂3件(id不変): reset-dry-run-default(退避先pathのbucket名入り化+registry再書込の
+#   除去/残行数表示)・reset-apply-clears-versions-and-registry(givenに当該bucketのみの記録を
+#   明記・操作3をbucket限定再書込(温存対象なしなので残0行→file削除)へ・退避先名bucket入り)・
+#   reset-idempotent(除去対象0件かつtorn tail無しの書換なし・torn tailがあれば除去0件でも
+#   再書込してtail破棄)。
+#   廃止1件: reset-prod-registry-records-guard(安全弁2の廃止により拒否理由が消滅。
+#   後継=retention.reset-registry-preserves-other-bucket-records)。旧covers tag
+#   (tests/retention.rs reset_rejects_foreign_bucket_upload_records)は次段階のテスト置換まで
+#   残るため、この段階のverifyは当該(a)dangling 1件のみ一時的に許容する([[excluded]]は
+#   条件idを持たずdangling回避には機械的に効かないため、廃止の記録は本ヘッダーで行う)。
+#   新規3件: reset-registry-preserves-other-bucket-records・
+#   reset-registry-rewrite-idempotent・reset-registry-torn-tail(テスト未作成のため
+#   verify (b)はfail許容・実装・テスト作成後に解消)。
+#   [meta]はテスト先行運用のためverified=falseへ(実装・全件pass後に検証記録を復帰)。
+# 2026-10-26: TASK-25実装完了。cargo test全量pass・verify-conditions.py PASS(204/204 covered・
+#   dangling解消)を確認し[meta]をverified=trueへ復帰。
+# 2026-11-03: PR#7レビュー指摘対応(TASK-29・resetの共有uuid file_upload記録除去)。
+#   文言改訂1件(id不変): reset-registry-preserves-other-bucket-records(対象bucket宛
+#   file_uploadはuuid共有に関わらず除去へ。reset --applyがS3実体を削除するため記録の
+#   温存はregistry-only skipが実在しないobjectを参照し続ける不整合。prod側所在情報は
+#   prod bucket宛行の温存で保持)。
 
 [meta]
 feature = "retention"
 source_file = "src/cli.rs"
 verified = true
-verified_at = "2026-10-23"
-verified_by = "claude"
+verified_at = "2026-11-03"
+verified_by = "cargo test全量pass+verify-conditions.py PASS(PR#7レビュー指摘対応TASK-29後)"
 test_command = "cargo test"
-source_hash = "73cea824ff94378893d5c761de5bb520d5182c0c"
-note = "TASK-10(9章素案+設計3.2/5.2本文)の条件化。TASK-18で保持数管理がaws.toml [aws.lifecycle](noncurrent_days・keep_versions・mpu_abort_days)へ一元化(ハードコード禁止・承認事項7)し、lifecycleはdata/一括3rule(NCVE+MPU abort+DeleteMarkerSweep)、pruneはdata/一括(keep=aws.toml値)。source_fileはエリア主対象としてcli.rs(manage系コマンド)を指し、lifecycle構成のS3 API実体(src/s3.rs)と対象計算(src/index.rs)はtarget_functionで特定(config.tomlのCONF-005と同一運用)。2026-11-02 TASK-7(pipeline.toml profile化)でsrc/cli.rsが変更されたためsource_hashを更新(manage系コマンドの契約は不変・retention系testは全件pass)"
+source_hash = "15a056deda238ed05ca9f772d27a271fd172242d"
+note = "TASK-10(9章素案+設計3.2/5.2本文)の条件化。TASK-18で保持数管理がaws.toml [aws.lifecycle](noncurrent_days・keep_versions・mpu_abort_days)へ一元化(ハードコード禁止・承認事項7)し、lifecycleはdata/一括3rule(NCVE+MPU abort+DeleteMarkerSweep)、pruneはdata/一括(keep=aws.toml値)。source_fileはエリア主対象としてcli.rs(manage系コマンド)を指し、lifecycle構成のS3 API実体(src/s3.rs)と対象計算(src/index.rs)はtarget_functionで特定(config.tomlのCONF-005と同一運用)。2026-11-02 TASK-7(pipeline.toml profile化)でsrc/cli.rsが変更されたためsource_hashを更新(manage系コマンドの契約は不変・retention系testは全件pass)。TASK-25(2026-10-26)でmanage resetのregistry操作を当該bucket由来行のみ除去した再書込(案B)へ改訂(安全弁2のreset-prod-registry-records-guardは廃止・新規3条件追加。2026-11-03 rebase統合でsource_hashを更新)。2026-11-03 PR#7レビュー指摘対応(TASK-29)でreset-registry-preserves-other-bucket-recordsを対象bucket宛file_uploadはuuid共有に関わらず除去へ改訂しcargo test全件pass・verify-conditions.py PASSを確認・source_hashを更新(fmt適用)"
 
 [[condition]]
 id = "retention.lifecycle-data-ncve-and-sweep-rules"
@@ -119,43 +142,61 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(8.1コマンド仕�
 description = "manage reset(dev bucket初期化・恒久コマンド)の安全弁1: 実効profileのpurposeがdevであること(AwsConfig(src/config.rs)へpurpose保持を追加し、選択時のみでなく実行時にも参照)。prod等のpurposeでの実行はbucket指定によらず拒否。違反は設定エラー2+案内で、S3 API呼び出しを行わない (integration, fake seam)"
 given = "dev/purposeとprod/purposeのprofileを併記したaws.tomlで、prod側profileを--profile指定した manage reset 実行(既定dry-runのまま実行)"
 expect_return_shape = "exit 2でpurpose=dev限定の旨の案内表示が出て、S3 API呼び出し(ListObjectVersions等)は一切行われない"
-source_lines = "tests/retention.rs:677"
-
-[[condition]]
-id = "retention.reset-prod-registry-records-guard"
-target_function = "cli::cmd_manage_reset(安全弁2)"
-source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(8.1コマンド仕様)・5.12(manage)"
-description = "manage resetの安全弁2: ローカルregistry(data/registry.jsonl。registry.jsonlはprofile共用の1ファイル)に当該bucketと異なるbucket宛のfile_upload記録(prod由来)が存在する場合、実行拒否(消去するとprod側の記録を失うため。案内: prod記録の退避・協議)。違反は設定エラー2+案内で、S3 API呼び出しを行わない (integration, fake seam)"
-given = "registryにs3_bucketが実効bucketと異なるfile_upload記録を含む状態(dev/purpose profile)での manage reset --apply 実行"
-expect_return_shape = "exit 2でprod記録の退避・協議を促す案内表示が出て、S3 API呼び出しは一切行われずregistryも消去されない"
-source_lines = "tests/retention.rs:714"
+source_lines = "tests/retention.rs:835"
 
 [[condition]]
 id = "retention.reset-dry-run-default"
 target_function = "cli::cmd_manage_reset"
-source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(8.1コマンド仕様)・5.12(manage)"
-description = "manage resetは--apply無し既定dry-run(prune/reconcileと同一流儀): 削除を行わず、消去対象のobject version数(Versions・DeleteMarkers別)とregistry退避先path(./tmp/<yyyymmdd(JST)>_registry_before_reset.jsonl)を報告してexit 0する (integration, fake seam)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(8.1コマンド仕様)・5.12(manage)。TASK-25(tmp/tasks/tm-25/design_reset_bucket_scoped.md 5章・2.4・2.5): 退避先pathのbucket名入り化+registry再書込の除去/残行数表示へ改訂"
+description = "manage resetは--apply無し既定dry-run(prune/reconcileと同一流儀): 削除を行わず、消去対象のobject version数(Versions・DeleteMarkers別)・registry退避先path(./tmp/<yyyymmdd(JST)>_<bucket>_registry_before_reset.jsonl・bucket名入り)・registry再書込の見通し(除去/残行数。当該bucket分のみ除去・他bucket分は温存。registry不在時はskip表示)を報告してexit 0する (integration, fake seam)"
 given = "push済み(Versions複数)かつdelete marker 1件が存在する状態での、オプション省略の manage reset 実行"
-expect_return_shape = "DeleteObjectVersionは呼ばれず、Versions・DeleteMarkers別の対象数表示とregistry退避先pathの表示が出てexit 0。registry・S3 objectは変化しない"
-source_lines = "tests/retention.rs:749"
+expect_return_shape = "DeleteObjectVersionは呼ばれず、Versions・DeleteMarkers別の対象数表示・bucket名入りregistry退避先pathの表示・registry再書込の除去N行・残M行表示が出てexit 0。registry・S3 objectは変化しない"
+source_lines = "tests/retention.rs:1097"
 
 [[condition]]
 id = "retention.reset-apply-clears-versions-and-registry"
 target_function = "cli::cmd_manage_reset(apply操作)"
-source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(8.1コマンド仕様)・5.12(manage)"
-description = "manage reset --applyの操作順: 1) registryを./tmp/<yyyymmdd(JST)>_registry_before_reset.jsonlへ退避(不在ならskip) 2) list_versions(prefix=root prefix)でVersions・DeleteMarkers全件を列挙し各件delete_object_versionで削除(data/配下に留まらずsys/索引・manifestも消去対象。S3Backend操作はlist_versions/delete_object_versionのみ) 3) ローカルregistry削除(cache dir(暗号化一時物dir)はreset対象外・手動掃除) 4) 再list_versionsで0件であることを確認表示 (integration, fake seam)"
-given = "push済み(data object・索引・manifest・metadata)かつdelete marker 1件が存在する状態での manage reset --apply 実行(退避先がcwd基準のため専用作業dirで実行)"
-expect_return_shape = "exit 0で、退避fileが退避時点のregistryと同一内容で作成され、全version(delete marker含む)がDeleteObjectVersionで削除され、再list_versions 0件の確認表示が出て、registry.jsonlが削除される"
-source_lines = "tests/retention.rs:805"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(8.1コマンド仕様)・5.12(manage)。TASK-25(tmp/tasks/tm-25/design_reset_bucket_scoped.md 5章・2.1・2.5): 操作3を当該bucket由来行のみ除去の再書込へ・退避先名をbucket名入りへ改訂"
+description = "manage reset --applyの操作順: 1) registryを./tmp/<yyyymmdd(JST)>_<bucket>_registry_before_reset.jsonlへ全体退避(証跡。不在ならskip) 2) list_versions(prefix=root prefix)でVersions・DeleteMarkers全件を列挙し各件delete_object_versionで削除(data/配下に留まらずsys/索引・manifestも消去対象。S3Backend操作はlist_versions/delete_object_versionのみ) 3) ローカルregistryから当該bucket由来行のみ除去して再書込(温存対象なしなので残0行→registry file削除。cache dir(暗号化一時物dir)はreset対象外・手動掃除) 4) 再list_versionsで0件であることを確認表示 (integration, fake seam)"
+given = "push済み(data object・索引・manifest・metadata)かつdelete marker 1件が存在し、registryは当該bucket(dev)の記録のみの状態での manage reset --apply 実行(退避先がcwd基準のため専用作業dirで実行)"
+expect_return_shape = "exit 0で、bucket名入りの退避file名で退避fileが退避時点のregistryと同一内容(全体copy)として作成され、全version(delete marker含む)がDeleteObjectVersionで削除され、再list_versions 0件の確認表示が出て、registry.jsonlが削除される(温存対象なしのため残0行→file削除)"
+source_lines = "tests/retention.rs:1171"
 
 [[condition]]
 id = "retention.reset-idempotent"
 target_function = "cli::cmd_manage_reset(冪等性)"
-source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(8.1コマンド仕様)・5.12(manage)"
-description = "manage resetは冪等: 空状態への再実行(registry不在のため退避skip・0件削除)も成功する。途中失敗時は再実行で残りを削除 (integration, fake seam)"
+source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 8章(8.1コマンド仕様)・5.12(manage)。TASK-25(tmp/tasks/tm-25/design_reset_bucket_scoped.md 5章・1.3・2.3): 除去対象0件かつtorn tail無しの書換なし原則を追記"
+description = "manage resetは冪等: 空状態への再実行(registry不在のため退避skip・0件削除)も成功する。registryが存在する状態での再実行は、除去対象0件かつtorn tail無しならregistry書換なし(torn tailがあれば除去0件でも再書込してtail破棄。tail放置は後続appendの未完行連結=registry破損要因)。途中失敗時は再実行で残りを削除 (integration, fake seam)"
 given = "manage reset --apply実行済みの空状態(S3 version 0件・ローカルregistry不在)での再実行"
 expect_return_shape = "exit 0で、registry退避はskip表示・削除対象0件・再list_versions 0件の確認表示が出て、新たな退避fileは作られない"
-source_lines = "tests/retention.rs:868"
+source_lines = "tests/retention.rs:1233"
+
+[[condition]]
+id = "retention.reset-registry-preserves-other-bucket-records"
+target_function = "cli::cmd_manage_reset(registry再書込) / registry partition_reset_removal(除去判定)"
+source = "tmp/tasks/tm-25/design_reset_bucket_scoped.md 5章・2.2(除去判定)・2.3(registry再書込)。2026-11-03 PR#7レビュー指摘(TASK-29): 対象bucket宛file_uploadはuuid共有に関わらず除去へ改訂"
+description = "混在registryでのdev reset --applyは、当該bucket由来行(upload系記録(対象bucket宛file_uploadはuuid共有(非対象bucketにもuploadされたuuid)に関わらず全て・manifest/index_upload/pin_write/pin_remove・旧upload/manifest_upload)+対象bucketのみにuploadされたuuidのfile_write)のみ除去して再書込(temp+fsync+rename+rename後の親dir fsync・残0行ならregistry file削除)し、他bucket宛行・共有uuidのfile_write(非対象bucketにもuploadされたuuid・prod側所在情報)・crash残存file_write(対応upload無しuuid)・prune/sweep/location_remove・旧encrypt・未知record_type行は温存する(行順保持。対象bucket宛file_uploadを温存するとreset --applyのS3実体削除後にregistry-only skipが実在しないobjectを参照し続けるため除去。未知行もload_registryの「未知は警告のうえ無視」を書換では温存として再現)。退避はfs::copyによる全体copy(証跡完全) (integration, fake seam)"
+given = "dev bucket宛のpush記録に加え、registryへ他bucket宛file_upload(s3_bucket=prod系)+そのuuidのfile_write・共有uuidのfile_upload(dev bucket宛・prodのfile_uploadと同一uuid)+同uuidのfile_write・crash残存file_write(対応upload無しuuid)・prune/sweep/location_remove・旧encrypt・未知record_type行を混在させた状態での manage reset --apply 実行"
+expect_return_shape = "exit 0で、退避fileは追記込みのregistry全体copyと同一内容。再書込後のregistryはdev由来行(当該uuidのfile_write/file_upload・manifest/index_upload)に加え共有uuidのdev bucket宛file_uploadも除去され、prod file_upload+紐付けfile_write・共有uuidのfile_write・crash残存file_write・prune/sweep/location_remove/encrypt・未知record_type行は温存される(行順保持)"
+source_lines = "tests/retention.rs:872"
+
+[[condition]]
+id = "retention.reset-registry-rewrite-idempotent"
+target_function = "cli::cmd_manage_reset(registry再書込)"
+source = "tmp/tasks/tm-25/design_reset_bucket_scoped.md 5章・1.3(冪等性)・2.3"
+description = "registry再書込の冪等性: 除去対象0件かつtorn tail無しの再実行はregistryを書換えない(temp fileも作成しない。退避copyは実行上書き) (integration, fake seam)"
+given = "混在registryでの manage reset --apply 実行後(温存行のみ残った状態・除去対象0件かつtorn tail無し)での再実行"
+expect_return_shape = "exit 0で、registry内容が再実行前と完全一致(書換なし)し、退避copyは上書き実行される。S3削除呼び出しは0件"
+source_lines = "tests/retention.rs:941"
+
+[[condition]]
+id = "retention.reset-registry-torn-tail"
+target_function = "cli::cmd_manage_reset(registry再書込) / registry read_registry_lines(torn tail検出)"
+source = "tmp/tasks/tm-25/design_reset_bucket_scoped.md 5章・1.3・2.2(torn tail)"
+description = "torn write最終行(改行終端しない最終行)は退避file(全体copy)に含まれ、再書込後のregistryからは破棄される(load_registryと同解釈。退避copyに残るため証跡喪失なし。tail放置は後続appendの未完行連結=registry破損要因)。除去対象0件でもtorn tailがあれば再書込を実行する (integration, fake seam)"
+given = "registry末尾に改行終端しないtorn行を追記した状態での manage reset --apply 実行(全行非対象bucket由来=除去対象0件かつtorn tail有りのcaseを含む)"
+expect_return_shape = "退避fileにtorn行が含まれ、再書込後のregistryにtorn行は無く温存行のみ。除去対象0件のcaseでも再書込が実行されtorn行のみが破棄される"
+source_lines = "tests/retention.rs:985"
 
 [[excluded]]
 item = "IAM policy案(principal A: 全操作 / principal B: 復元専用最小権限)"

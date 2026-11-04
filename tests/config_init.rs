@@ -366,7 +366,10 @@ fn config_init_templates_match_embedded_example() {
             .and_then(|r| r.get("public_keys"))
             .and_then(|k| k.as_array())
             .unwrap_or_else(|| panic!("profile({name})のrecipients.public_keys: {text}"));
-        assert!(!keys.is_empty(), "profile({name})のpublic_keysは空でない: {text}");
+        assert!(
+            !keys.is_empty(),
+            "profile({name})のpublic_keysは空でない: {text}"
+        );
         for k in keys {
             let path = k.as_str().unwrap_or_default();
             assert!(

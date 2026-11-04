@@ -674,6 +674,164 @@ fn reset_count(stdout: &str, label: &str) -> i64 {
         .unwrap_or(-1)
 }
 
+/// reset系testの実効dev bucket(fixtureのaws.toml既定値・it-bucket)。
+const RESET_DEV_BUCKET: &str = "it-bucket";
+
+/// resetのregistry退避先path(TASK-25 2.5: bucket名入り。
+/// ./tmp/<yyyymmdd(JST)>_<bucket>_registry_before_reset.jsonl・cwd基準)。
+fn reset_backup_path(cwd: &std::path::Path) -> std::path::PathBuf {
+    cwd.join("tmp").join(format!(
+        "{}_{RESET_DEV_BUCKET}_registry_before_reset.jsonl",
+        jst_today().replace('-', "")
+    ))
+}
+
+/// 表示から`<label>`直後の連続digit列を読む(無ければNone。
+/// `除去<N>行・残<M>行`形式のように`=`を挟まない表示用)。
+fn count_after_label(stdout: &str, label: &str) -> Option<i64> {
+    stdout.split(label).nth(1).and_then(|rest| {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse::<i64>().ok()
+    })
+}
+
+/// 混在registryの構築(TASK-25 4章追加1): dev push済みregistryへ
+/// 他bucket(prod)宛file_upload+そのuuidのfile_write・共有uuidのfile_upload
+/// (dev bucket宛・prodのfile_uploadと同一uuid)+同uuidのfile_write・crash残存
+/// file_write(対応upload無しuuid)・prune/sweep/location_remove・旧encrypt・
+/// 未知record_type行をこの順で追記し、期待温存行(追記順)を返す。
+/// dev bucket宛の共有uuid file_uploadはreset --applyがS3実体を削除するため
+/// uuid共有でも除去側(温存期待から除外。prod側所在はprod bucket宛行が保持)。
+/// 追記行のJSON field名・schema値はsrc/registry.rsの各record structどおり
+/// (file_upload=2・file_write=3・prune=2・sweep/location_remove/encrypt=1)。
+fn append_mixed_records(fx: &StorageFixture) -> Vec<serde_json::Value> {
+    let values = fx.registry_values();
+    let mut fu = values
+        .iter()
+        .find(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload"))
+        .expect("file_upload記録(dev push)")
+        .clone();
+    let mut fw = values
+        .iter()
+        .find(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_write"))
+        .expect("file_write記録(dev push)")
+        .clone();
+    let dev_bucket = fu
+        .get("s3_bucket")
+        .and_then(|b| b.as_str())
+        .expect("dev file_uploadのs3_bucket")
+        .to_string();
+    // prodとdevで共有するuuid(同一entityの再PUT経路で同一uuidが両bucketへuploadされる)
+    let shared_uuid = "11111111-0000-7000-8000-000000000011";
+    let crash_uuid = "22222222-0000-7000-8000-000000000022";
+    let shared_key = fx.data_key(shared_uuid);
+
+    // 1. 他bucket(prod)宛file_upload+そのuuidのfile_write(prod側所在)
+    fu["uuid"] = serde_json::json!(shared_uuid);
+    fu["title"] = serde_json::json!("prod-entity");
+    fu["s3_key"] = serde_json::json!(shared_key);
+    fu["s3_bucket"] = serde_json::json!("prod-your-family-bucket");
+    fu["version_id"] = serde_json::json!("vid-prod-shared-1");
+    let prod_fu = fu.clone();
+    fw["uuid"] = serde_json::json!(shared_uuid);
+    fw["title"] = serde_json::json!("prod-entity");
+    fw["source_path"] = serde_json::json!("/prod/location/a.zip");
+    fw["source_name"] = serde_json::json!("a.zip");
+    fw["identity_hash"] = serde_json::json!("prodloc1");
+    fw["s3_key"] = serde_json::json!(shared_key);
+    let prod_fw = fw.clone();
+    // 2. 共有uuidのfile_upload(dev bucket宛・prodのfile_uploadと同一uuid)+同uuidの
+    //    file_write(dev側所在)。file_uploadは対象bucket宛のためuuid共有でも除去側、
+    //    file_writeはuuidがprod側uploadにも紐付くため温存
+    fu["s3_bucket"] = serde_json::json!(dev_bucket);
+    fu["version_id"] = serde_json::json!("vid-dev-shared-1");
+    let shared_fu = fu;
+    fw["source_path"] = serde_json::json!("/dev/location/a.zip");
+    fw["identity_hash"] = serde_json::json!("devloc1");
+    let shared_fw = fw.clone();
+    // 3. crash残存file_write(対応するfile_uploadが無いuuid)
+    fw["uuid"] = serde_json::json!(crash_uuid);
+    fw["source_path"] = serde_json::json!("/crash/location/a.zip");
+    fw["identity_hash"] = serde_json::json!("crashloc1");
+    fw["s3_key"] = serde_json::json!(fx.data_key(crash_uuid));
+    let crash_fw = fw;
+    // 4. prune/sweep/location_remove・旧encrypt・未知record_typeの各行
+    //    (field名・schema値はsrc/registry.rsのrecord structどおり)
+    let prune = serde_json::json!({
+        "schema": 2,
+        "record_type": "prune",
+        "recorded_at": "2026-10-26T09:00:00+09:00",
+        "deleted": [{ "s3_key": shared_key, "version_id": "vid-prune-1" }],
+    });
+    let sweep = serde_json::json!({
+        "schema": 1,
+        "record_type": "sweep",
+        "recorded_at": "2026-10-26T09:00:00+09:00",
+        "reason": "lifecycle",
+        "deleted": [{ "s3_key": shared_key, "version_id": "vid-sweep-1" }],
+    });
+    let location_remove = serde_json::json!({
+        "schema": 1,
+        "record_type": "location_remove",
+        "recorded_at": "2026-10-26T09:00:00+09:00",
+        "uuid": crash_uuid,
+        "identity_hash": "crashloc1",
+        "source_path": "/crash/location/a.zip",
+    });
+    let encrypt = serde_json::json!({
+        "schema": 1,
+        "record_type": "encrypt",
+        "recorded_at": "2026-10-26T08:00:00+09:00",
+        "batch_id": "20261026-abcdef01",
+        "batch_date": "2026-10-26",
+        "source_path": "/legacy/path/a.zip",
+        "source_name": "a.zip",
+        "source_size": 100,
+        "source_mtime": "2026-10-01T09:00:00+09:00",
+        "source_sha256": "a".repeat(64),
+        "age_path": "2026-10-26/a.zip.age",
+        "age_size": 140,
+        "age_sha256": "b".repeat(64),
+        "recipients": ["SHA256:testfingerprint"],
+        "manifest_path": "2026-10-26/manifest.jsonl.age",
+    });
+    let unknown = serde_json::json!({
+        "schema": 99,
+        "record_type": "future_event",
+        "detail": "x",
+    });
+    let appended = vec![
+        prod_fu,
+        prod_fw,
+        shared_fu,
+        shared_fw,
+        crash_fw,
+        prune,
+        sweep,
+        location_remove,
+        encrypt,
+        unknown,
+    ];
+    for r in &appended {
+        append_registry_line(&fx.registry, r);
+    }
+    // 温存期待=appendedからdev bucket宛の共有uuid file_upload(3行目)を除外
+    let mut kept = appended;
+    kept.remove(2);
+    kept
+}
+
+/// registry末尾へ改行終端しないtorn行を追記する(crash途中writeの模擬)。
+fn append_torn_tail(path: &std::path::Path, fragment: &str) {
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .unwrap_or_else(|e| panic!("registry({})へのtorn追記: {e}", path.display()));
+    f.write_all(fragment.as_bytes())
+        .unwrap_or_else(|e| panic!("torn行の書込({}): {e}", path.display()));
+}
+
 /// [covers:retention.reset-dev-purpose-guard]
 /// 安全弁1(8.1): 実効profileのpurposeがdevであること。prod等のpurposeでの実行は
 /// bucket指定によらず拒否(設定エラー2+案内・S3 API呼び出しなし)。
@@ -711,45 +869,236 @@ fn reset_rejects_non_dev_purpose_profile() {
     assert_eq!(fx.calls(), "", "S3 API呼び出しは行われない: {}", fx.calls());
 }
 
-/// [covers:retention.reset-prod-registry-records-guard]
-/// 安全弁2(8.1): ローカルregistryに当該bucketと異なるbucket宛のfile_upload記録
-/// (prod由来。registry.jsonlはprofile共用の1ファイル)が存在する場合は実行拒否
-/// (設定エラー2+案内・S3 API呼び出しなし・registryも消去しない)。
+/// [covers:retention.reset-registry-preserves-other-bucket-records]
+/// 混在registryでのdev reset --apply(TASK-25 2.2・2.3・安全弁2廃止): 当該bucket
+/// 由来行(upload系記録(対象bucket宛file_uploadはuuid共有でも全て)+対象bucketのみに
+/// uploadされたuuidのfile_write)のみ除去して再書込し、他bucket宛行・共有uuidの
+/// file_write(prod側所在情報)・crash残存file_write・prune/sweep/location_remove・
+/// 旧encrypt・未知record_type行は温存する(行順保持)。退避はfs::copyによる全体copy
+/// (bucket名入りの退避先名)。
 #[test]
-fn reset_rejects_foreign_bucket_upload_records() {
-    let Some((fx, _)) = reset_setup("ret-reset-foreign") else {
+fn reset_rewrites_registry_bucket_scoped() {
+    let Some((fx, work)) = reset_setup("ret-reset-mixed") else {
         return;
     };
-    // registryへprod由来のfile_upload記録(s3_bucket=実効bucketと異なる)を直接追記
-    let mut foreign = fx
-        .registry_values()
-        .into_iter()
-        .find(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload"))
-        .expect("file_upload記録")
-        .clone();
-    foreign["s3_bucket"] = serde_json::json!("prod-your-family-bucket");
-    foreign["s3_key"] =
-        serde_json::json!("amazing-backup/data/00000000-0000-7000-8000-000000000000/default.age");
-    append_registry_line(&fx.registry, &foreign);
-    clear_calls(&fx);
+    let dev_uuid = uuid_of_path(&fx, &fx.data_root.join("a.zip"));
+    // dev pushの全行(file_write/file_upload/manifest/index_upload)+共有uuidのdev bucket
+    // 宛file_upload(S3実体削除との整合でuuid共有でも除去)が除去対象
+    let dev_lines = fx.registry_values().len() as i64 + 1;
+    let kept = append_mixed_records(&fx);
+    let before = std::fs::read_to_string(&fx.registry).expect("混在registryの読込");
 
-    let (code, stdout, stderr) = fx.manage("reset", &["--apply"]);
+    let (code, stdout, stderr) = reset_run_cwd(&fx, &["--apply"], &work);
     assert_eq!(
-        code, 2,
-        "他bucket宛file_upload記録での実行は設定エラー2: {stdout}{stderr}"
+        code, 0,
+        "他bucket宛記録の混在でも(温存により)exit 0: {stdout}{stderr}"
+    );
+    // (b) 退避file=追記込みの全体copy(bucket名入りの名)
+    let backup = reset_backup_path(&work);
+    assert!(
+        backup.is_file(),
+        "退避fileが作成される: {}",
+        backup.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&backup).expect("退避fileの読込"),
+        before,
+        "退避内容は退避時点のregistryとbyte単位で同一(全体copy)"
+    );
+    // (c) 再書込後のregistry: dev由来行は除去・追記行は温存(行順保持)
+    assert_eq!(
+        fx.registry_values(),
+        kept,
+        "再書込後のregistryは温存行のみ(行順保持)"
+    );
+    for r in &fx.registry_values() {
+        let rt = r.get("record_type").and_then(|t| t.as_str()).unwrap_or("");
+        assert!(
+            !matches!(rt, "manifest" | "index_upload"),
+            "dev bucket宛のmanifest/index_uploadは除去される: {r}"
+        );
+        if matches!(rt, "file_upload" | "file_write") {
+            assert_ne!(
+                r.get("uuid").and_then(|u| u.as_str()),
+                Some(dev_uuid.as_str()),
+                "dev uuidのfile_write/file_uploadは除去される: {r}"
+            );
+        }
+    }
+    // 完了表示(2.3): 除去=dev由来行数・残=温存行数
+    assert_eq!(
+        count_after_label(&stdout, "除去"),
+        Some(dev_lines),
+        "完了表示の除去行数=dev由来行数: {stdout}"
+    );
+    assert_eq!(
+        count_after_label(&stdout, "行・残"),
+        Some(kept.len() as i64),
+        "完了表示の残行数=温存行数: {stdout}"
+    );
+}
+
+/// [covers:retention.reset-registry-rewrite-idempotent]
+/// registry再書込の冪等性(TASK-25 2.3): 除去対象0件かつtorn tail無しの再実行は
+/// registryを書換えない(temp fileも作成しない。退避copyは実行上書き)。
+#[test]
+fn reset_registry_rewrite_idempotent_mixed() {
+    let Some((fx, work)) = reset_setup("ret-reset-mixed-idem") else {
+        return;
+    };
+    let kept = append_mixed_records(&fx);
+    let (code, stdout, stderr) = reset_run_cwd(&fx, &["--apply"], &work);
+    assert_eq!(code, 0, "1回目(混在)のreset --apply: {stdout}{stderr}");
+    assert_eq!(fx.registry_values(), kept, "1回目で温存行のみ残る");
+    let before = std::fs::read_to_string(&fx.registry).expect("registry読込");
+
+    // 2回目: 温存行のみ(除去対象0件・torn tail無し)→registry書換なし・退避copyは実行
+    let backup = reset_backup_path(&work);
+    std::fs::remove_file(&backup).expect("退避fileを一旦除去(再実行での再作成観察)");
+    clear_calls(&fx);
+    let (code, stdout, stderr) = reset_run_cwd(&fx, &["--apply"], &work);
+    assert_eq!(code, 0, "再実行もexit 0: {stdout}{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&fx.registry).expect("registry読込"),
+        before,
+        "registry内容は再実行前と完全一致(書換なし)"
     );
     assert!(
-        stderr.contains("prod-your-family-bucket"),
-        "拒否案内に当該bucket(prod記録の退避・協議の案内): {stdout}{stderr}"
+        backup.is_file(),
+        "退避copyは実行される(上書き): {}",
+        backup.display()
     );
-    assert!(fx.registry.is_file(), "registryは消去されない");
-    assert_eq!(fx.calls(), "", "S3 API呼び出しは行われない: {}", fx.calls());
+    assert_eq!(
+        std::fs::read_to_string(&backup).expect("退避fileの読込"),
+        before,
+        "退避内容はregistryと同一"
+    );
+    assert!(
+        !fx.calls()
+            .lines()
+            .any(|l| l.starts_with("s3 DeleteObjectVersion")),
+        "S3削除呼び出しは0件: {}",
+        fx.calls()
+    );
+}
+
+/// [covers:retention.reset-registry-torn-tail]
+/// torn write最終行(改行終端しない最終行)は退避file(全体copy)に含まれ、再書込後の
+/// registryからは破棄される(load_registryと同解釈。退避copyに残るため証跡喪失なし)。
+/// 除去対象0件でもtorn tailがあれば再書込を実行する(tail放置は後続appendの
+/// 未完行連結=registry破損要因)。
+#[test]
+fn reset_registry_drops_torn_tail_on_rewrite() {
+    const TORN_MARKER: &str = "torn-tail-marker";
+    let torn_line =
+        format!("{{\"schema\":2,\"record_type\":\"file_upload\",\"uuid\":\"{TORN_MARKER}");
+
+    // (i) dev由来行あり+末尾torn行: 退避fileにtorn行を含み、再書込後は温存行のみ
+    let Some((fx, work)) = reset_setup("ret-reset-torn") else {
+        return;
+    };
+    let kept = append_mixed_records(&fx);
+    append_torn_tail(&fx.registry, &torn_line);
+    let before = std::fs::read_to_string(&fx.registry).expect("torn付きregistryの読込");
+
+    let (code, stdout, stderr) = reset_run_cwd(&fx, &["--apply"], &work);
+    assert_eq!(code, 0, "(i) reset --applyはexit 0: {stdout}{stderr}");
+    let backup = reset_backup_path(&work);
+    assert!(
+        backup.is_file(),
+        "(i) 退避fileが作成される: {}",
+        backup.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&backup).expect("退避fileの読込"),
+        before,
+        "(i) 退避fileはtorn行を含む全体copy"
+    );
+    let after = std::fs::read_to_string(&fx.registry).expect("(i) 再書込後registryの読込");
+    assert!(
+        !after.contains(TORN_MARKER),
+        "(i) 再書込後のregistryにtorn行は無い: {after}"
+    );
+    assert!(
+        after.ends_with('\n'),
+        "(i) 再書込後のregistryは改行終端(後続append可能): {after:?}"
+    );
+    assert_eq!(
+        read_registry_lines(&fx.registry),
+        kept,
+        "(i) 再書込後のregistryは温存行のみ"
+    );
+
+    // (ii) 除去対象0件(全行非対象bucket宛)+torn tail有り: 再書込が実行されtorn行のみ破棄
+    let Some((fx2, work2)) = reset_setup("ret-reset-torn0") else {
+        return;
+    };
+    let values = fx2.registry_values();
+    let mut fu = values
+        .iter()
+        .find(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_upload"))
+        .expect("file_upload記録(dev push)")
+        .clone();
+    let mut fw = values
+        .iter()
+        .find(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_write"))
+        .expect("file_write記録(dev push)")
+        .clone();
+    // registryを非対象bucket(prod)宛の行のみへ組み替え(除去対象0件)
+    let prod_uuid = "33333333-0000-7000-8000-000000000033";
+    let prod_key = fx2.data_key(prod_uuid);
+    fu["uuid"] = serde_json::json!(prod_uuid);
+    fu["s3_key"] = serde_json::json!(prod_key);
+    fu["s3_bucket"] = serde_json::json!("prod-your-family-bucket");
+    fw["uuid"] = serde_json::json!(prod_uuid);
+    fw["s3_key"] = serde_json::json!(prod_key);
+    fw["source_path"] = serde_json::json!("/prod/location/b.zip");
+    fw["identity_hash"] = serde_json::json!("prodonly1");
+    let prod_only = vec![fu, fw];
+    let mut text = String::new();
+    for r in &prod_only {
+        text.push_str(&serde_json::to_string(r).expect("registry行serialize"));
+        text.push('\n');
+    }
+    write_file(&fx2.registry, text.as_bytes());
+    append_torn_tail(&fx2.registry, &torn_line);
+    let before2 = std::fs::read_to_string(&fx2.registry).expect("(ii) torn付きregistryの読込");
+
+    let (code, stdout, stderr) = reset_run_cwd(&fx2, &["--apply"], &work2);
+    assert_eq!(code, 0, "(ii) reset --applyはexit 0: {stdout}{stderr}");
+    let backup2 = reset_backup_path(&work2);
+    assert!(
+        backup2.is_file(),
+        "(ii) 退避fileが作成される: {}",
+        backup2.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&backup2).expect("退避fileの読込"),
+        before2,
+        "(ii) 退避fileはtorn行を含む全体copy"
+    );
+    let after2 = std::fs::read_to_string(&fx2.registry).expect("(ii) 再書込後registryの読込");
+    assert!(
+        !after2.contains(TORN_MARKER),
+        "(ii) 除去0件でも再書込が実行されtorn行は破棄: {after2}"
+    );
+    assert_eq!(
+        read_registry_lines(&fx2.registry),
+        prod_only,
+        "(ii) 再書込後のregistryは温存行(prod宛)のみ"
+    );
+    assert_eq!(
+        count_after_label(&stdout, "除去"),
+        Some(0),
+        "(ii) 除去行数は0(それでも再書込が走る): {stdout}"
+    );
 }
 
 /// [covers:retention.reset-dry-run-default]
 /// manage resetは--applyなき実行が既定dry-run(prune/reconcileと同一流儀): 削除を
-/// 行わず、消去対象のobject version数(Versions・DeleteMarkers別)とregistry退避先path
-/// (./tmp/<yyyymmdd(JST)>_registry_before_reset.jsonl)を報告してexit 0。
+/// 行わず、消去対象のobject version数(Versions・DeleteMarkers別)・registry退避先path
+/// (./tmp/<yyyymmdd(JST)>_<bucket>_registry_before_reset.jsonl・bucket名入り)・
+/// registry再書込の見通し(除去/残行数)を報告してexit 0。
 #[test]
 fn reset_dry_run_is_default_and_reports_counts() {
     let Some((fx, _)) = reset_setup("ret-reset-dry") else {
@@ -782,10 +1131,27 @@ fn reset_dry_run_is_default_and_reports_counts() {
     );
     assert!(
         stdout.contains(&format!(
-            "tmp/{}_registry_before_reset.jsonl",
-            jst_today().replace('-', "")
+            "tmp/{}_{}_registry_before_reset.jsonl",
+            jst_today().replace('-', ""),
+            RESET_DEV_BUCKET
         )),
-        "registry退避先pathの表示: {stdout}"
+        "registry退避先pathの表示(bucket名入り): {stdout}"
+    );
+    // registry再書込の見通し表示(TASK-25 2.4): 除去/残行数。
+    // pushのみのfixtureでは全行がdev由来のため除去=registry行数・残=0
+    assert!(
+        stdout.contains("registry再書込"),
+        "registry再書込の見通し表示: {stdout}"
+    );
+    assert_eq!(
+        count_after_label(&stdout, "除去"),
+        Some(fx.registry_values().len() as i64),
+        "dry-runの除去行数(dev由来の全行): {stdout}"
+    );
+    assert_eq!(
+        count_after_label(&stdout, "行・残"),
+        Some(0),
+        "dry-runの残行数(温存対象なし): {stdout}"
     );
     // dry-runでは削除・退避とも行わない
     assert!(
@@ -803,10 +1169,11 @@ fn reset_dry_run_is_default_and_reports_counts() {
 }
 
 /// [covers:retention.reset-apply-clears-versions-and-registry]
-/// manage reset --apply(8.1の操作順): 1) registry退避 2) list_versions(root prefix)で
-/// Versions・DeleteMarkers全件をdelete_object_version(data/配下に留まらずsys/索引・
-/// manifestも消去) 3) ローカルregistry削除(data/outは対象外) 4) 再list_versionsで
-/// 0件確認表示。
+/// manage reset --apply(2.1の操作順): 1) registry退避(bucket名入りの退避先名) 2)
+/// list_versions(root prefix)でVersions・DeleteMarkers全件をdelete_object_version
+/// (data/配下に留まらずsys/索引・manifestも消去) 3) 当該bucket由来行のみ除去した
+/// registry再書込(本testのfixtureはdev bucketのみの記録=温存対象なしなので残0行→
+/// registry file削除。cache dirは対象外) 4) 再list_versionsで0件確認表示。
 #[test]
 fn reset_apply_clears_versions_and_registry() {
     let Some((fx, work)) = reset_setup("ret-reset-apply") else {
@@ -822,11 +1189,9 @@ fn reset_apply_clears_versions_and_registry() {
     let (code, stdout, stderr) = reset_run_cwd(&fx, &["--apply"], &work);
     assert_eq!(code, 0, "reset --applyはexit 0: {stdout}{stderr}");
 
-    // 1. registry退避: ./tmp/<yyyymmdd>_registry_before_reset.jsonl(registryと同一内容)
-    let backup = work.join("tmp").join(format!(
-        "{}_registry_before_reset.jsonl",
-        jst_today().replace('-', "")
-    ));
+    // 1. registry退避: ./tmp/<yyyymmdd>_<bucket>_registry_before_reset.jsonl
+    //    (registryと同一内容の全体copy)
+    let backup = reset_backup_path(&work);
     assert!(
         backup.is_file(),
         "退避fileが作成される: {}",
@@ -856,7 +1221,7 @@ fn reset_apply_clears_versions_and_registry() {
         "delete markerもDeleteObjectVersionで削除: {}",
         fx.calls()
     );
-    // 3. ローカルregistry削除
+    // 3. registry再書込(fixtureはdev bucketのみの記録=温存対象なし→残0行でfile削除)
     assert!(!fx.registry.is_file(), "registry.jsonlは削除される");
     // 4. 再list_versions 0件の確認表示
     assert!(
@@ -875,10 +1240,7 @@ fn reset_is_idempotent_on_empty_state() {
     let (code, stdout, stderr) = reset_run_cwd(&fx, &["--apply"], &work);
     assert_eq!(code, 0, "1回目のreset --apply: {stdout}{stderr}");
     assert!(!fx.registry.is_file(), "1回目でregistry削除済み");
-    let backup = work.join("tmp").join(format!(
-        "{}_registry_before_reset.jsonl",
-        jst_today().replace('-', "")
-    ));
+    let backup = reset_backup_path(&work);
     assert!(backup.is_file(), "1回目で退避file作成済み");
 
     // 2回目: 空状態(S3 0件・registry不在)への再実行も成功(退避skip・0件削除)
@@ -888,6 +1250,10 @@ fn reset_is_idempotent_on_empty_state() {
     assert!(
         stdout.contains("skip"),
         "registry退避はskip表示(不在): {stdout}"
+    );
+    assert!(
+        stdout.contains("registry再書込: skip"),
+        "registry再書込もskip表示(不在): {stdout}"
     );
     assert_eq!(reset_count(&stdout, "Versions"), 0, "削除対象0件: {stdout}");
     assert_eq!(

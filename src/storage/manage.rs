@@ -930,14 +930,15 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
     }
 }
 
-/// manage reset(TASK-18 8章・8.1): dev bucket初期化の恒久コマンド(全消去・冪等)。
-/// 既定dry-run・--applyで実行(prune/reconcileと同一流儀)。
-/// 安全弁(違反は設定エラー2+案内・S3 API呼び出しなし): 1) 実効profileのpurposeが
-/// devであること(AwsConfigのpurpose保持。prod等ではbucket指定によらず拒否)
-/// 2) ローカルregistryに当該bucketと異なるbucket宛のfile_upload記録(prod由来。
-/// registry.jsonlはprofile共用の1ファイル)があれば実行拒否(案内: prod記録の退避・協議)。
-/// apply操作: registry退避→list_versions(root prefix)でVersions・DeleteMarkers全件を
-/// delete_object_version→ローカルregistry削除(cache dirは対象外・手動掃除)→
+/// manage reset(TASK-18 8章・8.1・TASK-25 2章): dev bucket初期化の恒久コマンド
+/// (S3全消去・registryはbucket限定・冪等)。既定dry-run・--applyで実行
+/// (prune/reconcileと同一流儀)。
+/// 安全弁(違反は設定エラー2+案内・S3 API呼び出しなし): 実効profileのpurposeが
+/// devであること(AwsConfigのpurpose保持。prod等ではbucket指定によらず拒否)。
+/// apply操作: registry退避(全体copy)→list_versions(root prefix)でVersions・
+/// DeleteMarkers全件をdelete_object_version→当該bucket由来行のみ除去した
+/// registry再書込(温存: 他bucket宛・共有uuidのfile_write・crash残存file_write・
+/// prune/sweep等)→
 /// 再list_versionsで0件確認。S3Backend操作は既存のlist_versions・
 /// delete_object_versionのみ(新API追加なし)。
 fn cmd_manage_reset(ctx: &CtxArgs, apply: bool) -> i32 {
@@ -954,27 +955,27 @@ fn cmd_manage_reset(ctx: &CtxArgs, apply: bool) -> i32 {
                 session.aws.profile, session.aws.purpose
             )));
         }
-        // 安全弁2: 当該bucketと異なるbucket宛のfile_upload記録(prod由来)の混在拒否
+        // registry行読込(1回のみ・in-memory保持。8.1の同時実行禁止により同一実行内で
+        // 再読込不要。不在なら退避・再書込ともskip)
         let registry_path = cfg.registry_path.clone();
-        if registry_path.is_file() {
-            let records = registry::load_registry(&registry_path)?;
-            let reduced = registry::reduce_records(&records);
-            if let Some(u) = reduced.file_uploads.iter().find(|u| {
-                !registry::record_bucket_matched(
-                    &u.s3_bucket,
+        let registry_lines = if registry_path.is_file() {
+            Some(registry::read_registry_lines(&registry_path)?)
+        } else {
+            None
+        };
+        // 除去判定(2.2)・計上値(除去行数・残行数)の保持
+        let partition = match registry_lines {
+            Some((lines, torn_tail)) => Some((
+                registry::partition_reset_removal(
+                    lines,
                     &session.aws.bucket,
                     &session.canonical_bucket,
-                )
-            }) {
-                return Err(BackupError::Config(format!(
-                    "registry({})に当該bucket({})と異なるbucket({})宛のfile_upload記録があります。resetで消去すると当該bucket側の記録を失うため実行を拒否します(prod記録の退避・対応を協議してください)",
-                    registry_path.display(),
-                    session.aws.bucket,
-                    u.s3_bucket
-                )));
-            }
-        }
-        let backup_path = registry_backup_path();
+                )?,
+                torn_tail,
+            )),
+            None => None,
+        };
+        let backup_path = registry_backup_path(&session.aws.bucket);
         let prefix = session.aws.prefix.clone();
         let versions = session
             .backend
@@ -986,6 +987,14 @@ fn cmd_manage_reset(ctx: &CtxArgs, apply: bool) -> i32 {
                 "[dry-run] manage reset: prefix={prefix} Versions={n_versions} DeleteMarkers={n_markers}"
             );
             println!("[dry-run] registry退避先: {}", backup_path.display());
+            match &partition {
+                Some((p, _)) => println!(
+                    "[dry-run] registry再書込: 除去{}行・残{}行(当該bucket分のみ除去・他bucket分は温存)",
+                    p.remove.len(),
+                    p.keep.len()
+                ),
+                None => println!("[dry-run] registry再書込: skip (不在)"),
+            }
             println!(
                 "[dry-run] 実行は --apply (data/配下に留まらずsys/索引・manifestも消去します)"
             );
@@ -1027,14 +1036,45 @@ fn cmd_manage_reset(ctx: &CtxArgs, apply: bool) -> i32 {
                 .delete_object_version(&session.aws.bucket, &v.key, &v.version_id)?;
             println!("delete {} version_id={}", v.key, v.version_id);
         }
-        // 3. ローカルregistry削除(cache dirはreset対象外・手動掃除)
-        if registry_path.is_file() {
-            std::fs::remove_file(&registry_path).map_err(|e| {
-                BackupError::Process(format!(
-                    "registryの削除に失敗({}): {e}",
-                    registry_path.display()
-                ))
-            })?;
+        // 3. ローカルregistry再書込(当該bucket由来行のみ除去・cache dirは対象外・手動掃除)。
+        //    除去0件かつtorn tail無しは書換なし(torn tailがあれば除去0件でも再書込して
+        //    tail破棄。放置すると後続appendが未完行と連結しregistry破損)
+        match partition {
+            Some((p, torn_tail)) if p.remove.is_empty() && !torn_tail => {
+                println!("registry再書込: 書換なし(除去0行・残{}行)", p.keep.len());
+            }
+            Some((p, torn_tail)) if p.keep.is_empty() => {
+                // 残0行(全行除去): 空fileを残さない→不在扱いで冪等性・既存テスト整合
+                std::fs::remove_file(&registry_path).map_err(|e| {
+                    BackupError::Process(format!(
+                        "registryの削除に失敗({}): {e}",
+                        registry_path.display()
+                    ))
+                })?;
+                sync_parent_dir(&registry_path)?;
+                let mut msg = format!(
+                    "registry再書込: 除去{}行・残0行(registry fileを削除",
+                    p.remove.len()
+                );
+                if torn_tail {
+                    msg.push_str("・torn write最終行を破棄");
+                }
+                println!("{msg})");
+            }
+            Some((p, torn_tail)) => {
+                rewrite_registry_file(&registry_path, &p.keep)?;
+                print!(
+                    "registry再書込: 除去{}行・残{}行",
+                    p.remove.len(),
+                    p.keep.len()
+                );
+                if torn_tail {
+                    println!("(torn write最終行を破棄)");
+                } else {
+                    println!();
+                }
+            }
+            None => println!("registry再書込: skip (不在)"),
         }
         // 4. 検証: 再list_versionsで0件であることを確認表示
         let rest = session
@@ -1060,12 +1100,80 @@ fn cmd_manage_reset(ctx: &CtxArgs, apply: bool) -> i32 {
     }
 }
 
-/// registry退避先path(8.1): cwd基準 ./tmp/<yyyymmdd(JST)>_registry_before_reset.jsonl。
-fn registry_backup_path() -> std::path::PathBuf {
+/// registry退避先path(TASK-25 2.5): cwd基準
+/// ./tmp/<yyyymmdd(JST)>_<bucket>_registry_before_reset.jsonl。
+/// bucket名入り: 同日の複数bucket resetが退避を上書きしない・退避証跡の帰属明確化。
+/// 同一日内の同一bucket再実行は従来どおり上書き(退避は復元しない前提・日次粒度)。
+fn registry_backup_path(bucket: &str) -> std::path::PathBuf {
     let jst = chrono::FixedOffset::east_opt(9 * 3600).expect("JST offset");
     let ymd = chrono::Utc::now()
         .with_timezone(&jst)
         .format("%Y%m%d")
         .to_string();
-    std::path::PathBuf::from(format!("./tmp/{ymd}_registry_before_reset.jsonl"))
+    std::path::PathBuf::from(format!("./tmp/{ymd}_{bucket}_registry_before_reset.jsonl"))
+}
+
+/// registry再書込(TASK-25 2.3): 残行を各行`\n`終端で書き出す
+/// (registry_pathと同dirのtemp file→fsync→rename→rename後の親dir fsync。
+/// append_recordのappendとは異なり、rename・removeはdir entry更新の永続化が必要。
+/// 電源断・OS crashでの旧registry巻戻し=「S3消去済みなのにupload成功記録が残り
+/// 後続pushが誤skip」を防ぐ)。書込失敗時はtempをbest effortで除去。
+fn rewrite_registry_file(registry_path: &std::path::Path, keep: &[String]) -> BackupResult<()> {
+    let temp_path = std::path::PathBuf::from(format!("{}.tmp", registry_path.display()));
+    let result = (|| -> BackupResult<()> {
+        let mut body = String::new();
+        for line in keep {
+            body.push_str(line);
+            body.push('\n');
+        }
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&temp_path).map_err(|e| {
+            BackupError::Process(format!(
+                "registry再書込temp fileの作成に失敗({}): {e}",
+                temp_path.display()
+            ))
+        })?;
+        file.write_all(body.as_bytes())
+            .and_then(|()| file.flush())
+            .and_then(|()| file.sync_all())
+            .map_err(|e| {
+                BackupError::Process(format!(
+                    "registry再書込temp fileへの書込に失敗({}): {e}",
+                    temp_path.display()
+                ))
+            })?;
+        std::fs::rename(&temp_path, registry_path).map_err(|e| {
+            BackupError::Process(format!(
+                "registry再書込のrenameに失敗({} -> {}): {e}",
+                temp_path.display(),
+                registry_path.display()
+            ))
+        })?;
+        sync_parent_dir(registry_path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path); // best effort
+    }
+    result
+}
+
+/// rename・remove後の親dir fsync(TASK-25 2.3・dir entry更新の永続化)。
+fn sync_parent_dir(path: &std::path::Path) -> BackupResult<()> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+    let dir = std::fs::File::open(parent).map_err(|e| {
+        BackupError::Process(format!(
+            "registry親dirのfsyncのためのopenに失敗({}): {e}",
+            parent.display()
+        ))
+    })?;
+    dir.sync_all().map_err(|e| {
+        BackupError::Process(format!(
+            "registry親dirのfsyncに失敗({}): {e}",
+            parent.display()
+        ))
+    })
 }

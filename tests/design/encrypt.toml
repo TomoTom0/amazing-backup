@@ -132,7 +132,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 ENC-011(規則は2.2-2�
 description = "sourceのsize/mtime変化時は再暗号化(平文sha256入手)のうえsha照合へ進み、内容同一なら既存uuidへ合流: default.ageへのuploadなし・版増加なしでfile_write新記録が追記されreduce後勝ちになる(次回から所在skipが回復) (integration)"
 given = "過去file_write記録がある対象のsize/mtimeを変更(内容不変: mtimeのみ変化を含む)して backup push 再実行"
 expect_return_shape = "再暗号化されsha照合で合流し、default.ageへのPUTは行われず(版増加なし)、reduce後の状態で新記録が有効(age_sha256等が新値・旧記録は参照されない)"
-source_lines = "src/registry.rs:860; tests/encrypt_batch.rs:192"
+source_lines = "src/registry.rs:1051; tests/encrypt_batch.rs:192"
 
 [[condition]]
 id = "encrypt.registry-append-fields"

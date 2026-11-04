@@ -1739,7 +1739,12 @@ fn ssh_fingerprint_of(pubkey: &std::path::Path) -> String {
     String::from_utf8_lossy(&out.stdout)
         .split_whitespace()
         .find(|t| t.starts_with("SHA256:"))
-        .unwrap_or_else(|| panic!("SHA256指紋が取れない: {}", String::from_utf8_lossy(&out.stdout)))
+        .unwrap_or_else(|| {
+            panic!(
+                "SHA256指紋が取れない: {}",
+                String::from_utf8_lossy(&out.stdout)
+            )
+        })
         .to_string()
 }
 
@@ -2004,12 +2009,10 @@ fn backup_verify_requires_aws_config() {
     std::fs::create_dir_all(&abh2).expect("ABH dir2");
     std::fs::copy(&fx.cfg, abh2.join("pipeline.toml")).expect("pipeline.toml配置2");
     std::fs::copy(&fx.registry, abh2.join("registry.jsonl")).expect("registry配置2");
-    let aws_body = fx
-        .aws_toml_body()
-        .replace(
-            &fx.credentials.display().to_string(),
-            "/nonexistent/amazing-backup-it-creds.toml",
-        );
+    let aws_body = fx.aws_toml_body().replace(
+        &fx.credentials.display().to_string(),
+        "/nonexistent/amazing-backup-it-creds.toml",
+    );
     write_file(&abh2.join("aws.toml"), aws_body.as_bytes());
     let (code, stdout, stderr) = run_bin_env(
         &["backup", "verify"],
@@ -2021,5 +2024,71 @@ fn backup_verify_requires_aws_config() {
     assert_eq!(
         code, 0,
         "credentialファイル不在でも構造検査は完結: {stdout}{stderr}"
+    );
+}
+
+/// [covers:plan.from-list-standalone]
+/// TASK-23(--from-list単独許容化): backup pushは--from-list単独(位置引数0個)で
+/// 対象解決・実行される(usage 64とならない)。[[targets]]1件(title付き)のfrom-listのみで
+/// backup push --dry-runを実行し、対象解決+newのdry-run予測表示・exit 0を確認する。
+#[test]
+fn push_from_list_only_resolves_targets() {
+    let Some(fx) = StorageFixture::new("sb-flonly", sb_opts()) else {
+        return;
+    };
+    let target = fx.data_root.join("fl-only.zip");
+    write_file(&target, b"from-list-standalone");
+    clear_calls(&fx);
+    let (code, stdout, stderr) =
+        fx.push_from_list(&[], &[(&target, Some("fl-only-title"))], &["--dry-run"]);
+    assert_eq!(
+        code, 0,
+        "--from-list単独(位置引数0個)のbackup push --dry-runはexit 0: {stdout}{stderr}"
+    );
+    assert!(
+        stdout.contains("fl-only.zip"),
+        "from-listの対象が解決・表示される: {stdout}{stderr}"
+    );
+    assert!(
+        stdout.contains("data/(新規uuid)/default.age") && stdout.contains("fl-only-title"),
+        "新規発行のdry-run予測表示(title付き): {stdout}{stderr}"
+    );
+    assert!(
+        stdout.contains("plan: 1件"),
+        "解決対象1件の集計表示: {stdout}{stderr}"
+    );
+    assert_eq!(
+        fx.calls(),
+        "",
+        "dry-runはS3 API呼び出し無し: {}",
+        fx.calls()
+    );
+}
+
+/// [covers:plan.from-list-empty-warning]
+/// TASK-23(--from-list単独許容化): from-listの[[targets]]0件(空リスト)のみの指定は
+/// 警告表示+exit 0(usage 64・対象エラー3としない)。S3 API呼び出し・暗号化は行われない。
+#[test]
+fn push_from_list_empty_warns_zero() {
+    let Some(fx) = StorageFixture::new("sb-flempty", sb_opts()) else {
+        return;
+    };
+    clear_calls(&fx);
+    let (code, stdout, stderr) = fx.push_from_list(&[], &[], &[]);
+    assert_eq!(
+        code, 0,
+        "[[targets]]0件のfrom-listのみは警告+exit 0: {stdout}{stderr}"
+    );
+    assert!(
+        (stdout.contains("警告") || stderr.contains("警告"))
+            && (stdout.contains("対象0件") || stderr.contains("対象0件"))
+            && (stdout.contains("処理を行わず") || stderr.contains("処理を行わず")),
+        "対象0件の警告表示(警告・対象0件・処理を行わず): {stdout}{stderr}"
+    );
+    assert_eq!(
+        fx.calls(),
+        "",
+        "S3 API呼び出し無し(処理を行わず終了): {}",
+        fx.calls()
     );
 }

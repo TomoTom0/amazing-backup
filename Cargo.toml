@@ -21,6 +21,8 @@ base64 = "0.22"
 chrono = "0.4"
 uuid = { version = "1", features = ["v7"] }
 aws-sdk-s3 = "1"
+# SdkError::ServiceErrorのcode/message/status診断(TASK-26)。SDK中核crateのため実質size影響なし
+aws-smithy-runtime-api = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "fs", "io-util"] }
 
 [dev-dependencies]
