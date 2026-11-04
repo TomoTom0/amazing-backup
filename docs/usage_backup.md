@@ -73,6 +73,7 @@ repoのclone・buildは不要。設定templateはbinary埋め込みのため、i
 | aws.toml | `$XDG_CONFIG_HOME/amazing-backup/aws.toml`(同上) | `configs/aws.example.toml`(binary埋め込み。`credentials_file`は生成したcredential雛形の絶対pathへ置換) |
 | aws-credentials.toml | `$XDG_CONFIG_HOME/amazing-backup/aws-credentials.toml`(同上) | -(空値のcredential雛形・permission 600。2.3) |
 | registry.jsonl | `$XDG_STATE_HOME/amazing-backup/registry.jsonl`(未設定なら`~/.local/state/amazing-backup/registry.jsonl`。dirは自動作成) | -(自動生成) |
+| catalog.db | `$XDG_STATE_HOME/amazing-backup/catalog.db`(未設定なら`~/.local/state/amazing-backup/catalog.db`。dir 0700・file 0600で作成) | -(自動生成・local catalog DB) |
 | cache dir | `$XDG_CACHE_HOME/amazing-backup/`(未設定なら`~/.cache/amazing-backup/`) | -(run毎の暗号化一時物) |
 
 ```console
@@ -92,7 +93,9 @@ $ amazing-backup config init
 - 規定pathに設定fileが無い状態でコマンドを実行すると設定エラー2+`config init`による生成案内が表示される
 - 初回の鍵準備: 暗号鍵(SSH ed25519鍵pair)をまだ持っていない場合は、8.3の手順1で鍵pairを生成する。生成したらpipeline.toml(規定path)の`[profiles.<name>.recipients].public_keys`を**生成した公開鍵(.pub)のpathへ置換**する(生成直後の雛形は存在しないpathのdummyのため、置換しないままでは設定エラー2)。あわせて`[profiles.<name>.verify].decrypt_key`へ生成した秘密鍵のpathを記述する(照会・復元の`--key`省略時の既定。`<name>`は実効aws profile名と同名)
 - `--config PATH` / `--aws-config PATH` で明示指定した場合はcwd基準の相対pathも可(規定pathより優先)
-- `AMAZING_BACKUP_HOME`環境変数(テスト/CI用)を指定すると規定pathをすべて`$ABH/`配下へ統合できる(`$ABH/pipeline.toml`・`$ABH/aws.toml`・`$ABH/registry.jsonl`・`$ABH/cache/`)
+- `AMAZING_BACKUP_HOME`環境変数(テスト/CI用)を指定すると規定pathをすべて`$ABH/`配下へ統合できる(`$ABH/pipeline.toml`・`$ABH/aws.toml`・`$ABH/registry.jsonl`・`$ABH/catalog.db`・`$ABH/cache/`)
+
+local catalog DB(`catalog.db`)はremote索引のlocal複製(復号後の平文view)とローカル書込の導出indexを保持するSQLite DB(照会系のS3 HEAD/GET削減・5.2)。真正はregistry.jsonl(JSONL)とS3索引のままで、DBは`manage catalog rebuild`(5.10)で常に再構築可能。**平文を含む**ため権限0600・専用dir 0700で作成され、DB fileのbackupは利用者の責任(取扱注意)。
 - pipeline.toml内の相対path(public_keys・decrypt_key)とaws.tomlの`credentials_file`の相対pathは**実行時のcwd基準**で解決される(XDG配置後も維持。生成直後の設定はcwd非依存の絶対pathで書かれる)
 
 ### 2.3 AWS credential(API keyファイル)の作成
@@ -373,6 +376,7 @@ s3://<bucket>/<prefix>/
 | `--key PATH` | 実効profileの`[profiles.<name>.verify].decrypt_key` | 復号用SSH ed25519秘密鍵。索引の復号に使うためlist/query/get/diff・pull・pinのすべてで使用(pipeline.tomlが規定pathに無い場合・実効profileのentryが読めない場合は必須・9.1)。どちらにも無ければ設定エラー2 |
 | `--profile NAME` | aws.toml `[aws].active_profile` | 当該実行限りprofileを上書き(aws.tomlへの書戻しはしない)。**aws.tomlとpipeline.tomlの両方のprofileを選択する**(実効pipeline profileは常に実効aws profile名と同一のため「aws=dev・pipeline=family」のような交叉は構造的に起きない・3.1) |
 | `--format human|json` | `human` | 照会系8コマンド(list 5種・query・get・diff)の出力形式。`json`はstdout全体が単一JSON(人間向け通知はstderr) |
+| `--refresh` | なし | 索引cacheを検証せずS3から再取得してDBを更新(`list files/versions/pins/runs`・`query`が対応・5.2) |
 | `--dry-run` | なし | 実行予定のみ表示(backup push/pullが対応。manage系は`--apply`方式でdry-runが既定・5.10) |
 
 backup verifyのみ旧形式の`--config`/`--key`/`--checksum`/`--roundtrip`を扱う(5.8。`--aws-config`/`--profile`も受理する)。
@@ -395,6 +399,8 @@ amazing-backup list jobs
 | `runs` | run(batch_id)毎の対象実体数(索引由来) |
 | `jobs` | 復元job状況(現行/非現行版ごと・pin含む。headのRestore headerをparse) |
 
+索引cache(2.2のcatalog.db): `files`/`versions`/`pins`/`runs`と`query`(5.3)は、起動時に索引objectのHEAD 1回でvalidator(ETag+VersionId)を確認し、検証済みfreshならS3 GET・復号を行わずlocal catalog DBから回答する(書込系実行直後の同一process内は無条件fresh)。validator不一致時は従来どおりS3 GET+復号で回答しDBを更新する。`--refresh`でvalidatorに関係なく再取得を強制できる。`get`・`diff`・`jobs`は実態突合・per-object headが必要なため従来どおりS3直接(cache不使用)。
+
 旧`list files --tree`・`list categories`は廃止。0件は警告表示+終了コード0。
 
 ### 5.3 query — 探索
@@ -403,7 +409,7 @@ amazing-backup list jobs
 amazing-backup query <手がかり> [--category C] [--versions]
 ```
 
-title部分一致・uuid前方一致・所在(source_path)部分一致で索引を検索。既定は実体単位要約、`--versions`で版一覧も表示。title重複で候補が複数ある場合は候補一覧(uuid・所在source_path)を表示し`get <title> --source-path <source_path>`での特定を案内する。0件は警告+終了コード0。
+title部分一致・uuid前方一致・所在(source_path)部分一致で索引を検索。既定は実体単位要約、`--versions`で版一覧も表示。title重複で候補が複数ある場合は候補一覧(uuid・所在source_path)を表示し`get <title> --source-path <source_path>`での特定を案内する。0件は警告+終了コード0。索引cacheの挙動はlist系と同一(5.2。`--refresh`対応)。
 
 ### 5.4 get — 単一実体の取得
 
@@ -527,6 +533,7 @@ amazing-backup manage index reconcile [--apply]
 amazing-backup manage location rm <source_path> [--uuid <uuid>]
 amazing-backup manage jobs reissue <object_key> [--tier T]
 amazing-backup manage reset [--apply]
+amazing-backup manage catalog sync|rebuild
 ```
 
 | subcommand | 動作 |
@@ -539,8 +546,10 @@ amazing-backup manage reset [--apply]
 | `location rm` | 旧所在の明示除去(`--uuid`でentity絞込可。不在・複数hitは対象エラー3)。location_remove記録+索引再構築+metadata sync。S3・実体には触れない(再backupで所在は復活) |
 | `jobs reissue` | 復元jobの再発行(tier変更可。Tierのallowlist外はusage 64)。対象はobject keyで指定 |
 | `reset` | dev bucketの初期化(S3全消去・registryはbucket限定・冪等)。**dry-runが既定**(消去対象version数=Versions・DeleteMarkers別・registry退避先path・registry再書込の除去/残行数を表示)。`--apply`で 1) ローカルregistryを`./tmp/<yyyymmdd>_<bucket>_registry_before_reset.jsonl`へ全体退避(証跡。不在ならskip。同日再実行は上書き) 2) root prefix配下の全object version(Versions・DeleteMarkers)をDeleteObjectVersionで削除(`{prefix}data/`配下に留まらず`sys/`索引・manifestも消去) 3) ローカルregistryから当該bucket由来行(対象bucket宛file_uploadはuuid共有(非対象bucketにもuploadされたuuid)に関わらず全て除去+S3実体削除後の記録残存はregistry-only skipとの不整合のため。他のupload系記録と対象bucketのみにuploadされたuuidのfile_write)のみ除去して再書込(temp+fsync+rename+親dir fsync。他bucket宛記録・共有uuidのfile_write・crash残存file_write・prune/sweep等は温存。torn write最終行は破棄。残0行ならfile削除。cache dirは対象外・手動掃除) 4) 再list_versionsで0件確認。安全弁(違反は設定エラー2+案内・S3 API呼び出しなし): 実効profileのpurpose=dev限定。`--config`必須 |
+| `catalog sync` | remote索引をlocal catalog DB(2.2)へ同期(遅延refresh)。HEAD 1回でvalidator(ETag+VersionId)を検証し、変化(初回含む)あればGET+復号でDBへ反映・変化なければGETを省略。書込実績の無いnamespaceは空cacheとして確定(S3問い合わせなし)。索引object不在は`index rebuild`案内の設定エラー2(未書込namespace例外は除く) |
+| `catalog rebuild` | ローカルregistry(JSONL)からcatalog DBのcache class(entities/versions/pins/locations/sync_state/pending_items)を置換再構築(冪等)。永続class(credential・実行記録)は保持・削除しない。cacheは常にregistry+S3から再構築可能な導出index(2.2) |
 
-`prune`/`index`/`location rm`/`reset`は`--config`必須。`lifecycle`/`jobs reissue`はconfig不要。
+`prune`/`index`/`location rm`/`reset`/`catalog`は`--config`必須。`lifecycle`/`jobs reissue`はconfig不要。
 
 ### 5.11 edit — 設定の確認
 

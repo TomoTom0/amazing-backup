@@ -24,6 +24,11 @@ aws-sdk-s3 = "1"
 # SdkError::ServiceErrorのcode/message/status診断(TASK-26)。SDK中核crateのため実質size影響なし
 aws-smithy-runtime-api = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "fs", "io-util"] }
+# TASK-9 local catalog DB(D1承認: SQLite)。DB層はCLI・serve共用のため無条件依存。
+# bundledでlibsqlite3を同梱build(外部libsqlite3への依存無し)
+rusqlite = { version = "0.40", features = ["bundled"] }
+# schema migration(user_version方式)。rusqlite 0.40系と組合わせる(links衝突回避)
+rusqlite_migration = "2.6.0"
 
 [dev-dependencies]
 # capture_request検証用(設計4.3案4・12.1)。capture_request関数の実体はこのSDK版では

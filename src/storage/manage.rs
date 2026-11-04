@@ -54,6 +54,25 @@ pub enum ManageSub {
         #[arg(long)]
         apply: bool,
     },
+    /// local catalog DBの管理(TASK-9: remote replica同期・ローカルregistryからの再構築)
+    Catalog {
+        #[command(subcommand)]
+        sub: CatalogSub,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum CatalogSub {
+    /// 索引objectのvalidator検証→変化時のみGET+復号でDBへ同期(遅延refresh・D10)
+    Sync {
+        #[command(flatten)]
+        ctx: CtxArgs,
+    },
+    /// ローカルregistry(JSONL)からcache classを置換再構築(永続classは保持)
+    Rebuild {
+        #[command(flatten)]
+        ctx: CtxArgs,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -144,6 +163,10 @@ pub fn cmd_manage(args: &ManageArgs) -> i32 {
             } => cmd_manage_jobs_reissue(ctx, object_key, tier.as_deref()),
         },
         ManageSub::Reset { ctx, apply } => cmd_manage_reset(ctx, *apply),
+        ManageSub::Catalog { sub } => match sub {
+            CatalogSub::Sync { ctx } => cmd_manage_catalog_sync(ctx),
+            CatalogSub::Rebuild { ctx } => cmd_manage_catalog_rebuild(ctx),
+        },
     }
 }
 
@@ -344,6 +367,7 @@ fn format_spec(r: &crate::s3::LifecycleSpec) -> String {
 }
 
 /// registryから索引を再構築してS3へ配置する(prune/pin等の索引影響操作後)。
+/// 配置後はTASK-9書込系のDB反映も行う(同一process内・失敗時は警告のみ)。
 fn rebuild_and_upload(
     session: &super::Session,
     registry_path: &std::path::Path,
@@ -357,6 +381,7 @@ fn rebuild_and_upload(
     let reduced = registry::reduce_records(&records);
     let entries =
         crate::index::build_entries(&reduced, &session.aws.bucket, &session.canonical_bucket);
+    let updated_at = now_jst();
     crate::index::upload_index(
         session.backend.as_ref(),
         &session.aws.bucket,
@@ -364,9 +389,30 @@ fn rebuild_and_upload(
         &cfg.public_keys,
         &entries,
         run_tag,
-        &now_jst(),
+        &updated_at,
         registry_path,
     )?;
+    let header = crate::index::IndexHeader {
+        schema: INDEX_SCHEMA,
+        record_type: "index_header".into(),
+        updated_at,
+        run_id: run_tag.to_string(),
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        entries: entries.len() as i64,
+    };
+    if let Err(warn) = crate::catalog::reflect_written_index(
+        session.backend.as_ref(),
+        &session.aws.bucket,
+        &session.aws.prefix,
+        &header,
+        &entries,
+        &crate::catalog::SourceMtimes::from_reduced(&reduced),
+    ) {
+        eprintln!(
+            "WARNING: catalog DB({})への反映に失敗しました(当該scopeのcacheは失効扱い。処理は継続します): {warn}",
+            crate::catalog::catalog_db_path().display()
+        );
+    }
     Ok(())
 }
 
@@ -901,6 +947,7 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             .first()
             .and_then(|e| e.versions.first().map(|v| v.batch_id.clone()))
             .unwrap_or_else(|| "rebuild".to_string());
+        let updated_at = now_jst();
         crate::index::upload_index(
             session.backend.as_ref(),
             &session.aws.bucket,
@@ -908,9 +955,31 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             &cfg.public_keys,
             &entry_list,
             &run_id,
-            &now_jst(),
+            &updated_at,
             &registry_path,
         )?;
+        // TASK-9 書込系のDB反映(索引upload成功後・同一process内。失敗時は警告のみ)
+        let header = crate::index::IndexHeader {
+            schema: INDEX_SCHEMA,
+            record_type: "index_header".into(),
+            updated_at,
+            run_id: run_id.clone(),
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            entries: entry_list.len() as i64,
+        };
+        if let Err(warn) = crate::catalog::reflect_written_index(
+            session.backend.as_ref(),
+            &session.aws.bucket,
+            &session.aws.prefix,
+            &header,
+            &entry_list,
+            &crate::catalog::SourceMtimes::empty(),
+        ) {
+            eprintln!(
+                "WARNING: catalog DB({})への反映に失敗しました(当該scopeのcacheは失効扱い。処理は継続します): {warn}",
+                crate::catalog::catalog_db_path().display()
+            );
+        }
         println!(
             "索引を再構築しました: entries={} (manifests={})",
             entry_list.len(),
@@ -918,6 +987,165 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
         );
         println!(
             "案内: 続けて `amazing-backup manage index reconcile` を実行してください(manifest由来の再構築ではregistryのprune/sweep除外が及ばない場合があるため、S3実在集合へ整合します)"
+        );
+        Ok(0)
+    })();
+    match run {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// manage catalog sync(TASK-9 4章・12章P1): HEAD 1回で索引objectのvalidator
+/// (ETag+VersionId)を取得しsync_stateと比較する。変化(初回含む=sync自身の取得実績が
+/// 無い状態)あればGET+復号で当該scopeのcache行を置換し、fetched_at・validatorを取得
+/// 内容としてsync_stateへ確定する。変化なければGETを行わない(毎回の索引GETを廃止=
+/// 要件1)。転送・復号失敗時はsync_state.status=error(staleness明示)。
+fn cmd_manage_catalog_sync(ctx: &CtxArgs) -> i32 {
+    let run = (|| -> BackupResult<i32> {
+        use crate::catalog::{
+            CatalogDb, ReflectOrigin, SourceMtimes, Validator, STATUS_ERROR, STATUS_FRESH,
+            STATUS_STALE,
+        };
+        let session = open_session_with_pipeline(ctx)?;
+        let key_path = resolve_key(ctx, session.cfg.as_ref())?;
+        let index_key = layout::index_object_key(&session.aws.prefix);
+        let mut db = CatalogDb::open()?;
+        let empty_cache = |db: &mut CatalogDb| -> BackupResult<i32> {
+            let header = crate::index::IndexHeader {
+                schema: INDEX_SCHEMA,
+                record_type: "index_header".into(),
+                updated_at: now_jst(),
+                run_id: String::new(),
+                tool_version: env!("CARGO_PKG_VERSION").to_string(),
+                entries: 0,
+            };
+            db.replace_scope(
+                &session.aws.bucket,
+                &session.aws.prefix,
+                &header,
+                &[],
+                &SourceMtimes::empty(),
+                &Validator::default(),
+                STATUS_FRESH,
+                ReflectOrigin::Fetched,
+            )?;
+            println!("catalog: 未書込namespaceです(空のcacheを同期しました)");
+            Ok(0)
+        };
+        // sync_state行が無く・registry file自体が不在(この環境に書込履歴が一切無い)の場合:
+        // 同期すべきremote索引の参照情報も無いため、未書込namespaceとして空cacheを確定し
+        // S3へ問い合わせない(registryがある場合は通常どおりHEAD検証から始める)
+        if db.sync_state(&session.aws.bucket, &session.aws.prefix)?.is_none()
+            && !session
+                .cfg
+                .as_ref()
+                .expect("pipeline.toml必須経路(open_session_with_pipeline)")
+                .registry_path
+                .is_file()
+        {
+            return empty_cache(&mut db);
+        }
+        let head = session.backend.head(&session.aws.bucket, &index_key)?;
+        let Some(head) = head else {
+            // 索引object不在: 従来の未書込namespace例外と同じ規則(空cache+freshでexit 0・
+            // 書込実績があるnamespaceは索引不在を案内エラーにする)
+            if super::namespace_never_written(&session)? {
+                return empty_cache(&mut db);
+            }
+            return Err(BackupError::Config(format!(
+                "索引object({index_key})を取得・復号できません。`amazing-backup manage index rebuild`で復旧するか、aws.tomlのbucket/prefixを確認してください"
+            )));
+        };
+        let validator = Validator::from_head(&head);
+        if db.replica_synced_fresh(&session.aws.bucket, &session.aws.prefix, &validator)? {
+            db.mark_verified_fresh(&session.aws.bucket, &session.aws.prefix)?;
+            println!("catalog: 変化なし(索引objectのGETを省略しました)");
+            return Ok(0);
+        }
+        let fetch = super::fetch_index_confirmed(&session, &key_path, &head);
+        match fetch {
+            Ok((header, entries, confirmed, fetched)) => {
+                let status = if confirmed { STATUS_FRESH } else { STATUS_STALE };
+                db.replace_scope(
+                    &session.aws.bucket,
+                    &session.aws.prefix,
+                    &header,
+                    &entries,
+                    &SourceMtimes::empty(),
+                    &fetched,
+                    status,
+                    ReflectOrigin::Fetched,
+                )?;
+                println!(
+                    "catalog: 同期しました(entries={}{})",
+                    entries.len(),
+                    if confirmed {
+                        String::new()
+                    } else {
+                        "・WARNING: 取得中に索引が変化したためstale扱いです(再実行で確定します)".to_string()
+                    }
+                );
+                Ok(0)
+            }
+            Err(e) => {
+                // 取得失敗(転送・復号): status=error(旧fresh状態を残さない)
+                let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+                Err(e)
+            }
+        }
+    })();
+    match run {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// manage catalog rebuild(TASK-9 2章・12章P1): ローカルregistry(JSONL=真正)から
+/// cache class(entities/versions/pins/locations/sync_state)のみを置換再構築する
+/// (冪等)。永続class(credentials/push_intents)はdropしない。registry由来の内容と
+/// S3索引の鮮度関係は未知のためstatus=staleで確定する(次回照会のHEAD検証・取得で
+/// S3側と整合する=cacheは常にJSONL+S3から再構築可能)。
+fn cmd_manage_catalog_rebuild(ctx: &CtxArgs) -> i32 {
+    let run = (|| -> BackupResult<i32> {
+        let session = open_session_with_pipeline(ctx)?;
+        let cfg = session
+            .cfg
+            .as_ref()
+            .expect("pipeline.toml必須経路(open_session_with_pipeline)");
+        let registry_path = cfg.registry_path.clone();
+        let records = registry::load_registry(&registry_path)?;
+        let reduced = registry::reduce_records(&records);
+        let entries =
+            crate::index::build_entries(&reduced, &session.aws.bucket, &session.canonical_bucket);
+        let mut db = crate::catalog::CatalogDb::open()?;
+        let header = crate::index::IndexHeader {
+            schema: INDEX_SCHEMA,
+            record_type: "index_header".into(),
+            updated_at: now_jst(),
+            run_id: "catalog-rebuild".into(),
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            entries: entries.len() as i64,
+        };
+        db.replace_scope(
+            &session.aws.bucket,
+            &session.aws.prefix,
+            &header,
+            &entries,
+            &crate::catalog::SourceMtimes::from_reduced(&reduced),
+            &crate::catalog::Validator::default(),
+            crate::catalog::STATUS_STALE,
+            crate::catalog::ReflectOrigin::Written,
+        )?;
+        println!(
+            "catalog: ローカルregistryから再構築しました(entries={}・次回照会時にS3索引と整合します)",
+            entries.len()
         );
         Ok(0)
     })();

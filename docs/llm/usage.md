@@ -16,13 +16,13 @@
 | 復元 | `backup pull` | category/run/全対象の一括復元(確認付き) |
 | 検査 | `backup verify` | ローカル成果物の整合検査(S3接続なし) |
 | 管理 | `pin add` / `pin rm` | ピン留め版(世代管理対象外)の付与・解除 |
-| 管理 | `manage prune/lifecycle/index/location/jobs/reset` | 世代削除・bucket保持設定・索引再構築・旧所在除去・復元job再発行・dev bucket初期化 |
+| 管理 | `manage prune/lifecycle/index/location/jobs/reset/catalog` | 世代削除・bucket保持設定・索引再構築・旧所在除去・復元job再発行・dev bucket初期化・local catalog DB管理 |
 | 設定 | `config init` | 設定file群の初期生成(規定pathへtemplate展開・既存file保護) |
 | 設定 | `edit metadata/files/layout/policy` | 設定sectionの確認(検証付き) |
 | 補完 | `completions <bash|zsh|fish>` | shell補完scriptのstdout出力 |
 | 文書 | `docs usage/config` / `docs llm usage/skill/snippet` | 配布ドキュメントのstdout出力(本書を含む) |
 
-主要文法(照会系は末尾に共通option群 `--config`・`--aws-config`・`--key`・`--profile`・`--format human|json` を持つ):
+主要文法(照会系は末尾に共通option群 `--config`・`--aws-config`・`--key`・`--profile`・`--format human|json` を持つ。`list files/versions/pins/runs`と`query`は索引cache(local catalog DB)を使用し`--refresh`で再取得を強制):
 
 ```
 amazing-backup get <title|uuid> [--path P] [--version V] [--version-id ID] [--pin <名>]
@@ -39,6 +39,7 @@ amazing-backup manage index reconcile [--apply]
 amazing-backup manage location rm <source_path> [--uuid <uuid>]
 amazing-backup manage jobs reissue <object_key> [--tier T]
 amazing-backup manage reset [--apply]
+amazing-backup manage catalog sync|rebuild
 ```
 
 `<PATH>`は対象アーカイブ(`.zip`/`.7z`。1個以上必須)。titleは実体の人間用ラベル(64文字以内・UTF-8可。新規発行時必須)。uuidはUUIDv7発行キー(hyphenated lowercase 36字)。

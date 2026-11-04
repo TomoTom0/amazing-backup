@@ -395,6 +395,23 @@ pub fn read_index(
     if backend.head(bucket, &key)?.is_none() {
         return Err(BackupError::Config(guidance));
     }
+    fetch_index(backend, bucket, prefix, decrypt_key)
+}
+
+/// 索引objectのGET+復号+parse(HEAD検査を含まない。呼び出し側がHEAD情報を既に持つ
+/// 経路=TASK-9 catalogのcache miss時取得で使い、HEAD二重呼出を避ける)。
+/// 索引GETのS3転送エラーは転送エラー5(cli.index-get-transfer-error。
+/// 索引不在404・復号失敗の設定エラー2と分離する)。
+pub fn fetch_index(
+    backend: &dyn S3Backend,
+    bucket: &str,
+    prefix: &str,
+    decrypt_key: &Path,
+) -> BackupResult<(IndexHeader, Vec<IndexFileEntry>)> {
+    let key = crate::layout::index_object_key(prefix);
+    let guidance = format!(
+        "索引object({key})を取得・復号できません。`amazing-backup manage index rebuild`で復旧するか、aws.tomlのbucket/prefixを確認してください"
+    );
     let tmp = std::env::temp_dir().join(format!(
         "amazing-backup-index-dl-{}-{}.age",
         std::process::id(),
@@ -404,8 +421,6 @@ pub fn read_index(
             .unwrap_or(0)
     ));
     let result = (|| -> BackupResult<(IndexHeader, Vec<IndexFileEntry>)> {
-        // 索引GETのS3転送エラーは転送エラー5(cli.index-get-transfer-error。
-        // 索引不在404・復号失敗の設定エラー2と分離する)
         backend
             .get_to_file(bucket, &key, &tmp)
             .map_err(|e| BackupError::Transfer(format!("{guidance} ({e})")))?;

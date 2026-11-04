@@ -247,12 +247,14 @@ fn index_get_transfer_error_is_exit_5() {
     assert_eq!(code, 0, "初回push: {stdout}");
     let index_key = fx.index_key();
 
-    // 索引objectは存在する状態で索引GETへ失敗注入
+    // 索引objectは存在する状態で索引GETへ失敗注入。
+    // TASK-9 D7: list filesは検証済みfresh時(cache hit)は索引GETを行わないため、
+    // GET経路の転送エラー観測には--refresh(強制S3再取得)を指定する
     let (code, _, stderr) =
-        fx.list_env("files", &[], &[("FAKE_S3_FAIL_CP_FOR", index_key.as_str())]);
+        fx.list_env("files", &["--refresh"], &[("FAKE_S3_FAIL_CP_FOR", index_key.as_str())]);
     assert_eq!(
         code, 5,
-        "索引GET転送エラーは転送エラー5(list files): {stderr}"
+        "索引GET転送エラーは転送エラー5(list files --refresh): {stderr}"
     );
     let out = fx.elsewhere.join("idxget-out");
     let (code, _, stderr) = fx.get_env(

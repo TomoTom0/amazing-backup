@@ -1162,3 +1162,139 @@ pub fn drop_version_state(state_dir: &Path, key: &str, version_id: &str) {
     write_file(&versions_path, out.as_bytes());
     let _ = std::fs::remove_file(state_dir.join("object-versions").join(key).join(version_id));
 }
+
+// ---------------------------------------------------------------------------
+// TASK-9(local catalog DB + Web frontend・tmp/tasks/tm-9/
+// design_catalog-frontend-auth.md)P1/P2テスト先行で追加したhelper群。
+
+/// 127.0.0.1の空きportを1つ取得する(serve testの都度使い捨てport。OS自動割当)。
+pub fn free_local_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("空きport取得")
+        .local_addr()
+        .expect("local_addr")
+        .port()
+}
+
+/// bin amazing-backupをsubprocessでspawnする(serve等の起動し続けるcommand観測用)。
+/// stderr_to指定時はstderrをfileへredirectする(spawnのpipe読み切りblockを避け、
+/// 後からwarning等を読む)。
+pub fn spawn_bin_env(
+    args: &[&str],
+    env: &[(&str, &str)],
+    stderr_to: Option<&Path>,
+) -> std::process::Child {
+    let bin = env!("CARGO_BIN_EXE_amazing-backup");
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    if let Some(p) = stderr_to {
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).expect("stderr redirect先parent dir");
+        }
+        let f = std::fs::File::create(p).expect("stderr redirect file create");
+        cmd.stderr(f);
+    }
+    cmd.spawn().expect("amazing-backup bin spawn")
+}
+
+/// spawnしたbin childの後始末(Dropでkill。放置によるtest並列時のport占有を防ぐ)。
+pub struct BinChild(std::process::Child);
+
+impl BinChild {
+    pub fn pid(&self) -> u32 {
+        self.0.id()
+    }
+
+    /// SIGTERM送信(graceful shutdown観測用)。
+    pub fn send_sigterm(&self) {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &self.0.id().to_string()])
+            .status();
+    }
+
+    /// 子processの終了を待ちexit codeを返す。
+    pub fn wait(&mut self) -> Option<i32> {
+        use std::os::unix::process::ExitStatusExt as _;
+        let status = self.0.wait().expect("子process待ち");
+        status.code().or(Some(status.signal().unwrap_or(-1)))
+    }
+}
+
+impl Drop for BinChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// addr(127.0.0.1:<port>)へのTCP接続が成功するまで繰り返す(serveのlisten待ち合わせ)。
+/// 成功=true・timeout=false。
+pub fn wait_http_ready(addr: &str, attempts: u32) -> bool {
+    for _ in 0..attempts {
+        if std::net::TcpStream::connect(addr).is_ok() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+/// addrへ素朴なHTTP/1.1 GETを実行し(status, body)を返す(応答無し・接続失敗はNone)。
+/// 外部HTTP client依存を持たないためstdのTcpStreamで書く。
+pub fn http_get(addr: &str, path: &str) -> Option<(u16, String)> {
+    use std::io::{Read as _, Write as _};
+    let mut stream = std::net::TcpStream::connect(addr).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok()?;
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    // status行 "HTTP/1.1 200 ..." からcodeをparse
+    let code = text.split_whitespace().nth(1)?.parse().ok()?;
+    // header/body分離(空行以降をbodyとする)
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
+    Some((code, body))
+}
+
+impl StorageFixture {
+    /// server.tomlのpath($ABH/server.toml。設計8章: 既存XDG config配下への新規file)。
+    pub fn server_toml(&self) -> PathBuf {
+        self.home.join("server.toml")
+    }
+
+    /// server.tomlを書く([server]本文断片を渡す)。
+    pub fn write_server_toml(&self, body: &str) {
+        write_file(&self.server_toml(), body.as_bytes());
+    }
+
+    /// serve等の起動し続けるcommandをfake seam環境(ABH+fake S3 state)でspawnする。
+    pub fn spawn_serve(
+        &self,
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+        stderr_to: Option<&Path>,
+    ) -> BinChild {
+        let state_s = self.state.display().to_string();
+        let home_s = self.home.display().to_string();
+        let mut envs: Vec<(&str, &str)> = vec![
+            ("AMAZING_BACKUP_FAKE_S3_STATE", state_s.as_str()),
+            ("AMAZING_BACKUP_HOME", home_s.as_str()),
+        ];
+        envs.extend_from_slice(extra_env);
+        BinChild(spawn_bin_env(args, &envs, stderr_to))
+    }
+
+    /// catalog DB fileのpath($ABH/catalog.db。設計2章: ABH統合則)。
+    pub fn catalog_db(&self) -> PathBuf {
+        self.home.join("catalog.db")
+    }
+}

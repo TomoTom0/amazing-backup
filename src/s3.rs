@@ -20,6 +20,11 @@ pub struct HeadInfo {
     /// 対象object(版)のstorage class(TASK-10: DA系は復元job要否の判定に使う。
     /// fakeはPUT時に記録した値・seed由来など不明はNone=非archive扱い)
     pub storage_class: Option<String>,
+    /// ETag(TASK-9 catalog: 索引objectのvalidator構成要素1。設計4章・HEAD応答由来)
+    pub etag: Option<String>,
+    /// VersionId(TASK-9 catalog: 索引objectのvalidator構成要素2。現行版のHEAD応答由来。
+    /// versioning無効bucketやseed由来など不明はNone)
+    pub version_id: Option<String>,
 }
 
 /// versioning有効bucketでの版情報(ListObjectVersions応答のrepo中立型)。
@@ -390,6 +395,8 @@ impl S3Backend for RealS3 {
                     checksum_type: out.checksum_type().map(|t| t.as_str().to_string()),
                     restore: out.restore().map(str::to_string),
                     storage_class: out.storage_class().map(|s| s.as_str().to_string()),
+                    etag: out.e_tag().map(str::to_string),
+                    version_id: out.version_id().map(str::to_string),
                 })),
                 Err(err) => {
                     // 404(NotFound)=Key不在はOk(None)(現行規則の維持・設計1章・8章)
@@ -576,6 +583,8 @@ impl S3Backend for RealS3 {
                     checksum_type: out.checksum_type().map(|t| t.as_str().to_string()),
                     restore: out.restore().map(str::to_string),
                     storage_class: out.storage_class().map(|s| s.as_str().to_string()),
+                    etag: out.e_tag().map(str::to_string),
+                    version_id: Some(version_id.to_string()),
                 })),
                 Err(err) => {
                     let not_found = err.as_service_error().is_some_and(
@@ -1354,6 +1363,26 @@ impl FakeS3 {
         base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(data))
     }
 
+    /// fakeのETag(object bytesのsha256 hexをquote付きで。内容変化=etag変化。
+    /// TASK-9 catalogの索引validator構成要素)
+    fn fake_etag(data: &[u8]) -> String {
+        use sha2::Digest;
+        let hex = sha2::Sha256::digest(data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        format!("\"{hex}\"")
+    }
+
+    /// 現行versionのid(版stateなし・delete marker現行はNone)
+    fn current_version_id(&self, key: &str) -> Option<String> {
+        self.version_lines(key)
+            .into_iter()
+            .last()
+            .filter(|l| l.kind == "put")
+            .map(|l| l.version_id)
+    }
+
     /// RestoreObject共通の事前検査(L-3・実S3相当): key(版指定時は当該version)の実在と
     /// archive storage class(GLACIER/DEEP_ARCHIVE/GLACIER_IR)を検査する。
     /// 不在keyはNoSuchKey/NoSuchVersion相当・archive系以外はInvalidObjectState相当の
@@ -1438,6 +1467,10 @@ impl S3Backend for FakeS3 {
                 .filter(|l| l.kind == "put")
                 .map(|l| l.storage_class.clone())
                 .filter(|sc| !sc.is_empty()),
+            // TASK-9 validator: etagはobject実体bytes由来(内容変化で変わる=直接書換え
+            // でも検出できる)。version_idは版stateの現行版(版stateなしはNone)
+            etag: Some(Self::fake_etag(&bytes)),
+            version_id: self.current_version_id(key),
         }))
     }
 
@@ -1628,6 +1661,8 @@ impl S3Backend for FakeS3 {
                 .find(|l| l.version_id == version_id)
                 .map(|l| l.storage_class.clone())
                 .filter(|sc| !sc.is_empty()),
+            etag: Some(Self::fake_etag(&bytes)),
+            version_id: Some(version_id.to_string()),
         }))
     }
 

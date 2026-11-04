@@ -172,7 +172,7 @@ source = "TASK-9 SDK移行設計 4.3案1・10.3・12.4(tmp/tasks/tm-9/design_sdk
 description = "fake seam: env AMAZING_BACKUP_FAKE_S3_STATE=<dir>指定時はS3 backendをfakeへ差し替える(gateは#[cfg(debug_assertions)]でrelease build・debug_assertions無効にはseam・FakeS3ともcompileされず実S3経路になる)。fakeはstate dir配下へobjects/<key>とcalls.log相当のAPI呼び出し記録(op名・bucket・key・storage_class・checksum・days・tier等のfield)を書く。fake選択時はstderr冒頭へ「WARNING: FAKE S3 MODE」を必ず表示する(誤用防御)。fakeはcredential値が不正(検出用ダミー値)でも成功する=実network不使用 (integration, fake seam)"
 given = "AMAZING_BACKUP_FAKE_S3_STATEを設定したbackup push実行(state dirを用意・credentialファイルはダミー値)"
 expect_return_shape = "exit 0でstate dirへobjects/<key>と呼び出し記録が書かれ、stderr冒頭にWARNING: FAKE S3 MODE表示。credential値・検出用ダミーは出力に現れない"
-source_lines = "src/s3.rs:2011; src/s3.rs:2075; tests/s3_backend.rs:38"
+source_lines = "src/s3.rs:2046; src/s3.rs:2110; tests/s3_backend.rs:38"
 
 [[condition]]
 id = "cli.query-partial-match"
@@ -504,7 +504,7 @@ source = "TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-3・D-6・§5)"
 description = "--profile <name>はaws.tomlとpipeline.tomlの両方を選択する(実効pipeline profileは常に実効aws profile名と同一=単一解決源。pipeline.toml独自の既定は置かないため「aws=dev・pipeline=family」のような交叉が構造的に起こらない)。--profile省略時はaws.toml active_profile側のpipeline profileが使われる。decrypt_keyの既定も実効profileの[profiles.<name>.verify].decrypt_keyへ変わる(解決規則 --key > 実効profileのdecrypt_key は不変) (integration, fake seam)"
 given = "dev(active_profile)とfamilyが独立した鍵pair・別bucketの[profiles.dev]/[profiles.family]構成での、(1)--profile family指定の backup push(索引objectの暗号化recipientの観察) (2)--key省略での get --profile family(復元) (3)--profile省略の backup push(dev側・索引の再暗号化観察)"
 expect_return_shape = "(1)索引objectはfamily側recipient(family秘密鍵)で復号できdev秘密鍵では復号できない (2)実効profile(family)のdecrypt_keyが既定で使われ索引・objectの復号までexit 0で完結する (3)索引はdev側recipient(dev秘密鍵)で復号できる"
-source_lines = "tests/phase_b_options.rs:909"
+source_lines = "tests/phase_b_options.rs:911"
 
 [[condition]]
 id = "cli.profile-unknown-config-error"
@@ -549,7 +549,7 @@ source = "TASK-11 body(Phase B: manage jobs reissue・tier変更可・最小実�
 description = "manage jobs reissue <対象>: 対象objectの復元jobを再発行する(tier変更可。--tier指定時は当該tier・省略時は既定Standard)。tierはStandard/Bulkのallowlist検査(allowlist外はusage error 64)。復元済み・進行中の対象にも再発行できる(保持期間延長・tier切替用途) (integration, fake seam)"
 given = "復元済みobjectと進行中objectがある状態での manage jobs reissue <対象> --tier Bulk 実行と、--tier Expedited(不可値)指定・--tier省略の各実行"
 expect_return_shape = "--tier BulkはRestoreObjectが当該対象へtier=Bulkで再発行され呼び出し記録に残る。--tier Expeditedは exit 64でRestoreObject発行なし。--tier省略はtier=Standardで発行"
-source_lines = "tests/phase_b_options.rs:375"
+source_lines = "tests/phase_b_options.rs:377"
 
 [[condition]]
 id = "cli.profile-namespace-isolated-by-bucket"
@@ -558,7 +558,7 @@ source = "TASK-11(Phase B)コードレビュー指摘H-1+tmp/tasks/tm-10/design_
 description = "registry記録のs3_bucketと当該実行の実効bucketの一致によりnamespaceはbucket単位で分離される(同一prefix・別bucketの複数profile構成でprefix一致のみなら全経路が他方bucketの実績に惑わされるのを防ぐ)。対象は(a) backup pushのskip判定(他方bucket実績ではskipしない=bucket横断で1byteもuploadされないrunを作らない) (b) 索引versions構築(他方bucketのfile_upload記録をversionsへ混入させない) (c) 索引不在時の未書込namespace例外(他方bucketの書込実績では救済せず0件exit 0とする)。bucket一致規則はregistry::record_bucket_matchedと同一(記録s3_bucket欠損の旧記録は正本bucket=aws.toml active_profile相当として扱い、実効bucketが正本と一致する実行でのみ一致扱い) (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成での、(1)devでのbackup push後に同一内容を--profile prodでbackup pushする実行 (2)prod実行後の索引versionsのversion_id確認(registryのbucket別file_upload記録と突合) (3)索引objectを削除した状態での list files --profile prod(他方bucket実績のみ)と list files(正本bucket実績あり)の各実行 (4)file_upload記録のs3_bucketを空文字へ書き換えた旧形式記録での再push(dev=正本と一致する実効bucket・prod=一致しない実効bucket)の各実行"
 expect_return_shape = "(1)prod側pushはskipされずにfile uploadが行われexit 0(ok表示あり・skip表示なし) (2)索引versionsにはprod側bucketのfile_upload記録のversionのみが載る(dev側のversion_idは混入しない) (3)prod照会は未書込namespaceとして0件+exit 0(索引不在でも設定エラー2にならない)。正本bucket(書込実績あり)の照会は設定エラー2+rebuild案内 (4)dev側の再pushはskipされる(旧記録は正本bucket扱い・file keyへのPUTなし)。prod側(--profile)のpushはskipされずuploadされる"
-source_lines = "tests/phase_b_options.rs:297; tests/phase_b_options.rs:471"
+source_lines = "tests/phase_b_options.rs:299; tests/phase_b_options.rs:473"
 
 [[condition]]
 id = "cli.fake-s3-restore-validates-key-and-state"
@@ -576,7 +576,7 @@ source = "TASK-11 body(ユーザー指示2026-10-15: prodはyour-family-bucket/y
 description = "3つ以上のbucketを含む複数profile構成(dev + prod系の同一prefix・別bucket)でもnamespace分離はbucket単位で機能する(cli.profile-namespace-isolated-by-bucketのbucket一致規則はprofile数に依存しない=一致/不一致の2値判定のため)。prod系profile相互(family/baked等)でも、(a) backup pushのskip判定は他bucket実績ではskipしない(bucket横断で1byteもuploadされないrunを作らない) (b) 索引versions構築には当該bucketのfile_upload記録のみが載る(3bucket分の実績が同一registryに混在していても混入しない) (c) 索引不在時の未書込namespace例外もbucket単位で判定する (integration, fake seam)"
 given = "dev(active_profile)とprod系2profile(同一prefix・別bucket)を含むaws.toml構成での、(1)family profileでのbackup push後に同一内容をbaked profileでbackup pushする実行 (2)3bucketそれぞれへのfile_upload記録(registryのbucket別version_id)と、baked実行後に再構築された索引versionsの突合"
 expect_return_shape = "(1)baked側pushはskipされずにfile uploadが行われexit 0(ok表示あり) (2)索引versionsにはbaked bucketのfile_upload記録のversionのみが載る(dev・family bucketのversion_idは混入しない)"
-source_lines = "tests/phase_b_options.rs:735"
+source_lines = "tests/phase_b_options.rs:737"
 
 [[condition]]
 id = "cli.backup-push-connection-dest-shown"
@@ -585,7 +585,7 @@ source = "TASK-11 body(ユーザー指示2026-10-15: 3prod bucket構成の混同
 description = "backup push(通常実行・--dry-run)は実行開始時に接続先を表示する: 実効profile名・bucket・prefix(3prod bucket構成で誤profile・誤bucketへの書き込みに気づかせるため)。表示は対象解決・S3 API呼び出しに先行して出るため、--dry-run(S3 API呼び出しなし)でも表示される (integration, fake seam)"
 given = "複数profileのaws.tomlでの、(1)--profile prod系指定の backup push --dry-run 実行 (2)--profile prod系指定の通常 backup push 実行 (3)既定(active_profile=dev)での backup push 実行"
 expect_return_shape = "いずれの実行でも接続先行(profile=・bucket=・prefix=を含む)が表示され、表示値は当該実行の実効profile(--profile指定時は指定profile・省略時はactive_profile)の値。(1)ではS3 API呼び出しは行われない"
-source_lines = "tests/phase_b_options.rs:805"
+source_lines = "tests/phase_b_options.rs:807"
 
 [[condition]]
 id = "cli.backup-push-recipient-fingerprints-shown"

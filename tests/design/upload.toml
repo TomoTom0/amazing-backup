@@ -99,7 +99,7 @@ source = "TASK-9 SDK移行設計 5.1〜5.3(tmp/tasks/tm-9/design_sdk_migration.m
 description = "multipart閾値: 対象file sizeがMULTIPART_THRESHOLD_BYTES(64 MiB)超の場合はCreateMultipartUpload→UploadPart×N(part size 64 MiB)→CompleteMultipartUploadでuploadし、閾値未満(manifest・索引等)は単発PutObject(設計5.3) (integration, fake seam)"
 given = "64 MiB超の対象(暗号化済み.age)と閾値未満の対象を含む backup push 実行(fake seam)"
 expect_return_shape = "64 MiB超keyの呼び出し記録はCreateMultipartUpload→UploadPart×N→CompleteMultipartUpload(単発PutObject無し)で、閾値未満keyは単発PutObject(CreateMultipartUpload無し)。完成objectは実体とbyte一致"
-source_lines = "src/s3.rs:1970; tests/s3_backend.rs:272"
+source_lines = "src/s3.rs:2005; tests/s3_backend.rs:272"
 
 [[condition]]
 id = "upload.multipart-checksum-per-part"
@@ -117,7 +117,7 @@ source = "TASK-26(2026-10-26実機エラー: 520MiB対象のCompleteMultipartUpl
 description = "Complete要求の各part checksum(TASK-26): checksum_algorithm SHA256指定のmultipartではUploadPart応答のChecksumSHA256(SDKがpart bytesのSHA256を計算・添付した結果)をCompleteMultipartUpload要求の各partのchecksum_sha256へ引き継ぐ。FakeS3はUploadPart応答checksum(part bytesのSHA256 base64)を返すとともに、Complete受付時に「Create時checksum指定なら全part checksum必須」を実S3仕様どおり検証する(欠落はInvalidRequest相当の転送エラー5) (unit+integration, fake seam)"
 given = "multipart閾値超の対象を含む backup push 実行(fake seam)とUploadPartOutput→CompletedPart組立のunit test"
 expect_return_shape = "UploadPart行がpart_sha256=<part bytesのSHA256 base64>を含み、CompleteMultipartUpload行がparts=<n> parts_with_checksum=<n>(全part checksum付き)となる。unit側はCompletedPartのchecksum_sha256がUploadPart応答の値と一致する"
-source_lines = "src/s3.rs:1989; tests/s3_backend.rs:274"
+source_lines = "src/s3.rs:2024; tests/s3_backend.rs:274"
 
 [[condition]]
 id = "upload.multipart-abort-on-part-failure"

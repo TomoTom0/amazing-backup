@@ -802,6 +802,30 @@ fn cmd_backup_push(
                     uuid,
                 )?;
             }
+            // TASK-9 書込系のDB反映(設計2章書込時序: JSONL append成功→同一process内で
+            // 当該scope反映。反映失敗時は警告表示のみでpush自体は継続=JSONLが正本)
+            let header = crate::index::IndexHeader {
+                schema: crate::index::INDEX_SCHEMA,
+                record_type: "index_header".into(),
+                updated_at: now_jst(),
+                run_id: batch_id.clone(),
+                tool_version: env!("CARGO_PKG_VERSION").to_string(),
+                entries: entries.len() as i64,
+            };
+            let mtimes = crate::catalog::SourceMtimes::from_reduced(&reduced_now);
+            if let Err(warn) = crate::catalog::reflect_written_index(
+                backend.as_ref(),
+                &aws.bucket,
+                &aws.prefix,
+                &header,
+                &entries,
+                &mtimes,
+            ) {
+                eprintln!(
+                    "WARNING: catalog DB({})への反映に失敗しました(当該scopeのcacheは失効扱い。backupは継続します): {warn}",
+                    crate::catalog::catalog_db_path().display()
+                );
+            }
         }
 
         // cache dir掃除(keep_artifacts="run"・run成功時のみ。TASK-19 XDG配置の暗号化

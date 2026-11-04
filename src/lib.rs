@@ -1,6 +1,7 @@
 //! library crate root(設計5章lib.rs)。module宣言と主要型の再export。
 
 pub mod cli;
+pub mod catalog;
 pub mod config;
 pub mod crypto;
 pub mod docs;

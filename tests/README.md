@@ -504,11 +504,35 @@ error時に旧形式移行error・parse失敗・実効profile entry不在のい�
 cargo test全件pass(297件)・verify-conditions.py PASS(235条件すべてcover)
 - 条件数235(excluded 43件のまま)
 
+2026-11-04: TASK-9(local catalog DB + Web frontend・P1+P2 wave)対応でテスト先行の条件書更新・
+テストコード作成(tmp/tasks/tm-9/design_catalog-frontend-auth.md 2/4/5章・12章P1/P2。
+D1〜D11は2026-11-05ユーザー承認済み)。
+- 新規feature 2ファイル: catalog(DB層11条件: DB path権限・schema/migration・syncのvalidator
+  取得とGET省略・list cache hit・cache miss反映とerror扱い・書込反映とstale化・rebuildの冪等・
+  scope分離・--refresh・--format json互換・diff/get/list jobs従来直接)・server(serve基盤7条件:
+  health・server.toml listen既定40510・config initのserver.toml生成・dist欠落APIのみ起動・
+  保護API fail-closed・graceful shutdown・起動時syncのasync境界)
+- tests/catalog_storage.rs(11test)・tests/server_api.rs(7test)を新設(いずれもbin subprocess・
+  fake seam。server_apiはSIGTERMと素朴HTTP client)。実装前のため赤確認済み・
+  verify-conditions.py PASS。P3以降(読取API・認証・frontend)の条件は後続wave
+- 条件数235→258(excluded 43→57件)
+
+2026-11-05: TASK-9 Phase P1(DB層)実装。src/catalog.rs新設(rusqlite bundled+rusqlite_migration・
+cache class 6 table+永続class 2 table・WAL・専用dir 0700/file 0600・scope(bucket+prefix)単位の
+原子的置換・unit test 4件)・src/s3.rs(HeadInfoへetag/version_id)・src/index.rs(fetch_index抽出)・
+src/storage/mod.rs(read_index_cached)・query.rs(照会系cache切替+--refresh)・manage.rs(manage
+catalog sync/rebuild・rebuild時反映hook)・backup.rs/pin.rs(書込後の同一process DB反映・失敗時
+stale化警告)。catalog_storage.rs 11test緑化・cargo test 320pass/7fail(failはserver_api.rs=
+P2実装前許容赤)・verify-conditions.py PASS。tests/phase_b_options.rsの
+index_get_transfer_error_is_exit_5へ--refresh追加(検証済みfresh時のGET省略=D7承認により
+push反映済みDBでlistがcache hitとなりGETが発生しなくなるため・観察経路の維持)。
+catalog.tomlの[meta]をverified=trueへ(source_hash=git blob hash)
+
 ## 構成
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(15ファイル・240条件・excluded 43件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-23(--from-list単独許容化・空リスト警告: cli改訂1・plan source追記1+新規2・id不変)とTASK-25(manage reset registry bucket限定化: 廃止1・改訂3・新規3・id不変)とTASK-26(multipart Complete要求のpart checksum SHA256引き継ぎ: upload新規1)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)とTASK-7(pipeline profile化: config新規8・cli新規4+verify/docs文言改訂・除外4)と実運用file schema適合(2026-11-03: 1件)反映済み。TASK-1〜5・TASK-20・TASK-23・TASK-25・TASK-26・TASK-7分ともテスト作成済み・実装済み(240条件すべてcover。TASK-7分は2026-11-03実装後に全件pass・条件書4fileの[meta]verified=true) |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(17ファイル・258条件・excluded 57件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-23(--from-list単独許容化・空リスト警告: cli改訂1・plan source追記1+新規2・id不変)とTASK-25(manage reset registry bucket限定化: 廃止1・改訂3・新規3・id不変)とTASK-26(multipart Complete要求のpart checksum SHA256引き継ぎ: upload新規1)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)とTASK-7(pipeline profile化: config新規8・cli新規4+verify/docs文言改訂・除外4)と実運用file schema適合(2026-11-03: 1件)とTASK-9(local catalog DB+Web frontend・P1/P2 wave: 新規feature 2ファイルcatalog 11条件+server 7条件・除外14)反映済み。TASK-1〜5・TASK-20・TASK-23・TASK-25・TASK-26・TASK-7分ともテスト作成済み・実装済み(240条件すべてcover。TASK-7分は2026-11-03実装後に全件pass・条件書4fileの[meta]verified=true)。TASK-9 catalog 11条件はP1実装(2026-11-05)後に全件pass([meta]verified=true)・server 7条件はP2実装前fail許容 |
 | tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(TASK-7 profile schema([profiles.dev]+追加profile)組立・AMAZING_BACKUP_HOMEによるXDG規定path統合・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
 | tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
@@ -530,6 +554,8 @@ cargo test全件pass(297件)・verify-conditions.py PASS(235条件すべてcover
 | tests/config_init.rs | TASK-1 config initの結合side(生成path解決=ABH絶対/相対・既存file上書き保護=通常file/dangling symlink・credential雛形のmode 0600と空値・空credentialでのbackup push事前検査・stdout案内・生成fileと埋め込みtemplateのbyte一致/parse突合。bin subprocess+AMAZING_BACKUP_HOME) | 作成済み(TASK-1実装前fail許容) |
 | tests/config_init_unit.rs | TASK-1 config initのunit(render_init_templateのTOML basic string符号化=「"」「\」入りpathのparse復元一致と劣化template内部エラー1・cmd_config_init_with_writerの失敗注入= EEXIST競合/IO失敗によるrollback。lib API直呼び) | 作成済み(TASK-1実装前compile error許容) |
 | tests/docs_pages.rs | TASK-4 docsサブコマンド(unit 4: 変換関数substitute_version_lines合成入力9.9.9+test側独立期待値・対象行が入力末尾の改行あり/なし両caseの保持=レビュー指摘対応・正本version literal sync+対象行count==1・終了コード表の両doc一致(固定期待集合・code→区分・重複拒否・空集合拒否)。integration 8: bin subprocess+AMAZING_BACKUP_HOME空dir固定=各ページbyte一致・usage version行・config marker置換+区切り行・llm skill frontmatter・llm snippet pointer・ページ一覧・invalid syntax 64本文非出力・書込失敗BrokenPipe=0/ENOSPC=4(/dev/full・相手close socketpair)。Write注入系unit観測はsrc/docs.rs内unit test 4件が担う) | 作成済み(TASK-4実装後に全件pass。TASK-7のconfig-marker-replaced改訂分も実装後に全件pass) |
+| tests/catalog_storage.rs | TASK-9 catalogエリア(DB path権限・schema/migration・sync validator取得とGET省略・list cache hit・cache miss反映とerror扱い・書込反映とstale化・rebuild冪等・scope分離・--refresh・--format json互換・diff/get/list jobs従来直接。bin subprocess+fake seam) | 作成済み(P1実装2026-11-05後に全件pass) |
+| tests/server_api.rs | TASK-9 serverエリア(serve subcommand health・server.toml listen/port既定40510・config initのserver.toml生成・dist欠落APIのみ起動warning・保護API fail-closed・graceful shutdown・起動時syncのasync境界。bin subprocess+素朴HTTP client+SIGTERM) | 作成済み(P2実装前fail許容) |
 | src/**/*.rs 内 #[cfg(test)] | cargo単体test(S3実行はS3Backend fake(FakeS3)差替) | 作成済み |
 
 cargo testの階層: unit=src/各モジュール内`#[cfg(test)] mod tests`、
@@ -572,6 +598,8 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | registry.toml | registry | src/registry.rs | 6 | TASK-18設計3.2/5.3(schema2 records往復・旧schema拒否・sweep/location_remove・sha_uuid_lookup合流正本) |
 | metadata.toml | metadata | src/metadata.rs | 4 | TASK-18設計2章/5.5(MetadataDoc導出・変更時のみPUT・latest_source_path 3形態・title変更キーローテーション) |
 | docs.toml | docs | src/docs.rs | 10 | TASK-4設計3章・3.9(各ページbyte一致・version置換3段検出=変換関数unit/integration出力/正本sync・config marker置換=render_init_template再利用・終了コード表doc間一致・SKILL.md形式・snippet pointer形式・ページ一覧・invalid-syntax usage error 64・書込失敗0/4)+TASK-7(config-marker-replacedを2profile新schemaのtemplate syncへ文言改訂・id不変) |
+| catalog.toml | catalog | src/catalog.rs | 11 | TASK-9設計2章(DB・D1/D11: path権限・schema・table契約)・4章(同期・D10: validator・freshness)・5章(CLI照会cache・D7)・12章P1 |
+| server.toml | server | src/server.rs | 7 | TASK-9設計1章(D2 serve)・6章(API)・8章(server.toml)・9章(D4)・10章(dist二階建て)・12章P2 |
 
 - 分割理由: test-structureの`[meta].source_file`(検証対象の実装ファイル・ファイル単位に1つ)が
   7エリアでそれぞれ別moduleに対応し、単一ファイルでは特定できないため。分割によりidの`<area>`部と

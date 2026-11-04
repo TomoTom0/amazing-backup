@@ -1,0 +1,168 @@
+# amazing-backup テスト設計条件書(catalog エリア)
+# 出典: tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(DB設計・D1/D11)・4章(同期・D10)・
+#   5章(CLI照会cache・D7)・12章 Phase P1(DB層)。D1〜D11は2026-11-05ユーザー承認済み。
+# 2026-11-04: TASK-9 Phase P1(DB層)対応でテスト先行の条件書(新設feature)。
+#   src/catalog.rs は設計12章P1で新設されるmodule(local catalog DB=rusqlite)。
+#   実装前のため新条件のテストは実行failを許容(bin subprocess観測: manage catalog系
+#   subcommand未実装=exit 64・catalog.db実体の不在等。cargo test --no-runのcompileは通る)。
+#   src/catalog.rs内のunit test(schema各tableの詳細構造・WAL mode・migration直接呼出・
+#   同一process内無条件fresh等)は実装時に追加する方針(TASK-10段階5・TASK-18と同一構成)。
+#   P3以降(serve・API・認証・frontend)の条件は後続waveでserver.toml等へ書く(本ファイル対象外)。
+
+[meta]
+feature = "catalog"
+source_file = "src/catalog.rs"
+verified = true
+verified_at = "2026-11-05"
+verified_by = "claude"
+test_command = "cargo test"
+source_hash = "a5d82e64045b69592ae0eddb6b6b864814fd5e93"
+note = "TASK-9設計2章(DB層)・4章(replica同期)・5章(CLI照会cache)・12章P1の条件化。DB真正はJSONL registryのまま・DBは導出index+S3索引replica(平文view・D11承認)。テストはbin subprocess+fake seam(StorageFixture)で観測しsrc/catalog.rs直接参照のunit testは実装時に追加"
+
+[[condition]]
+id = "catalog.db-path-and-file-permissions"
+target_function = "catalog::db_path解決 / DB open(作成時権限)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(D1/D11・格納先と権限)"
+description = "catalog DBの格納先は$XDG_STATE_HOME/amazing-backup/catalog.db(AMAZING_BACKUP_HOME指定時は$ABH/catalog.db=ABH統合則。resolve_app_pathsのregistryと同一規則)。DBは平文replicaを含むため(D11承認)専用directoryは0700・DB本体・WAL/SHM・一時fileは0600で作成する(group/other読取不可の権限境界) (integration, fake seam)"
+given = "AMAZING_BACKUP_HOME=<dir>指定での manage catalog sync 実行と、XDG_STATE_HOME=<dir>指定(ABH未指定)での manage catalog sync 実行"
+expect_return_shape = "ABH指定時は$ABH/catalog.db・XDG_STATE_HOME指定時は<dir>/amazing-backup/catalog.dbが作成され、DB fileのpermissionはmode & 0o077 == 0。XDG_STATE_HOME側の専用directory(<dir>/amazing-backup/)もmode & 0o077 == 0で作成される"
+source_lines = "tests/catalog_storage.rs:33"
+
+[[condition]]
+id = "catalog.schema-migration"
+target_function = "catalog::migrations(rusqlite_migration)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(schema要約・table契約)・12章P1(schema/migration)"
+description = "DB新規作成はmigrationによりschemaを構築する: cache class 6 table(entities/versions/pins/locations/sync_state/pending_items)+永続class 2 table(credentials/push_intents)。versions/locationsはfile_write由来のsource_mtimeを保存する(3章の比較基準供給源)。migrationは冪等(既存DBへの再適用で内容を壊さない)。WAL modeで運用する (unit; integrationではDB file生成を観測)"
+given = "存在しないpathへの初回DB作成(manage catalog sync実行)と、同一DBへの再実行"
+expect_return_shape = "初回実行でSQLite database file(magic header \"SQLite format 3\")が作成され後続の照会が動作。再実行はexit 0で既存内容を壊さない(schema各tableの詳細構造・WAL modeの直接観測はsrc/catalog.rs実装時のunit test)"
+source_lines = "src/catalog.rs:871; src/catalog.rs:967; tests/catalog_storage.rs:86"
+
+[[condition]]
+id = "catalog.sync-fetches-replica-on-change"
+target_function = "manage catalog sync(replica取得)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(D10遅延refresh・validator取得・freshness整合規則)・12章P1"
+description = "manage catalog syncはHEAD 1回で索引objectのvalidator(ETag+VersionId。S3Backend/FakeS3へのvalidator取得追加)を取得しsync_stateのvalidatorと比較する: 変化(初回含む)あればGET+復号し当該scopeのcache行を置換、fetched_at・validatorを取得内容としてsync_stateへ確定する。変化なければGETを行わない(毎回の索引GETを廃止=要件1)。転送・復号失敗時はsync_state.status=error(staleness明示) (integration, fake seam)"
+given = "索引objectが無い状態での初回 manage catalog sync・2回目sync(変化なし)・索引objectを書換えた後の3回目sync"
+expect_return_shape = "初回は索引keyへのHeadObject+GetObjectが呼ばれexit 0(同期時にDB file生成)。2回目はHeadObjectのみでGetObjectは呼ばれない。書換え後は再度GetObjectが呼ばれexit 0"
+source_lines = "tests/catalog_storage.rs:114"
+
+[[condition]]
+id = "catalog.list-cache-hit-after-head-check"
+target_function = "照会系CLI(list files/versions/pins/runs・query)のcache利用"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(freshness整合規則=別process起動時HEAD 1回 validator確認必須)・5章(D7承認: 検証済みfresh時DB利用)・12章P1(cache hit/miss両経路)"
+description = "list files/versions/pins/runs・queryは別process起動時にHEAD 1回のvalidator一致確認を行い、検証済みfreshならS3 GETを行わずDBから回答する(cache hit。HEADとGETの毎回取得を廃止)。HEAD validator一致確認は毎process起動時に必須(検証なしfreshの持ち越し期限は設けない) (integration, fake seam)"
+given = "manage catalog sync済み(fresh)状態での list files と query の実行(いずれもsyncとは別process)"
+expect_return_shape = "索引objectへのHeadObject 1回のみでGetObjectは呼ばれず、表示結果はS3索引の内容と一致する"
+source_lines = "src/catalog.rs:1026; tests/catalog_storage.rs:164"
+
+[[condition]]
+id = "catalog.cache-miss-refreshes-db"
+target_function = "照会系CLI(stale時の従来経路+DB更新)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 5章(D7: staleなら従来経路のS3 GET+復号→DB更新)・4章(取得失敗時のstaleness扱い)"
+description = "validator不一致(stale)時は従来経路(S3 GET+復号)で回答し、取得内容をDBへ反映する(次回起動はcache hit)。取得失敗(転送・復号)時は旧cacheをstaleness明示付きで扱い、sync_state.status=errorとする(旧fresh状態を残さない) (integration, fake seam)"
+given = "sync後に索引objectを書換えた(validator変化)状態での list files 実行と、転送失敗注入(FAKE_S3_FAIL_CP_FOR=索引key)での list files 実行"
+expect_return_shape = "書換え後のlistは索引keyへGetObject 1回を行いexit 0でDBが更新される(続く再実行はcache hit=GetObject無し)。失敗注入時は転送エラー(exit 5)で、DBはfreshとして持ち越されない"
+source_lines = "tests/catalog_storage.rs:208"
+
+[[condition]]
+id = "catalog.append-then-reflect-with-stale-on-failure"
+target_function = "backup push(書込系のDB反映) / catalog::reflect"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(書込時序: JSONL append成功→同一process内でDB反映・反映失敗時のstale化)"
+description = "backup push等の書込系はJSONL registry append成功後、同一process内で当該scopeのDBへ反映する(反映済み=自端末書込snapshot。次の照会はcache hit)。DB反映失敗(DB file破損等)時は当該scopeをstale化して警告表示する(旧fresh状態を残さない。JSONLが正本のためpush自体は成功継続) (integration, fake seam)"
+given = "通常のbackup push実行後のlist files(cache hit観測)と、catalog.dbを不正bytesで事前配置した状態でのbackup push実行"
+expect_return_shape = "通常時はpush後のlistがcache hit(索引objectへのHeadObject 1回・GetObject無し)。破損DB配置時はpushはexit 0でDB反映失敗の警告がstderrへ表示され、続くlistはS3経路(GetObjectあり)で回答する"
+source_lines = "tests/catalog_storage.rs:270"
+
+[[condition]]
+id = "catalog.rebuild-scoped-to-cache-class"
+target_function = "manage catalog rebuild"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(table契約: rebuildはcache classのみ置換・永続classはdropしない)・11章(rebuild冪等)・12章P1"
+description = "manage catalog rebuildはローカルregistry(JSONL)からcache class(entities/versions/pins/locations/sync_state/pending_items)のみを置換再構築し、永続class(credentials/push_intents)はdropしない。再実行で同一内容(冪等)。cacheは常にJSONL+S3から再構築可能 (integration, fake seam; 永続class保持の直接観測はsrc/catalog.rs実装時のunit test)"
+given = "sync済みDBへの manage catalog rebuild 2回実行と、rebuild後のlist files実行"
+expect_return_shape = "rebuildはexit 0でS3索引由来と同一の照会結果をDBから回答し、2回のrebuild後のlist結果は同一(冪等)"
+source_lines = "src/catalog.rs:990; tests/catalog_storage.rs:325"
+
+[[condition]]
+id = "catalog.scope-isolation-multi-profile"
+target_function = "catalog(cache tableのscope列)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(指摘#3: 全cache tableにscope(bucket+prefix)を持ち混在時の衝突・上書き防止)"
+description = "全cache tableはscope(bucket+prefix)をPK/検索条件に持つ: 複数profile=複数scopeの混在時に対象scope外のcache行への衝突・上書きが起きない(一方のscopeの同期・書込反映が他方のscopeのcacheを消さない。profile切替での照会は各scopeの内容のみ) (integration, fake seam)"
+given = "別prefixの2 profile(dev・prod。pipeline.toml側にも同名profile)でそれぞれpush+manage catalog syncした構成での、各profileでのlist files実行"
+expect_return_shape = "各profileのlistは当該scopeの索引内容のみを表示し他scopeのentityは混入せず、両scopeのcacheは併存する(後からsyncした側が先の側を上書きしない)"
+source_lines = "tests/catalog_storage.rs:351"
+
+[[condition]]
+id = "catalog.cli-refresh-flag"
+target_function = "照会系CLI(--refresh)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 5章(D7承認: --refreshフラグ追加)・12章P1"
+description = "list files/versions/pins/runs・queryへ--refresh flagを追加する: 指定時はHEAD validatorの一致に関係なくS3 GET+復号で索引を再取得しDBを更新する(強制refresh) (integration, fake seam)"
+given = "sync済み(fresh・索引変化なし)状態での list files --refresh 実行"
+expect_return_shape = "exit 0で索引objectへのGetObjectが行われ、表示結果はS3索引の内容と一致する(実装前の未知flagはusage 64)"
+source_lines = "tests/catalog_storage.rs:411"
+
+[[condition]]
+id = "catalog.json-format-compat"
+target_function = "照会系CLI(--format json出力)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 5章(D7: --format json出力schemaは完全互換・entry_summary_json単一source化)"
+description = "--format json出力schemaはcache/S3両経路で完全互換(cache hit経路で項目・語彙・構造が変化しない。entry_summary_jsonを単一source化) (integration, fake seam)"
+given = "sync済み状態での list files --format json(cache hit経路)と list files --refresh --format json(S3再取得経路)の実行"
+expect_return_shape = "2つの出力がJSONとして等価である"
+source_lines = "tests/catalog_storage.rs:439"
+
+[[condition]]
+id = "catalog.s3-direct-commands-unchanged"
+target_function = "diff / get / list jobs(従来S3直接)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 5章(D7: diff・get・list jobsは従来S3直接)・12章P1(既存commandの挙動はD7承認分を除き不変=1章影響)"
+description = "diff・get・list jobsはcache化対象外・従来どおりS3直接で動作する(diffは実態突合が目的・list jobsはper-object headが必要なため) (integration, fake seam)"
+given = "sync済み(fresh)状態でのdiff・get・list jobs実行"
+expect_return_shape = "いずれもS3 API呼び出しを行い(ListObjectVersions・HeadObject・GetObject等)従来経路の結果を返す(cache skipされた空応答にならない)"
+source_lines = "tests/catalog_storage.rs:471"
+
+[[excluded]]
+item = "pending_items(scan対象明示登録・未backup分類(b')・push dry-run/from-list実行記録(a)の併合・manage catalog scan)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(D6)・12章Phase P5"
+reason = "P5(pending catalog)の実装phaseでありP1+P2の対象外。後続waveで条件化する(pending_items table自体のschemaはcatalog.schema-migrationの構成に含む)"
+decided_at = "2026-11-04"
+decided_by = "claude"
+
+[[excluded]]
+item = "credentials tableのpasskey登録・bootstrap one-time token(128bit・in-memory・期限10分・原子的消費・再起動失効)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(D3・指摘#8)・12章Phase P4"
+reason = "P4(passkey認証)の実装phaseでありP1+P2の対象外。後続waveでwebauthn系areaへ条件化する(credentials table自体のschemaはcatalog.schema-migrationの構成に含む)"
+decided_at = "2026-11-04"
+decided_by = "claude"
+
+[[excluded]]
+item = "同一process内の自端末書込直後のみ無条件fresh(CLI再検証省略範囲)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(freshness整合規則)"
+reason = "CLIは1実行1コマンドのため別processからの観測が構成上できず、integrationでの検証手段が無い(=unit領域)。別process起動時のHEAD検証必須の観測面はcatalog.list-cache-hit-after-head-checkが担保し、同一process内省略はsrc/catalog.rs実装時のunit testで担保する"
+decided_at = "2026-11-04"
+decided_by = "claude"
+
+[[excluded]]
+item = "serve内sync・CLI sync・書込即時反映のsingle-flight(semaphore 1)直列化と複数process同時実行のSQLite書込lock直列化"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 1章(実行境界)・4章(sync競合)"
+reason = "並行processの競合時刻を決定的に制御した観測が統合testで困難な内部設計制約(test-structure §8: 観測可能な振る舞い分岐を定められない)。競合時に壊れた状態を作らないことの表出面は、冪等性(catalog.rebuild-scoped-to-cache-class)・stale化(catalog.cache-miss-refreshes-db)が担保"
+decided_at = "2026-11-04"
+decided_by = "claude"
+
+[[excluded]]
+item = "索引snapshot反映の単一transaction化(delete+insert置換)のtransaction内部構造"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(scope単位の原子的置換)"
+reason = "transactionの内部構造であり統合testでの直接観測面が無い(途中状態は外部から不可視)。観測可能な帰結(反映後の内容がsnapshot全体と一致=部分混在なし)はcatalog.sync-fetches-replica-on-change・cache miss反映系の各条件が担保"
+decided_at = "2026-11-04"
+decided_by = "claude"
+
+[[excluded]]
+item = "catalog.dbのbackupは利用者責任である旨のdocs記載(平文のため取扱注意)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(D11影響)"
+reason = "docs更新でありコードの振る舞い条件ではない(既存docs運用系除外と同一扱い。権限境界の振る舞い自体はcatalog.db-path-and-file-permissionsが担保)"
+decided_at = "2026-11-04"
+decided_by = "claude"
+
+[[excluded]]
+item = "SQLCipher等の暗号化DBの不採用(D11で平文replica保存を受容したため)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(代替案・D11)"
+reason = "不採用の決定事項であり検証対象コードの振る舞い条件が存在しない(test-structure §8)。平文保存の緩和措置(権限0600/0700)はcatalog.db-path-and-file-permissionsが担保"
+decided_at = "2026-11-04"
+decided_by = "claude"

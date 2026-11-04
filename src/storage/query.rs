@@ -4,7 +4,8 @@
 
 use super::get::restore_state;
 use super::{
-    CtxArgs, Format, fmt_size, open_session, print_json, read_index_for_query, resolve_key,
+    CtxArgs, Format, fmt_size, open_session, print_json, read_index_cached, read_index_for_query,
+    resolve_key,
 };
 use crate::errors::BackupResult;
 use crate::index::{IndexFileEntry, IndexLocation};
@@ -26,6 +27,9 @@ pub enum ListSub {
         /// category絞り込み(いずれかのlocation.category一致)
         #[arg(long)]
         category: Option<String>,
+        /// 検証済みfresh時のcache利用をせずS3索引を再取得してDBを更新する
+        #[arg(long)]
+        refresh: bool,
     },
     /// 実体毎の版一覧
     Versions {
@@ -37,6 +41,9 @@ pub enum ListSub {
         /// category絞り込み(いずれかのlocation.category一致)
         #[arg(long)]
         category: Option<String>,
+        /// 検証済みfresh時のcache利用をせずS3索引を再取得してDBを更新する
+        #[arg(long)]
+        refresh: bool,
     },
     /// ピン留め版一覧
     Pins {
@@ -45,11 +52,17 @@ pub enum ListSub {
         /// entity指定(title完全一致・uuid完全一致も受理)
         #[arg(long)]
         title: Option<String>,
+        /// 検証済みfresh時のcache利用をせずS3索引を再取得してDBを更新する
+        #[arg(long)]
+        refresh: bool,
     },
     /// run(batch)一覧
     Runs {
         #[command(flatten)]
         ctx: CtxArgs,
+        /// 検証済みfresh時のcache利用をせずS3索引を再取得してDBを更新する
+        #[arg(long)]
+        refresh: bool,
     },
     /// 復元job状況(全namespace・現行/非現行版ごと)
     Jobs {
@@ -69,6 +82,9 @@ pub struct QueryArgs {
     /// 版一覧も表示
     #[arg(long)]
     pub versions: bool,
+    /// 検証済みfresh時のcache利用をせずS3索引を再取得してDBを更新する
+    #[arg(long)]
+    pub refresh: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -143,7 +159,7 @@ fn entry_summary_json(e: &IndexFileEntry, with_versions: bool) -> serde_json::Va
 fn run_query(args: &QueryArgs) -> BackupResult<i32> {
     let session = open_session(&args.ctx)?;
     let key_path = resolve_key(&args.ctx, session.cfg.as_ref())?;
-    let (_header, entries) = read_index_for_query(&session, &key_path)?;
+    let (_header, entries) = read_index_cached(&session, &key_path, args.refresh)?;
     let term = args.term.as_str();
     let matched: Vec<&IndexFileEntry> = entries
         .iter()
@@ -240,24 +256,33 @@ pub fn cmd_list(args: &ListArgs) -> i32 {
 
 fn run_list(args: &ListArgs) -> BackupResult<i32> {
     match &args.sub {
-        ListSub::Files { ctx, category } => list_files(ctx, category.as_deref()),
+        ListSub::Files {
+            ctx,
+            category,
+            refresh,
+        } => list_files(ctx, category.as_deref(), *refresh),
         ListSub::Versions {
             ctx,
             title,
             category,
-        } => list_versions(ctx, title.as_deref(), category.as_deref()),
-        ListSub::Pins { ctx, title } => list_pins(ctx, title.as_deref()),
-        ListSub::Runs { ctx } => list_runs(ctx),
+            refresh,
+        } => list_versions(ctx, title.as_deref(), category.as_deref(), *refresh),
+        ListSub::Pins {
+            ctx,
+            title,
+            refresh,
+        } => list_pins(ctx, title.as_deref(), *refresh),
+        ListSub::Runs { ctx, refresh } => list_runs(ctx, *refresh),
         ListSub::Jobs { ctx } => list_jobs(ctx),
     }
 }
 
 /// list files(TASK-18 5.11): entity毎に
 /// `title  uuid(先頭8字)  所在n  {v}版  latest {date} ({size})  pins=n`の目録表示。
-fn list_files(ctx: &CtxArgs, category_filter: Option<&str>) -> BackupResult<i32> {
+fn list_files(ctx: &CtxArgs, category_filter: Option<&str>, refresh: bool) -> BackupResult<i32> {
     let session = open_session(ctx)?;
     let key_path = resolve_key(ctx, session.cfg.as_ref())?;
-    let (_h, entries) = read_index_for_query(&session, &key_path)?;
+    let (_h, entries) = read_index_cached(&session, &key_path, refresh)?;
     let matched: Vec<&IndexFileEntry> = entries
         .iter()
         .filter(|e| category_matched(e, category_filter))
@@ -315,10 +340,11 @@ fn list_versions(
     ctx: &CtxArgs,
     title: Option<&str>,
     category_filter: Option<&str>,
+    refresh: bool,
 ) -> BackupResult<i32> {
     let session = open_session(ctx)?;
     let key_path = resolve_key(ctx, session.cfg.as_ref())?;
-    let (_h, entries) = read_index_for_query(&session, &key_path)?;
+    let (_h, entries) = read_index_cached(&session, &key_path, refresh)?;
     let targets: Vec<&IndexFileEntry> = match title {
         Some(t) => {
             let e = super::get::find_entry(&entries, t, None)?;
@@ -410,10 +436,10 @@ fn print_label(label: &str) -> String {
     }
 }
 
-fn list_pins(ctx: &CtxArgs, title: Option<&str>) -> BackupResult<i32> {
+fn list_pins(ctx: &CtxArgs, title: Option<&str>, refresh: bool) -> BackupResult<i32> {
     let session = open_session(ctx)?;
     let key_path = resolve_key(ctx, session.cfg.as_ref())?;
-    let (_h, entries) = read_index_for_query(&session, &key_path)?;
+    let (_h, entries) = read_index_cached(&session, &key_path, refresh)?;
     let targets: Vec<&IndexFileEntry> = match title {
         Some(t) => vec![super::get::find_entry(&entries, t, None)?],
         None => entries.iter().collect(),
@@ -456,10 +482,10 @@ fn list_pins(ctx: &CtxArgs, title: Option<&str>) -> BackupResult<i32> {
     Ok(0)
 }
 
-fn list_runs(ctx: &CtxArgs) -> BackupResult<i32> {
+fn list_runs(ctx: &CtxArgs, refresh: bool) -> BackupResult<i32> {
     let session = open_session(ctx)?;
     let key_path = resolve_key(ctx, session.cfg.as_ref())?;
-    let (_h, entries) = read_index_for_query(&session, &key_path)?;
+    let (_h, entries) = read_index_cached(&session, &key_path, refresh)?;
     // run(batch_id)ごとの対象entity数とtitle(JSONはhumanの行と同一対象のtitleを含む)
     let mut runs: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for e in &entries {
