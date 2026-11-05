@@ -862,6 +862,9 @@ mod tests {
     /// index_upload記録(version_id付き)が残る。
     #[test]
     fn upload_index_uses_standard_and_records_event() {
+        // ageをPATH経由でspawnするためPATH書換えtestとlockで直列化する
+        // (lock不在だと並列testのPATH書換えと競合し「ageが見つからない」flaky)
+        let _lock = crate::testutil::path_env_lock();
         let tmp = TempDir::new("idx-up");
         let state = tmp.path().join("s3state");
         let fake = FakeS3::new(&state);
