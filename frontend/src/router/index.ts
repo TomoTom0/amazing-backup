@@ -1,20 +1,13 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import HomeView from '../views/HomeView.vue'
-import LoginView from '../views/LoginView.vue'
-import PendingView from '../views/PendingView.vue'
-import DiffView from '../views/DiffView.vue'
+import { routes } from './routes'
 import { useAuthStore } from '../stores/auth'
 
 // TASK-9設計7章: P4はLoginView追加+未認証時誘導(router guard軽量版=P4条件の範囲。
-// P5はPendingView追加・P6はDiffView追加。EntitiesView等の本格画面は後続wave)。
+// P5はPendingView追加・P6はDiffView追加。entities画面(EntitiesView・
+// EntityDetailView)はコードレビュー指摘高4で追加)。routes配列はroutes.tsへ分離。
 export const router = createRouter({
   history: createWebHistory(),
-  routes: [
-    { path: '/', name: 'home', component: HomeView },
-    { path: '/login', name: 'login', component: LoginView },
-    { path: '/pending', name: 'pending', component: PendingView },
-    { path: '/diff', name: 'diff', component: DiffView },
-  ],
+  routes,
 })
 
 // 未認証時はLoginViewへ誘導(認証状態はGET /api/auth/status由来。保護API自体は

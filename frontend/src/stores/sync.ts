@@ -3,8 +3,10 @@ import {
   apiGet,
   fetchSyncState,
   isHealthResponse,
+  postSyncRefresh,
   type ApiError,
 } from '../api/client'
+import { useEntitiesStore } from './entities'
 
 /** liveness(health)の表示状態 */
 export type HealthState = 'checking' | 'ok' | 'error'
@@ -24,6 +26,11 @@ type SyncState = {
   syncFetchedAt: string
   syncLastVerifiedAt: string
   syncEntryCount: number
+  /** 手動refresh(POST /api/sync)実行中状態 */
+  refreshing: boolean
+  /** 直近の手動refreshのerror(成功でクリア。取得系lastErrorとは別状態に保持=
+   * P5 lastScanError・P6 lastRunErrorと同一構成) */
+  lastRefreshError: ApiError | null
 }
 
 /**
@@ -43,6 +50,8 @@ export const useSyncStore = defineStore('sync', {
     syncFetchedAt: '',
     syncLastVerifiedAt: '',
     syncEntryCount: 0,
+    refreshing: false,
+    lastRefreshError: null,
   }),
   actions: {
     async fetchHealth(): Promise<void> {
@@ -77,6 +86,27 @@ export const useSyncStore = defineStore('sync', {
       this.syncLastVerifiedAt = ''
       this.syncEntryCount = 0
       this.lastError = result.error
+    },
+    /** 手動refresh(POST /api/sync。応答はGET /api/syncと同一形式のためPOST応答で
+     * sync状態を更新する=改めてGET /api/syncを呼ばない)。成功後にentities一覧を
+     * 再取得する(EntitiesViewの実描画がexcludedのためstore層で観測する解釈)。
+     * 失敗はlastRefreshErrorへ別保持しentities再取得は行わない */
+    async refresh(): Promise<void> {
+      this.refreshing = true
+      const result = await postSyncRefresh()
+      if (result.ok) {
+        this.syncFetch = 'ok'
+        this.syncStatus = result.data.status
+        this.syncScope = result.data.scope
+        this.syncFetchedAt = result.data.fetched_at
+        this.syncLastVerifiedAt = result.data.last_verified_at
+        this.syncEntryCount = result.data.entry_count
+        this.lastRefreshError = null
+        await useEntitiesStore().refetchEntities()
+      } else {
+        this.lastRefreshError = result.error
+      }
+      this.refreshing = false
     },
   },
 })

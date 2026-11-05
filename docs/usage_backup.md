@@ -658,6 +658,8 @@ Web frontend(埋め込み静的配信)と読取API(`/api/*`・axum)を起動す�
 - sync状態(`GET /api/sync`)と手動refresh(`POST /api/sync`)
 - diff実行(`POST /api/diff`)と最終diff結果参照(`GET /api/diff`)
 
+これらの閲覧はfrontendの各画面(entity一覧=検索・category絞込・paging・sync状態表示と手動refreshボタン・entity詳細=所在・pins・版一覧・アップロード前カタログ・diff)から操作できる(CLIの`query`/`list`と同一の索引語彙で表示)。
+
 未認証の閲覧系APIは401で拒否される(空dataを返さない)。操作系CLI(backup push/pull・get・pin・manage系のfile操作)のAPIは提供しない(操作はCLI既存のまま)。
 
 **APIの実装確定値**:

@@ -190,9 +190,11 @@ describe('diff storeの再実行失敗の明示(runDiff失敗で旧result保持)
       ),
     )
     await diff.runDiff()
-    expect(diff.result).not.toBeNull('実行失敗で旧結果を破棄しない')
+    // 実行失敗で旧結果を破棄しない
+    expect(diff.result).not.toBeNull()
     expect(diff.lastRunError?.code).toBe('internal')
-    expect(diff.lastError).toBeNull('取得系errorとは別状態')
+    // 取得系errorとは別状態
+    expect(diff.lastError).toBeNull()
     expect(diff.diffView).toBe('result')
     // 旧結果を表示している状態での実行失敗の明示フラグ(Viewの案内行用)
     expect(diff.showingStaleResult).toBe(true)

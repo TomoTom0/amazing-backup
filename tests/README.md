@@ -815,6 +815,25 @@ router routes.tsは未作成)。
   (実装後に復帰)
 - 条件数320(excluded 64件)
 
+2026-11-05: TASK-9コードレビュー指摘高4の実装完了。
+- frontend/src/api/client.ts: entities系型+型ガード(EntitySummary/EntitiesResponse/
+  EntityDetail/EntityVersionsResponse等)・fetchEntities(値のあるparamのみ直列化)・
+  fetchEntityDetail・fetchEntityVersions・postSyncRefresh
+- frontend/src/stores/entities.ts新規(items/query/category/page/totalPages・setQuery/
+  setCategoryはpage=1戻し・fetched flag=0件成功もresult・entitiesView getter=loading/
+  result/error/not_fetched・detail/versions/selectedUuid/detailError)
+- frontend/src/stores/sync.ts: refreshing・lastRefreshError・refresh action(POST応答で
+  sync状態更新+entities再取得=絞り込みリセットspec契約優先の解釈)
+- frontend/src/router/routes.ts新規(routes配列切出し=/entities・/entities/:uuid)・
+  EntitiesView.vue新規(一覧表・検索・category絞込・paging・SyncStatus+手動refresh)・
+  EntityDetailView.vue新規(詳細・versions・pins・locations)・HomeView「後続phase」解消
+- docs/usage_backup.md 5.14へfrontend画面の一文追記(最小)
+- テスト側修正1件: stores/diff.spec.tsのtoBeNull(message)引数=vitest 5.1.0型定義で
+  TS2554となりbuildを阻害する既存欠陃をmessage退避で修正(挙動不変)
+- frontend.tomlの[meta]verified=true復帰(source_hash=frontend/src tree hash)。
+  vitest 61pass/0fail(44+17)・pnpm build(vue-tsc)pass・cargo test 377pass/0fail・
+  verify-conditions.py PASS(320条件)
+
 ## 構成
 
 ## 構成

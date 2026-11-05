@@ -59,6 +59,43 @@ export function fetchSyncState(): Promise<ApiResult<SyncStateResponse>> {
   return apiGet('/api/sync', isSyncStateResponse)
 }
 
+/** 手動sync refresh(POST /api/sync・request body無し。応答はGET /api/syncと同一の
+ * sync状態形式=server.sync-refresh-endpointの解釈に整合) */
+export async function postSyncRefresh(): Promise<ApiResult<SyncStateResponse>> {
+  let resp: Response
+  try {
+    resp = await fetch('/api/sync', {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+    })
+  } catch {
+    return {
+      ok: false,
+      error: { code: 'network', message: 'serverに接続できません' },
+      httpStatus: 0,
+    }
+  }
+  const body: unknown = await resp.json().catch(() => null)
+  if (resp.ok) {
+    if (isSyncStateResponse(body)) {
+      return { ok: true, data: body }
+    }
+    return {
+      ok: false,
+      error: { code: 'internal', message: '応答の形式が不正です' },
+      httpStatus: resp.status,
+    }
+  }
+  if (isApiErrorResponse(body)) {
+    return { ok: false, error: body.error, httpStatus: resp.status }
+  }
+  return {
+    ok: false,
+    error: { code: 'unexpected_status', message: `HTTP ${resp.status}` },
+    httpStatus: resp.status,
+  }
+}
+
 /** GET /api/auth/status の応答形式(TASK-9設計6章: 認証状態と登録credential数) */
 export type AuthStatusResponse = {
   authenticated: boolean
@@ -256,6 +293,175 @@ export async function postLogout(): Promise<ApiResult<Record<string, unknown>>> 
     error: { code: 'unexpected_status', message: `HTTP ${resp.status}` },
     httpStatus: resp.status,
   }
+}
+
+// --- entities照会(TASK-9設計6章(GET /api/entities?query=&category=&label=&page=
+//     &scope=・:uuid・:uuid/versions)・7章(EntitiesView・EntityDetailView)・
+//     コードレビュー指摘高4。応答wrap・要素schemaはserver.entities-list-endpoint・
+//     entity-detail-endpoint・entity-versions-endpointの解釈に整合) ---
+
+/** entityのlocation 1件分(entry_summary_json互換の語彙) */
+export type EntityLocation = {
+  source_path: string
+  category: string
+  label: string
+  identity_hash: string
+  last_backup: string
+}
+
+/** entityのpin 1件分 */
+export type EntityPin = { pin: string; date: string; source_size: number }
+
+/** entity要約(GET /api/entitiesの要素=entry_summary語彙。versionsは版数) */
+export type EntitySummary = {
+  uuid: string
+  title: string
+  locations: EntityLocation[]
+  versions: number
+  latest_date: string
+  latest_size: number
+  pins: EntityPin[]
+}
+
+/** GET /api/entities の応答形式({"entities":[...],"page":n,"total_pages":n}) */
+export type EntitiesResponse = {
+  entities: EntitySummary[]
+  page: number
+  total_pages: number
+}
+
+function isEntityLocation(v: unknown): v is EntityLocation {
+  if (!isRecord(v)) return false
+  const fields = ['source_path', 'category', 'label', 'identity_hash', 'last_backup']
+  return fields.every((f) => typeof v[f] === 'string')
+}
+
+function isEntityPin(v: unknown): v is EntityPin {
+  return (
+    isRecord(v) &&
+    typeof v['pin'] === 'string' &&
+    typeof v['date'] === 'string' &&
+    typeof v['source_size'] === 'number'
+  )
+}
+
+function isEntitySummary(v: unknown): v is EntitySummary {
+  if (!isRecord(v)) return false
+  if (typeof v['uuid'] !== 'string' || typeof v['title'] !== 'string') return false
+  if (!Array.isArray(v['locations']) || !v['locations'].every(isEntityLocation)) {
+    return false
+  }
+  if (typeof v['versions'] !== 'number') return false
+  if (typeof v['latest_date'] !== 'string' || typeof v['latest_size'] !== 'number') {
+    return false
+  }
+  return Array.isArray(v['pins']) && v['pins'].every(isEntityPin)
+}
+
+/** GET /api/entities応答の型ガード(wrap+要素schema一致のみtrue) */
+export function isEntitiesResponse(v: unknown): v is EntitiesResponse {
+  if (!isRecord(v)) return false
+  if (!Array.isArray(v['entities']) || !v['entities'].every(isEntitySummary)) {
+    return false
+  }
+  return typeof v['page'] === 'number' && typeof v['total_pages'] === 'number'
+}
+
+/** entity詳細のversion_list要素(GET /api/entities/:uuidの詳細用) */
+export type EntityVersionEntry = {
+  date: string
+  version_ts: string
+  version_id: string
+  batch_id: string
+  source_size: number
+}
+
+/** GET /api/entities/:uuid の応答(要約+version_list付き=entity-detail-endpoint) */
+export type EntityDetail = EntitySummary & { version_list: EntityVersionEntry[] }
+
+function isEntityVersionEntry(v: unknown): v is EntityVersionEntry {
+  if (!isRecord(v)) return false
+  const fields = ['date', 'version_ts', 'version_id', 'batch_id']
+  return fields.every((f) => typeof v[f] === 'string') && typeof v['source_size'] === 'number'
+}
+
+/** GET /api/entities/:uuid応答の型ガード(要約+version_list配列の一致のみtrue) */
+export function isEntityDetailResponse(v: unknown): v is EntityDetail {
+  if (!isEntitySummary(v)) return false
+  return hasEntityVersionList(v)
+}
+
+function hasEntityVersionList(v: unknown): boolean {
+  if (!isRecord(v)) return false
+  const list = v['version_list']
+  return Array.isArray(list) && list.every(isEntityVersionEntry)
+}
+
+/** GET /api/entities/:uuid/versions のversions要素(state=現行/noncurrent付き) */
+export type EntityVersionsItem = {
+  date: string
+  version_ts: string
+  version_id: string
+  source_size: number
+  state: string
+}
+
+/** GET /api/entities/:uuid/versions の応答(list versions --format json相当) */
+export type EntityVersionsResponse = {
+  uuid: string
+  title: string
+  locations: EntityLocation[]
+  versions: EntityVersionsItem[]
+  pins: EntityPin[]
+}
+
+function isEntityVersionsItem(v: unknown): v is EntityVersionsItem {
+  if (!isRecord(v)) return false
+  const fields = ['date', 'version_ts', 'version_id', 'state']
+  return fields.every((f) => typeof v[f] === 'string') && typeof v['source_size'] === 'number'
+}
+
+/** GET /api/entities/:uuid/versions応答の型ガード */
+export function isEntityVersionsResponse(v: unknown): v is EntityVersionsResponse {
+  if (!isRecord(v)) return false
+  if (typeof v['uuid'] !== 'string' || typeof v['title'] !== 'string') return false
+  if (!Array.isArray(v['locations']) || !v['locations'].every(isEntityLocation)) return false
+  if (!Array.isArray(v['versions']) || !v['versions'].every(isEntityVersionsItem)) {
+    return false
+  }
+  return Array.isArray(v['pins']) && v['pins'].every(isEntityPin)
+}
+
+/** GET /api/entitiesの絞り込みparam(値のあるparamのみURL queryへ直列化する。
+ * scopeは省略=server側実効profile) */
+export type EntitiesQueryParams = {
+  query?: string
+  category?: string
+  label?: string
+  page?: number
+}
+
+/** entity一覧の取得(保護API。query/category/label/pageは値のあるもののみ付与) */
+export function fetchEntities(
+  params: EntitiesQueryParams = {},
+): Promise<ApiResult<EntitiesResponse>> {
+  const search = new URLSearchParams()
+  if (params.query) search.set('query', params.query)
+  if (params.category) search.set('category', params.category)
+  if (params.label) search.set('label', params.label)
+  if (params.page !== undefined) search.set('page', String(params.page))
+  const qs = search.toString()
+  return apiGet(qs === '' ? '/api/entities' : `/api/entities?${qs}`, isEntitiesResponse)
+}
+
+/** entity詳細の取得(保護API。不在uuidの404 not_foundはerror扱い) */
+export function fetchEntityDetail(uuid: string): Promise<ApiResult<EntityDetail>> {
+  return apiGet(`/api/entities/${uuid}`, isEntityDetailResponse)
+}
+
+/** entityの版一覧取得(保護API。state=現行/noncurrent付き) */
+export function fetchEntityVersions(uuid: string): Promise<ApiResult<EntityVersionsResponse>> {
+  return apiGet(`/api/entities/${uuid}/versions`, isEntityVersionsResponse)
 }
 
 // --- passkey登録・login(TASK-9設計8章・12章P4。LoginViewから使用) ---

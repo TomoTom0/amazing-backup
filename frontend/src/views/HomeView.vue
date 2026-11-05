@@ -25,8 +25,11 @@ onMounted(() => {
   <section class="card">
     <h2>データ照会</h2>
     <p class="muted">
-      entity一覧等の照会画面は後続phaseで提供されます。passkey認証後も当面はCLI
-      (list・query)をご利用ください(未認証の場合はlogin画面へ誘導されます)。
+      照会画面の一覧です(passkey認証後に閲覧できます。未認証の場合はlogin画面へ誘導
+      されます)。
+    </p>
+    <p>
+      <router-link to="/entities">entity一覧(検索・絞込・sync状態+refresh)</router-link>
     </p>
     <p>
       <router-link to="/pending">アップロード前カタログ(pending)</router-link>

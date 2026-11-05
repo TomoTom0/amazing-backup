@@ -63,12 +63,12 @@
 [meta]
 feature = "frontend"
 source_file = "frontend/src/"
-verified = false
+verified = true
 verified_at = "2026-11-05"
 verified_by = "claude"
 test_command = "pnpm --dir frontend vitest run"
-source_hash = "de1f71778ad5fd7ee4a4dcb12819bec097905ce4"
-note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3〜P6時点+コードレビュー指摘高4(EntitiesView・EntityDetailView・手動sync)分のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff・entities)のvitestで担保。P3分5条件・P4分4条件・P5分2条件・P6分3条件+レビュー分2条件は2026-11-05実装後に全件pass(44 tests)で検証記録を復帰済み。レビュー高4分5条件はテスト先行のためverified=false(実装後に復帰)。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
+source_hash = "a36d8be37995c30bf210ce953a814c873dcb44b4"
+note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3〜P6時点+コードレビュー指摘高4(EntitiesView・EntityDetailView・手動sync)分のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff・entities)のvitestで担保。P3分5条件・P4分4条件・P5分2条件・P6分3条件+レビュー分2条件は2026-11-05実装後に全件pass(44 tests)で検証記録を復帰済み。レビュー高4分5条件(entities-client・entities-store・sync-refresh-trigger・entities-view-state・entities-routes-nav)も2026-11-05実装後に全件pass(61 tests)で検証記録を復帰。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
 
 [[condition]]
 id = "frontend.api-error-body-guard"
