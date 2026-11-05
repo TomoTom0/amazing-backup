@@ -5,8 +5,9 @@ import { useEntitiesStore } from '../stores/entities'
 
 // TASK-9設計7章(EntityDetailView)・6章(:uuid=version_list付き詳細・
 // :uuid/versions=state付き版一覧)・コードレビュー指摘高4。詳細・versionsの状態は
-// entities store(detail/versions/detailError)が持つ。実描画の観測は実browser
-// (条件書frontend.tomlのexcluded参照)。
+// entities store(detail/versions/detailError/versionsError)が持つ(詳細とversionsで
+// error状態を分離し並行取得で片方の成功がもう片方の失敗を隠さない)。実描画の観測は
+// 実browser(条件書frontend.tomlのexcluded参照)。
 
 const route = useRoute()
 const entities = useEntitiesStore()
@@ -45,6 +46,9 @@ const fmtSize = (size: number): string => {
     <p v-if="entities.detailError" class="message">
       詳細の取得に失敗しました({{ entities.detailError.code }})。対象のentityが見つからない
       場合は一覧から選び直してください。
+    </p>
+    <p v-if="entities.versionsError" class="message">
+      版一覧(state付き)の取得に失敗しました({{ entities.versionsError.code }})。
     </p>
 
     <template v-if="entities.detail">

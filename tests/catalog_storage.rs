@@ -489,6 +489,76 @@ fn catalog_sync_and_reflect_failures_mark_status_on_healthy_db() {
     );
 }
 
+/// [covers:catalog.sync-invalidation-on-replace-failure-and-missing-index]
+/// syncのcache置換(replace_scope)失敗・書込履歴があるnamespaceでの索引object不在も
+/// 失効させてからエラー終了する(置換失敗=error・索引不在=stale。いずれも正常DBの
+/// まま旧freshを残さない=レビュー再指摘#6)。
+#[test]
+fn catalog_sync_replace_failure_and_missing_index_invalidate_status() {
+    let Some(fx) = StorageFixture::new("cat-sync-inv", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    make_archive(&a, 1024);
+    let (code, stdout, stderr) = fx.push_from_list(&[], &[(&a, Some("alpha"))], &[]);
+    assert_eq!(code, 0, "push(事前): {stdout}{stderr}");
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(事前): {stdout}{stderr}");
+    assert_eq!(sync_state_status(&fx), "fresh", "事前はfresh");
+
+    // (1) 置換失敗: 正常DBのままversions挿入のみを失敗させる(trigger注入。
+    // sync_stateへのUPDATE(mark_status)には影響しない)
+    {
+        let conn = rusqlite::Connection::open(fx.catalog_db()).expect("catalog.db open");
+        conn.execute_batch(
+            "CREATE TRIGGER fail_versions_insert BEFORE INSERT ON versions\
+             \nBEGIN SELECT RAISE(ABORT, 'injected'); END",
+        )
+        .expect("置換失敗注入triggerの作成");
+    }
+    // 索引objectを書換えてvalidatorを変化させる(HEAD不一致で置換が走る状態へ)
+    let mut lines = fx.read_index();
+    assert!(!lines.is_empty(), "索引にfile行がある(push済み前提)");
+    for l in lines.iter_mut() {
+        if l["record_type"] == "file" {
+            l["title"] = serde_json::Value::String("alpha2".into());
+        }
+    }
+    fx.rewrite_index(&lines);
+    let (code, _stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 1, "置換失敗注入のsyncは内部エラー: {stderr}");
+    assert_eq!(
+        sync_state_status(&fx),
+        "error",
+        "置換失敗はerror化(rollback後も旧freshを残さない)"
+    );
+
+    // 失敗は恒続化しない: 注入を解除すれば再syncでfresh復帰
+    {
+        let conn = rusqlite::Connection::open(fx.catalog_db()).expect("catalog.db open");
+        conn.execute_batch("DROP TRIGGER fail_versions_insert")
+            .expect("置換失敗注入triggerの解除");
+    }
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "解除後の再sync: {stdout}{stderr}");
+    assert_eq!(sync_state_status(&fx), "fresh", "再syncでfresh復帰");
+
+    // (2) 書込履歴があるnamespaceでremote索引object不在(HEADで不在確認):
+    // stale化してから案内エラー(旧freshを残さない)
+    std::fs::remove_file(fx.object_path(&fx.index_key())).expect("索引objectの削除");
+    let (code, _stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 2, "索引不在は案内エラー(Config): {stderr}");
+    assert_eq!(
+        sync_state_status(&fx),
+        "stale",
+        "索引不在はstale化(旧freshを残さない)"
+    );
+    assert!(
+        stderr.contains("manage index rebuild"),
+        "復旧案内を表示: {stderr}"
+    );
+}
+
 /// [covers:catalog.rebuild-scoped-to-cache-class] rebuildはcache classのみ置換・冪等
 #[test]
 fn catalog_rebuild_scoped_and_idempotent() {

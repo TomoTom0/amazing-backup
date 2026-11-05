@@ -1105,7 +1105,10 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
 /// (ETag+VersionId)を取得しsync_stateと比較する。変化(初回含む=sync自身の取得実績が
 /// 無い状態)あればGET+復号で当該scopeのcache行を置換し、fetched_at・validatorを取得
 /// 内容としてsync_stateへ確定する。変化なければGETを行わない(毎回の索引GETを廃止=
-/// 要件1)。転送・復号失敗時はsync_state.status=error(staleness明示)。
+/// 要件1)。転送・復号失敗時はsync_state.status=error(staleness明示)。cache置換
+/// (replace_scope)失敗時もerror化してからエラー終了し、書込履歴があるnamespaceで
+/// remote索引objectが不在(HEADで不在確認)の場合はstale化してから案内エラー終了
+/// する(いずれも置換失敗・rollback後・不在確認後に旧freshを残さない)。
 fn cmd_manage_catalog_sync(ctx: &CtxArgs) -> i32 {
     match catalog_sync_once(ctx) {
         Ok(msg) => {
@@ -1142,7 +1145,7 @@ pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             entries: 0,
         };
-        db.replace_scope(
+        if let Err(e) = db.replace_scope(
             &session.aws.bucket,
             &session.aws.prefix,
             &header,
@@ -1151,7 +1154,12 @@ pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
             &Validator::default(),
             STATUS_FRESH,
             ReflectOrigin::Fetched,
-        )?;
+        ) {
+            // 置換失敗・rollback後も旧freshを残さない=error化してからエラー
+            // (mark_status失敗は元のerrorに優先させない)
+            let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+            return Err(e);
+        }
         Ok("未書込namespaceです(空のcacheを同期しました)".to_string())
     };
     // remote索引の存在確認から(HEAD)。HEAD失敗もerror化経路へ集約する
@@ -1177,6 +1185,10 @@ pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
         if registry_absent || super::namespace_never_written(&session)? {
             return empty_cache(&mut db);
         }
+        // 書込実績があるnamespaceの索引object不在: cacheは旧索引のまま鮮度保証が
+        // ないためstale化してから案内エラー(旧freshを残さない。mark_status失敗は
+        // 元のerrorに優先させない)
+        let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_STALE);
         return Err(BackupError::Config(format!(
             "索引object({index_key})を取得・復号できません。`amazing-backup manage index rebuild`で復旧するか、aws.tomlのbucket/prefixを確認してください"
         )));
@@ -1194,7 +1206,7 @@ pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
             } else {
                 STATUS_STALE
             };
-            db.replace_scope(
+            if let Err(e) = db.replace_scope(
                 &session.aws.bucket,
                 &session.aws.prefix,
                 &header,
@@ -1203,7 +1215,12 @@ pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
                 &fetched,
                 status,
                 ReflectOrigin::Fetched,
-            )?;
+            ) {
+                // 置換失敗・rollback後も旧freshを残さない=error化してからエラー
+                // (mark_status失敗は元のerrorに優先させない)
+                let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+                return Err(e);
+            }
             Ok(format!(
                 "同期しました(entries={}{})",
                 entries.len(),

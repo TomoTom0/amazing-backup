@@ -30,6 +30,11 @@ export const useDiffStore = defineStore('diff', {
       }
       return 'not_run'
     },
+    /** 直近のdiff実行(POST)の失敗有無(旧resultの有無に関係なくViewで案内する=
+     * 保存済み結果が無い初回実行の失敗も表示から隠さない) */
+    hasRunError(): boolean {
+      return this.lastRunError !== null
+    },
     /** 旧結果を表示している状態での直近実行失敗の有無(Viewの明示行用) */
     showingStaleResult(): boolean {
       return this.result !== null && this.lastRunError !== null

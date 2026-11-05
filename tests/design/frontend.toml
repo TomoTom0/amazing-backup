@@ -59,6 +59,10 @@
 #     してrouter/index.tsから切出す=createWebHistoryがnodeで動かないための観測seam
 #   - EntitiesView・EntityDetailView componentの実描画・HomeViewのnav link実描画・
 #     router guardの実navigationはP4 LoginView〜P6 DiffViewと同一扱いでexcludedへ
+# 2026-11-05: TASK-9レビュー再指摘①〜④(category絞込がsubmitで適用されない・sync後の
+#   詳細失効・詳細/versionsのerror状態分離・旧result無しのdiff実行失敗が隠れる)対応で
+#   条件追加(4条件)。①のsubmit統合はapplyFilters action・②はrefetchEntitiesでの
+#   詳細系resetとしてstore層で観測する(実描画はexcluded維持)。
 
 [meta]
 feature = "frontend"
@@ -67,8 +71,8 @@ verified = true
 verified_at = "2026-11-05"
 verified_by = "claude"
 test_command = "pnpm --dir frontend vitest run"
-source_hash = "a36d8be37995c30bf210ce953a814c873dcb44b4"
-note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3〜P6時点+コードレビュー指摘高4(EntitiesView・EntityDetailView・手動sync)分のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff・entities)のvitestで担保。P3分5条件・P4分4条件・P5分2条件・P6分3条件+レビュー分2条件は2026-11-05実装後に全件pass(44 tests)で検証記録を復帰済み。レビュー高4分5条件(entities-client・entities-store・sync-refresh-trigger・entities-view-state・entities-routes-nav)も2026-11-05実装後に全件pass(61 tests)で検証記録を復帰。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
+source_hash = "f5a4b0fab47d0e5b848b08d29277093fc7b5e8f3"
+note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3〜P6時点+コードレビュー指摘高4(EntitiesView・EntityDetailView・手動sync)分+レビュー再指摘①〜④分のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff・entities)のvitestで担保。P3分5条件・P4分4条件・P5分2条件・P6分3条件+レビュー分2条件は2026-11-05実装後に全件pass(44 tests)で検証記録を復帰済み。レビュー高4分5条件(entities-client・entities-store・sync-refresh-trigger・entities-view-state・entities-routes-nav)も2026-11-05実装後に全件pass(61 tests)で検証記録を復帰。レビュー再指摘①〜④分4条件(entities-filter-apply・sync-refresh-invalidates-detail-state・entities-detail-versions-error-separation・diff-run-error-visible-without-result)も2026-11-05実装後に全件pass(66 tests)で検証記録を更新。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
 
 [[condition]]
 id = "frontend.api-error-body-guard"
@@ -287,9 +291,45 @@ given = "frontend/src/router/routes.tsのroutes配列参照"
 expect_return_shape = "routesのpathに/entitiesと/entities/:uuidが含まれる(実装前のためroutes.ts未作成=module解決failで実行failを許容)"
 source_lines = "frontend/src/router/index.spec.ts:12"
 
+[[condition]]
+id = "frontend.entities-filter-apply"
+target_function = "frontend stores/entities.ts applyFilters(検索語+categoryの同時適用)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesView=一覧・検索・絞込)・TASK-9レビュー再指摘①(filter formのsubmitがqueryのみ適用しcategory絞込がAPIへ送信されない)"
+description = "entities storeのapplyFilters(query, category)は検索語とcategory絞り込みを1回の適用でstoreへ反映し再取得も1回にまとめる: EntitiesViewのfilter form submitは両入力をこのactionへ渡す=1つのsubmit処理でquery・category両方がURL queryへ乗る(片方だけが適用される経路を作らない。絞り込み変更でpageは1へ戻る。category=nullはcategory paramを付けない) (vitest)"
+given = "2page閲覧中の状態からのapplyFilters(\"beta\", \"docs\")呼び出しと、applyFilters(\"\", null)呼び出しでのfetch mock URL観測"
+expect_return_shape = "前者は1回のfetchで/api/entities?query=beta&category=docs&page=1へ向かいquery=\"beta\"・category=\"docs\"・page=1を保持。後者は/api/entities?page=1(category paramなし)"
+source_lines = "frontend/src/stores/entities.spec.ts:270"
+
+[[condition]]
+id = "frontend.sync-refresh-invalidates-detail-state"
+target_function = "frontend stores/entities.ts refetchEntities(sync後再取得での詳細失効)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesView・EntityDetailView)・4章(D10手動refresh)・TASK-9レビュー再指摘②(sync後もselectedUuid一致で詳細取得を省略し旧locations/pinsと新versions一覧が混在する)"
+description = "手動sync成功後のentities一覧再取得(refetchEntities)は詳細・versionsの保持状態(selectedUuid・detail・detailError・versions・versionsError)を失効させる: syncはremote索引の置き換えのため旧詳細の内容保証が無く、失効により詳細を開く際の再取得を強制する(旧locations/pinsと新versions一覧の混在を構造的に排除) (vitest)"
+given = "fetchEntityDetail/fetchEntityVersions成功後(detail・versions保持状態)でのrefetchEntities呼び出し"
+expect_return_shape = "一覧(items)は再取得結果へ更新され、selectedUuid=null・detail=null・detailError=null・versions=null・versionsError=nullへ失効する"
+source_lines = "frontend/src/stores/entities.spec.ts:298"
+
+[[condition]]
+id = "frontend.entities-detail-versions-error-separation"
+target_function = "frontend stores/entities.ts detailError/versionsError(詳細・versionsのerror状態分離)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntityDetailView=詳細+版一覧)・TASK-9レビュー再指摘③(詳細とversionsが同一detailErrorを共有し片方の失敗がもう片方の成功で消える)"
+description = "詳細取得のerror(detailError)とversions取得のerror(versionsError)は別状態として保持する: 並行取得で詳細が失敗した後にversionsが成功してもdetailErrorは残り(詳細部分は失敗表示のまま)・逆にversionsが失敗してもversionsErrorはversionsの成功で消えない(EntityDetailViewは両errorを別々に表示) (vitest)"
+given = "fetch mock(詳細404 not_found+versions 200・versions 500 internal+詳細200)でのfetchEntityDetail/fetchEntityVersions順次呼び出し"
+expect_return_shape = "前者はdetail=null+detailError={code:\"not_found\"}が残りversionsは保持・versionsError=null。後者はdetailは保持+detailError=nullでversions=null+versionsError={code:\"internal\"}が残る"
+source_lines = "frontend/src/stores/entities.spec.ts:333"
+
+[[condition]]
+id = "frontend.diff-run-error-visible-without-result"
+target_function = "frontend stores/diff.ts hasRunError(旧result無しの実行失敗も表示対象)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(diff UI)・12章P6・TASK-9レビュー再指摘④(POST失敗の表示条件がresult非nullのため保存済み結果が無い初回実行失敗が「未実行」表示だけになり隠れる)"
+description = "diff実行(POST /api/diff)の失敗は旧resultの有無に関係なく表示対象とする: hasRunError getter(lastRunError非null)をViewの案内行条件とし、旧resultがある場合はshowingStaleResultで「保存済みの旧結果」であることを添え・無い場合は「保存済みの結果はありません」へ接続する(実行失敗が未実行表示に隠れない)。実行成功でlastRunErrorはクリアされる (vitest)"
+given = "保存済みresultが無い状態(result=null)でのPOST /api/diff 500でのrunDiff実行と、続くPOST成功での再実行"
+expect_return_shape = "失敗時はresult=nullのままlastRunError={code:...}を保持しhasRunError=true・showingStaleResult=false。成功時はlastRunError=null+hasRunError=false"
+source_lines = "frontend/src/stores/diff.spec.ts:213"
+
 [[excluded]]
 item = "EntitiesView・EntityDetailView componentの実描画(entity一覧table・検索box・category絞込・詳細・versions一覧の実browser描画)・HomeViewの「後続phase」文言解消後のnav link実描画・sync refreshボタン実操作・router guardの実navigation(未認証時login誘導の実挙動)"
 source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesView=一覧・検索・絞込・sync状態+refresh・EntityDetailView・HomeView)・4章(D10 staleness表示)・TASK-9レビュー指摘高4"
-reason = "component実描画はvitest(node環境)で観測できない(store/client層+routes配列で担保=P4 LoginView・P5 PendingView・P6 DiffViewと同一扱い。UI誘導状態はentitiesView getter・絞込はquery/category状態+fetchEntities・stalenessはsync状態+refresh action・navはroutes登録で担保)。createWebHistoryはwindow依存のためguard実navigationのnode観測も不能。実機画面確認は実装waveの手動verify項目"
+reason = "component実描画はvitest(node環境)で観測できない(store/client層+routes配列で担保=P4 LoginView・P5 PendingView・P6 DiffViewと同一扱い。UI誘導状態はentitiesView getter・絞込はquery/category状態+applyFilters・stalenessはsync状態+refresh action・navはroutes登録で担保)。createWebHistoryはwindow依存のためguard実navigationのnode観測も不能。実機画面確認は実装waveの手動verify項目"
 decided_at = "2026-11-05"
 decided_by = "claude"

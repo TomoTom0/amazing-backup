@@ -209,3 +209,36 @@ describe('diff storeの再実行失敗の明示(runDiff失敗で旧result保持)
     expect(diff.showingStaleResult).toBe(false)
   })
 })
+
+// [covers:frontend.diff-run-error-visible-without-result]
+describe('diff storeの初回実行失敗の明示(保存済み結果なし)', () => {
+  it('保存済みresultが無い状態での実行失敗もlastRunErrorで示し表示対象になる', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          responseOf(500, {
+            error: { code: 'internal', message: '内部エラーが発生しました' },
+          }),
+        ),
+      ),
+    )
+    const diff = useDiffStore()
+    expect(diff.result).toBeNull()
+    await diff.runDiff()
+    // 旧resultが無い場合でも実行errorは保持され表示条件(result有無と無関係)を満たす
+    expect(diff.result).toBeNull()
+    expect(diff.lastRunError?.code).toBe('internal')
+    expect(diff.hasRunError).toBe(true)
+    expect(diff.showingStaleResult).toBe(false)
+
+    // 実行成功で実行errorはクリアされる
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(responseOf(200, diffBody))),
+    )
+    await diff.runDiff()
+    expect(diff.hasRunError).toBe(false)
+    expect(diff.lastRunError).toBeNull()
+  })
+})

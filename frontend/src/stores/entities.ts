@@ -34,10 +34,13 @@ export const useEntitiesStore = defineStore('entities', {
     selectedUuid: null as string | null,
     /** 詳細(version_list付き。不在404時は保持しない) */
     detail: null as EntityDetail | null,
-    /** 詳細・versions取得のerror(detail・versionsの共通error状態) */
+    /** 詳細取得のerror(versions取得のerrorとは分離=並行取得で片方の成功が
+     * もう片方の失敗を隠さない) */
     detailError: null as ApiError | null,
     /** 版一覧(state=現行/noncurrent付き) */
     versions: null as EntityVersionsResponse | null,
+    /** versions取得のerror(detail取得のerrorとは分離) */
+    versionsError: null as ApiError | null,
   }),
   getters: {
     /** EntitiesViewのUI誘導状態: 取得中=loading・一覧保持済み=result(0件の成功も
@@ -85,13 +88,27 @@ export const useEntitiesStore = defineStore('entities', {
       }
       this.loading = false
     },
+    /** 検索語とcategory絞り込みの同時適用(EntitiesViewのfilter formのsubmitから
+     * 呼ぶ=1回のsubmitで両入力を反映し再取得も1回にまとめる) */
+    async applyFilters(query: string, category: string | null): Promise<void> {
+      this.setQuery(query)
+      this.setCategory(category)
+      await this.fetchEntities()
+    },
     /** 手動sync後のentities一覧再取得(sync storeのrefresh action内から呼ぶ。
      * sync.specの契約=POST /api/sync成功後は絞り込みparam無しのGET /api/entities
-     * で再取得するため絞り込み状態を初期へ戻す) */
+     * で再取得するため絞り込み状態を初期へ戻す。syncで索引が置き換わるため
+     * 詳細・versionsの保持内容も失効させる(旧locations/pinsと新versions一覧の
+     * 混在を構造的に排除=詳細を開く際に再取得させる) */
     async refetchEntities(): Promise<void> {
       this.query = ''
       this.category = null
       this.page = 1
+      this.selectedUuid = null
+      this.detail = null
+      this.detailError = null
+      this.versions = null
+      this.versionsError = null
       this.loading = true
       const result = await fetchEntities()
       if (result.ok) {
@@ -119,17 +136,18 @@ export const useEntitiesStore = defineStore('entities', {
       this.detail = null
       this.detailError = result.error
     },
-    /** 版一覧の取得(state付き。失敗時はversionsを空へ戻しdetailErrorで示す) */
+    /** 版一覧の取得(state付き。失敗時はversionsを空へ戻しversionsErrorで示す=
+     * detailErrorとは分離し片方の失敗がもう片方の成功で消えない) */
     async fetchEntityVersions(uuid: string): Promise<void> {
       const result = await fetchEntityVersions(uuid)
       if (result.ok) {
         this.selectedUuid = uuid
         this.versions = result.data
-        this.detailError = null
+        this.versionsError = null
         return
       }
       this.versions = null
-      this.detailError = result.error
+      this.versionsError = result.error
     },
   },
 })

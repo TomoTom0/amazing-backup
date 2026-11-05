@@ -266,3 +266,117 @@ describe('entities storeの詳細・versions取得(EntityDetailView基盤)', () 
     expect(entities.versions?.versions[0].state).toBe('現行')
   })
 })
+
+// [covers:frontend.entities-filter-apply]
+describe('entities storeの絞り込み適用(applyFilters)', () => {
+  it('検索語とcategoryを1回の適用でURL queryへ同時反映する(1回のfetchのみ)', async () => {
+    const captured: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        captured.push(typeof input === 'string' ? input : input.toString())
+        return Promise.resolve(responseOf(200, listBody([UUID_A], 1, 1)))
+      }),
+    )
+    const entities = useEntitiesStore()
+    // 2page閲覧中の状態から両入力を1回のsubmitで適用する(先頭pageへ戻る)
+    entities.page = 2
+    await entities.applyFilters('beta', 'docs')
+    expect(captured).toHaveLength(1)
+    expect(captured[0]).toBe('/api/entities?query=beta&category=docs&page=1')
+    expect(entities.query).toBe('beta')
+    expect(entities.category).toBe('docs')
+    expect(entities.page).toBe(1)
+
+    // category無し(null)での適用はcategory paramを付けない
+    await entities.applyFilters('', null)
+    expect(captured).toHaveLength(2)
+    expect(captured[1]).toBe('/api/entities?page=1')
+  })
+})
+
+// [covers:frontend.sync-refresh-invalidates-detail-state]
+describe('entities storeのsync後再取得(refetchEntities)の詳細失効', () => {
+  it('refetchEntitiesは詳細・versionsの保持内容を失効させる(旧詳細と新一覧の混在防止)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (url === `/api/entities/${UUID_A}`) {
+          return Promise.resolve(responseOf(200, detailBody))
+        }
+        if (url === `/api/entities/${UUID_A}/versions`) {
+          return Promise.resolve(responseOf(200, versionsBody))
+        }
+        return Promise.resolve(responseOf(200, listBody([UUID_A], 1, 1)))
+      }),
+    )
+    const entities = useEntitiesStore()
+    await entities.fetchEntityDetail(UUID_A)
+    await entities.fetchEntityVersions(UUID_A)
+    expect(entities.selectedUuid).toBe(UUID_A)
+    expect(entities.detail).not.toBeNull()
+    expect(entities.versions).not.toBeNull()
+
+    // 手動sync後の再取得: 一覧は更新し詳細系状態は失効する(syncで索引が置き換わる
+    // ため詳細を開く際に再取得させる)
+    await entities.refetchEntities()
+    expect(entities.items.length).toBe(1)
+    expect(entities.selectedUuid).toBeNull()
+    expect(entities.detail).toBeNull()
+    expect(entities.detailError).toBeNull()
+    expect(entities.versions).toBeNull()
+    expect(entities.versionsError).toBeNull()
+  })
+})
+
+// [covers:frontend.entities-detail-versions-error-separation]
+describe('entities storeの詳細・versions error分離', () => {
+  it('詳細404失敗後にversions取得が成功してもdetailErrorは残る(成功で失敗を隠さない)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (url === `/api/entities/${UUID_A}`) {
+          return Promise.resolve(
+            responseOf(404, {
+              error: { code: 'not_found', message: '対象のentityが見つかりません' },
+            }),
+          )
+        }
+        return Promise.resolve(responseOf(200, versionsBody))
+      }),
+    )
+    const entities = useEntitiesStore()
+    await entities.fetchEntityDetail(UUID_A)
+    await entities.fetchEntityVersions(UUID_A)
+    expect(entities.detail).toBeNull()
+    expect(entities.detailError?.code).toBe('not_found')
+    expect(entities.versions).not.toBeNull()
+    expect(entities.versionsError).toBeNull()
+  })
+
+  it('versions失敗後に詳細取得が成功してもversionsErrorは残る', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (url === `/api/entities/${UUID_A}/versions`) {
+          return Promise.resolve(
+            responseOf(500, {
+              error: { code: 'internal', message: '内部エラーが発生しました' },
+            }),
+          )
+        }
+        return Promise.resolve(responseOf(200, detailBody))
+      }),
+    )
+    const entities = useEntitiesStore()
+    await entities.fetchEntityVersions(UUID_A)
+    await entities.fetchEntityDetail(UUID_A)
+    expect(entities.detail).not.toBeNull()
+    expect(entities.detailError).toBeNull()
+    expect(entities.versions).toBeNull()
+    expect(entities.versionsError?.code).toBe('internal')
+  })
+})

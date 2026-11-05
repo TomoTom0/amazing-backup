@@ -24,22 +24,19 @@ onMounted(() => {
   }
 })
 
-const applyQuery = (): void => {
-  entities.setQuery(queryInput.value)
-  void entities.fetchEntities()
-}
-
-const applyCategory = (): void => {
-  entities.setCategory(categoryInput.value === '' ? null : categoryInput.value)
-  void entities.fetchEntities()
+// formのsubmitは検索語とcategory絞込を1回で反映する(1つのsubmit処理へ纏める=
+// どちらか片方だけが適用される経路を作らない)
+const applyFilters = (): void => {
+  void entities.applyFilters(
+    queryInput.value,
+    categoryInput.value === '' ? null : categoryInput.value,
+  )
 }
 
 const clearFilters = (): void => {
   queryInput.value = ''
   categoryInput.value = ''
-  entities.setQuery('')
-  entities.setCategory(null)
-  void entities.fetchEntities()
+  void entities.applyFilters('', null)
 }
 
 const gotoPage = (page: number): void => {
@@ -81,7 +78,7 @@ const fmtSize = (size: number): string => {
       最後に取得できた内容です。
     </p>
 
-    <form class="entity-filters" @submit.prevent="applyQuery">
+    <form class="entity-filters" @submit.prevent="applyFilters">
       <label>
         検索(title/uuid/所在pathの部分一致)
         <input v-model="queryInput" type="search" name="query" />
