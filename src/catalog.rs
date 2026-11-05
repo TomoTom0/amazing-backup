@@ -431,6 +431,18 @@ impl CatalogDb {
             .map_err(|e| BackupError::Internal(format!("credentials行の取り出しに失敗: {e}")))
     }
 
+    /// credentialの失効(TASK-9設計8章・12章P6: `manage auth remove`用。
+    /// credential_id完全一致の1行を削除するlocal操作。戻り値は削除行数
+    /// (0=対象不在=呼び出し側が対象エラー扱いにする))
+    pub fn remove_credential(&self, credential_id: &str) -> BackupResult<usize> {
+        self.conn
+            .execute(
+                "DELETE FROM credentials WHERE credential_id = ?1",
+                [credential_id],
+            )
+            .map_err(|e| BackupError::Internal(format!("credentials削除に失敗: {e}")))
+    }
+
     /// sync_state読み出し(行が無いNone)。
     pub fn sync_state(&self, bucket: &str, prefix: &str) -> BackupResult<Option<SyncState>> {
         let scope = scope_key(bucket, prefix);

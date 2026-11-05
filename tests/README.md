@@ -741,6 +741,22 @@ credentials行準備・観測。manage auth未知subcommandのexit 64で赤)
   verified=falseへ(P6実装後に復帰)
 - 条件数310(excluded 63件)
 
+2026-11-05: TASK-9 Phase P6(実装+docs配布物+release準備)実装。
+- 残り実装: src/storage/manage.rsへManageSub::Auth+AuthSub(List/Remove)・
+  cmd_manage_auth_list/remove(credential_id完全一致・不在は対象エラー3・全削除時
+  serve --bootstrap再発行案内・S3不要)。src/catalog.rsへremove_credential。
+  frontend: isDiffResponse/fetchDiff/postDiffRun・stores/diff.ts(diffView 4状態・summary・
+  POST 1回のみ再GET無し)・DiffView.vue+/diff route・HomeView link
+- docs: usage_backup.mdへ3.1 [catalog.scan]説明・3.4 server.toml節・5.10 catalog scan/
+  auth行・5.14 serve節新設(--bootstrap手順・passkey login・閲覧API一覧と実装確定値
+  1page=50件・Vite dev 40512・cf-tunnel前提・dist欠落時APIのみ。旧5.14終了コードは
+  5.15へ繰り下げ)・1.1表へ追記。llm/usage.mdへmanage auth/serve契約。docs/README.md・
+  README.md(repo)へserve行。changelog/unreleased.md 0.2.0へTASK-9分記載
+- 条件書: frontend.toml・cli.tomlをverified=trueへ復帰(source_hash更新)。release.ymlは
+  P2構成のまま変更不要・bump/tagはrelease-prep工程
+- cargo test 370pass/0fail・vitest 41pass/0fail・verify-conditions.py PASS・
+  docs_pages 11pass
+
 ## 構成
 
 | path | 役割 | 状態 |

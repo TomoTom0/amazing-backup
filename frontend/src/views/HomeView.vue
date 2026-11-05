@@ -31,5 +31,8 @@ onMounted(() => {
     <p>
       <router-link to="/pending">アップロード前カタログ(pending)</router-link>
     </p>
+    <p>
+      <router-link to="/diff">完全性突合(diff)</router-link>
+    </p>
   </section>
 </template>

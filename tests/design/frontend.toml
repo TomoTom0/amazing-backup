@@ -43,12 +43,12 @@
 [meta]
 feature = "frontend"
 source_file = "frontend/src/"
-verified = false
-verified_at = ""
-verified_by = ""
+verified = true
+verified_at = "2026-11-05"
+verified_by = "claude"
 test_command = "pnpm --dir frontend vitest run"
-source_hash = "176a32475c833bb061ce4890a9bfa375665272d8"
-note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3+P4+P5+P6時点のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff)のvitestで担保。P3分5条件・P4分4条件・P5分2条件は2026-11-05実装後に全件passで検証記録を復帰済み。P6テスト先行(2026-11-05)のためverified=falseへ(P6実装後に復帰)。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
+source_hash = "de1f71778ad5fd7ee4a4dcb12819bec097905ce4"
+note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3+P4+P5+P6時点のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff)のvitestで担保。P3分5条件・P4分4条件・P5分2条件・P6分3条件(diff client/store・runDiff・diffView)は2026-11-05実装後に全件pass(41 tests)で検証記録を復帰済み。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
 
 [[condition]]
 id = "frontend.api-error-body-guard"

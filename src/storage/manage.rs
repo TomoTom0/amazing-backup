@@ -1,6 +1,7 @@
 //! manage系(TASK-18 5.12・6.2/6.3/6.4・8章): prune(data/一括)・lifecycle(3rule)・
 //! index(rebuild/reconcile)・jobs(reissue)・location rm(旧所在の明示除去)・
-//! reset(dev bucket初期化の全消去・8.1)。
+//! reset(dev bucket初期化の全消去・8.1)・catalog(TASK-9 local catalog DB)・
+//! auth(TASK-9 passkey credential管理)。
 
 use super::get::{RestoreCheck, ensure_restored, restore_guidance};
 use super::{CtxArgs, now_jst, open_session, open_session_with_pipeline, resolve_key, sha256_hex};
@@ -58,6 +59,27 @@ pub enum ManageSub {
     Catalog {
         #[command(subcommand)]
         sub: CatalogSub,
+    },
+    /// passkey credentialの管理(TASK-9設計8章・12章P6: 失効はmanage auth remove(CLI))
+    Auth {
+        #[command(subcommand)]
+        sub: AuthSub,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum AuthSub {
+    /// 登録credential一覧(credential_id・name・created_at)
+    List {
+        #[command(flatten)]
+        ctx: CtxArgs,
+    },
+    /// credentialの失効(credential_id完全一致の1件削除。S3接続不要のlocal操作)
+    Remove {
+        #[command(flatten)]
+        ctx: CtxArgs,
+        /// 削除するcredential_id(完全一致・manage auth listで確認)
+        credential_id: String,
     },
 }
 
@@ -178,6 +200,75 @@ pub fn cmd_manage(args: &ManageArgs) -> i32 {
             CatalogSub::Rebuild { ctx } => cmd_manage_catalog_rebuild(ctx),
             CatalogSub::Scan { ctx, sha256 } => cmd_manage_catalog_scan(ctx, *sha256),
         },
+        ManageSub::Auth { sub } => match sub {
+            AuthSub::List { ctx: _ } => cmd_manage_auth_list(),
+            AuthSub::Remove {
+                ctx: _,
+                credential_id,
+            } => cmd_manage_auth_remove(credential_id),
+        },
+    }
+}
+
+/// manage auth list(TASK-9設計8章・12章P6): catalog DB(2.2のcatalog.db)の
+/// credentials table(永続class)に登録されたpasskey credential一覧を表示する
+/// (credential_id・name・created_at)。S3接続不要のlocal操作。
+fn cmd_manage_auth_list() -> i32 {
+    let run = (|| -> BackupResult<i32> {
+        let db = crate::catalog::CatalogDb::open()?;
+        let rows = db.load_credentials()?;
+        if rows.is_empty() {
+            println!("登録されたcredentialはありません(0件)");
+            println!(
+                "案内: 初回登録は `amazing-backup serve --bootstrap` でbootstrap tokenを発行してください"
+            );
+            return Ok(0);
+        }
+        for r in &rows {
+            println!("{} {} {}", r.credential_id, r.name, r.created_at);
+        }
+        println!("{}件(credential_id・name・created_at)", rows.len());
+        Ok(0)
+    })();
+    match run {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// manage auth remove <credential_id>(TASK-9設計8章・12章P6): credential_id完全一致の
+/// 1行をcredentials table(永続class)から削除する(失効=nameは一意性が無いため
+/// 削除対象指定に使わない)。不在のcredential_idは対象エラー3。削除後に
+/// credentials 0件(全credential紛失時と同一状態)となった場合は再bootstrap案内
+/// (serve --bootstrap)を表示する(credential 0ではlogin手段が無く登録はbootstrap
+/// token提示時のみ開く=認証閉鎖fail-closed)。S3接続不要のlocal操作。
+fn cmd_manage_auth_remove(credential_id: &str) -> i32 {
+    let run = (|| -> BackupResult<i32> {
+        let db = crate::catalog::CatalogDb::open()?;
+        let removed = db.remove_credential(credential_id)?;
+        if removed == 0 {
+            return Err(BackupError::Target(format!(
+                "credential_id({credential_id})は登録されていません(`manage auth list`で確認してください)"
+            )));
+        }
+        println!("ok: credentialを削除しました (credential_id={credential_id})");
+        let rest = db.credential_count()?;
+        if rest == 0 {
+            println!(
+                "案内: credentialが0件になりました(未登録状態・login不可)。再登録は `amazing-backup serve --bootstrap` でbootstrap tokenを発行してください"
+            );
+        }
+        Ok(0)
+    })();
+    match run {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
     }
 }
 

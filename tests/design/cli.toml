@@ -133,12 +133,12 @@
 [meta]
 feature = "cli"
 source_file = "src/cli.rs"
-verified = false
-verified_at = ""
-verified_by = ""
+verified = true
+verified_at = "2026-11-05"
+verified_by = "claude"
 test_command = "cargo test"
 source_hash = "328e20f3263795ece1bb3e58645def0cb3ea9a52"
-note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(--profile両file選択・backup verifyのaws.toml必須化・検査対象の実効bucket帰属絞り込み・recipients指紋表示はsrc/storage/backup.rs経由)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新。2026-11-03 REVIEW-1(code review)指摘対応を反映しsource_hashを再更新。2026-11-03 TASK-23(--from-list単独許容化のrebase統合。paths-required-usage-error条件をrequired_unless_present版へ)を反映しsource_hashを更新"
+note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(--profile両file選択・backup verifyのaws.toml必須化・検査対象の実効bucket帰属絞り込み・recipients指紋表示はsrc/storage/backup.rs経由)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新。2026-11-03 REVIEW-1(code review)指摘対応を反映しsource_hashを再更新。2026-11-03 TASK-23(--from-list単独許容化のrebase統合。paths-required-usage-error条件をrequired_unless_present版へ)を反映しsource_hashを更新。2026-11-05 TASK-9 P6(manage auth)のテスト先行更新でverified=falseへ戻した(manage auth list/remove実装はsrc/storage/manage.rs・src/catalog.rsでsrc/cli.rsは不変のためsource_hash更新なし)。2026-11-05 P6実装後にcargo test全件pass(370 tests)・verify-conditions.py PASSを確認してverified=trueへ復帰"
 
 [[condition]]
 id = "cli.usage-error-exit-64"

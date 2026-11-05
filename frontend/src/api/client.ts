@@ -147,6 +147,81 @@ export async function postPendingScan(): Promise<ApiResult<PendingResponse>> {
   }
 }
 
+// --- diff(TASK-9設計6章(endpoint一覧: GET/POST /api/diff)・7章・12章P6。
+//     DiffViewから使用。応答はcmd_diffのJSON語彙{performed_at,entries,files,
+//     missing,unexpected}・server.diff-endpointsの解釈に整合) ---
+
+/** GET /api/diff のfiles要素schema({uuid,title}=索引entityの要約) */
+export type DiffFile = { uuid: string; title: string }
+
+/** GET/POST /api/diff の応答形式(diff結果) */
+export type DiffResponse = {
+  performed_at: string
+  entries: number
+  files: DiffFile[]
+  missing: string[]
+  unexpected: string[]
+}
+
+/** GET /api/diff応答の型ガード(cmd_diffのJSON語彙との一致のみtrue) */
+export function isDiffResponse(v: unknown): v is DiffResponse {
+  if (!isRecord(v)) return false
+  if (typeof v['performed_at'] !== 'string') return false
+  if (typeof v['entries'] !== 'number') return false
+  const files = v['files']
+  if (!Array.isArray(files)) return false
+  const isFile = (f: unknown): f is DiffFile =>
+    isRecord(f) && typeof f['uuid'] === 'string' && typeof f['title'] === 'string'
+  if (!files.every(isFile)) return false
+  const missing = v['missing']
+  if (!Array.isArray(missing) || !missing.every((k) => typeof k === 'string')) return false
+  const unexpected = v['unexpected']
+  if (!Array.isArray(unexpected) || !unexpected.every((k) => typeof k === 'string')) return false
+  return true
+}
+
+/** 最終diff結果の取得(保護API。未実行diffは404 not_foundのerror扱い) */
+export function fetchDiff(): Promise<ApiResult<DiffResponse>> {
+  return apiGet('/api/diff', isDiffResponse)
+}
+
+/** diff実行(POST /api/diff・request body無し。応答はdiff結果そのもののため
+ * 実行後の一覧再GETは行わない=POST応答をresultへ保持する) */
+export async function postDiffRun(): Promise<ApiResult<DiffResponse>> {
+  let resp: Response
+  try {
+    resp = await fetch('/api/diff', {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+    })
+  } catch {
+    return {
+      ok: false,
+      error: { code: 'network', message: 'serverに接続できません' },
+      httpStatus: 0,
+    }
+  }
+  const body: unknown = await resp.json().catch(() => null)
+  if (resp.ok) {
+    if (isDiffResponse(body)) {
+      return { ok: true, data: body }
+    }
+    return {
+      ok: false,
+      error: { code: 'internal', message: '応答の形式が不正です' },
+      httpStatus: resp.status,
+    }
+  }
+  if (isApiErrorResponse(body)) {
+    return { ok: false, error: body.error, httpStatus: resp.status }
+  }
+  return {
+    ok: false,
+    error: { code: 'unexpected_status', message: `HTTP ${resp.status}` },
+    httpStatus: resp.status,
+  }
+}
+
 /** POST /api/auth/logout(session破棄。未認証401でもUI状態は未認証へ揃える) */
 export async function postLogout(): Promise<ApiResult<Record<string, unknown>>> {
   let resp: Response
