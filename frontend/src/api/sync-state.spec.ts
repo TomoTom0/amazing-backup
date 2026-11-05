@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { fetchSyncState, isSyncStateResponse } from './client'
+import { fetchSyncState, isSyncStateResponse, postSyncRefresh } from './client'
 import { useSyncStore } from '../stores/sync'
 
-// GET /api/sync応答の型ガードとsync状態取得(TASK-9設計6章・4章D10・12章P3)。
-// P3実装前のためfetchSyncState/isSyncStateResponseはclient.tsに未実装=
-// 本fileのtestは実行failを許容(実装後に緑化)。
+// GET /api/sync応答の型ガードとsync状態取得(TASK-9設計6章・4章D10・12章P3)と
+// 手動refresh POST /api/sync client(TASK-9設計4章D10・コードレビュー指摘高4)。
+// fetchSyncState/isSyncStateResponseはP3実装済み・postSyncRefreshは実装前のため
+// 該当testは実行failを許容(実装後に緑化)。
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -96,6 +97,64 @@ describe('sync状態の型ガード', () => {
     expect(sync.lastError).not.toBeNull()
     if (sync.lastError !== null) {
       expect(sync.lastError.code).toBe('configuration')
+    }
+  })
+})
+
+// [covers:frontend.sync-refresh-trigger]
+describe('POST /api/sync client(手動refresh)', () => {
+  it('postSyncRefreshはPOST /api/syncを呼び応答(sync状態形式)を検証してmappingする', async () => {
+    const captured: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        captured.push(`${init?.method ?? 'GET'} ${url}`)
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              scope: 'api-bucket:amazing-backup/',
+              status: 'fresh',
+              index_etag: '"etag-2"',
+              index_version_id: 'vid-2',
+              fetched_at: '2026-11-05T13:00:00+09:00',
+              last_write_at: '',
+              last_verified_at: '2026-11-05T13:00:00+09:00',
+              entry_count: 2,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          ),
+        )
+      }),
+    )
+    const result = await postSyncRefresh()
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.status).toBe('fresh')
+      expect(result.data.entry_count).toBe(2)
+    }
+    expect(captured).toEqual(['POST /api/sync'])
+  })
+
+  it('POST失敗(502 upstream)はerror扱いにする(保護API)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: { code: 'upstream', message: 'remote索引の取得に失敗しました' },
+            }),
+            { status: 502, headers: { 'Content-Type': 'application/json' } },
+          ),
+        ),
+      ),
+    )
+    const result = await postSyncRefresh()
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error.code).toBe('upstream')
+      expect(result.httpStatus).toBe(502)
     }
   })
 })
