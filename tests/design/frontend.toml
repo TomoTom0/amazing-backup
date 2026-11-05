@@ -27,16 +27,28 @@
 #   scan実行はrunScan action(POST後に一覧再取得)で担保する。
 #   GET /api/pending応答・POST /api/pending/scan応答の形式はserver.toml P5条件の解釈
 #   ({"pending":[...]}・item schema共通)に整合。
+# 2026-11-05: TASK-9 Phase P6(diff UI)対応でテスト先行の条件追加(3条件)。
+#   server.toml excluded「diff UI(P6: diff結果のfrontend画面表示)」を解消しdiff
+#   client(src/api/client.tsのdiff系)・diff store(src/stores/diff.ts)層を条件化。
+#   実装前のため新条件のテストは実行failを許容(pnpm vitest runは実行可能)。
+#   設計7章の画面一覧にdiff結果画面は列挙されていないため、12章P6のdiff UIは
+#   DiffView(view)として実装する(component実描画はvitest=node環境で観測できない
+#   ためexcludedへ=P4 LoginView・P5 PendingViewと同一扱い。UI誘導状態はstoreの
+#   diffView getter・結果集計はsummary getterで担保する)。
+#   POST /api/diffの応答はdiff結果そのもののためP5 runScanのような実行後の再GETは
+#   行わない。GET /api/diffは未実行時404 not_found(server.diff-endpointsの解釈)を
+#   error扱いで返し、diffView getterは未実行(not_run)へ接続する(未実行と未認証401
+#   などの失敗をUI状態として区別)。
 
 [meta]
 feature = "frontend"
 source_file = "frontend/src/"
-verified = true
-verified_at = "2026-11-05"
-verified_by = "claude"
+verified = false
+verified_at = ""
+verified_by = ""
 test_command = "pnpm --dir frontend vitest run"
 source_hash = "176a32475c833bb061ce4890a9bfa375665272d8"
-note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3+P4+P5時点のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending)のvitestで担保。P3分5条件・P4分4条件は2026-11-05実装後に全件passで検証記録を復帰済み。P5テスト先行(2026-11-05)のためverified=falseへ(P5実装後に復帰)。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
+note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3+P4+P5+P6時点のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff)のvitestで担保。P3分5条件・P4分4条件・P5分2条件は2026-11-05実装後に全件passで検証記録を復帰済み。P6テスト先行(2026-11-05)のためverified=falseへ(P6実装後に復帰)。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
 
 [[condition]]
 id = "frontend.api-error-body-guard"
@@ -155,5 +167,39 @@ decided_by = "claude"
 item = "Vite dev proxy(40512)経由の実browser接続・dist埋め込み配信の実機確認・testing libraryによるcomponent描画test"
 source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(vite.config.ts dev proxy)・10章(dist二階建て)・11章(vitest+testing library)・12章P2/P3"
 reason = "実browser・release build産物を要する観測は単体testで観測できない(dev proxy・dist配信)。testing libraryは未導入のためcomponent描画testは本waveでは書かずstore・clientのunit testで担保する(導入はP4+の画面実装waveで判断)"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+[[condition]]
+id = "frontend.diff-client-and-store"
+target_function = "frontend api/client.ts GET /api/diff応答型ガード・stores/diff.ts結果取得"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GET /api/diff=最終diff結果参照)・7章(Pinia stores)・12章P6(diff UI)"
+description = "GET /api/diff応答(cmd_diffのJSON語彙={performed_at: string, entries: number, files: [{uuid,title}], missing: string[], unexpected: string[]})の型ガード(isDiffResponse)を持ち、diff storeはdiff結果(result)を取得して保持する(DiffViewの結果表示の基盤。未実行diffの404 not_foundはerror扱いで返しUI状態の未実行(not_run)へ接続する。取得失敗時はlastErrorを保持しresultをnullへ戻す=空dataを表示しない) (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(200+diff結果body・404+{\"error\":{\"code\":\"not_found\",...}}・network reject)でのdiff store(fetchDiff)の取得"
+expect_return_shape = "型ガードは形式一致のみtrue(entries非number・files要素のtitle欠落・missing非配列・nullはfalse)。storeは200時にresult(performed_at等)を保持しlastError=null・404/network失敗時はlastError(not_found/network)を保持しresultはnull(実装前のためsrc/stores/diff.ts・clientのdiff系未実装で実行failを許容)"
+source_lines = "frontend/src/api/diff.spec.ts:26; frontend/src/stores/diff.spec.ts:38"
+
+[[condition]]
+id = "frontend.diff-run-trigger"
+target_function = "frontend api/client.ts POST /api/diff・stores/diff.ts runDiff(diff実行)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: POST /api/diff=diff実行・結果をDB保存)・7章(diff実行UI)・12章P6(diff UI)"
+description = "POST /api/diff呼出(postDiffRun・request body無し)とdiff storeのdiff実行action(runDiff)を持ち、実行中状態(running)へ遷移し実行後に結果を保持する(diff実行ボタン=手動トリガのUI基盤。POSTの応答はdiff結果そのもののためP5 runScanのような実行後の一覧再GETは行わずPOST応答をresultへ保持する) (vitest)"
+given = "fetch mock(POST /api/diff 200+diff結果body)でのdiff storeのrunDiff実行と、fetch呼出のmethod/URL観測"
+expect_return_shape = "fetchはPOST /api/diffの1回のみ(実行後のGET /api/diffを呼ばない)。resultはPOST応答へ更新されrunningは実行中trueから完了falseへ遷移する(実装前のため実行failを許容)"
+source_lines = "frontend/src/api/diff.spec.ts:112; frontend/src/stores/diff.spec.ts:84"
+
+[[condition]]
+id = "frontend.diff-view-state"
+target_function = "frontend stores/diff.ts diffView getter(DiffView UI誘導状態)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(frontend構成・画面)・12章P6(diff UI)"
+description = "diff storeはDiffViewのUI誘導状態をgetter(diffView)で提供する: 実行中=running・結果保持済み=result・未実行(結果未取得・または未実行diffの404 not_found)=not_run・その他の失敗(未認証401等)=error。結果の集計getter(summary: entries数・missing/unexpected件数)も提供する(diff結果表示の枠。component実描画は実browser観測のため本条件はstore層の状態で担保) (vitest)"
+given = "各状態(running中・fetchDiff成功後・未取得・fetchDiff 404後・fetchDiff 401後)でのdiffView getter参照と、missing 2件・unexpected 1件の結果でのsummary参照"
+expect_return_shape = "状態に応じてrunning/result/not_run/errorを返し(404 not_foundはnot_run=未実行扱い・401はerror扱い)、summaryは{entries, missing, unexpected}の計数を返す(実装前のため実行failを許容)"
+source_lines = "frontend/src/stores/diff.spec.ts:116"
+
+[[excluded]]
+item = "DiffView componentの実描画(diff実行ボタン実操作・performed_at/entries/missing/unexpected一覧の実browser描画・routerへのdiff route登録)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面構成)・12章P6(diff UI)"
+reason = "component実描画はvitest(node環境)で観測できない(store/client層のみ条件化しUI誘導状態はdiffView getter・結果集計はsummary getterで担保=P4 LoginView・P5 PendingViewと同一扱い)。実機画面確認は設計12章P6の手動verify項目"
 decided_at = "2026-11-05"
 decided_by = "claude"

@@ -863,3 +863,89 @@ fn push_intents_recorded_for_dry_run_and_from_list() {
         "rebuild後も記録は保持(永続class)"
     );
 }
+
+// --- manage auth(TASK-9設計8章・12章P6: 失効はmanage auth remove(CLI)・
+//     全credential紛失時はcredentials table削除+再bootstrap=指摘#8) ---
+
+/// catalog.dbのcredentials行(credential_id, name)を読む(manage auth観測用)。
+fn credential_rows(fx: &StorageFixture) -> Vec<(String, String)> {
+    let conn = rusqlite::Connection::open(fx.catalog_db()).expect("catalog.db open");
+    let mut stmt = conn
+        .prepare("SELECT credential_id, name FROM credentials ORDER BY credential_id")
+        .expect("credentials準備(migration済みschema)");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("credentials読込");
+    rows.collect::<Result<Vec<_>, _>>()
+        .expect("credentials行読取")
+}
+
+/// credentials tableへ1行挿入(rusqlite直接=P1 APIと同一schema)。
+fn insert_credential(fx: &StorageFixture, credential_id: &str, name: &str) {
+    let conn = rusqlite::Connection::open(fx.catalog_db()).expect("catalog.db open");
+    conn.execute(
+        "INSERT INTO credentials (credential_id, passkey_json, name, created_at) \
+         VALUES (?1, '{}', ?2, '2026-11-05T00:00:00+09:00')",
+        rusqlite::params![credential_id, name],
+    )
+    .expect("credentials挿入");
+}
+
+/// [covers:cli.manage-auth-list-and-remove]
+/// manage auth listはcredential一覧(id・name)を表示し、manage auth remove <id>は
+/// credential_id完全一致の1件を削除する(S3接続不要)。存在しないidは対象エラー3。
+#[test]
+fn manage_auth_lists_and_removes_credential() {
+    let Some(fx) = StorageFixture::new("cli-auth-rm", StorageOpts::default()) else {
+        return;
+    };
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(DB作成・事前): {stdout}{stderr}");
+    insert_credential(&fx, "cred-a", "laptop");
+    insert_credential(&fx, "cred-b", "phone");
+    assert_eq!(credential_rows(&fx).len(), 2, "事前2行");
+
+    // 一覧: 両credentialの行(credential_id・name)を表示
+    let (code, stdout, stderr) = fx.manage("auth", &["list"]);
+    assert_eq!(code, 0, "manage auth list: {stdout}{stderr}");
+    assert!(stdout.contains("cred-a"), "id表示: {stdout}");
+    assert!(stdout.contains("laptop"), "name表示: {stdout}");
+    assert!(
+        stdout.contains("cred-b") && stdout.contains("phone"),
+        "2行表示: {stdout}"
+    );
+
+    // 1件削除: 当該1行のみ(他行は不変)
+    let (code, stdout, stderr) = fx.manage("auth", &["remove", "cred-a"]);
+    assert_eq!(code, 0, "manage auth remove: {stdout}{stderr}");
+    let rows = credential_rows(&fx);
+    assert_eq!(rows.len(), 1, "残1行: {rows:?}");
+    assert_eq!(rows[0].0, "cred-b", "他行は不変: {rows:?}");
+
+    // 存在しないcredential_idは対象エラー3
+    let (code, stdout, stderr) = fx.manage("auth", &["remove", "cred-missing"]);
+    assert_eq!(code, 3, "存在しないidは対象エラー3: {stdout}{stderr}");
+    assert_eq!(credential_rows(&fx).len(), 1, "失敗時は削除しない");
+}
+
+/// [covers:cli.manage-auth-remove-all-guides-rebootstrap]
+/// 全credential削除(残0件)時は再bootstrap案内を表示して未登録状態へ戻る
+/// (credential 0での認証閉鎖のserver側契約はwebauthn.register-closed-without-valid-token
+/// 等が担保。本testはCLI表示とcredentials 0遷移を観測)。
+#[test]
+fn manage_auth_remove_last_guides_rebootstrap() {
+    let Some(fx) = StorageFixture::new("cli-auth-rm-all", StorageOpts::default()) else {
+        return;
+    };
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(DB作成・事前): {stdout}{stderr}");
+    insert_credential(&fx, "cred-a", "laptop");
+
+    let (code, stdout, stderr) = fx.manage("auth", &["remove", "cred-a"]);
+    assert_eq!(code, 0, "最後の1件削除: {stdout}{stderr}");
+    assert!(
+        stdout.contains("--bootstrap"),
+        "再bootstrap案内(serve --bootstrap): {stdout}"
+    );
+    assert_eq!(credential_rows(&fx).len(), 0, "credentials 0行=未登録状態");
+}

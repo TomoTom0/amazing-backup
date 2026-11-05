@@ -51,6 +51,11 @@
 #     (単一値・省略時全件)。不正値は400 invalid_request(既存error体系と共通)
 #   - POST /api/pending/scanは保護API(未認証401=auth_gate)。scanのDB書込はsyncと
 #     同一のsingle-flight(semaphore 1)で直列化する(設計1章)
+# 2026-11-05: TASK-9 Phase P6(diff UI)対応でexcluded「diff UI(P6: diff結果のfrontend
+#   画面表示)」を解消(削除)。diff UIはfrontend area(frontend.toml)の
+#   frontend.diff-client-and-store・frontend.diff-run-trigger・
+#   frontend.diff-view-stateへ条件化。diff API(POST/GET /api/diff)自体はP3条件
+#   (server.diff-endpoints)が担保済みのため本areaへの新規条件は無し。
 
 [meta]
 feature = "server"
@@ -275,13 +280,6 @@ description = "GET /api/pendingはP3のschema枠(server.pending-endpoint-schema)
 given = "POST /api/pending/scan実行後(unbacked項目あり)での GET /api/pending?status=unbacked・?status=ok・?status=bogus"
 expect_return_shape = "?status=unbackedは200でunbacked項目のみ。?status=okは200で空配列。?status=bogusは400 invalid_request({\"error\":{...}}形式)(実装前はparam無視の200でfailを許容)"
 source_lines = "src/server.rs:2279"
-
-[[excluded]]
-item = "diff UI(P6: diff結果のfrontend画面表示)"
-source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 12章P6(diff UI・docs配布物)"
-reason = "P6の実装phaseでありP5の対象外。POST/GET /api/diffのendpointとschemaの枠はserver.diff-endpointsが担保。pending分(POST /api/pending/scan・scan・未backup分類)はP5条件(server.pending-scan-endpoint・server.pending-list-status-filter・catalog系6条件)へ解消済み"
-decided_at = "2026-11-05"
-decided_by = "claude"
 
 [[excluded]]
 item = "release CIのfrontend先行build job+artifact共有(現行4 matrix jobへの先行job追加)"

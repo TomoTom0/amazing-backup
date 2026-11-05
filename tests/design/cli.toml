@@ -109,13 +109,33 @@
 #   disaster-recovery-reads(D-6影響なしの明確化)。
 #   実装前のため新規・改訂条件のテストは実行fail・StorageFixture新schema化により
 #   cli系結合test全体が赤になる([meta]はverified=falseへ戻し実装後に記録)。
+# 2026-11-05: TASK-9 Phase P6(manage auth remove)対応でテスト先行の条件追加(2条件)。
+#   webauthn.toml excluded「manage auth remove(CLI)によるcredential失効」を解消。
+#   area判断: webauthn.toml側のexcluded理由が「後続waveでcli areaへ条件化する」と
+#   宣言しており、manage系CLIコマンドの振る舞い条件(manage jobs reissue等)は本area
+#   の前例どおりcli.tomlが管理場所のため(認証契約の詳細はwebauthn.toml・CLI面は
+#   cli.tomlが担う)。実装前のため新条件のテストは実行failを許容
+#   (cargo test --no-runのcompileは通る)。
+#   設計8章にコマンド詳細が規定されない点は以下の解釈で条件化(実装はこれに従う):
+#   - manage authはnested subcommand構成(manage auth list / manage auth remove)。
+#     失効は設計8章のとおりmanage auth remove(CLI)。一覧表示は削除対象特定のための
+#     credential_id確認手段として同じ階層に置く
+#   - manage auth remove <credential_id>: credential_id完全一致で1件削除(nameは
+#     一意性が無いため削除対象指定に使わない)。S3接続不要(credentials table=
+#     ABH配下catalog.db・local操作)
+#   - 存在しないcredential_idは対象エラー3(BackupError::Target)
+#   - 削除後にcredentials 0件(全credential紛失時と同一状態)となった場合は再bootstrap
+#     案内(serve --bootstrap)を表示する。credential 0での認証閉鎖(登録閉鎖・login
+#     不可)はserver側契約のためwebauthn.register-closed-without-valid-token・
+#     webauthn.register-login-flow-server-to-serverが担保し、本areaはCLI面
+#     (一覧・削除・案内表示・credentials 0遷移)のみ条件化する
 
 [meta]
 feature = "cli"
 source_file = "src/cli.rs"
-verified = true
-verified_at = "2026-11-03"
-verified_by = "claude"
+verified = false
+verified_at = ""
+verified_by = ""
 test_command = "cargo test"
 source_hash = "328e20f3263795ece1bb3e58645def0cb3ea9a52"
 note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(--profile両file選択・backup verifyのaws.toml必須化・検査対象の実効bucket帰属絞り込み・recipients指紋表示はsrc/storage/backup.rs経由)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新。2026-11-03 REVIEW-1(code review)指摘対応を反映しsource_hashを再更新。2026-11-03 TASK-23(--from-list単独許容化のrebase統合。paths-required-usage-error条件をrequired_unless_present版へ)を反映しsource_hashを更新"
@@ -789,3 +809,21 @@ source = "TASK-2 body(zshは実動作確認・ユーザーshellはzsh)"
 reason = "対話shellのcompletion駆動はcargo testのtest構造では表現できない。実装段階の検証手順としてREADME手順をuser環境(zsh 5.9)で実施し上記3点を目視確認する。条件書の対象は生成内容の構造マーカー・語彙・引数error・可視性(cli.completions-generates-shells等)で担保"
 decided_at = "2026-10-28"
 decided_by = "claude"
+
+[[condition]]
+id = "cli.manage-auth-list-and-remove"
+target_function = "manage auth list / manage auth remove <credential_id>"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(追加登録・失効・復旧=指摘#8: 失効はmanage auth remove(CLI))・12章P6"
+description = "manage auth listは登録credential一覧(credential_id・name・created_at)を表示し、manage auth remove <credential_id>はcredential_id完全一致の1件をcredentials table(永続class・ABH配下catalog.db)から削除する(S3接続不要のlocal操作)。存在しないcredential_id指定は対象エラー3 (integration)"
+given = "catalog.db credentials tableへ2行挿入(rusqlite直接)後の manage auth list・manage auth remove <一方のid>・manage auth remove <存在しないid> の各実行(rusqlite直接で行数観測)"
+expect_return_shape = "listはexit 0で両credentialの行(id・name)を表示。removeはexit 0で当該1行のみ削除(残1行・他行は不変)。存在しないidはexit 3(実装前は未知subcommandのexit 64でfailを許容)"
+source_lines = "tests/catalog_storage.rs:894"
+
+[[condition]]
+id = "cli.manage-auth-remove-all-guides-rebootstrap"
+target_function = "manage auth remove(全削除時の再bootstrap案内)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(追加登録・失効・復旧=指摘#8: 全credential紛失時はcredentials table削除+再bootstrap)・12章P6"
+description = "manage auth removeでcredentials 0件(全credential紛失時と同一状態)となった場合は再bootstrap案内(serve --bootstrapの再発行)を表示して未登録状態へ戻る(credential 0ではlogin手段が無く・登録はbootstrap token提示時のみ開く=認証閉鎖fail-closed。閉鎖・登録のserver側契約はwebauthn.register-closed-without-valid-token等が担保し本条件はCLI表示とcredentials 0遷移を観測する) (integration)"
+given = "catalog.db credentials tableへ1行挿入(rusqlite直接)後の manage auth remove <id> 実行(rusqlite直接で行数観測)"
+expect_return_shape = "exit 0でcredentials tableは0行・stdoutに再bootstrap案内(--bootstrapを含む語)が表示される(実装前は未知subcommandのexit 64でfailを許容)"
+source_lines = "tests/catalog_storage.rs:931"

@@ -30,6 +30,11 @@
 #     fail-closed。503や403ではなく認証情報不正の区分)
 #   期限系契約(token 10分・challenge 120秒・session 24h)の自動観測のため、P4実装は
 #   時刻注入seam(testから現在時刻を差し替え可能な経路)を提供する(testability要求。
+# 2026-11-05: TASK-9 Phase P6対応でexcluded「manage auth remove(CLI)によるcredential
+#   失効」を解消(削除)。CLI管理コマンド面は本areaのexcluded理由どおりcli area
+#   (cli.toml)へ条件化(cli.manage-auth-list-and-remove・
+#   cli.manage-auth-remove-all-guides-rebootstrap)。認証契約(register/login/
+#   logout)の条件は本areaのまま不変。
 
 [meta]
 feature = "webauthn"
@@ -171,13 +176,6 @@ source_lines = "src/server.rs:3286"
 item = "実機login確認(実browser+実際のpasskeyでの登録・login)"
 source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 12章P4(verify可能状態: 認証flow自動test緑・実機login確認)・9章(WebAuthnはsecure context必須)"
 reason = "実browserのWebAuthn API(navigator.credentials)と実際のauthenticatorを要する手動観測であり単体・結合testで観測できない。自動検証可能な契約境界(token・challenge・session・flow)は本条件書が担保し、実機確認は設計12章P4の手動verify項目"
-decided_at = "2026-11-05"
-decided_by = "claude"
-
-[[excluded]]
-item = "manage auth remove(CLI)によるcredential失効"
-source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(失効はmanage auth remove(CLI))"
-reason = "CLI管理command系はP4のserver(passkey認証)実装対象外であり後続waveでcli areaへ条件化する。本areaはserverの認証契約(register/login/logout)に限定"
 decided_at = "2026-11-05"
 decided_by = "claude"
 
