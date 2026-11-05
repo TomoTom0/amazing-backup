@@ -9,6 +9,19 @@ repository = "https://github.com/TomoTom0/amazing-backup"
 keywords = ["backup", "s3", "age", "encryption", "archive"]
 categories = ["command-line-utilities", "backup"]
 
+[features]
+default = ["serve"]
+# TASK-9設計1章(D2承認): serve関連依存は`serve` featureに括りdefault featuresへ含める
+# (cargo install/mise導線で`--features serve`指定を不要にする)。
+# webauthn-rs・tower-sessionsはP4(passkey認証)で導入する(P2では未使用のため省く)。
+serve = [
+  "dep:axum",
+  "dep:tower-http",
+  "dep:rust-embed",
+  "tokio/net",
+  "tokio/signal",
+]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 # completionsサブコマンドの補完script生成(TASK-2設計D-1。runtime用・feature分岐なし)
@@ -29,6 +42,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "fs", "io-util"]
 rusqlite = { version = "0.40", features = ["bundled"] }
 # schema migration(user_version方式)。rusqlite 0.40系と組合わせる(links衝突回避)
 rusqlite_migration = "2.6.0"
+# TASK-9設計1章(serve feature): HTTP層axum(0.8系)
+axum = { version = "0.8", optional = true }
+# TASK-9設計1章(serve feature): API応答のCache-Control付与(set-headerのみ有効化)
+tower-http = { version = "0.6", optional = true, default-features = false, features = ["set-header"] }
+# TASK-9設計10章(serve feature): frontend/distのbinary埋め込み。allow_missingはderive属性
+# (#[allow_missing = true])で付与しdist欠落でもbuild可能(欠落時は空assets=静的配信なし)
+rust-embed = { version = "8", optional = true }
 
 [dev-dependencies]
 # capture_request検証用(設計4.3案4・12.1)。capture_request関数の実体はこのSDK版では

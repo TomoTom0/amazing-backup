@@ -72,6 +72,7 @@ repoのclone・buildは不要。設定templateはbinary埋め込みのため、i
 | pipeline.toml | `$XDG_CONFIG_HOME/amazing-backup/pipeline.toml`(未設定なら`~/.config/amazing-backup/pipeline.toml`) | `configs/pipeline.example.toml`(binary埋め込み・そのまま生成) |
 | aws.toml | `$XDG_CONFIG_HOME/amazing-backup/aws.toml`(同上) | `configs/aws.example.toml`(binary埋め込み。`credentials_file`は生成したcredential雛形の絶対pathへ置換) |
 | aws-credentials.toml | `$XDG_CONFIG_HOME/amazing-backup/aws-credentials.toml`(同上) | -(空値のcredential雛形・permission 600。2.3) |
+| server.toml | `$XDG_CONFIG_HOME/amazing-backup/server.toml`(同上) | `configs/server.example.toml`(binary埋め込み・そのまま生成。serveのserver共通設定) |
 | registry.jsonl | `$XDG_STATE_HOME/amazing-backup/registry.jsonl`(未設定なら`~/.local/state/amazing-backup/registry.jsonl`。dirは自動作成) | -(自動生成) |
 | catalog.db | `$XDG_STATE_HOME/amazing-backup/catalog.db`(未設定なら`~/.local/state/amazing-backup/catalog.db`。dir 0700・file 0600で作成) | -(自動生成・local catalog DB) |
 | cache dir | `$XDG_CACHE_HOME/amazing-backup/`(未設定なら`~/.cache/amazing-backup/`) | -(run毎の暗号化一時物) |
@@ -81,6 +82,7 @@ $ amazing-backup config init
 生成: ~/.config/amazing-backup/pipeline.toml
 生成: ~/.config/amazing-backup/aws.toml
 生成: ~/.config/amazing-backup/aws-credentials.toml (permission 600)
+生成: ~/.config/amazing-backup/server.toml (serve設定)
 次ステップ:
   1. aws-credentials.toml に access_key_id / secret_access_key を記述
   2. aws.toml の bucket を実際の値へ記述
@@ -93,7 +95,7 @@ $ amazing-backup config init
 - 規定pathに設定fileが無い状態でコマンドを実行すると設定エラー2+`config init`による生成案内が表示される
 - 初回の鍵準備: 暗号鍵(SSH ed25519鍵pair)をまだ持っていない場合は、8.3の手順1で鍵pairを生成する。生成したらpipeline.toml(規定path)の`[profiles.<name>.recipients].public_keys`を**生成した公開鍵(.pub)のpathへ置換**する(生成直後の雛形は存在しないpathのdummyのため、置換しないままでは設定エラー2)。あわせて`[profiles.<name>.verify].decrypt_key`へ生成した秘密鍵のpathを記述する(照会・復元の`--key`省略時の既定。`<name>`は実効aws profile名と同名)
 - `--config PATH` / `--aws-config PATH` で明示指定した場合はcwd基準の相対pathも可(規定pathより優先)
-- `AMAZING_BACKUP_HOME`環境変数(テスト/CI用)を指定すると規定pathをすべて`$ABH/`配下へ統合できる(`$ABH/pipeline.toml`・`$ABH/aws.toml`・`$ABH/registry.jsonl`・`$ABH/catalog.db`・`$ABH/cache/`)
+- `AMAZING_BACKUP_HOME`環境変数(テスト/CI用)を指定すると規定pathをすべて`$ABH/`配下へ統合できる(`$ABH/pipeline.toml`・`$ABH/aws.toml`・`$ABH/server.toml`・`$ABH/registry.jsonl`・`$ABH/catalog.db`・`$ABH/cache/`)
 
 local catalog DB(`catalog.db`)はremote索引のlocal複製(復号後の平文view)とローカル書込の導出indexを保持するSQLite DB(照会系のS3 HEAD/GET削減・5.2)。真正はregistry.jsonl(JSONL)とS3索引のままで、DBは`manage catalog rebuild`(5.10)で常に再構築可能。**平文を含む**ため権限0600・専用dir 0700で作成され、DB fileのbackupは利用者の責任(取扱注意)。
 - pipeline.toml内の相対path(public_keys・decrypt_key)とaws.tomlの`credentials_file`の相対pathは**実行時のcwd基準**で解決される(XDG配置後も維持。生成直後の設定はcwd非依存の絶対pathで書かれる)

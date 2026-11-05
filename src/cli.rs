@@ -34,6 +34,9 @@ pub enum Command {
     Edit(crate::storage::EditArgs),
     /// 設定file群の初期生成(規定pathへtemplate展開・既存file保護)
     Config(crate::config::ConfigArgs),
+    /// HTTP server(閲覧frontend・liveness API。TASK-9設計1章D2・serve feature)
+    #[cfg(feature = "serve")]
+    Serve(crate::server::ServeArgs),
     /// shell補完scriptの生成(bash/zsh/fish)
     Completions(CompletionsArgs),
     /// 配布ドキュメントの出力(使用手順書・設定example・LLM/agent向け)
@@ -632,6 +635,8 @@ pub fn run(argv: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
             Command::Manage(a) => crate::storage::cmd_manage(&a),
             Command::Edit(a) => crate::storage::cmd_edit(&a),
             Command::Config(a) => crate::config::cmd_config(&a),
+            #[cfg(feature = "serve")]
+            Command::Serve(a) => crate::server::cmd_serve(&a),
             Command::Completions(a) => cmd_completions(a.shell, &mut std::io::stdout()),
             Command::Docs(a) => crate::docs::cmd_docs(&a, &mut std::io::stdout()),
         },

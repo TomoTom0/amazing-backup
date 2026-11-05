@@ -1005,104 +1005,108 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
 /// 内容としてsync_stateへ確定する。変化なければGETを行わない(毎回の索引GETを廃止=
 /// 要件1)。転送・復号失敗時はsync_state.status=error(staleness明示)。
 fn cmd_manage_catalog_sync(ctx: &CtxArgs) -> i32 {
-    let run = (|| -> BackupResult<i32> {
-        use crate::catalog::{
-            CatalogDb, ReflectOrigin, SourceMtimes, Validator, STATUS_ERROR, STATUS_FRESH,
-            STATUS_STALE,
+    match catalog_sync_once(ctx) {
+        Ok(msg) => {
+            println!("catalog: {msg}");
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// catalog syncの処理本体(印刷しない)。TASK-9 12章P2: serve起動時syncもこの関数を
+/// spawn_blocking経由で呼ぶ(P1同期層の再利用・Runtime混在panic回避)。
+/// 戻り値はCLI向けの結果message(stdoutの`catalog: `以降)。
+pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
+    use crate::catalog::{
+        CatalogDb, ReflectOrigin, SourceMtimes, Validator, STATUS_ERROR, STATUS_FRESH,
+        STATUS_STALE,
+    };
+    let session = open_session_with_pipeline(ctx)?;
+    let key_path = resolve_key(ctx, session.cfg.as_ref())?;
+    let index_key = layout::index_object_key(&session.aws.prefix);
+    let mut db = CatalogDb::open()?;
+    let empty_cache = |db: &mut CatalogDb| -> BackupResult<String> {
+        let header = crate::index::IndexHeader {
+            schema: INDEX_SCHEMA,
+            record_type: "index_header".into(),
+            updated_at: now_jst(),
+            run_id: String::new(),
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            entries: 0,
         };
-        let session = open_session_with_pipeline(ctx)?;
-        let key_path = resolve_key(ctx, session.cfg.as_ref())?;
-        let index_key = layout::index_object_key(&session.aws.prefix);
-        let mut db = CatalogDb::open()?;
-        let empty_cache = |db: &mut CatalogDb| -> BackupResult<i32> {
-            let header = crate::index::IndexHeader {
-                schema: INDEX_SCHEMA,
-                record_type: "index_header".into(),
-                updated_at: now_jst(),
-                run_id: String::new(),
-                tool_version: env!("CARGO_PKG_VERSION").to_string(),
-                entries: 0,
-            };
+        db.replace_scope(
+            &session.aws.bucket,
+            &session.aws.prefix,
+            &header,
+            &[],
+            &SourceMtimes::empty(),
+            &Validator::default(),
+            STATUS_FRESH,
+            ReflectOrigin::Fetched,
+        )?;
+        Ok("未書込namespaceです(空のcacheを同期しました)".to_string())
+    };
+    // sync_state行が無く・registry file自体が不在(この環境に書込履歴が一切無い)の場合:
+    // 同期すべきremote索引の参照情報も無いため、未書込namespaceとして空cacheを確定し
+    // S3へ問い合わせない(registryがある場合は通常どおりHEAD検証から始める)
+    if db.sync_state(&session.aws.bucket, &session.aws.prefix)?.is_none()
+        && !session
+            .cfg
+            .as_ref()
+            .expect("pipeline.toml必須経路(open_session_with_pipeline)")
+            .registry_path
+            .is_file()
+    {
+        return empty_cache(&mut db);
+    }
+    let head = session.backend.head(&session.aws.bucket, &index_key)?;
+    let Some(head) = head else {
+        // 索引object不在: 従来の未書込namespace例外と同じ規則(空cache+freshでexit 0・
+        // 書込実績があるnamespaceは索引不在を案内エラーにする)
+        if super::namespace_never_written(&session)? {
+            return empty_cache(&mut db);
+        }
+        return Err(BackupError::Config(format!(
+            "索引object({index_key})を取得・復号できません。`amazing-backup manage index rebuild`で復旧するか、aws.tomlのbucket/prefixを確認してください"
+        )));
+    };
+    let validator = Validator::from_head(&head);
+    if db.replica_synced_fresh(&session.aws.bucket, &session.aws.prefix, &validator)? {
+        db.mark_verified_fresh(&session.aws.bucket, &session.aws.prefix)?;
+        return Ok("変化なし(索引objectのGETを省略しました)".to_string());
+    }
+    let fetch = super::fetch_index_confirmed(&session, &key_path, &head);
+    match fetch {
+        Ok((header, entries, confirmed, fetched)) => {
+            let status = if confirmed { STATUS_FRESH } else { STATUS_STALE };
             db.replace_scope(
                 &session.aws.bucket,
                 &session.aws.prefix,
                 &header,
-                &[],
+                &entries,
                 &SourceMtimes::empty(),
-                &Validator::default(),
-                STATUS_FRESH,
+                &fetched,
+                status,
                 ReflectOrigin::Fetched,
             )?;
-            println!("catalog: 未書込namespaceです(空のcacheを同期しました)");
-            Ok(0)
-        };
-        // sync_state行が無く・registry file自体が不在(この環境に書込履歴が一切無い)の場合:
-        // 同期すべきremote索引の参照情報も無いため、未書込namespaceとして空cacheを確定し
-        // S3へ問い合わせない(registryがある場合は通常どおりHEAD検証から始める)
-        if db.sync_state(&session.aws.bucket, &session.aws.prefix)?.is_none()
-            && !session
-                .cfg
-                .as_ref()
-                .expect("pipeline.toml必須経路(open_session_with_pipeline)")
-                .registry_path
-                .is_file()
-        {
-            return empty_cache(&mut db);
+            Ok(format!(
+                "同期しました(entries={}{})",
+                entries.len(),
+                if confirmed {
+                    String::new()
+                } else {
+                    "・WARNING: 取得中に索引が変化したためstale扱いです(再実行で確定します)".to_string()
+                }
+            ))
         }
-        let head = session.backend.head(&session.aws.bucket, &index_key)?;
-        let Some(head) = head else {
-            // 索引object不在: 従来の未書込namespace例外と同じ規則(空cache+freshでexit 0・
-            // 書込実績があるnamespaceは索引不在を案内エラーにする)
-            if super::namespace_never_written(&session)? {
-                return empty_cache(&mut db);
-            }
-            return Err(BackupError::Config(format!(
-                "索引object({index_key})を取得・復号できません。`amazing-backup manage index rebuild`で復旧するか、aws.tomlのbucket/prefixを確認してください"
-            )));
-        };
-        let validator = Validator::from_head(&head);
-        if db.replica_synced_fresh(&session.aws.bucket, &session.aws.prefix, &validator)? {
-            db.mark_verified_fresh(&session.aws.bucket, &session.aws.prefix)?;
-            println!("catalog: 変化なし(索引objectのGETを省略しました)");
-            return Ok(0);
-        }
-        let fetch = super::fetch_index_confirmed(&session, &key_path, &head);
-        match fetch {
-            Ok((header, entries, confirmed, fetched)) => {
-                let status = if confirmed { STATUS_FRESH } else { STATUS_STALE };
-                db.replace_scope(
-                    &session.aws.bucket,
-                    &session.aws.prefix,
-                    &header,
-                    &entries,
-                    &SourceMtimes::empty(),
-                    &fetched,
-                    status,
-                    ReflectOrigin::Fetched,
-                )?;
-                println!(
-                    "catalog: 同期しました(entries={}{})",
-                    entries.len(),
-                    if confirmed {
-                        String::new()
-                    } else {
-                        "・WARNING: 取得中に索引が変化したためstale扱いです(再実行で確定します)".to_string()
-                    }
-                );
-                Ok(0)
-            }
-            Err(e) => {
-                // 取得失敗(転送・復号): status=error(旧fresh状態を残さない)
-                let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
-                Err(e)
-            }
-        }
-    })();
-    match run {
-        Ok(code) => code,
         Err(e) => {
-            eprintln!("error: {e}");
-            e.exit_code()
+            // 取得失敗(転送・復号): status=error(旧fresh状態を残さない)
+            let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+            Err(e)
         }
     }
 }

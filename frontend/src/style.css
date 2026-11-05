@@ -1,0 +1,43 @@
+/* TASK-9 P2 最小CSS(UI libraryは後続phaseで検討) */
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  line-height: 1.6;
+}
+
+body {
+  margin: 0;
+  max-width: 960px;
+  padding: 0 1rem;
+}
+
+.app-header h1 {
+  font-size: 1.25rem;
+  margin: 1rem 0;
+  border-bottom: 1px solid #8888;
+  padding-bottom: 0.5rem;
+}
+
+.card {
+  border: 1px solid #8886;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin: 0.5rem 0;
+}
+
+.status-ok {
+  color: #1a7f37;
+}
+
+.status-error {
+  color: #b42318;
+}
+
+.status-checking {
+  color: #888;
+}
+
+.muted {
+  color: #888;
+  font-size: 0.9rem;
+}

@@ -13,6 +13,8 @@ pub mod manifest;
 pub mod metadata;
 pub mod registry;
 pub mod s3;
+#[cfg(feature = "serve")]
+pub mod server;
 pub mod storage;
 pub mod targets;
 

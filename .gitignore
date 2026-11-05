@@ -17,3 +17,7 @@ __pycache__/
 
 # 実aws設定(個人のbucket名等を含む・templateはconfigs/aws.example.toml)
 configs/aws.toml
+
+# frontend(TASK-9): 依存とbuild成果物はcommit対象外(distはrelease CIが先行buildして埋め込む)
+frontend/node_modules/
+frontend/dist/

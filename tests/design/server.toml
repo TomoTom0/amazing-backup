@@ -16,11 +16,11 @@
 [meta]
 feature = "server"
 source_file = "src/server.rs"
-verified = false
-verified_at = ""
-verified_by = ""
-test_command = ""
-source_hash = ""
+verified = true
+verified_at = "2026-11-05"
+verified_by = "claude"
+test_command = "cargo test"
+source_hash = "77964e0b90eb38d95f09ea2e632ca197f039f376"
 note = "TASK-9設計1章(serve subcommand・async実行境界)・6章(API)・8章(server.toml)・9章(D4 localhost既定)・10章(dist二階建て)・12章P2の条件化。テストはbin subprocess(spawn)・素朴HTTP client・SIGTERMで観測しsrc/server.rs直接参照のunit testは実装時に追加"
 
 [[condition]]
@@ -39,7 +39,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(server.toml: liste
 description = "server.toml([server] listen_addr・port・rp_id・rp_origin)はserver共通設定のみを持ちbackup profile(pipeline/aws)とは分離する。listen_addr/portはserveのlistenへ反映する(listen_addr既定127.0.0.1・port既定40510=D5本番serve。rp_id既定\"localhost\"・rp_origin既定\"http://localhost:<port>\"はP4のWebAuthnで使用=本条件の観測対象外) (integration, fake seam)"
 given = "port(空きport)を明示したserver.tomlでのserve起動と、[server]からport keyを省略したserver.tomlでのserve起動"
 expect_return_shape = "明示時は当該portでHTTP応答し、port省略時は40510で応答する(listenは127.0.0.1)"
-source_lines = "tests/server_api.rs:48"
+source_lines = "src/server.rs:364; src/server.rs:394; src/server.rs:404; tests/server_api.rs:48"
 
 [[condition]]
 id = "server.config-init-generates-server-toml"
