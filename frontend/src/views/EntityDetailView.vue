@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useEntitiesStore } from '../stores/entities'
 
@@ -27,6 +27,20 @@ onMounted(() => {
   }
   void entities.fetchEntityVersions(uuid)
 })
+
+// sync後の一覧再取得(refetchEntities)で詳細・versionsが失効(detail=null化)した
+// 場合、表示中の画面でも再取得する(mount時のみでは失効後に「読み込み中」で
+// 止まる)。失効前に開始した旧応答はstore側(detailEpoch)で不採用になるため
+// ここでの再取得結果が採用される
+watch(
+  () => entities.detailEpoch,
+  () => {
+    const uuid = uuidFromRoute.value
+    if (uuid === null) return
+    void entities.fetchEntityDetail(uuid)
+    void entities.fetchEntityVersions(uuid)
+  },
+)
 
 const fmtSize = (size: number): string => {
   if (size >= 1024 * 1024 * 1024) return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`

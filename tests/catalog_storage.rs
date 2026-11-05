@@ -490,9 +490,11 @@ fn catalog_sync_and_reflect_failures_mark_status_on_healthy_db() {
 }
 
 /// [covers:catalog.sync-invalidation-on-replace-failure-and-missing-index]
+/// [covers:catalog.sync-registry-judgment-failure-error]
 /// syncのcache置換(replace_scope)失敗・書込履歴があるnamespaceでの索引object不在も
 /// 失効させてからエラー終了する(置換失敗=error・索引不在=stale。いずれも正常DBの
-/// まま旧freshを残さない=レビュー再指摘#6)。
+/// まま旧freshを残さない=レビュー再指摘#6)。索引不在時の未書込判定(registry読取)
+/// 失敗もerror化してエラー終了する。
 #[test]
 fn catalog_sync_replace_failure_and_missing_index_invalidate_status() {
     let Some(fx) = StorageFixture::new("cat-sync-inv", StorageOpts::default()) else {
@@ -557,6 +559,28 @@ fn catalog_sync_replace_failure_and_missing_index_invalidate_status() {
         stderr.contains("manage index rebuild"),
         "復旧案内を表示: {stderr}"
     );
+
+    // (3) 索引不在のままregistryが破損(未書込判定の読取・parse失敗): 判定失敗も
+    // error化してエラー終了(早期returnで旧状態(stale)を持ち越さない)
+    let registry_text = std::fs::read_to_string(&fx.registry).expect("registry読取");
+    std::fs::write(
+        &fx.registry,
+        format!("{registry_text}not-json-line\n"),
+    )
+    .expect("registry破損書込");
+    let (code, _stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 4, "registry破損の未書込判定失敗は処理エラー: {stderr}");
+    assert_eq!(
+        sync_state_status(&fx),
+        "error",
+        "判定失敗はerror化(旧状態を残さない)"
+    );
+
+    // registryを復旧すれば再び案内エラー経路へ戻る(失敗が恒続化しない)
+    std::fs::write(&fx.registry, registry_text).expect("registry復旧書込");
+    let (code, _stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 2, "復旧後は索引不在の案内エラーへ戻る: {stderr}");
+    assert_eq!(sync_state_status(&fx), "stale", "復旧後はstale化へ戻る");
 }
 
 /// [covers:catalog.rebuild-scoped-to-cache-class] rebuildはcache classのみ置換・冪等

@@ -1108,7 +1108,8 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
 /// 要件1)。転送・復号失敗時はsync_state.status=error(staleness明示)。cache置換
 /// (replace_scope)失敗時もerror化してからエラー終了し、書込履歴があるnamespaceで
 /// remote索引objectが不在(HEADで不在確認)の場合はstale化してから案内エラー終了
-/// する(いずれも置換失敗・rollback後・不在確認後に旧freshを残さない)。
+/// する(いずれも置換失敗・rollback後・不在確認後に旧freshを残さない)。索引不在時の
+/// 未書込判定(registry読取)失敗もerror化してからエラー終了する。
 fn cmd_manage_catalog_sync(ctx: &CtxArgs) -> i32 {
     match catalog_sync_once(ctx) {
         Ok(msg) => {
@@ -1182,7 +1183,16 @@ pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
             .expect("pipeline.toml必須経路(open_session_with_pipeline)")
             .registry_path
             .is_file();
-        if registry_absent || super::namespace_never_written(&session)? {
+        // 未書込判定の失敗(registry読取・parse失敗)も早期returnさせない=error化して
+        // からエラー(HEADで索引不在を確認済みの状態で旧freshを残さない)
+        let never_written = match super::namespace_never_written(&session) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+                return Err(e);
+            }
+        };
+        if registry_absent || never_written {
             return empty_cache(&mut db);
         }
         // 書込実績があるnamespaceの索引object不在: cacheは旧索引のまま鮮度保証が

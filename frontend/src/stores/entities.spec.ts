@@ -380,3 +380,53 @@ describe('entities storeの詳細・versions error分離', () => {
     expect(entities.versionsError?.code).toBe('internal')
   })
 })
+
+// [covers:frontend.entities-stale-detail-response-rejected]
+describe('entities storeの失効をまたいだ詳細応答(detailEpoch)', () => {
+  it('失効(sync後再取得)前に開始した応答は完了しても採用されない(旧内容の再格納防止)', async () => {
+    // 詳細応答のみ保留(gate)とし、失効をまたいでから完了させる。callごとに
+    // 新しいResponseを返す(Response本体は再読取不可のため共用しない)。
+    // Promise executorは同期実行のためreleaseDetailは即座にresolveへ置換される
+    let releaseDetail: () => void = () => {}
+    const detailGate = new Promise<void>((resolve) => {
+      releaseDetail = resolve
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (url === `/api/entities/${UUID_A}`) {
+          return detailGate.then(() => responseOf(200, detailBody))
+        }
+        if (url === `/api/entities/${UUID_A}/versions`) {
+          return Promise.resolve(responseOf(200, versionsBody))
+        }
+        return Promise.resolve(responseOf(200, listBody([UUID_A], 1, 1)))
+      }),
+    )
+    const entities = useEntitiesStore()
+    const detailPromise = entities.fetchEntityDetail(UUID_A)
+    const versionsPromise = entities.fetchEntityVersions(UUID_A)
+
+    // 応答が完了する前に手動sync後の一覧再取得が走り詳細・versionsは失効する
+    await entities.refetchEntities()
+    expect(entities.detail).toBeNull()
+    expect(entities.versions).toBeNull()
+
+    // 失効前に開始した旧応答がここで完了しても旧内容は再格納されない
+    releaseDetail()
+    await detailPromise
+    await versionsPromise
+    expect(entities.detail).toBeNull()
+    expect(entities.detailError).toBeNull()
+    expect(entities.versions).toBeNull()
+    expect(entities.versionsError).toBeNull()
+
+    // 失効後の新規取得は採用される(表示中詳細の再取得経路)
+    await entities.fetchEntityDetail(UUID_A)
+    await entities.fetchEntityVersions(UUID_A)
+    expect(entities.detail).not.toBeNull()
+    expect(entities.versions).not.toBeNull()
+    expect(entities.selectedUuid).toBe(UUID_A)
+  })
+})

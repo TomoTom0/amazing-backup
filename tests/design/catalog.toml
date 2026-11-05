@@ -95,6 +95,15 @@ expect_return_shape = "置換失敗注入時はexit 1(内部エラー)でsync_st
 source_lines = "tests/catalog_storage.rs:492"
 
 [[condition]]
+id = "catalog.sync-registry-judgment-failure-error"
+target_function = "manage catalog sync(索引不在時の未書込判定失敗=error化)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(D10遅延refresh・freshness整合規則: 失効時に旧freshを持ち越さない)・TASK-9レビュー再々指摘#1(索引不在確認後にnamespace_never_writtenのregistry読取失敗が早期returnし失効処理を通らず旧状態が残る)"
+description = "manage catalog syncはremote索引object不在(HEADで不在確認)時の未書込判定(registry読取・parse)に失敗した場合もstatus=errorへ失効してから処理エラー終了する(判定失敗で早期returnし旧fresh/staleを持ち越さない。registry復旧後の再実行で通常経路へ戻る) (integration, fake seam)"
+given = "push+sync済みで索引objectを削除済み(書込履歴あり・HEAD不在)の状態での、registry JSONLへ不正JSON行を追記した状態での manage catalog sync・およびregistry復旧後の再sync"
+expect_return_shape = "registry破損時はexit 4(処理エラー)でsync_state.status=error。registry復旧後は索引不在の案内エラー経路へ戻る(exit 2・status=stale)"
+source_lines = "tests/catalog_storage.rs:493"
+
+[[condition]]
 id = "catalog.list-cache-hit-after-head-check"
 target_function = "照会系CLI(list files/versions/pins/runs・query)のcache利用"
 source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(freshness整合規則=別process起動時HEAD 1回 validator確認必須)・5章(D7承認: 検証済みfresh時DB利用)・12章P1(cache hit/miss両経路)"
@@ -128,7 +137,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(table契約: rebui
 description = "manage catalog rebuildはローカルregistry(JSONL)からcache class(entities/versions/pins/locations/sync_state/pending_items)のみを置換再構築し、永続class(credentials/push_intents)はdropしない。再実行で同一内容(冪等)。cacheは常にJSONL+S3から再構築可能 (integration, fake seam; 永続class保持の直接観測はsrc/catalog.rs実装時のunit test)"
 given = "sync済みDBへの manage catalog rebuild 2回実行と、rebuild後のlist files実行"
 expect_return_shape = "rebuildはexit 0でS3索引由来と同一の照会結果をDBから回答し、2回のrebuild後のlist結果は同一(冪等)"
-source_lines = "src/catalog.rs:1461; tests/catalog_storage.rs:562"
+source_lines = "src/catalog.rs:1461; tests/catalog_storage.rs:586"
 
 [[condition]]
 id = "catalog.scope-isolation-multi-profile"
@@ -137,7 +146,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(指摘#3: 全cache
 description = "全cache tableはscope(bucket+prefix)をPK/検索条件に持つ: 複数profile=複数scopeの混在時に対象scope外のcache行への衝突・上書きが起きない(一方のscopeの同期・書込反映が他方のscopeのcacheを消さない。profile切替での照会は各scopeの内容のみ) (integration, fake seam)"
 given = "別prefixの2 profile(dev・prod。pipeline.toml側にも同名profile)でそれぞれpush+manage catalog syncした構成での、各profileでのlist files実行"
 expect_return_shape = "各profileのlistは当該scopeの索引内容のみを表示し他scopeのentityは混入せず、両scopeのcacheは併存する(後からsyncした側が先の側を上書きしない)"
-source_lines = "tests/catalog_storage.rs:588"
+source_lines = "tests/catalog_storage.rs:612"
 
 [[condition]]
 id = "catalog.cli-refresh-flag"
@@ -146,7 +155,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 5章(D7承認: --refres
 description = "list files/versions/pins/runs・queryへ--refresh flagを追加する: 指定時はHEAD validatorの一致に関係なくS3 GET+復号で索引を再取得しDBを更新する(強制refresh) (integration, fake seam)"
 given = "sync済み(fresh・索引変化なし)状態での list files --refresh 実行"
 expect_return_shape = "exit 0で索引objectへのGetObjectが行われ、表示結果はS3索引の内容と一致する(実装前の未知flagはusage 64)"
-source_lines = "tests/catalog_storage.rs:647"
+source_lines = "tests/catalog_storage.rs:671"
 
 [[condition]]
 id = "catalog.json-format-compat"
@@ -155,7 +164,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 5章(D7: --format json�
 description = "--format json出力schemaはcache/S3両経路で完全互換(cache hit経路で項目・語彙・構造が変化しない。entry_summary_jsonを単一source化)。S3取得経路の戻りにもDB保存側(replace_scope)と同一のscope分離filterを適用する=同一bucket複数prefixの記録が混在する索引でも--refresh時と次回cache hit時のentity・version・pinの集合が変わらない (integration, fake seam)"
 given = "sync済み状態での list files --format json(cache hit経路)と list files --refresh --format json(S3再取得経路)の実行。および同一bucket・別prefix2 profileでpushした混在索引での同比較"
 expect_return_shape = "2つの出力がJSONとして等価である(混在索引でも他prefixの記録は両経路とも混入せず等価)"
-source_lines = "tests/catalog_storage.rs:678; tests/catalog_storage.rs:712"
+source_lines = "tests/catalog_storage.rs:702; tests/catalog_storage.rs:736"
 
 [[condition]]
 id = "catalog.s3-direct-commands-unchanged"
@@ -164,7 +173,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 5章(D7: diff・get・l
 description = "diff・get・list jobsはcache化対象外・従来どおりS3直接で動作する(diffは実態突合が目的・list jobsはper-object headが必要なため) (integration, fake seam)"
 given = "sync済み(fresh)状態でのdiff・get・list jobs実行"
 expect_return_shape = "いずれもS3 API呼び出しを行い(ListObjectVersions・HeadObject・GetObject等)従来経路の結果を返す(cache skipされた空応答にならない)"
-source_lines = "tests/catalog_storage.rs:766"
+source_lines = "tests/catalog_storage.rs:790"
 
 [[condition]]
 id = "catalog.scan-targets-in-pipeline-profile"
@@ -173,7 +182,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(D6承認: (b')scan
 description = "scan対象はpipeline.toml [profiles.<n>.catalog.scan](roots=絶対path列挙・1つ以上必須)へ登録しserver.tomlには置かない(scanはCLI(manage catalog scan)・serve(POST /api/pending/scan)両方から使うbackup対象の定義でありserver.tomlはserver共通設定のみ=指摘#13の分離原則。backup対象はprofile毎に異なる)。auto_path_rootsはscan対象へ転用しない(auto_path_rootsは明示投入fileの分類・相対化用=指摘#6。[catalog.scan]未登録のroot配下は走査しない)。未登録(section無し)では0件走査でexit 0。scanはlocal FS走査+catalog DB比較のみでS3 APIを呼ばない(設計3章「scanはlocal FS走査のみでS3不要」) (integration, fake seam)"
 given = "push済みfixture(auto_path_roots=[data_root]・[catalog.scan]未登録)での manage catalog scan と、roots=[data_root]追記後(roots外のelsewhere配下にもfileを置いた構成)の再実行"
 expect_return_shape = "未登録時はexit 0で集計0件(scan: 0件)。roots登録後はroots配下のfileのみ走査されroots外(elsewhere)のfileは計上されない。いずれのscan実行もcalls.logへS3 API呼び出しを追加しない"
-source_lines = "tests/catalog_storage.rs:888"
+source_lines = "tests/catalog_storage.rs:912"
 
 [[condition]]
 id = "catalog.scan-file-selection"
@@ -182,7 +191,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章((b')対象種別(f
 description = "scanの対象選択: extensions指定時は拡張子一致fileのみ(省略・空は全regular fileが対象)。excludeは走査対象の相対pathへの部分一致で除外(一致file・一致dir配下とも対象外)。symlinkは既定で辿らない(directory symlinkをtraverseせずfile symlinkも対象にしない=範囲拡大事故防止=指摘#6) (integration, fake seam)"
 given = "scan root配下に x.zip(対象拡張子)・y.txt(対象外拡張子)・skip/z.zip(exclude=\"skip\"一致)・elsehere配下へのdirectory symlink(link先に対象拡張子file)を置いたextensions=[\".zip\"]・exclude=[\"skip\"]構成での manage catalog scan"
 expect_return_shape = "走査結果はx.zipの1件のみ(y.txt=拡張子対象外・skip/z.zip=除外・symlink先=不追従で計上されない)"
-source_lines = "tests/catalog_storage.rs:929"
+source_lines = "tests/catalog_storage.rs:953"
 
 [[condition]]
 id = "catalog.scan-classification-statuses"
@@ -191,7 +200,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(D6承認: 分類�
 description = "scanは対象fileをcatalog DB(実効scope)のlocations/versions記録とpath+basename+size+mtimeで比較し4状態へ分類する: (1)path一致の記録がありsize/mtime不一致=changed (2)path一致が無くbasename一致の記録のみでsize/mtime不一致=unknown(移動+変更か別内容かをsize+mtimeでは判定不能。changed/unbackedへ偽装しない) (3)size+mtime一致(path一致・basename一致のいずれか)=ok (4)path・basenameとも一致する記録なし=unbacked。mtimeはfile_write由来のsource_mtime保存値(mtime_jst_preciseと同一形式)との比較 (integration, fake seam)"
 given = "a.zip(backup済み・不変)・b.zip(backup済み・内容変更)・c.zip(未backup)・d.zip(backup済みをmoved/配下へ移動=basename一致+size/mtime一致)・e.zip(backup済み・不変)+other/e.zip(同名・異内容=basename一致+size/mtime不一致)をpush+rebuild後に manage catalog scan"
 expect_return_shape = "集計はunbacked=1(c.zip)・changed=1(b.zip)・ok=3(a.zip・moved/d.zip・e.zip)・unknown=1(other/e.zip)(実装前はmanage catalog scan未知subcommandのexit 64でfailを許容)"
-source_lines = "tests/catalog_storage.rs:955"
+source_lines = "tests/catalog_storage.rs:979"
 
 [[condition]]
 id = "catalog.scan-sha-merge-option"
@@ -200,7 +209,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(sha256再計算は
 description = "sha256再計算は明示option(manage catalog scan --sha256)指定時のみ行う: 対象fileのsha256を計算しregistry由来の合流正本sha_uuid_lookup(file_uploadsの同sha・bucket一致記録)で問い合わせ、合流先が存在すれば当該内容はbackup済みとしてokへ確定する(未指定時はsize+mtime比較のみ=unknown等の判定をshaで確定しない) (integration, fake seam)"
 given = "f.zipをpush済みの状態でcopy/f.zip(同一内容=sha一致・mtimeのみ相違=未指定scanではbasename一致+mtime不一致のunknown)を作り、manage catalog scan(既定)と manage catalog scan --sha256 を実行"
 expect_return_shape = "既定scanはcopy/f.zipをunknownに分類する。--sha256指定時はcopy/f.zipがokへ確定する(unknown=0・sha一致のbackup済み内容との合流判定。sha256計算は--sha256指定時のみ行う)"
-source_lines = "tests/catalog_storage.rs:1011"
+source_lines = "tests/catalog_storage.rs:1035"
 
 [[condition]]
 id = "catalog.scan-replaces-pending-items"
@@ -209,7 +218,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(scan結果(pending
 description = "scan結果は当該scopeのpending_itemsを全置換する(前回scan結果を残さない=再実行で二重計上されず対象外fileの行が消える・冪等)。pending_itemsの置換を行うのは再scanのみでありmanage catalog rebuild/syncのcache置換(replace_scope)はpending_itemsに触れない(索引由来でないため=P1実装の契約と同一) (integration, fake seam)"
 given = "push+scan済み(a.zip=ok・c.zip=unbacked)状態でのscan再実行・c.zip削除後の再scan・その後の manage catalog rebuild(catalog.dbのpending_items行を直接読取)"
 expect_return_shape = "scan再実行は行数不変(冪等)。file削除後の再scanは削除fileの行が消える。rebuild後もpending_items行は保持される(rebuildでは置換されない)"
-source_lines = "tests/catalog_storage.rs:1058"
+source_lines = "tests/catalog_storage.rs:1082"
 
 [[condition]]
 id = "catalog.push-intents-recorded"
@@ -218,7 +227,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(D6承認: (a)push 
 description = "backup pushは--dry-run指定時kind=dry_run・--from-list指定(非dry-run)時kind=from_listで実行記録をpush_intents(永続class)へ記録する(payload_jsonに投入予定対象のpath情報を含む)。通常push(positionalのみ・非dry-run・from-list無し)は記録しない。push_intentsはmanage catalog rebuildでも消えない(永続class=cache class置換の対象外) (integration, fake seam)"
 given = "manage catalog sync済みDBへの from-list実push・同一fileのpositional再push(skip)・--dry-run push の順の実行後と manage catalog rebuild 後のcatalog.db push_intents表直接読取"
 expect_return_shape = "from-list実pushはkind=from_listの行1件(payloadに投入対象file名を含む)・positional再pushは行を追加しない・dry-runはkind=dry_runの行1件を追加。rebuild後も行数・内容は不変(実装前は記録が無く0行でfailを許容)"
-source_lines = "tests/catalog_storage.rs:1109"
+source_lines = "tests/catalog_storage.rs:1133"
 
 [[excluded]]
 item = "credentials tableのpasskey登録・bootstrap one-time token(128bit・in-memory・期限10分・原子的消費・再起動失効)"

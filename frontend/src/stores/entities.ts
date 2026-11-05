@@ -41,6 +41,10 @@ export const useEntitiesStore = defineStore('entities', {
     versions: null as EntityVersionsResponse | null,
     /** versions取得のerror(detail取得のerrorとは分離) */
     versionsError: null as ApiError | null,
+    /** 詳細・versionsの失効世代(refetchEntitiesで増加)。失効前に開始した取得の
+     * 応答は不採用とする(失効後への旧内容再格納防止)。EntityDetailViewは本値の
+     * 変化をwatchして表示中の詳細を再取得する */
+    detailEpoch: 0,
   }),
   getters: {
     /** EntitiesViewのUI誘導状態: 取得中=loading・一覧保持済み=result(0件の成功も
@@ -104,6 +108,7 @@ export const useEntitiesStore = defineStore('entities', {
       this.query = ''
       this.category = null
       this.page = 1
+      this.detailEpoch += 1
       this.selectedUuid = null
       this.detail = null
       this.detailError = null
@@ -124,9 +129,11 @@ export const useEntitiesStore = defineStore('entities', {
       this.loading = false
     },
     /** 詳細の取得(version_list付き。selectedUuid=uuid。不在404はdetailErrorで示し
-     * detailは保持しない) */
+     * detailは保持しない。失効(sync後再取得)をまたいだ応答は不採用とする) */
     async fetchEntityDetail(uuid: string): Promise<void> {
+      const epoch = this.detailEpoch
       const result = await fetchEntityDetail(uuid)
+      if (epoch !== this.detailEpoch) return
       if (result.ok) {
         this.selectedUuid = uuid
         this.detail = result.data
@@ -137,9 +144,12 @@ export const useEntitiesStore = defineStore('entities', {
       this.detailError = result.error
     },
     /** 版一覧の取得(state付き。失敗時はversionsを空へ戻しversionsErrorで示す=
-     * detailErrorとは分離し片方の失敗がもう片方の成功で消えない) */
+     * detailErrorとは分離し片方の失敗がもう片方の成功で消えない。失効をまたいだ
+     * 応答は不採用とする) */
     async fetchEntityVersions(uuid: string): Promise<void> {
+      const epoch = this.detailEpoch
       const result = await fetchEntityVersions(uuid)
+      if (epoch !== this.detailEpoch) return
       if (result.ok) {
         this.selectedUuid = uuid
         this.versions = result.data

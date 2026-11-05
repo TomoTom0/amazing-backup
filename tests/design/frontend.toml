@@ -310,10 +310,19 @@ expect_return_shape = "一覧(items)は再取得結果へ更新され、selected
 source_lines = "frontend/src/stores/entities.spec.ts:298"
 
 [[condition]]
+id = "frontend.entities-stale-detail-response-rejected"
+target_function = "frontend stores/entities.ts detailEpoch(詳細・versions失効をまたいだ応答の不採用)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(EntityDetailView)・TASK-9レビュー再々指摘②(sync中に詳細へ移動すると失効後に再取得されず読み込み中で止まる・失効前に開始した詳細リクエストの応答が後から完了すると旧内容を再格納する)"
+description = "refetchEntities(sync後再取得)による詳細・versionsの失効(detailEpoch増加)をまたいで完了した取得応答は採用しない(失効後の状態へ旧locations/pins・旧versionsを再格納しない)。EntityDetailViewはdetailEpochの変化をwatchして表示中の詳細・versionsを再取得する(表示中失効に対するwatchの実行は実browser観測=excluded) (vitest)"
+given = "fetchEntityDetail/fetchEntityVersionsの応答が未完了のままrefetchEntitiesで失効した後に旧応答が完了する場合・および失効後の新規fetchEntityDetail/fetchEntityVersions"
+expect_return_shape = "旧応答の完了後もdetail=null・versions=nullのまま(旧内容を再格納しない)。失効後の新規取得応答は採用されdetail/versionsへ保持される"
+source_lines = "frontend/src/stores/entities.spec.ts:384"
+
+[[condition]]
 id = "frontend.entities-detail-versions-error-separation"
 target_function = "frontend stores/entities.ts detailError/versionsError(詳細・versionsのerror状態分離)"
 source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntityDetailView=詳細+版一覧)・TASK-9レビュー再指摘③(詳細とversionsが同一detailErrorを共有し片方の失敗がもう片方の成功で消える)"
-description = "詳細取得のerror(detailError)とversions取得のerror(versionsError)は別状態として保持する: 並行取得で詳細が失敗した後にversionsが成功してもdetailErrorは残り(詳細部分は失敗表示のまま)・逆にversionsが失敗してもversionsErrorはversionsの成功で消えない(EntityDetailViewは両errorを別々に表示) (vitest)"
+description = "詳細取得のerror(detailError)とversions取得のerror(versionsError)は別状態として保持する: 並行取得で詳細が失敗した後にversionsが成功してもdetailErrorは残り(詳細部分は失敗表示のまま)・逆にversionsが失敗してもversionsErrorは詳細の成功で消えない(EntityDetailViewは両errorを別々に表示) (vitest)"
 given = "fetch mock(詳細404 not_found+versions 200・versions 500 internal+詳細200)でのfetchEntityDetail/fetchEntityVersions順次呼び出し"
 expect_return_shape = "前者はdetail=null+detailError={code:\"not_found\"}が残りversionsは保持・versionsError=null。後者はdetailは保持+detailError=nullでversions=null+versionsError={code:\"internal\"}が残る"
 source_lines = "frontend/src/stores/entities.spec.ts:333"
