@@ -294,6 +294,15 @@ pub struct CatalogDb {
     conn: Connection,
 }
 
+/// credentials tableの1行(永続class・P4 passkey認証の保存先。passkey_jsonは
+/// webauthn-rs Passkeyのserde JSON)。
+pub struct CredentialRow {
+    pub credential_id: String,
+    pub passkey_json: String,
+    pub name: String,
+    pub created_at: String,
+}
+
 impl CatalogDb {
     /// 規定path(catalog_db_path)で開く。新規作成時はdir 0700・file 0600で作成する。
     pub fn open() -> BackupResult<CatalogDb> {
@@ -374,6 +383,52 @@ impl CatalogDb {
         self.conn
             .query_row("SELECT COUNT(*) FROM credentials", [], |r| r.get(0))
             .map_err(|e| BackupError::Internal(format!("credentials計数に失敗: {e}")))
+    }
+
+    /// passkey credentialの保存(設計8章: credentials tableへPasskeyを通常のserdeで
+    /// 保存=永続class。danger-allow-state-serialisation不使用)。同一credential_idは
+    /// 上書き(re-register時の置換)。
+    pub fn upsert_credential(
+        &self,
+        credential_id: &str,
+        passkey_json: &str,
+        name: &str,
+    ) -> BackupResult<()> {
+        self.conn
+            .execute(
+                "INSERT INTO credentials (credential_id, passkey_json, name, created_at) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(credential_id) DO UPDATE SET \
+                 passkey_json = excluded.passkey_json, \
+                 name = excluded.name, \
+                 created_at = excluded.created_at",
+                rusqlite::params![credential_id, passkey_json, name, crate::storage::now_jst()],
+            )
+            .map_err(|e| BackupError::Internal(format!("credentials保存に失敗: {e}")))?;
+        Ok(())
+    }
+
+    /// credentials行の一覧(P4 loginのallowCredentials組立)。
+    pub fn load_credentials(&self) -> BackupResult<Vec<CredentialRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT credential_id, passkey_json, name, created_at FROM credentials \
+                 ORDER BY created_at, credential_id",
+            )
+            .map_err(|e| BackupError::Internal(format!("credentials読取の準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(CredentialRow {
+                    credential_id: r.get(0)?,
+                    passkey_json: r.get(1)?,
+                    name: r.get(2)?,
+                    created_at: r.get(3)?,
+                })
+            })
+            .map_err(|e| BackupError::Internal(format!("credentials読取に失敗: {e}")))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| BackupError::Internal(format!("credentials行の取り出しに失敗: {e}")))
     }
 
     /// sync_state読み出し(行が無いNone)。

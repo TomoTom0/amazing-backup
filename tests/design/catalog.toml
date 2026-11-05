@@ -35,7 +35,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(schema要約・tab
 description = "DB新規作成はmigrationによりschemaを構築する: cache class 6 table(entities/versions/pins/locations/sync_state/pending_items)+永続class 2 table(credentials/push_intents)。versions/locationsはfile_write由来のsource_mtimeを保存する(3章の比較基準供給源)。migrationは冪等(既存DBへの再適用で内容を壊さない)。WAL modeで運用する (unit; integrationではDB file生成を観測)"
 given = "存在しないpathへの初回DB作成(manage catalog sync実行)と、同一DBへの再実行"
 expect_return_shape = "初回実行でSQLite database file(magic header \"SQLite format 3\")が作成され後続の照会が動作。再実行はexit 0で既存内容を壊さない(schema各tableの詳細構造・WAL modeの直接観測はsrc/catalog.rs実装時のunit test)"
-source_lines = "src/catalog.rs:1105; src/catalog.rs:989; tests/catalog_storage.rs:85"
+source_lines = "src/catalog.rs:1044; src/catalog.rs:1160; tests/catalog_storage.rs:85"
 
 [[condition]]
 id = "catalog.sync-fetches-replica-on-change"
@@ -53,7 +53,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(freshness整合規
 description = "list files/versions/pins/runs・queryは別process起動時にHEAD 1回のvalidator一致確認を行い、検証済みfreshならS3 GETを行わずDBから回答する(cache hit。HEADとGETの毎回取得を廃止)。HEAD validator一致確認は毎process起動時に必須(検証なしfreshの持ち越し期限は設けない) (integration, fake seam)"
 given = "manage catalog sync済み(fresh)状態での list files と query の実行(いずれもsyncとは別process)"
 expect_return_shape = "索引objectへのHeadObject 1回のみでGetObjectは呼ばれず、表示結果はS3索引の内容と一致する"
-source_lines = "src/catalog.rs:1190; tests/catalog_storage.rs:163"
+source_lines = "src/catalog.rs:1245; tests/catalog_storage.rs:163"
 
 [[condition]]
 id = "catalog.cache-miss-refreshes-db"
@@ -80,7 +80,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(table契約: rebui
 description = "manage catalog rebuildはローカルregistry(JSONL)からcache class(entities/versions/pins/locations/sync_state/pending_items)のみを置換再構築し、永続class(credentials/push_intents)はdropしない。再実行で同一内容(冪等)。cacheは常にJSONL+S3から再構築可能 (integration, fake seam; 永続class保持の直接観測はsrc/catalog.rs実装時のunit test)"
 given = "sync済みDBへの manage catalog rebuild 2回実行と、rebuild後のlist files実行"
 expect_return_shape = "rebuildはexit 0でS3索引由来と同一の照会結果をDBから回答し、2回のrebuild後のlist結果は同一(冪等)"
-source_lines = "src/catalog.rs:1128; tests/catalog_storage.rs:327"
+source_lines = "src/catalog.rs:1183; tests/catalog_storage.rs:327"
 
 [[condition]]
 id = "catalog.scope-isolation-multi-profile"

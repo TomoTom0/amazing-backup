@@ -17,6 +17,9 @@ default = ["serve"]
 serve = [
   "dep:axum",
   "dep:tower-http",
+  "dep:tower-sessions",
+  "dep:webauthn-rs",
+  "dep:time",
   "dep:rust-embed",
   "tokio/net",
   "tokio/signal",
@@ -49,6 +52,13 @@ tower-http = { version = "0.6", optional = true, default-features = false, featu
 # TASK-9設計10章(serve feature): frontend/distのbinary埋め込み。allow_missingはderive属性
 # (#[allow_missing = true])で付与しdist欠落でもbuild可能(欠落時は空assets=静的配信なし)
 rust-embed = { version = "8", optional = true }
+# TASK-9設計8章(serve feature・D3承認): passkey認証webauthn-rs(0.6系stable最新)。
+# danger-allow-state-serialisationは不使用(challenge stateはin-memory保持のため不要)
+webauthn-rs = { version = "0.6.2", optional = true }
+# TASK-9設計8章(serve feature): session管理(in-memory store・cookie属性・期限24h)
+tower-sessions = { version = "0.15", optional = true }
+# 上記のExpiry期限指定(time::Duration)。tower-sessions 0.15と同一系列
+time = { version = "0.3", optional = true }
 
 [dev-dependencies]
 # capture_request検証用(設計4.3案4・12.1)。capture_request関数の実体はこのSDK版では
@@ -57,3 +67,7 @@ aws-smithy-runtime = { version = "1", features = ["test-util"] }
 aws-smithy-http-client = { version = "1", features = ["test-util"] }
 # TASK-9 12章P3(handler単体test): routerへのoneshot request(tower::ServiceExt)
 tower = { version = "0.5", features = ["util"] }
+# TASK-9 12章P4(server-to-server認証test): soft passkey合成応答のP-256鍵・署名と
+# attestationObject(CBOR)・COSE鍵の組立。src/server.rs #[cfg(test)]専用
+p256 = { version = "0.13", features = ["ecdsa"] }
+coset = "0.3"

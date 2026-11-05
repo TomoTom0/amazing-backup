@@ -25,8 +25,8 @@ onMounted(() => {
   <section class="card">
     <h2>データ照会</h2>
     <p class="muted">
-      entity一覧等の保護APIはpasskey認証の構成完了まで閉鎖されています(P2〜P3はfail-closed)。
-      照会は当面CLI(list・query)を利用してください。
+      entity一覧等の照会画面は後続phaseで提供されます。passkey認証後も当面はCLI
+      (list・query)をご利用ください(未認証の場合はlogin画面へ誘導されます)。
     </p>
   </section>
 </template>

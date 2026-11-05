@@ -59,6 +59,203 @@ export function fetchSyncState(): Promise<ApiResult<SyncStateResponse>> {
   return apiGet('/api/sync', isSyncStateResponse)
 }
 
+/** GET /api/auth/status の応答形式(TASK-9設計6章: 認証状態と登録credential数) */
+export type AuthStatusResponse = {
+  authenticated: boolean
+  credentials: number
+}
+
+export function isAuthStatusResponse(v: unknown): v is AuthStatusResponse {
+  return (
+    isRecord(v) &&
+    typeof v['authenticated'] === 'boolean' &&
+    typeof v['credentials'] === 'number'
+  )
+}
+
+/** 認証状態の取得(認証不要endpoint。LoginViewのUI誘導基盤) */
+export function fetchAuthStatus(): Promise<ApiResult<AuthStatusResponse>> {
+  return apiGet('/api/auth/status', isAuthStatusResponse)
+}
+
+/** POST /api/auth/logout(session破棄。未認証401でもUI状態は未認証へ揃える) */
+export async function postLogout(): Promise<ApiResult<Record<string, unknown>>> {
+  let resp: Response
+  try {
+    resp = await fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+    })
+  } catch {
+    return {
+      ok: false,
+      error: { code: 'network', message: 'serverに接続できません' },
+      httpStatus: 0,
+    }
+  }
+  const body: unknown = await resp.json().catch(() => null)
+  if (resp.ok) {
+    if (isRecord(body)) {
+      return { ok: true, data: body }
+    }
+    return {
+      ok: false,
+      error: { code: 'internal', message: '応答の形式が不正です' },
+      httpStatus: resp.status,
+    }
+  }
+  if (isApiErrorResponse(body)) {
+    return { ok: false, error: body.error, httpStatus: resp.status }
+  }
+  return {
+    ok: false,
+    error: { code: 'unexpected_status', message: `HTTP ${resp.status}` },
+    httpStatus: resp.status,
+  }
+}
+
+// --- passkey登録・login(TASK-9設計8章・12章P4。LoginViewから使用) ---
+// server応答はbase64url文字列のWebAuthn options。ここでは文字列のまま受け取り
+// LoginViewでBufferSourceへ変換する(ArrayBufferとbase64urlの往来はUI層の責務)。
+
+/** POST /api/auth/register/start の応答(PublicKeyCredentialCreationOptions相当) */
+export type RegisterOptionsResponse = {
+  publicKey: {
+    challenge: string
+    user: { id: string; name: string; displayName: string }
+    pubKeyCredParams: { type: 'public-key'; alg: number }[]
+  }
+}
+
+export function isRegisterOptionsResponse(v: unknown): v is RegisterOptionsResponse {
+  if (!isRecord(v)) return false
+  const pk = v['publicKey']
+  if (!isRecord(pk)) return false
+  if (typeof pk['challenge'] !== 'string') return false
+  const user = pk['user']
+  if (
+    !isRecord(user) ||
+    typeof user['id'] !== 'string' ||
+    typeof user['name'] !== 'string' ||
+    typeof user['displayName'] !== 'string'
+  ) {
+    return false
+  }
+  const params = pk['pubKeyCredParams']
+  if (!Array.isArray(params)) return false
+  return params.every(
+    (p) => isRecord(p) && p['type'] === 'public-key' && typeof p['alg'] === 'number',
+  )
+}
+
+/** POST /api/auth/login/start の応答(PublicKeyCredentialRequestOptions相当) */
+export type LoginOptionsResponse = {
+  publicKey: {
+    challenge: string
+    allowCredentials?: { type: 'public-key'; id: string }[]
+  }
+}
+
+export function isLoginOptionsResponse(v: unknown): v is LoginOptionsResponse {
+  if (!isRecord(v)) return false
+  const pk = v['publicKey']
+  if (!isRecord(pk) || typeof pk['challenge'] !== 'string') return false
+  const allow = pk['allowCredentials']
+  if (allow !== undefined && !Array.isArray(allow)) return false
+  if (Array.isArray(allow)) {
+    return allow.every(
+      (c) => isRecord(c) && c['type'] === 'public-key' && typeof c['id'] === 'string',
+    )
+  }
+  return true
+}
+
+/** POST共通(JSON body。応答は型ガードで検証し不一致はinternal扱い) */
+async function apiPost<T>(
+  path: string,
+  requestBody: unknown,
+  guard: (v: unknown) => v is T,
+): Promise<ApiResult<T>> {
+  let resp: Response
+  try {
+    resp = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(requestBody),
+    })
+  } catch {
+    return {
+      ok: false,
+      error: { code: 'network', message: 'serverに接続できません' },
+      httpStatus: 0,
+    }
+  }
+  const body: unknown = await resp.json().catch(() => null)
+  if (resp.ok) {
+    if (guard(body)) {
+      return { ok: true, data: body }
+    }
+    return {
+      ok: false,
+      error: { code: 'internal', message: '応答の形式が不正です' },
+      httpStatus: resp.status,
+    }
+  }
+  if (isApiErrorResponse(body)) {
+    return { ok: false, error: body.error, httpStatus: resp.status }
+  }
+  return {
+    ok: false,
+    error: { code: 'unexpected_status', message: `HTTP ${resp.status}` },
+    httpStatus: resp.status,
+  }
+}
+
+/** 登録開始(bootstrap token提示。登録UIはtoken提示時のみ開く=設計8章) */
+export function postRegisterStart(
+  token: string,
+): Promise<ApiResult<RegisterOptionsResponse>> {
+  return apiPost('/api/auth/register/start', { token }, isRegisterOptionsResponse)
+}
+
+/** 登録完了(WebAuthn登録応答。base64url文字列で送る) */
+export function postRegisterFinish(credential: {
+  id: string
+  rawId: string
+  type: string
+  response: { attestationObject: string; clientDataJSON: string; transports?: string[] }
+}): Promise<ApiResult<Record<string, unknown>>> {
+  return apiPost(
+    '/api/auth/register/finish',
+    credential,
+    (v): v is Record<string, unknown> => isRecord(v),
+  )
+}
+
+/** login開始(challenge発行) */
+export function postLoginStart(): Promise<ApiResult<LoginOptionsResponse>> {
+  return apiPost('/api/auth/login/start', {}, isLoginOptionsResponse)
+}
+
+/** login完了(WebAuthn認証応答。base64url文字列で送る) */
+export function postLoginFinish(credential: {
+  id: string
+  rawId: string
+  type: string
+  response: {
+    authenticatorData: string
+    clientDataJSON: string
+    signature: string
+    userHandle: string | null
+  }
+}): Promise<ApiResult<Record<string, unknown>>> {
+  return apiPost(
+    '/api/auth/login/finish',
+    credential,
+    (v): v is Record<string, unknown> => isRecord(v),
+  )
+}
+
 /** API呼び出し結果: 成功(型ガード通過data)または失敗(ApiError+HTTP status) */
 export type ApiResult<T> =
   | { ok: true; data: T }

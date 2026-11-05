@@ -634,6 +634,24 @@ endpoint群)・11章(server-to-server自動検証=指摘#12)・12章P4)。実装
   (3fail+store file load error)・新規1緑(401扱い)。server.toml・frontend.tomlの[meta]は
   テスト先行のためverified=falseへ・webauthn.tomlはverified=falseで新設(P4実装後に復帰)
 
+2026-11-05: TASK-9 Phase P4(passkey認証)実装。Cargo.toml serve featureへ
+webauthn-rs 0.6.2+tower-sessions 0.15.0+time(devへp256/coset=soft passkey合成用)を追加。
+src/server.rsへ認証本体(AuthState・BootstrapToken=16byte乱数base64・期限10分・atomic swap消費・
+再起動失効・credential数0+不一致は登録閉鎖・追加登録はlogin済み+token・PendingChallenge=120秒
+・一度限り・anonymous session結合〔start時の明示save+flow種別格納で未採番問題に対処〕・
+auth endpoint群6種・auth_gate middleware(未認証401・health/auth系素通り・/api/*未定義は404へ)・
+tower-sessions(HttpOnly+SameSite=Strict+https時Secure+OnInactivity 24h・login成功時cycle_id()で
+session ID付替)・token/時刻注入seam・soft passkey helper実装(固定P-256鍵+CBOR合成 fmt=none
+attestation・COSE EC2 ES256・ECDSA署名でregister/login両flowを本物の検証で完結))。
+src/catalog.rsへcredentials本番API(upsert_credential・load_credentials)。frontend:
+stores/auth.ts(authUi getter)・api/auth client・LoginView(bootstrap token入力+WebAuthn API
+呼出)・router guard・HomeView文言更新。テスト側修正1件(期待値不変): api_login_rotates_session_id
+がchallengeを渡さず空JSONだった欠陥(challenge不明では署名合成不可能=検証必須設計と矛盾)を修正。
+session期限24hの観測はstore不在session ID cookieでの401(tower-sessions内部時刻のためseam注入
+不可・Expiry設定自体は実装済み)。cargo test 359pass/0fail・vitest 23pass/0fail・
+verify-conditions.py PASS。webauthn/server/frontend条件書の[meta]をverified=trueへ復帰
+(source_hash更新・frontendはfrontend/src tree hash)
+
 ## 構成
 
 | path | 役割 | 状態 |

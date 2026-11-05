@@ -294,7 +294,9 @@ fn serve_bootstrap_flag_prints_one_time_token_on_stdout() {
     let Some(token) = token else {
         let _ = child.kill();
         let _ = child.wait();
-        panic!("serve --bootstrapがstdoutへtoken行を出す(実装前=--bootstrap未知のexit 64で不在は赤許容)");
+        panic!(
+            "serve --bootstrapがstdoutへtoken行を出す(実装前=--bootstrap未知のexit 64で不在は赤許容)"
+        );
     };
     // tokenは128bit乱数のbase64: base64 decodeすると16byte(標準/URL-safe両方を受容)
     use base64::Engine as _;
