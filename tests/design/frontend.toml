@@ -18,16 +18,25 @@
 #   (navigator.credentials.create/get)観測はexcluded維持(vitestはnode環境のため
 #   store/client層のみ条件化し、LoginViewのUI誘導状態はauth storeのgetterで担保)。
 #   GET /api/auth/status応答形式はserver.tomlの解釈({authenticated,credentials})に整合。
+# 2026-11-05: TASK-9 Phase P5(pending catalog)対応でテスト先行の条件追加(2条件)。
+#   excluded「PendingView(未backup/changed/unknown一覧+scanボタン)・pending周りのUI」を
+#   解消しpending store(src/stores/pending.ts)・client(src/api/client.tsのpending系)層を
+#   条件化。実装前のため新条件のテストは実行failを許容(pnpm vitest runは実行可能)。
+#   PendingView componentの実描画はvitest(node環境)で観測できないためexcluded維持
+#   (P4のLoginViewと同一扱い)。一覧のUI状態はstoreのstatus別集計getter(counts)で担保し
+#   scan実行はrunScan action(POST後に一覧再取得)で担保する。
+#   GET /api/pending応答・POST /api/pending/scan応答の形式はserver.toml P5条件の解釈
+#   ({"pending":[...]}・item schema共通)に整合。
 
 [meta]
 feature = "frontend"
 source_file = "frontend/src/"
-verified = true
+verified = false
 verified_at = "2026-11-05"
 verified_by = "claude"
 test_command = "pnpm --dir frontend vitest run"
 source_hash = "257200ae5305e17a928ecbf1c7b43d927793b249"
-note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3+P4時点のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth)のvitestで担保。P3分5条件は2026-11-05実装後に全件passで検証記録を復帰済み。P4テスト先行(2026-11-05)のためverified=falseへ(P4実装後に復帰)。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
+note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3+P4+P5時点のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending)のvitestで担保。P3分5条件・P4分4条件は2026-11-05実装後に全件passで検証記録を復帰済み。P5テスト先行(2026-11-05)のためverified=falseへ(P5実装後に復帰)。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
 
 [[condition]]
 id = "frontend.api-error-body-guard"
@@ -117,10 +126,28 @@ reason = "実browserのWebAuthn API・component描画はvitest(node環境)で観
 decided_at = "2026-11-05"
 decided_by = "claude"
 
+[[condition]]
+id = "frontend.pending-client-and-store"
+target_function = "frontend api/client.ts GET /api/pending応答型ガード・stores/pending.ts一覧取得"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GET /api/pending=アップロード前カタログ・item schema)・7章(Pinia stores: pending・PendingView)・12章P5"
+description = "GET /api/pending応答({\"pending\": [{source_root, path, size, mtime, status, last_scan_at}]}・statusはunbacked|changed|ok|unknown)の型ガード(isPendingResponse)を持ち、pending storeは一覧(items)を取得して保持しstatus別件数の集計getter(counts: unbacked/changed/ok/unknown)を提供する(PendingViewの未backup/changed/unknown一覧の基盤。取得失敗時はlastErrorを保持し一覧を空へ戻す=空dataを表示しない) (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(200+pending一覧body・network reject)でのpending store(fetchPending)の取得"
+expect_return_shape = "型ガードは形式一致のみtrue(size非number・pending欠落・nullはfalse)。storeは200時にitemsとcountsを保持しlastError=null・失敗時はlastErrorを保持しitemsは空(実装前のためsrc/stores/pending.ts・client未実装で実行failを許容)"
+source_lines = "frontend/src/api/pending.spec.ts:13; frontend/src/stores/pending.spec.ts:27"
+
+[[condition]]
+id = "frontend.pending-scan-trigger"
+target_function = "frontend api/client.ts POST /api/pending/scan・stores/pending.ts runScan(scan実行)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: POST /api/pending/scan=scanトリガ)・7章(PendingViewのscanボタン)・12章P5"
+description = "POST /api/pending/scan呼出(postPendingScan・応答はGET /api/pendingと同一形式)とpending storeのscan実行action(runScan)を持ち、実行中状態(scanning)へ遷移し実行後に一覧を再取得してitemsを更新する(scanボタン=手動トリガのUI基盤) (vitest)"
+given = "fetch mock(POST /api/pending/scan 200・続くGET /api/pending 200+更新後一覧)でのpending storeのrunScan実行と、fetch呼出のmethod/URL観測"
+expect_return_shape = "1回目のfetchはPOST /api/pending/scanへ向かい2回目はGET /api/pendingで再取得される。itemsは再取得結果へ更新されscanningは実行中trueから完了falseへ遷移する(実装前のため実行failを許容)"
+source_lines = "frontend/src/api/pending.spec.ts:90; frontend/src/stores/pending.spec.ts:71"
+
 [[excluded]]
-item = "PendingView(未backup/changed/unknown一覧+scanボタン)・pending周りのUI"
+item = "PendingView componentの実描画(scanボタン実操作・未backup/changed/unknown一覧の実browser描画)"
 source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: PendingView)・12章P5(pending catalog・PendingView)"
-reason = "P5(pending catalog)の実装phaseでありP3対象外。GET /api/pendingのendpoint/schema枠はserver.pending-endpoint-schemaが担保"
+reason = "component実描画はvitest(node環境)で観測できない(store/client層のみ条件化し一覧・scanのUI状態はstoreのcounts getterとrunScan actionで担保=P4 LoginViewと同一扱い)。実機画面確認は設計12章P5の手動verify項目"
 decided_at = "2026-11-05"
 decided_by = "claude"
 

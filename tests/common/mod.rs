@@ -1265,6 +1265,28 @@ pub fn http_get(addr: &str, path: &str) -> Option<(u16, String)> {
     Some((code, body))
 }
 
+/// 素朴HTTP POST(body無し。POST系保護endpointの未認証応答観測用)。
+pub fn http_post(addr: &str, path: &str) -> Option<(u16, String)> {
+    use std::io::{Read as _, Write as _};
+    let mut stream = std::net::TcpStream::connect(addr).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok()?;
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let code = text.split_whitespace().nth(1)?.parse().ok()?;
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
+    Some((code, body))
+}
+
 impl StorageFixture {
     /// server.tomlのpath($ABH/server.toml。設計8章: 既存XDG config配下への新規file)。
     pub fn server_toml(&self) -> PathBuf {

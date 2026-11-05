@@ -2147,6 +2147,109 @@ mod tests {
         drop(env);
     }
 
+    // -----------------------------------------------------------------------
+    // P5(pending catalog)のhandler単体test(テスト先行。実装前のためPOST
+    // /api/pending/scan未routingのfallback 404・?status=無視の200で実行failを
+    // 許容=赤。compileは通る)。scan対象のpipeline.toml [profiles.dev.catalog.scan]
+    // の追記は現行schemaが未知sectionを拒否するため、このtest専用のenvに対してのみ
+    // 行う(他testのpipeline.tomlには影響させない)。
+
+    /// P5 scan系handler test用の環境(api_env+scan対象dir+pipeline.tomlへ
+    /// [profiles.dev.catalog.scan]追記)。比較基準となるbackup記録は置かない
+    /// (scan対象fileは全件unbackedに分類される構成)。
+    fn api_env_with_scan(tag: &str, files: &[&str]) -> ApiEnv {
+        use crate::testutil::write_file;
+        let env = api_env(tag);
+        let scan_root = env
+            .home
+            .parent()
+            .expect("tmp dir")
+            .join("scanroot");
+        std::fs::create_dir_all(&scan_root).expect("scan root dir");
+        for name in files {
+            write_file(&scan_root.join(name), b"scan-target-bytes");
+        }
+        let body = std::fs::read_to_string(env.home.join("pipeline.toml")).expect("pipeline.toml");
+        let body = format!(
+            "{body}\n[profiles.dev.catalog.scan]\nroots = [\"{}\"]\n",
+            scan_root.display()
+        );
+        write_file(&env.home.join("pipeline.toml"), body.as_bytes());
+        env
+    }
+
+    /// [covers:server.pending-scan-endpoint]
+    /// POST /api/pending/scanはscanを実行し最新一覧をGET /api/pendingと同一schemaで
+    /// 応答する(itemはsource_root/path/size/mtime/status/last_scan_at入り)。
+    #[test]
+    fn api_pending_scan_endpoint_runs_scan_and_lists_items() {
+        let env = api_env_with_scan("srv-api-pending-scan", &["x.zip", "y.zip"]);
+        let (status, body) = api("POST", "/api/pending/scan");
+        assert_eq!(status, 200, "POST /api/pending/scanは200: {body}");
+        let pending = body
+            .get("pending")
+            .and_then(|v| v.as_array())
+            .expect("pending配列(GET /api/pendingと同一schema)");
+        assert_eq!(pending.len(), 2, "scan対象2file: {body}");
+        let item = &pending[0];
+        for key in ["source_root", "path", "size", "mtime", "status", "last_scan_at"] {
+            assert!(
+                item.get(key).is_some(),
+                "itemに{key}を含む(P3条件と同一schema): {body}"
+            );
+        }
+        assert_eq!(
+            item.get("status").and_then(|s| s.as_str()),
+            Some("unbacked"),
+            "比較基準となるbackup記録が無いため全件unbacked: {body}"
+        );
+        assert!(
+            item.get("last_scan_at")
+                .and_then(|v| v.as_str())
+                .is_some_and(|v| !v.is_empty()),
+            "last_scan_atは直近scan時刻(非空): {body}"
+        );
+        // 実行結果はDBへ反映され、続くGETにも現れる
+        let (status, body) = api("GET", "/api/pending");
+        assert_eq!(status, 200, "scan後のGET /api/pendingは200: {body}");
+        let pending = body
+            .get("pending")
+            .and_then(|v| v.as_array())
+            .expect("pending配列");
+        assert_eq!(pending.len(), 2, "scan実行後の一覧: {body}");
+        drop(env);
+    }
+
+    /// [covers:server.pending-list-status-filter]
+    /// GET /api/pendingの?status=絞り込み(単一値)と不正値400。
+    #[test]
+    fn api_pending_list_filters_by_status_param() {
+        let env = api_env_with_scan("srv-api-pending-filter", &["x.zip"]);
+        let (status, body) = api("POST", "/api/pending/scan");
+        assert_eq!(status, 200, "scan(事前): {body}");
+
+        let (status, body) = api("GET", "/api/pending?status=unbacked");
+        assert_eq!(status, 200, "?status=unbackedは200: {body}");
+        let pending = body
+            .get("pending")
+            .and_then(|v| v.as_array())
+            .expect("pending配列");
+        assert_eq!(pending.len(), 1, "unbackedのみ: {body}");
+
+        let (status, body) = api("GET", "/api/pending?status=ok");
+        assert_eq!(status, 200, "?status=okは200: {body}");
+        let pending = body
+            .get("pending")
+            .and_then(|v| v.as_array())
+            .expect("pending配列");
+        assert!(pending.is_empty(), "ok項目は0件: {body}");
+
+        let (status, body) = api("GET", "/api/pending?status=bogus");
+        assert_eq!(status, 400, "不正なstatus値は400 invalid_request: {body}");
+        expect_error_body(&body, "invalid_request");
+        drop(env);
+    }
+
     /// [covers:server.sync-state-endpoint]
     /// GET /api/syncはsync_state 1行分(scope/status/validator/fetched_at/entry_count)を
     /// 返す。未sync時はstatus=unknownで200(staleness表示のため常に応答)。

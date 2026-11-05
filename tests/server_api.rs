@@ -354,3 +354,39 @@ fn serve_protected_api_unauthenticated_401_after_p4() {
     let _ = child.send_sigterm();
     let _ = child.wait();
 }
+
+// ---------------------------------------------------------------------------
+// TASK-9 Phase P5(pending catalog)の結合test(テスト先行。POST /api/pending/scan
+// は保護APIのため未認証401=auth_gate実装済みの観測は実装前後とも緑。認証済みでの
+// scan実行観測はsrc/server.rs内handler単体testが担う)。
+
+/// [covers:server.pending-scan-endpoint]
+/// POST /api/pending/scanは保護API: 未認証では401 unauthenticatedでscanを実行しない。
+#[test]
+fn serve_pending_scan_unauthenticated_401() {
+    let Some(fx) = common::StorageFixture::new("srv-pending-scan", common::StorageOpts::default())
+    else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    make_archive(&a, 1024);
+    let (code, stdout, stderr) = fx.push_from_list(&[], &[(&a, Some("alpha"))], &[]);
+    assert_eq!(code, 0, "push(事前): {stdout}{stderr}");
+
+    let (addr, mut child, _err) = start_serve(&fx, free_local_port(), "pending-scan");
+    let (code, body) = common::http_post(&addr, "/api/pending/scan").expect("応答");
+    assert_eq!(
+        code, 401,
+        "未認証のPOST /api/pending/scanは401(保護API): status={code} body={body}"
+    );
+    assert!(
+        body.contains("\"unauthenticated\""),
+        "error bodyは既存error体系形式(unauthenticated): {body}"
+    );
+    assert!(
+        !body.contains("alpha"),
+        "保護対象データは応答に含まれない: {body}"
+    );
+    let _ = child.send_sigterm();
+    let _ = child.wait();
+}
