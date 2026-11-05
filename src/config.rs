@@ -38,6 +38,28 @@ pub struct PipelineConfig {
     pub metadata: MetadataConfig,
     /// 手動写像(basename → category/label)。省略時はauto_path_roots相対化へ
     pub files: std::collections::BTreeMap<String, FileMapping>,
+    /// catalog(pending scan)設定(TASK-9設計3章・12章P5。scan対象の明示登録)
+    pub catalog: CatalogConfig,
+}
+
+/// catalog関連設定(TASK-9設計3章D6・12章P5)。P5時点は[catalog.scan]のみ。
+/// 未登録(section無し)の場合も空で成立(scanは0件走査で正常終了)。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogConfig {
+    /// [catalog.scan](省略可=scan対象未登録)
+    pub scan: Option<ScanConfig>,
+}
+
+/// `[catalog.scan]`相当(TASK-9設計3章D6承認: scan対象root・対象種別・除外規則の
+/// 明示登録。auto_path_rootsは転用しない)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanConfig {
+    /// scan対象root(絶対path・1つ以上必須)
+    pub roots: Vec<std::path::PathBuf>,
+    /// 対象拡張子(".zip"形式。空=全regular file対象)
+    pub extensions: Vec<String>,
+    /// 除外(走査対象の相対pathへの部分一致)
+    pub exclude: Vec<String>,
 }
 
 /// XDG配置の規定path一式(TASK-19)。
@@ -250,6 +272,30 @@ struct ProfileFile {
     metadata: Option<MetadataFile>,
     #[serde(default)]
     files: std::collections::BTreeMap<String, FileMappingFile>,
+    /// catalog設定(TASK-9設計3章・12章P5: [catalog.scan]によるscan対象の明示登録)
+    #[serde(default)]
+    catalog: CatalogFile,
+}
+
+/// `[catalog]`のschema(TASK-9 12章P5)。
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct CatalogFile {
+    #[serde(default)]
+    scan: Option<ScanFile>,
+}
+
+/// `[catalog.scan]`のschema(TASK-9設計3章D6承認。roots=絶対path列挙・
+/// extensions/exclude省略可)。
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ScanFile {
+    #[serde(default)]
+    roots: Vec<String>,
+    #[serde(default)]
+    extensions: Vec<String>,
+    #[serde(default)]
+    exclude: Vec<String>,
 }
 
 /// `[metadata]`のschema(TASK-18 2.2)。
@@ -577,6 +623,49 @@ pub fn load_pipeline(path: &Path, profile_name: &str) -> BackupResult<PipelineCo
         );
     }
 
+    // [catalog.scan](TASK-9設計3章D6承認・12章P5): scan対象の明示登録。section在り
+    // ならroots 1つ以上必須・絶対path。extensionsは".zip"形式(先頭ドット)。excludeは
+    // 空文字列拒否(部分一致のため空は全域除外になり事故る)
+    let scan = match prof.catalog.scan.as_ref() {
+        None => None,
+        Some(s) => {
+            if s.roots.is_empty() {
+                return Err(BackupError::Config(format!(
+                    "[profiles.{profile_name}.catalog.scan].rootsが空です(scan対象rootを1つ以上絶対pathで指定してください。section自体の削除でも構いません)"
+                )));
+            }
+            let mut roots = Vec::with_capacity(s.roots.len());
+            for root in &s.roots {
+                let p = std::path::PathBuf::from(root);
+                if !p.is_absolute() {
+                    return Err(BackupError::Config(format!(
+                        "[profiles.{profile_name}.catalog.scan].rootsは絶対pathで指定してください: {root:?}"
+                    )));
+                }
+                roots.push(p);
+            }
+            for ext in s.extensions.iter().chain(s.exclude.iter()) {
+                // extensionsは拡張子(".zip"形式)。excludeは相対path部分一致の単語
+                // (空文字列は全対象一致=全域除外になるため拒否)
+                if ext.is_empty() {
+                    return Err(BackupError::Config(format!(
+                        "[profiles.{profile_name}.catalog.scan].extensions/excludeに空文字列を指定できません"
+                    )));
+                }
+            }
+            if let Some(bad) = s.extensions.iter().find(|e| !e.starts_with('.')) {
+                return Err(BackupError::Config(format!(
+                    "[profiles.{profile_name}.catalog.scan].extensionsは拡張子形式(.zip等・先頭にドット)で指定してください: {bad:?}"
+                )));
+            }
+            Some(ScanConfig {
+                roots,
+                extensions: s.extensions.clone(),
+                exclude: s.exclude.clone(),
+            })
+        }
+    };
+
     // registry・cache dirはXDG規定解決(TASK-19: [output]廃止・env上書きのみ)
     let paths = resolve_app_paths();
     Ok(PipelineConfig {
@@ -594,6 +683,7 @@ pub fn load_pipeline(path: &Path, profile_name: &str) -> BackupResult<PipelineCo
         },
         metadata: MetadataConfig { latest_source_path },
         files,
+        catalog: CatalogConfig { scan },
     })
 }
 

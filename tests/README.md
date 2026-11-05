@@ -686,6 +686,23 @@ verify-conditions.py PASS。webauthn/server/frontend条件書の[meta]をverifie
   8fail(既存359緑+新規1緑[未認証401]+新規8赤=manage catalog scan未知subcommandのexit 64・
   POST /api/pending/scan未routingの404由来)・pnpm vitest 既存23緑+新規4赤+store file load
   error。catalog/server/frontend条件書の[meta]はテスト先行のためverified=falseへ(P5実装後に復帰)
+
+2026-11-05: TASK-9 Phase P5(pending catalog)実装。src/config.rsへ[profiles.<n>.catalog.scan]
+schema(roots絶対path必須・extensions先頭ドット必須・exclude相対path部分一致・deny_unknown_fields)。
+src/catalog.rsへreplace_pending_items(scan領域専用全置換・replace_scopeと独立)・
+record_push_intent(永続class)・scan_baseline(uuid毎最新versionのsize+mtime組で分類基準供給)。
+src/storage/manage.rsへCatalogSub::Scan(--sha256)+catalog_scan_once(CLI/serve共用・S3 backend構築
+なし)+classify_scan_target(4状態: path一致+size/mtime不一致=changed・basename一致のみ=unknown・
+一致=ok・記録なし=unbacked)+walk_scan_root(symlink不追従)。src/storage/backup.rsへpush_intents
+記録(dry_run/from_list時のみ)。src/server.rsへPOST /api/pending/scan(single-flight+spawn_blocking
+・size+mtimeのみ)+GET /api/pendingのstatus絞り込み(400 invalid_request)。frontend:
+api/pending client・stores/pending・PendingView+/pending route。configs/pipeline.example.tomlへ
+コメント形式例示。実装解釈: 分類基準はlocation紐づ最新versionのsource_size+保存source_mtimeの組
+(mtime供給無しは一致判定不能としてchanged/unknown=「確認不能を済と偽装しない」準拠)・
+push_intents payloadは{"targets":[{path,name,size,title}]}・POST /api/pending/scanはsync/diffと
+同一semaphore。cargo test 368pass/0fail・vitest 30pass/0fail・verify-conditions.py PASS。
+catalog/server/frontend/webauthn条件書の[meta]verified=true・source_hash更新(server/webauthnは
+src/server.rs・catalogはsrc/catalog.rs・frontendはfrontend/src tree hash)
 - 条件数305(excluded 64件)
 
 ## 構成

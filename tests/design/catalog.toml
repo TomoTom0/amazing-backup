@@ -42,11 +42,11 @@
 [meta]
 feature = "catalog"
 source_file = "src/catalog.rs"
-verified = false
+verified = true
 verified_at = "2026-11-05"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "1c4f552603ff471938ebe587b57b1bf2aab395ab"
+source_hash = "19da2ee30064220ee142af94b00314ab34576593"
 note = "TASK-9設計2章(DB層)・4章(replica同期)・5章(CLI照会cache)・12章P1+3章(D6承認)・12章P5(pending catalog)の条件化。DB真正はJSONL registryのまま・DBは導出index+S3索引replica(平文view・D11承認)。テストはbin subprocess+fake seam(StorageFixture)で観測しsrc/catalog.rs直接参照のunit testは実装時に追加。P5分6条件はテスト先行(2026-11-05)のためverified=falseへ(P5実装後に復帰)"
 
 [[condition]]
@@ -65,7 +65,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(schema要約・tab
 description = "DB新規作成はmigrationによりschemaを構築する: cache class 6 table(entities/versions/pins/locations/sync_state/pending_items)+永続class 2 table(credentials/push_intents)。versions/locationsはfile_write由来のsource_mtimeを保存する(3章の比較基準供給源)。migrationは冪等(既存DBへの再適用で内容を壊さない)。WAL modeで運用する (unit; integrationではDB file生成を観測)"
 given = "存在しないpathへの初回DB作成(manage catalog sync実行)と、同一DBへの再実行"
 expect_return_shape = "初回実行でSQLite database file(magic header \"SQLite format 3\")が作成され後続の照会が動作。再実行はexit 0で既存内容を壊さない(schema各tableの詳細構造・WAL modeの直接観測はsrc/catalog.rs実装時のunit test)"
-source_lines = "src/catalog.rs:1044; src/catalog.rs:1160; tests/catalog_storage.rs:85"
+source_lines = "src/catalog.rs:1159; src/catalog.rs:1275; tests/catalog_storage.rs:85"
 
 [[condition]]
 id = "catalog.sync-fetches-replica-on-change"
@@ -83,7 +83,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(freshness整合規
 description = "list files/versions/pins/runs・queryは別process起動時にHEAD 1回のvalidator一致確認を行い、検証済みfreshならS3 GETを行わずDBから回答する(cache hit。HEADとGETの毎回取得を廃止)。HEAD validator一致確認は毎process起動時に必須(検証なしfreshの持ち越し期限は設けない) (integration, fake seam)"
 given = "manage catalog sync済み(fresh)状態での list files と query の実行(いずれもsyncとは別process)"
 expect_return_shape = "索引objectへのHeadObject 1回のみでGetObjectは呼ばれず、表示結果はS3索引の内容と一致する"
-source_lines = "src/catalog.rs:1245; tests/catalog_storage.rs:163"
+source_lines = "src/catalog.rs:1360; tests/catalog_storage.rs:163"
 
 [[condition]]
 id = "catalog.cache-miss-refreshes-db"
@@ -110,7 +110,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(table契約: rebui
 description = "manage catalog rebuildはローカルregistry(JSONL)からcache class(entities/versions/pins/locations/sync_state/pending_items)のみを置換再構築し、永続class(credentials/push_intents)はdropしない。再実行で同一内容(冪等)。cacheは常にJSONL+S3から再構築可能 (integration, fake seam; 永続class保持の直接観測はsrc/catalog.rs実装時のunit test)"
 given = "sync済みDBへの manage catalog rebuild 2回実行と、rebuild後のlist files実行"
 expect_return_shape = "rebuildはexit 0でS3索引由来と同一の照会結果をDBから回答し、2回のrebuild後のlist結果は同一(冪等)"
-source_lines = "src/catalog.rs:1183; tests/catalog_storage.rs:327"
+source_lines = "src/catalog.rs:1298; tests/catalog_storage.rs:327"
 
 [[condition]]
 id = "catalog.scope-isolation-multi-profile"
@@ -155,7 +155,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(D6承認: (b')scan
 description = "scan対象はpipeline.toml [profiles.<n>.catalog.scan](roots=絶対path列挙・1つ以上必須)へ登録しserver.tomlには置かない(scanはCLI(manage catalog scan)・serve(POST /api/pending/scan)両方から使うbackup対象の定義でありserver.tomlはserver共通設定のみ=指摘#13の分離原則。backup対象はprofile毎に異なる)。auto_path_rootsはscan対象へ転用しない(auto_path_rootsは明示投入fileの分類・相対化用=指摘#6。[catalog.scan]未登録のroot配下は走査しない)。未登録(section無し)では0件走査でexit 0。scanはlocal FS走査+catalog DB比較のみでS3 APIを呼ばない(設計3章「scanはlocal FS走査のみでS3不要」) (integration, fake seam)"
 given = "push済みfixture(auto_path_roots=[data_root]・[catalog.scan]未登録)での manage catalog scan と、roots=[data_root]追記後(roots外のelsewhere配下にもfileを置いた構成)の再実行"
 expect_return_shape = "未登録時はexit 0で集計0件(scan: 0件)。roots登録後はroots配下のfileのみ走査されroots外(elsewhere)のfileは計上されない。いずれのscan実行もcalls.logへS3 API呼び出しを追加しない"
-source_lines = "tests/catalog_storage.rs:600"
+source_lines = "tests/catalog_storage.rs:599"
 
 [[condition]]
 id = "catalog.scan-file-selection"
@@ -164,7 +164,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章((b')対象種別(f
 description = "scanの対象選択: extensions指定時は拡張子一致fileのみ(省略・空は全regular fileが対象)。excludeは走査対象の相対pathへの部分一致で除外(一致file・一致dir配下とも対象外)。symlinkは既定で辿らない(directory symlinkをtraverseせずfile symlinkも対象にしない=範囲拡大事故防止=指摘#6) (integration, fake seam)"
 given = "scan root配下に x.zip(対象拡張子)・y.txt(対象外拡張子)・skip/z.zip(exclude=\"skip\"一致)・elsehere配下へのdirectory symlink(link先に対象拡張子file)を置いたextensions=[\".zip\"]・exclude=[\"skip\"]構成での manage catalog scan"
 expect_return_shape = "走査結果はx.zipの1件のみ(y.txt=拡張子対象外・skip/z.zip=除外・symlink先=不追従で計上されない)"
-source_lines = "tests/catalog_storage.rs:641"
+source_lines = "tests/catalog_storage.rs:640"
 
 [[condition]]
 id = "catalog.scan-classification-statuses"
@@ -173,7 +173,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(D6承認: 分類�
 description = "scanは対象fileをcatalog DB(実効scope)のlocations/versions記録とpath+basename+size+mtimeで比較し4状態へ分類する: (1)path一致の記録がありsize/mtime不一致=changed (2)path一致が無くbasename一致の記録のみでsize/mtime不一致=unknown(移動+変更か別内容かをsize+mtimeでは判定不能。changed/unbackedへ偽装しない) (3)size+mtime一致(path一致・basename一致のいずれか)=ok (4)path・basenameとも一致する記録なし=unbacked。mtimeはfile_write由来のsource_mtime保存値(mtime_jst_preciseと同一形式)との比較 (integration, fake seam)"
 given = "a.zip(backup済み・不変)・b.zip(backup済み・内容変更)・c.zip(未backup)・d.zip(backup済みをmoved/配下へ移動=basename一致+size/mtime一致)・e.zip(backup済み・不変)+other/e.zip(同名・異内容=basename一致+size/mtime不一致)をpush+rebuild後に manage catalog scan"
 expect_return_shape = "集計はunbacked=1(c.zip)・changed=1(b.zip)・ok=3(a.zip・moved/d.zip・e.zip)・unknown=1(other/e.zip)(実装前はmanage catalog scan未知subcommandのexit 64でfailを許容)"
-source_lines = "tests/catalog_storage.rs:668"
+source_lines = "tests/catalog_storage.rs:666"
 
 [[condition]]
 id = "catalog.scan-sha-merge-option"
@@ -182,7 +182,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(sha256再計算は
 description = "sha256再計算は明示option(manage catalog scan --sha256)指定時のみ行う: 対象fileのsha256を計算しregistry由来の合流正本sha_uuid_lookup(file_uploadsの同sha・bucket一致記録)で問い合わせ、合流先が存在すれば当該内容はbackup済みとしてokへ確定する(未指定時はsize+mtime比較のみ=unknown等の判定をshaで確定しない) (integration, fake seam)"
 given = "f.zipをpush済みの状態でcopy/f.zip(同一内容=sha一致・mtimeのみ相違=未指定scanではbasename一致+mtime不一致のunknown)を作り、manage catalog scan(既定)と manage catalog scan --sha256 を実行"
 expect_return_shape = "既定scanはcopy/f.zipをunknownに分類する。--sha256指定時はcopy/f.zipがokへ確定する(unknown=0・sha一致のbackup済み内容との合流判定。sha256計算は--sha256指定時のみ行う)"
-source_lines = "tests/catalog_storage.rs:724"
+source_lines = "tests/catalog_storage.rs:722"
 
 [[condition]]
 id = "catalog.scan-replaces-pending-items"
@@ -191,7 +191,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(scan結果(pending
 description = "scan結果は当該scopeのpending_itemsを全置換する(前回scan結果を残さない=再実行で二重計上されず対象外fileの行が消える・冪等)。pending_itemsの置換を行うのは再scanのみでありmanage catalog rebuild/syncのcache置換(replace_scope)はpending_itemsに触れない(索引由来でないため=P1実装の契約と同一) (integration, fake seam)"
 given = "push+scan済み(a.zip=ok・c.zip=unbacked)状態でのscan再実行・c.zip削除後の再scan・その後の manage catalog rebuild(catalog.dbのpending_items行を直接読取)"
 expect_return_shape = "scan再実行は行数不変(冪等)。file削除後の再scanは削除fileの行が消える。rebuild後もpending_items行は保持される(rebuildでは置換されない)"
-source_lines = "tests/catalog_storage.rs:771"
+source_lines = "tests/catalog_storage.rs:769"
 
 [[condition]]
 id = "catalog.push-intents-recorded"
@@ -200,7 +200,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(D6承認: (a)push 
 description = "backup pushは--dry-run指定時kind=dry_run・--from-list指定(非dry-run)時kind=from_listで実行記録をpush_intents(永続class)へ記録する(payload_jsonに投入予定対象のpath情報を含む)。通常push(positionalのみ・非dry-run・from-list無し)は記録しない。push_intentsはmanage catalog rebuildでも消えない(永続class=cache class置換の対象外) (integration, fake seam)"
 given = "manage catalog sync済みDBへの from-list実push・同一fileのpositional再push(skip)・--dry-run push の順の実行後と manage catalog rebuild 後のcatalog.db push_intents表直接読取"
 expect_return_shape = "from-list実pushはkind=from_listの行1件(payloadに投入対象file名を含む)・positional再pushは行を追加しない・dry-runはkind=dry_runの行1件を追加。rebuild後も行数・内容は不変(実装前は記録が無く0行でfailを許容)"
-source_lines = "tests/catalog_storage.rs:818"
+source_lines = "tests/catalog_storage.rs:820"
 
 [[excluded]]
 item = "credentials tableのpasskey登録・bootstrap one-time token(128bit・in-memory・期限10分・原子的消費・再起動失効)"

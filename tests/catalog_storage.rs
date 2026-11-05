@@ -573,11 +573,10 @@ fn push_intents_rows(fx: &StorageFixture) -> Vec<(String, String)> {
         .prepare("SELECT kind, payload_json FROM push_intents ORDER BY id")
         .expect("push_intents準備(migration済みschema)");
     let rows = stmt
-        .query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
         .expect("push_intents読込");
-    rows.collect::<Result<Vec<_>, _>>().expect("push_intents行読取")
+    rows.collect::<Result<Vec<_>, _>>()
+        .expect("push_intents行読取")
 }
 
 /// catalog.dbのpending_items件数(status絞り込み任意。scan全置換の直接観測)。
@@ -653,8 +652,7 @@ fn catalog_scan_selects_files_by_extension_exclude_and_symlinks() {
     make_archive(&skip_dir.join("z.zip"), 256);
     // directory symlink(既定で辿らない): link先に対象拡張子fileを置く
     make_archive(&fx.elsewhere.join("linked.zip"), 256);
-    std::os::unix::fs::symlink(&fx.elsewhere, fx.data_root.join("link"))
-        .expect("symlink作成");
+    std::os::unix::fs::symlink(&fx.elsewhere, fx.data_root.join("link")).expect("symlink作成");
 
     add_scan_section(&fx, &[&fx.data_root], &[".zip"], &["skip"]);
     let (code, stdout, stderr) = fx.manage("catalog", &["scan"]);
@@ -792,7 +790,11 @@ fn catalog_scan_replaces_pending_items_and_rebuild_keeps_them() {
         1,
         "c.zip=unbacked"
     );
-    assert_eq!(pending_items_count(&fx, None), 2, "a.zip(ok)+c.zip(unbacked)");
+    assert_eq!(
+        pending_items_count(&fx, None),
+        2,
+        "a.zip(ok)+c.zip(unbacked)"
+    );
 
     // 再scanは全置換(前回結果を残さない=二重計上されない・冪等)
     let (code, stdout, stderr) = fx.manage("catalog", &["scan"]);

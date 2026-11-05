@@ -28,5 +28,8 @@ onMounted(() => {
       entity一覧等の照会画面は後続phaseで提供されます。passkey認証後も当面はCLI
       (list・query)をご利用ください(未認証の場合はlogin画面へ誘導されます)。
     </p>
+    <p>
+      <router-link to="/pending">アップロード前カタログ(pending)</router-link>
+    </p>
   </section>
 </template>

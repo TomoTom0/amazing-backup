@@ -838,6 +838,110 @@ impl CatalogDb {
         Ok(items)
     }
 
+    /// scan結果(pending_items)の当該scope全置換(TASK-9設計3章・12章P5)。
+    /// 置換を行うのは再scanのみ(replace_scopeのcache置換とは独立=索引由来でない
+    /// ため置換対象外)。単一transactionでdelete+insertし冪等(前回scan結果を残さない)。
+    pub fn replace_pending_items(
+        &mut self,
+        bucket: &str,
+        prefix: &str,
+        items: &[PendingItem],
+    ) -> BackupResult<()> {
+        let scope = scope_key(bucket, prefix);
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| BackupError::Internal(format!("transaction開始に失敗: {e}")))?;
+        tx.execute("DELETE FROM pending_items WHERE scope = ?1", [&scope])
+            .map_err(|e| BackupError::Internal(format!("pending_items置換のdeleteに失敗: {e}")))?;
+        for i in items {
+            tx.execute(
+                "INSERT INTO pending_items (scope, source_root, path, size, mtime, status,\
+                 last_scan_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    scope,
+                    i.source_root,
+                    i.path,
+                    i.size,
+                    i.mtime,
+                    i.status,
+                    i.last_scan_at
+                ],
+            )
+            .map_err(|e| BackupError::Internal(format!("pending_items挿入に失敗: {e}")))?;
+        }
+        tx.commit()
+            .map_err(|e| BackupError::Internal(format!("pending_items置換のcommitに失敗: {e}")))?;
+        Ok(())
+    }
+
+    /// push dry-run/from-list実行記録の追記(TASK-9設計3章(a)・2章push_intents=
+    /// 永続class。rebuildの置換対象外)。通常push(positionalのみ)は呼ばない。
+    pub fn record_push_intent(&self, kind: &str, payload_json: &str) -> BackupResult<()> {
+        self.conn
+            .execute(
+                "INSERT INTO push_intents (recorded_at, kind, payload_json) VALUES (?1, ?2, ?3)",
+                rusqlite::params![now_jst(), kind, payload_json],
+            )
+            .map_err(|e| BackupError::Internal(format!("push_intents記録に失敗: {e}")))?;
+        Ok(())
+    }
+
+    /// scan分類の比較基準(TASK-9設計3章D6承認・12章P5): 当該scopeのlocationsと
+    /// そのuuidの最新version(版source_size)を組で返す。mtimeはfile_write由来の
+    /// source_mtime保存値(S3索引replica取得のみの環境では供給されない=空文字。
+    /// その場合は一致判定不能としてchanged/unknownへ分類される=「確認不能」を
+    /// 「済」と偽装しない)。
+    pub fn scan_baseline(&self, bucket: &str, prefix: &str) -> BackupResult<Vec<ScanBaseline>> {
+        let scope = scope_key(bucket, prefix);
+        // uuid毎の最新版(version_ts最大)のsource_size(一致判定のsize基準)
+        let mut latest_size: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT uuid, source_size FROM versions WHERE scope = ?1\
+                     ORDER BY uuid, version_ts",
+                )
+                .map_err(|e| BackupError::Internal(format!("versions準備に失敗: {e}")))?;
+            let rows = stmt
+                .query_map([&scope], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })
+                .map_err(|e| BackupError::Internal(format!("versions読込に失敗: {e}")))?;
+            for row in rows {
+                let (uuid, size) =
+                    row.map_err(|e| BackupError::Internal(format!("versions行読取に失敗: {e}")))?;
+                latest_size.insert(uuid, size);
+            }
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT uuid, source_path, source_mtime FROM locations WHERE scope = ?1")
+            .map_err(|e| BackupError::Internal(format!("locations準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map([&scope], |r| {
+                Ok(ScanBaseline {
+                    uuid: r.get(0)?,
+                    source_path: r.get(1)?,
+                    source_mtime: r.get(2)?,
+                    latest_size: latest_size
+                        .get(&r.get::<_, String>(0)?)
+                        .copied()
+                        .unwrap_or(-1),
+                })
+            })
+            .map_err(|e| BackupError::Internal(format!("locations読込に失敗: {e}")))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(
+                row.map_err(|e| BackupError::Internal(format!("locations行読取に失敗: {e}")))?,
+            );
+        }
+        Ok(out)
+    }
+
     /// diff実行結果の保存(設計6章: POST /api/diffの結果をDB保存。scope単位に
     /// 最新1件のみ保持=再実行で置換)。
     pub fn save_diff_result(
@@ -884,7 +988,7 @@ impl CatalogDb {
     }
 }
 
-/// pending_items 1行分(設計2章schema・§3のscan結果。P5で書込が実装される)。
+/// pending_items 1行分(設計2章schema・§3のscan結果)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingItem {
     pub source_root: String,
@@ -893,6 +997,17 @@ pub struct PendingItem {
     pub mtime: String,
     pub status: String,
     pub last_scan_at: String,
+}
+
+/// scan分類の比較基準1行分(locations + 当該uuidの最新version source_size)。
+#[derive(Debug, Clone)]
+pub struct ScanBaseline {
+    pub uuid: String,
+    pub source_path: String,
+    /// file_write由来のsource_mtime保存値(replica取得のみの環境では空=判定不能)
+    pub source_mtime: String,
+    /// 最新versionのsource_size(versionsが無い場合は-1=非一致扱い)
+    pub latest_size: i64,
 }
 
 /// 空の索引header(sync_state不在時のload_entries用)。

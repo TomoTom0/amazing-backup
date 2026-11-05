@@ -791,6 +791,7 @@ fn build_router(state: AppState) -> axum::Router {
         .route("/api/pins", axum::routing::get(get_pins))
         .route("/api/locations", axum::routing::get(get_locations))
         .route("/api/pending", axum::routing::get(get_pending))
+        .route("/api/pending/scan", axum::routing::post(post_pending_scan))
         .route(
             "/api/sync",
             axum::routing::get(get_sync_state).post(post_sync_refresh),
@@ -1025,14 +1026,66 @@ async fn get_locations() -> Result<axum::Json<serde_json::Value>, ApiError> {
 }
 
 /// GET /api/pending(pending_itemsのschema(source_root/path/size/mtime/status/
-/// last_scan_at)で{"pending":[...]}形式。P3時点はscan(P5)が未実装のため空配列)。
-async fn get_pending() -> Result<axum::Json<serde_json::Value>, ApiError> {
-    let value = run_blocking(|| {
+/// last_scan_at)で{"pending":[...]}形式。?status=<unbacked|changed|ok|unknown>で
+/// 単一statusへ絞り込み(省略時全件)。不正値は400 invalid_request)。
+async fn get_pending(uri: axum::http::Uri) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let params = parse_query_params(uri.query());
+    let status = match params.get("status") {
+        None => None,
+        Some(v) => match v.as_str() {
+            "unbacked" | "changed" | "ok" | "unknown" => Some(v.clone()),
+            _ => {
+                return Err(invalid_request(
+                    "statusは unbacked/changed/ok/unknown のいずれかで指定してください",
+                ));
+            }
+        },
+    };
+    let value = run_blocking(move || {
         let (bucket, prefix) = resolve_scope(None)?;
         let db = crate::catalog::CatalogDb::open()?;
         let items = db.pending_items(&bucket, &prefix)?;
+        let items: Vec<_> = match &status {
+            Some(want) => items.into_iter().filter(|i| &i.status == want).collect(),
+            None => items,
+        };
         Ok(serde_json::json!({
             "pending": items.iter().map(|i| serde_json::json!({
+                "source_root": i.source_root,
+                "path": i.path,
+                "size": i.size,
+                "mtime": i.mtime,
+                "status": i.status,
+                "last_scan_at": i.last_scan_at,
+            })).collect::<Vec<_>>(),
+        }))
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
+/// POST /api/pending/scan(scan実行=manage catalog scanと同一のP5同期層。
+/// request body無し・sha256再計算optionはCLIのみのためsize+mtime比較固定。
+/// 応答はscan実行後の最新一覧をGET /api/pendingと同一schema({"pending":[...]})で
+/// 返す。scan対象未登録でも200で0件。DB書込を伴うためsyncと同一のsingle-flightで
+/// 直列化しspawn_blocking経由で実行=設計1章実行境界)。
+async fn post_pending_scan(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let _permit = state
+        .sync_permits
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|e| {
+            eprintln!("serve: scan semaphoreのacquireに失敗(logのみ): {e}");
+            internal("内部エラーが発生しました")
+        })?;
+    let ctx = state.sync_ctx.clone();
+    let value = run_blocking(move || {
+        let outcome = crate::storage::manage::catalog_scan_once(&ctx, false)?;
+        Ok(serde_json::json!({
+            "pending": outcome.items.iter().map(|i| serde_json::json!({
                 "source_root": i.source_root,
                 "path": i.path,
                 "size": i.size,
@@ -2160,11 +2213,7 @@ mod tests {
     fn api_env_with_scan(tag: &str, files: &[&str]) -> ApiEnv {
         use crate::testutil::write_file;
         let env = api_env(tag);
-        let scan_root = env
-            .home
-            .parent()
-            .expect("tmp dir")
-            .join("scanroot");
+        let scan_root = env.home.parent().expect("tmp dir").join("scanroot");
         std::fs::create_dir_all(&scan_root).expect("scan root dir");
         for name in files {
             write_file(&scan_root.join(name), b"scan-target-bytes");
@@ -2192,7 +2241,14 @@ mod tests {
             .expect("pending配列(GET /api/pendingと同一schema)");
         assert_eq!(pending.len(), 2, "scan対象2file: {body}");
         let item = &pending[0];
-        for key in ["source_root", "path", "size", "mtime", "status", "last_scan_at"] {
+        for key in [
+            "source_root",
+            "path",
+            "size",
+            "mtime",
+            "status",
+            "last_scan_at",
+        ] {
             assert!(
                 item.get(key).is_some(),
                 "itemに{key}を含む(P3条件と同一schema): {body}"

@@ -31,11 +31,11 @@
 [meta]
 feature = "frontend"
 source_file = "frontend/src/"
-verified = false
+verified = true
 verified_at = "2026-11-05"
 verified_by = "claude"
 test_command = "pnpm --dir frontend vitest run"
-source_hash = "257200ae5305e17a928ecbf1c7b43d927793b249"
+source_hash = "176a32475c833bb061ce4890a9bfa375665272d8"
 note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3+P4+P5時点のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending)のvitestで担保。P3分5条件・P4分4条件は2026-11-05実装後に全件passで検証記録を復帰済み。P5テスト先行(2026-11-05)のためverified=falseへ(P5実装後に復帰)。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
 
 [[condition]]

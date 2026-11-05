@@ -73,6 +73,16 @@ pub enum CatalogSub {
         #[command(flatten)]
         ctx: CtxArgs,
     },
+    /// scan対象(pipeline.toml [catalog.scan])をlocal FS走査し4状態へ分類・
+    /// pending_itemsを全置換(TASK-9 D6承認・12章P5)
+    Scan {
+        #[command(flatten)]
+        ctx: CtxArgs,
+        /// sha256を再計算しsha_uuid_lookup合流でunknownをokへ確定する(既定は
+        /// size+mtime比較のみ)
+        #[arg(long)]
+        sha256: bool,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -166,6 +176,7 @@ pub fn cmd_manage(args: &ManageArgs) -> i32 {
         ManageSub::Catalog { sub } => match sub {
             CatalogSub::Sync { ctx } => cmd_manage_catalog_sync(ctx),
             CatalogSub::Rebuild { ctx } => cmd_manage_catalog_rebuild(ctx),
+            CatalogSub::Scan { ctx, sha256 } => cmd_manage_catalog_scan(ctx, *sha256),
         },
     }
 }
@@ -1166,6 +1177,244 @@ fn cmd_manage_catalog_rebuild(ctx: &CtxArgs) -> i32 {
             e.exit_code()
         }
     }
+}
+
+/// manage catalog scan(TASK-9設計3章D6承認・12章P5): pipeline.toml
+/// [profiles.<n>.catalog.scan]の登録対象をlocal FS走査+catalog DB比較のみで4状態
+/// (unbacked/changed/ok/unknown)へ分類し、当該scopeのpending_itemsを全置換する。
+/// --sha256指定時のみsha256再計算+sha_uuid_lookup合流でunknownをokへ確定する。
+/// 集計表示はdry-runのplan行と同一形式。
+fn cmd_manage_catalog_scan(ctx: &CtxArgs, sha256: bool) -> i32 {
+    match catalog_scan_once(ctx, sha256) {
+        Ok(outcome) => {
+            println!(
+                "scan: {}件 unbacked={} changed={} ok={} unknown={}",
+                outcome.items.len(),
+                outcome.unbacked,
+                outcome.changed,
+                outcome.ok,
+                outcome.unknown
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// scanの分類status(TASK-9設計3章・catalog.toml P5条件の4状態)。
+pub(crate) const SCAN_UNBACKED: &str = "unbacked";
+pub(crate) const SCAN_CHANGED: &str = "changed";
+pub(crate) const SCAN_OK: &str = "ok";
+pub(crate) const SCAN_UNKNOWN: &str = "unknown";
+
+/// scan実行結果(items=置換後のpending_items。countsは集計表示用)。
+pub(crate) struct ScanOutcome {
+    pub items: Vec<crate::catalog::PendingItem>,
+    pub unbacked: usize,
+    pub changed: usize,
+    pub ok: usize,
+    pub unknown: usize,
+}
+
+/// catalog scanの処理本体(印刷しない)。CLI(manage catalog scan)とserve
+/// (POST /api/pending/scan)が呼ぶP5同期層。scanはlocal FS走査+catalog DB比較のみで
+/// S3 APIを呼ばない(設計3章)。sha256=true時のみsha計算+registry由来の
+/// sha_uuid_lookup合流を行う。
+pub(crate) fn catalog_scan_once(ctx: &CtxArgs, sha256: bool) -> BackupResult<ScanOutcome> {
+    // S3 backendを構築しない(scanはS3不要・設計3章。aws/pipeline設定のみ読む)
+    let aws = super::load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
+    let cfg =
+        crate::config::load_pipeline(&super::pipeline_config_path(&ctx.config), &aws.profile)?;
+    let mut db = crate::catalog::CatalogDb::open()?;
+    let baseline = db.scan_baseline(&aws.bucket, &aws.prefix)?;
+
+    // (b') scan対象の明示登録: section無しは0件走査で正常終了(全置換=前回結果を残さない)
+    let scan = cfg
+        .catalog
+        .scan
+        .clone()
+        .unwrap_or(crate::config::ScanConfig {
+            roots: Vec::new(),
+            extensions: Vec::new(),
+            exclude: Vec::new(),
+        });
+
+    // local FS走査(symlink不追従・extensions拡張子比較・exclude相対path部分一致)
+    let mut found: Vec<(std::path::PathBuf, std::path::PathBuf, u64, String)> = Vec::new();
+    for root in &scan.roots {
+        walk_scan_root(root, root, &scan.extensions, &scan.exclude, &mut found)?;
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    // --sha256合流判定の準備(指定時のみregistryを読む)
+    let mut reduced: Option<registry::Reduced> = None;
+    let canonical_bucket = if sha256 {
+        Some(crate::config::canonical_bucket(&super::aws_config_path(
+            &ctx.aws_config,
+        ))?)
+    } else {
+        None
+    };
+
+    let last_scan_at = now_jst();
+    let mut items: Vec<crate::catalog::PendingItem> = Vec::with_capacity(found.len());
+    let (mut n_unbacked, mut n_changed, mut n_ok, mut n_unknown) = (0usize, 0usize, 0usize, 0usize);
+    for (root, abs, size, mtime) in &found {
+        let abs_str = abs.to_string_lossy();
+        let mut status = classify_scan_target(&baseline, abs, *size, mtime);
+        if status == SCAN_UNKNOWN && sha256 {
+            // 明示option指定時のみsha256を計算し合流正本sha_uuid_lookupへ問い合わせ
+            let reduced = match &mut reduced {
+                Some(r) => r,
+                None => {
+                    let records = registry::load_registry(&cfg.registry_path)?;
+                    reduced.insert(registry::reduce_records(&records))
+                }
+            };
+            let canonical = canonical_bucket.as_deref().unwrap_or(aws.bucket.as_str());
+            let sha = super::sha256_hex_streaming(abs)?;
+            if registry::sha_uuid_lookup(reduced, &sha, &aws.bucket, canonical).is_some() {
+                status = SCAN_OK.to_string();
+            }
+        }
+        match status.as_str() {
+            SCAN_UNBACKED => n_unbacked += 1,
+            SCAN_CHANGED => n_changed += 1,
+            SCAN_OK => n_ok += 1,
+            _ => n_unknown += 1,
+        }
+        items.push(crate::catalog::PendingItem {
+            source_root: root.to_string_lossy().into_owned(),
+            path: abs_str.into_owned(),
+            size: *size as i64,
+            mtime: mtime.clone(),
+            status,
+            last_scan_at: last_scan_at.clone(),
+        });
+    }
+    db.replace_pending_items(&aws.bucket, &aws.prefix, &items)?;
+    Ok(ScanOutcome {
+        items,
+        unbacked: n_unbacked,
+        changed: n_changed,
+        ok: n_ok,
+        unknown: n_unknown,
+    })
+}
+
+/// 分類判定(TASK-9設計3章D6承認・catalog.toml P5条件の算法):
+/// (1)path一致の記録がありsize/mtime不一致=changed (2)path一致が無くbasename一致の
+/// 記録のみでsize/mtime不一致=unknown(判定不能をchanged/unbackedへ偽装しない)
+/// (3)size+mtime一致(path一致・basename一致のいずれか)=ok (4)path・basenameとも
+/// 一致する記録なし=unbacked。mtimeはfile_write由来のsource_mtime保存値
+/// (mtime_jst_preciseと同一形式)との文字列比較(保存値が空=供給源なしは不一致扱い)。
+fn classify_scan_target(
+    baseline: &[crate::catalog::ScanBaseline],
+    abs: &std::path::Path,
+    size: u64,
+    mtime: &str,
+) -> String {
+    let size_matches =
+        |b: &crate::catalog::ScanBaseline| b.latest_size == size as i64 && b.latest_size >= 0;
+    let mtime_matches =
+        |b: &crate::catalog::ScanBaseline| !b.source_mtime.is_empty() && b.source_mtime == mtime;
+    let abs_str = abs.to_string_lossy();
+    if let Some(b) = baseline.iter().find(|b| b.source_path == abs_str.as_ref()) {
+        // path一致の記録あり: 一致=ok・不一致=changed
+        return if size_matches(b) && mtime_matches(b) {
+            SCAN_OK.to_string()
+        } else {
+            SCAN_CHANGED.to_string()
+        };
+    }
+    let basename = abs.file_name().map(std::ffi::OsStr::to_string_lossy);
+    let base_matches: Vec<&crate::catalog::ScanBaseline> = baseline
+        .iter()
+        .filter(|b| {
+            basename.as_ref().is_some_and(|name| {
+                std::path::Path::new(&b.source_path)
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy() == *name)
+            })
+        })
+        .collect();
+    if base_matches.is_empty() {
+        return SCAN_UNBACKED.to_string();
+    }
+    if base_matches
+        .iter()
+        .any(|b| size_matches(b) && mtime_matches(b))
+    {
+        return SCAN_OK.to_string();
+    }
+    SCAN_UNKNOWN.to_string()
+}
+
+/// scan root配下の再帰走査(TASK-9設計3章(b')): symlinkはdirectory traverse・
+/// file対象化とも行わない(範囲拡大事故防止=指摘#6)。extensionsは拡張子一致のみ
+/// (省略・空は全regular file)。excludeは走査root基準の相対path部分一致で除外
+/// (一致dir配下も対象外)。rel計算は常にroot基準(root引数)で行う(再帰階層の
+/// dir基準にすると深い階層の除外語が一致しなくなるため)。
+fn walk_scan_root(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    extensions: &[String],
+    exclude: &[String],
+    out: &mut Vec<(std::path::PathBuf, std::path::PathBuf, u64, String)>,
+) -> BackupResult<()> {
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        BackupError::Process(format!("scan走査の読込に失敗({}): {e}", dir.display()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            BackupError::Process(format!("scan走査の読込に失敗({}): {e}", dir.display()))
+        })?;
+        let file_type = entry.file_type().map_err(|e| {
+            BackupError::Process(format!(
+                "scan走査のfile種別取得に失敗({}): {e}",
+                entry.path().display()
+            ))
+        })?;
+        // symlinkは既定で辿らない(directoryもfileも対象外)
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // exclude: 走査対象の相対path部分一致(dir一致=配下ごと対象外)
+        if exclude.iter().any(|e| rel.contains(e.as_str())) {
+            continue;
+        }
+        if file_type.is_dir() {
+            walk_scan_root(root, &path, extensions, exclude, out)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        // extensions(省略・空は全regular file対象)
+        if !extensions.is_empty() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !extensions.iter().any(|e| name.ends_with(e.as_str())) {
+                continue;
+            }
+        }
+        let meta = std::fs::metadata(&path).map_err(|e| {
+            BackupError::Process(format!(
+                "scan対象のmetadata取得に失敗({}): {e}",
+                path.display()
+            ))
+        })?;
+        let mtime = super::mtime_jst_precise(&path)?;
+        out.push((root.to_path_buf(), path, meta.len(), mtime));
+    }
+    Ok(())
 }
 
 /// manage reset(TASK-18 8章・8.1・TASK-25 2章): dev bucket初期化の恒久コマンド

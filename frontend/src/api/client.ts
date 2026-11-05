@@ -78,6 +78,75 @@ export function fetchAuthStatus(): Promise<ApiResult<AuthStatusResponse>> {
   return apiGet('/api/auth/status', isAuthStatusResponse)
 }
 
+// --- pending catalog(TASK-9設計6章・7章・12章P5。PendingViewから使用) ---
+
+/** GET /api/pending のitem schema(source_root/path/size/mtime/status/last_scan_at) */
+export type PendingItem = {
+  source_root: string
+  path: string
+  size: number
+  mtime: string
+  status: string
+  last_scan_at: string
+}
+
+/** GET /api/pending の応答形式({"pending":[...]}・statusは4状態) */
+export type PendingResponse = { pending: PendingItem[] }
+
+function isPendingItem(v: unknown): v is PendingItem {
+  if (!isRecord(v)) return false
+  const fields = ['source_root', 'path', 'mtime', 'status', 'last_scan_at']
+  return fields.every((f) => typeof v[f] === 'string') && typeof v['size'] === 'number'
+}
+
+/** GET /api/pending応答の型ガード(pending配列+item schema一致のみtrue) */
+export function isPendingResponse(v: unknown): v is PendingResponse {
+  if (!isRecord(v) || !Array.isArray(v['pending'])) return false
+  return v['pending'].every((item) => isPendingItem(item))
+}
+
+/** アップロード前カタログ一覧の取得(保護API。失敗時はerror扱い) */
+export function fetchPending(): Promise<ApiResult<PendingResponse>> {
+  return apiGet('/api/pending', isPendingResponse)
+}
+
+/** scan実行(POST /api/pending/scan・request body無し。応答はscan実行後の最新一覧=
+ *  GET /api/pendingと同一形式) */
+export async function postPendingScan(): Promise<ApiResult<PendingResponse>> {
+  let resp: Response
+  try {
+    resp = await fetch('/api/pending/scan', {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+    })
+  } catch {
+    return {
+      ok: false,
+      error: { code: 'network', message: 'serverに接続できません' },
+      httpStatus: 0,
+    }
+  }
+  const body: unknown = await resp.json().catch(() => null)
+  if (resp.ok) {
+    if (isPendingResponse(body)) {
+      return { ok: true, data: body }
+    }
+    return {
+      ok: false,
+      error: { code: 'internal', message: '応答の形式が不正です' },
+      httpStatus: resp.status,
+    }
+  }
+  if (isApiErrorResponse(body)) {
+    return { ok: false, error: body.error, httpStatus: resp.status }
+  }
+  return {
+    ok: false,
+    error: { code: 'unexpected_status', message: `HTTP ${resp.status}` },
+    httpStatus: resp.status,
+  }
+}
+
 /** POST /api/auth/logout(session破棄。未認証401でもUI状態は未認証へ揃える) */
 export async function postLogout(): Promise<ApiResult<Record<string, unknown>>> {
   let resp: Response
