@@ -250,8 +250,11 @@ fn index_get_transfer_error_is_exit_5() {
     // 索引objectは存在する状態で索引GETへ失敗注入。
     // TASK-9 D7: list filesは検証済みfresh時(cache hit)は索引GETを行わないため、
     // GET経路の転送エラー観測には--refresh(強制S3再取得)を指定する
-    let (code, _, stderr) =
-        fx.list_env("files", &["--refresh"], &[("FAKE_S3_FAIL_CP_FOR", index_key.as_str())]);
+    let (code, _, stderr) = fx.list_env(
+        "files",
+        &["--refresh"],
+        &[("FAKE_S3_FAIL_CP_FOR", index_key.as_str())],
+    );
     assert_eq!(
         code, 5,
         "索引GET転送エラーは転送エラー5(list files --refresh): {stderr}"

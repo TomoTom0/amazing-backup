@@ -65,17 +65,22 @@ describe('sync状態の型ガード', () => {
   })
 
   it('P2〜P3のfail-closed(503 configuration)はerror扱いになりdataを返さない', async () => {
+    // mockImplementation: Responseのbodyは1回しか読めないため、client直呼び出しと
+    // store経由の2回のfetchそれぞれに新しいResponseを渡す(mockResolvedValueの
+    // 同一object再利用は2回目がbody消費済みで必ず失敗する)
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            error: {
-              code: 'configuration',
-              message: '保護APIは認証機構の構成が完了するまで閉鎖されています',
-            },
-          }),
-          { status: 503, headers: { 'Content-Type': 'application/json' } },
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: {
+                code: 'configuration',
+                message: '保護APIは認証機構の構成が完了するまで閉鎖されています',
+              },
+            }),
+            { status: 503, headers: { 'Content-Type': 'application/json' } },
+          ),
         ),
       ),
     )

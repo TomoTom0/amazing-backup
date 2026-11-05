@@ -210,7 +210,9 @@ pub(crate) fn read_index_cached(
     key_path: &Path,
     refresh: bool,
 ) -> BackupResult<(crate::index::IndexHeader, Vec<crate::index::IndexFileEntry>)> {
-    use crate::catalog::{CatalogDb, ReflectOrigin, Validator, STATUS_ERROR, STATUS_FRESH, STATUS_STALE};
+    use crate::catalog::{
+        CatalogDb, ReflectOrigin, STATUS_ERROR, STATUS_FRESH, STATUS_STALE, Validator,
+    };
     let index_key = crate::layout::index_object_key(&session.aws.prefix);
     let head = session.backend.head(&session.aws.bucket, &index_key)?;
     let Some(head) = head else {
@@ -238,7 +240,11 @@ pub(crate) fn read_index_cached(
     match fetch {
         Ok((header, entries, confirmed, fetched)) => {
             if let Ok(db) = db.as_mut() {
-                let status = if confirmed { STATUS_FRESH } else { STATUS_STALE };
+                let status = if confirmed {
+                    STATUS_FRESH
+                } else {
+                    STATUS_STALE
+                };
                 let result = db.replace_scope(
                     &session.aws.bucket,
                     &session.aws.prefix,
@@ -252,9 +258,7 @@ pub(crate) fn read_index_cached(
                 if let Err(e) = result {
                     // DB反映失敗は照会自体の失敗にしない(取得済み内容で回答する)。
                     // 旧fresh状態を残さないためstatus失効を試みる
-                    eprintln!(
-                        "WARNING: catalog DBへの反映に失敗しました(cacheは無効化): {e}"
-                    );
+                    eprintln!("WARNING: catalog DBへの反映に失敗しました(cacheは無効化): {e}");
                     let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_STALE);
                 }
             }
@@ -287,8 +291,12 @@ pub(crate) fn fetch_index_confirmed(
     use crate::catalog::Validator;
     let index_key = crate::layout::index_object_key(&session.aws.prefix);
     let head_validator = |head: &crate::s3::HeadInfo| Validator::from_head(head);
-    let (header, entries) =
-        crate::index::fetch_index(session.backend.as_ref(), &session.aws.bucket, &session.aws.prefix, key_path)?;
+    let (header, entries) = crate::index::fetch_index(
+        session.backend.as_ref(),
+        &session.aws.bucket,
+        &session.aws.prefix,
+        key_path,
+    )?;
     let head2 = session.backend.head(&session.aws.bucket, &index_key)?;
     let Some(head2) = head2 else {
         // GET後に索引が消えた: 取得内容のvalidatorは確定不能のためstale扱い
@@ -298,8 +306,12 @@ pub(crate) fn fetch_index_confirmed(
         return Ok((header, entries, true, head_validator(&head2)));
     }
     // HEAD→GET間の変化: 1回limitの再取得
-    let (header2, entries2) =
-        crate::index::fetch_index(session.backend.as_ref(), &session.aws.bucket, &session.aws.prefix, key_path)?;
+    let (header2, entries2) = crate::index::fetch_index(
+        session.backend.as_ref(),
+        &session.aws.bucket,
+        &session.aws.prefix,
+        key_path,
+    )?;
     let v2 = head_validator(&head2);
     let head3 = session.backend.head(&session.aws.bucket, &index_key)?;
     let Some(head3) = head3 else {

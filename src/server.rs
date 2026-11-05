@@ -1,13 +1,21 @@
-//! TASK-9 serve基盤(設計1章D2: 同一binaryのserve subcommand・6章API・8章server.toml・
-//! 9章D4 localhost既定・10章dist二階建て・12章Phase P2)。
+//! TASK-9 serve基盤+読取API(設計1章D2: 同一binaryのserve subcommand・6章API・
+//! 8章server.toml・9章D4 localhost既定・10章dist二階建て・12章Phase P2+P3)。
 //!
-//! - HTTP層はaxum。mount prefixは`/api/`。P2の実endpointはliveness(GET /api/health)のみ
-//! - 保護API(entities等の読取系)はP3で実装予定だが、認証はP4まで構成されないため
-//!   `fail-closed`: 未構成の間は全保護endpointを503(configuration)で応答させ
-//!   応答内容を返さない(設計12章P2のverify可能状態・指摘#11)
-//! - 実行境界(設計1章): 既存S3/DB層は同期APIのため、serve起動時のHEAD validator検証+
-//!   DB反映(manage::catalog_sync_once=P1同期層)は`tokio::task::spawn_blocking`経由で
-//!   呼ぶ(async context内からのRuntime混在panic回避。DB接続も同thread内でopen)
+//! - HTTP層はaxum。mount prefixは`/api/`。P2はliveness(GET /api/health)のみで、
+//!   P3が読取API(entities/versions/pins/locations/pending/sync/diff)をrouteする
+//! - **serve経由の保護APIはP4(認証)までfail-closed**(設計12章・指摘#11):
+//!   認証機構未構成の間は全保護endpointを503(configuration)で応答させ内容を
+//!   返さない。実装は`protected_fail_closed` middleware(build_routerの外側)が担い、
+//!   handler本体はrouterに接続済み(handler単体test=router oneshotで観測)。
+//!   P4でこのgateがsession検証へ置換わる
+//! - 応答schemaは`--format json`と共通(設計5章・6章: entry_summary_json等の
+//!   storage::queryのJSON語彙を共用)。error体系(指摘#14)は
+//!   `{"error":{"code","message"}}`でmessageは一般化文言(内部error文字列の
+//!   無加工返却禁止。詳細はserver log=stderrのみ)
+//! - 実行境界(設計1章): 既存S3/DB層は同期APIのため、serve起動時sync・各handlerの
+//!   S3/DBアクセスは`tokio::task::spawn_blocking`経由で呼ぶ(async context内からの
+//!   Runtime混在panic回避。DB接続も同thread内でopen)。DB書込・syncはsingle-flight
+//!   (semaphore 1)で直列化
 //! - 静的配信(設計10章): frontend/distをrust-embedで埋め込み。`#[allow_missing = true]`
 //!   によりdist欠落でもbuild・起動可能で、欠落時は静的配信なし(APIのみ)で起動し
 //!   warning+frontend build手順をstderrへ表示する
@@ -140,7 +148,9 @@ fn parse_server_config(text: &str) -> BackupResult<ServerConfig> {
         rp_id: None,
         rp_origin: None,
     });
-    let listen_addr = sec.listen_addr.unwrap_or_else(|| DEFAULT_LISTEN_ADDR.into());
+    let listen_addr = sec
+        .listen_addr
+        .unwrap_or_else(|| DEFAULT_LISTEN_ADDR.into());
     if listen_addr.trim().is_empty() {
         return Err(BackupError::Config(
             "server.tomlのlisten_addrが空です".to_string(),
@@ -174,7 +184,10 @@ pub fn cmd_serve(args: &ServeArgs) -> i32 {
             "WARNING: frontend静的配信は無効のためAPIのみで起動します。release buildはfrontend/distを埋め込みます(frontend build手順: cd frontend && pnpm install && pnpm build。devでのfrontend確認はVite dev server: cd frontend && pnpm dev)"
         );
     }
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("error: 内部エラー: tokio runtime構築に失敗: {e}");
@@ -198,18 +211,22 @@ async fn run_server(cfg: ServerConfig, args: &ServeArgs) -> i32 {
 
     // 起動時sync(設計4章・1章実行境界): P1同期層(manage::catalog_sync_once)を
     // spawn_blockingから呼ぶ。失敗してもserveは継続(staleness表示はP3+のAPIが担う)
-    let ctx = serve_ctx_args(args);
-    let sync_handle = tokio::task::spawn_blocking(move || {
-        crate::storage::manage::catalog_sync_once(&ctx)
-    });
+    let state = AppState::from_ctx_args(serve_ctx_args(args));
+    let sync_ctx = state.sync_ctx.clone();
+    let sync_handle =
+        tokio::task::spawn_blocking(move || crate::storage::manage::catalog_sync_once(&sync_ctx));
 
-    let app = build_router();
+    // serve経由の保護APIはfail-closed(P4の認証構成まで503・指摘#11)。
+    // gateはbuild_routerの外側に重ね、handler本体はrouterに接続したままにする
+    let app = build_router(state).layer(axum::middleware::from_fn(protected_fail_closed));
     // 全応答へCache-Controlが未設定ならno-storeを付与(API応答の途中cache禁止。
     // 静的assetsはhandler側が明示的に設定するため上書きされない)
-    let app = app.layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-store"),
-    ));
+    let app = app.layer(
+        tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        ),
+    );
 
     let serve = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
     if let Err(e) = serve.await {
@@ -240,6 +257,27 @@ fn serve_ctx_args(args: &ServeArgs) -> crate::storage::CtxArgs {
     }
 }
 
+/// serveのAPI共有状態(P3)。
+///
+/// - `sync_permits`: sync・diff実行のsingle-flight(設計1章: DB書込・syncは
+///   semaphore 1で直列化)
+/// - `sync_ctx`: POST /api/sync・POST /api/diffが呼ぶ同期層(open_session系)への
+///   引数。serve起動時の実効profile解決(ServeArgs由来)をそのまま使う
+#[derive(Clone)]
+struct AppState {
+    sync_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    sync_ctx: std::sync::Arc<crate::storage::CtxArgs>,
+}
+
+impl AppState {
+    fn from_ctx_args(ctx: crate::storage::CtxArgs) -> AppState {
+        AppState {
+            sync_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            sync_ctx: std::sync::Arc::new(ctx),
+        }
+    }
+}
+
 /// SIGTERM/SIGINTの待受(graceful shutdown契機。設計1章)。
 async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
@@ -256,16 +294,594 @@ fn error_body(code: &str, message: &str) -> serde_json::Value {
     serde_json::json!({"error": {"code": code, "message": message}})
 }
 
-/// router組立(設計6章のendpoint一覧のP2分)。
-fn build_router() -> axum::Router {
+// ---------------------------------------------------------------------------
+// error体系(設計6章指摘#14: error code -> HTTP status変換。CLI exit codeの一律変換
+// は行わない)。messageは区分ごとの一般化文言に固定し、内部error文字列(内部path・
+// 下位層の詳細)は応答へ出さない(詳細はserver log=stderrのみ)。
+
+/// handlerのerror応答(ApiError -> HTTP status+error body)。
+struct ApiError {
+    status: axum::http::StatusCode,
+    code: &'static str,
+    message: &'static str,
+}
+
+impl axum::response::IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        (self.status, axum::Json(error_body(self.code, self.message))).into_response()
+    }
+}
+
+fn invalid_request(message: &'static str) -> ApiError {
+    ApiError {
+        status: axum::http::StatusCode::BAD_REQUEST,
+        code: "invalid_request",
+        message,
+    }
+}
+
+fn not_found(message: &'static str) -> ApiError {
+    ApiError {
+        status: axum::http::StatusCode::NOT_FOUND,
+        code: "not_found",
+        message,
+    }
+}
+
+fn validation_failed(message: &'static str) -> ApiError {
+    ApiError {
+        status: axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        code: "validation_failed",
+        message,
+    }
+}
+
+fn upstream(message: &'static str) -> ApiError {
+    ApiError {
+        status: axum::http::StatusCode::BAD_GATEWAY,
+        code: "upstream",
+        message,
+    }
+}
+
+fn configuration(message: &'static str) -> ApiError {
+    ApiError {
+        status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        code: "configuration",
+        message,
+    }
+}
+
+fn internal(message: &'static str) -> ApiError {
+    ApiError {
+        status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        code: "internal",
+        message,
+    }
+}
+
+/// 同期層(P1/S3Backend)のBackupErrorをAPI errorへ変換。詳細(log用)はここで
+/// stderrへ出力し、応答messageは区分ごとの一般化文言(指摘#14: 内部error文字列の
+/// 無加工返却禁止。秘密情報境界: 設定file path等を応答へ出さない)。
+fn api_error_from(e: BackupError) -> ApiError {
+    eprintln!("serve: API処理エラー詳細(logのみ): {e}");
+    match e {
+        BackupError::Internal(_) => internal("内部エラーが発生しました"),
+        BackupError::Config(_) => configuration("設定の読み込みに失敗しました"),
+        BackupError::Target(_) => not_found("対象が見つかりません"),
+        BackupError::Process(_) => validation_failed("処理・検証に失敗しました"),
+        BackupError::Transfer(_) => upstream("上流ストレージ(S3)との通信に失敗しました"),
+        BackupError::Usage(_) => invalid_request("リクエストの形式が不正です"),
+    }
+}
+
+/// 同期層(S3/DB)の呼び出しをspawn_blocking経由で実行(設計1章実行境界: async
+/// context内からのRuntime混在panic回避。BackupErrorはApiErrorへ変換)。
+async fn run_blocking<T, F>(f: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> BackupResult<T> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(result) => result.map_err(api_error_from),
+        Err(e) => {
+            eprintln!("serve: spawn_blockingのjoinに失敗(logのみ): {e}");
+            Err(internal("内部エラーが発生しました"))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 読取API handler(設計6章endpoint一覧・12章P3)。応答schemaは--format jsonと共通
+// (storage::queryのJSON語彙を共用)。scopeは<bucket>:<prefix>(bucket名にコロンは
+// 使用できないため一意。省略時は実効profileのscope)。
+
+/// GET /api/entities の1pageあたりのentity数(設計上の規定は無いため運用実績値で
+/// ある50を固定値とする。設定化は実需要が出た段階で検討)。
+const ENTITIES_PER_PAGE: usize = 50;
+
+/// query stringの手動parse(axumのQuery extractorはrejection応答が本APIのerror
+/// body形式と異なるため、形式errorを自前でinvalid_requestへmappingする)。
+/// valueはpercent-decode(`%XX`・`+`=space)する。
+fn parse_query_params(raw: Option<&str>) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let Some(raw) = raw else {
+        return map;
+    };
+    for pair in raw.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        map.insert(percent_decode(k), percent_decode(v));
+    }
+    map
+}
+
+/// percent-encodingのdecode(不正なescapeはそのまま文字として残す)。
+fn percent_decode(s: &str) -> String {
+    fn hex_val(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'+' {
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
+        if b == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+        {
+            out.push(h * 16 + l);
+            i += 3;
+            continue;
+        }
+        out.push(b);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// page query paramのparse(1始点。0・非数値はinvalid_request 400)。
+fn parse_page_param(raw: Option<&str>) -> Result<u32, ApiError> {
+    let Some(raw) = raw else {
+        return Ok(1);
+    };
+    match raw.parse::<u32>() {
+        Ok(page) if page >= 1 => Ok(page),
+        _ => Err(invalid_request("pageは1以上の数値で指定してください")),
+    }
+}
+
+/// scope query param(<bucket>:<prefix>)のparse。形式不正はNone。
+fn parse_scope_param(raw: &str) -> Option<(String, String)> {
+    let (bucket, prefix) = raw.split_once(':')?;
+    if bucket.is_empty() || prefix.is_empty() {
+        return None;
+    }
+    Some((bucket.to_string(), prefix.to_string()))
+}
+
+/// 実行scopeの解決(scope明示は<bucket>:<prefix>・省略時は実効profile)。
+/// 設定file読み込みを伴うためspawn_blocking内で使う。
+fn resolve_scope(explicit: Option<&str>) -> BackupResult<(String, String)> {
+    if let Some(scope) = explicit {
+        return parse_scope_param(scope).ok_or_else(|| {
+            BackupError::Usage("scopeは <bucket>:<prefix> 形式で指定してください".to_string())
+        });
+    }
+    let aws = crate::storage::load_aws(&None, None)?;
+    Ok((aws.bucket, aws.prefix))
+}
+
+/// query絞り込み(CLI queryと同一規則: title部分一致/uuid前方一致/所在path部分一致)。
+fn query_match(e: &crate::index::IndexFileEntry, want: Option<&str>) -> bool {
+    want.is_none_or(|t| {
+        e.title.contains(t)
+            || e.uuid.starts_with(t)
+            || e.locations.iter().any(|l| l.source_path.contains(t))
+    })
+}
+
+/// label絞り込み(いずれかのlocation.label一致)。
+fn label_match(e: &crate::index::IndexFileEntry, want: Option<&str>) -> bool {
+    want.is_none_or(|l| e.locations.iter().any(|loc| loc.label == l))
+}
+
+/// pin行JSON(list pins語彙: pin/date/source_size)。
+fn pins_json(e: &crate::index::IndexFileEntry) -> Vec<serde_json::Value> {
+    e.pins
+        .iter()
+        .map(|p| serde_json::json!({"pin": p.pin, "date": p.date, "source_size": p.source_size}))
+        .collect()
+}
+
+/// sync_state 1行分のJSON(未syncはstatus=unknown+空値。frontendのstaleness表示が
+/// 常に描画できるよう200で応答する。scopeは<bucket>:<prefix>形式)。
+fn sync_state_json(
+    bucket: &str,
+    prefix: &str,
+    st: Option<&crate::catalog::SyncState>,
+) -> serde_json::Value {
+    let scope = format!("{bucket}:{prefix}");
+    match st {
+        None => serde_json::json!({
+            "scope": scope,
+            "status": "unknown",
+            "index_etag": "",
+            "index_version_id": "",
+            "fetched_at": "",
+            "last_write_at": "",
+            "last_verified_at": "",
+            "entry_count": 0,
+        }),
+        Some(st) => serde_json::json!({
+            "scope": scope,
+            "status": st.status,
+            "index_etag": st.index_etag,
+            "index_version_id": st.index_version_id,
+            "fetched_at": st.fetched_at,
+            "last_write_at": st.last_write_at,
+            "last_verified_at": st.last_verified_at,
+            "entry_count": st.entry_count,
+        }),
+    }
+}
+
+/// router組立(設計6章のendpoint一覧のP2+P3分)。serve経由の保護APIはこのrouterの
+/// 外側にfail-closed gate(protected_fail_closed)を重ねる(P4の認証構成まで503。
+/// handler単体testはgate無しのこのrouterをoneshotする)。
+fn build_router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/api/health", axum::routing::get(health))
+        .route("/api/entities", axum::routing::get(get_entities))
+        .route(
+            "/api/entities/{uuid}",
+            axum::routing::get(get_entity_detail),
+        )
+        .route(
+            "/api/entities/{uuid}/versions",
+            axum::routing::get(get_entity_versions),
+        )
+        .route("/api/pins", axum::routing::get(get_pins))
+        .route("/api/locations", axum::routing::get(get_locations))
+        .route("/api/pending", axum::routing::get(get_pending))
+        .route(
+            "/api/sync",
+            axum::routing::get(get_sync_state).post(post_sync_refresh),
+        )
+        .route(
+            "/api/diff",
+            axum::routing::get(get_diff_last).post(post_diff_run),
+        )
         .fallback(fallback)
+        .with_state(state)
 }
 
 /// GET /api/health(認証不要のliveness・設計6章)。
 async fn health() -> impl axum::response::IntoResponse {
     axum::Json(serde_json::json!({"status": "ok"}))
+}
+
+/// 保護APIのfail-closed gate(設計12章P2〜P3・指摘#11): 認証機構が構成されるまで
+/// (P4)、/api/health以外の/api/*はhandlerへ渡さず503(configuration)で応答する
+/// (未認証401との使い分けはP4以降)。P4でsession検証のgateへ置換える。
+async fn protected_fail_closed(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path();
+    if path == "/api/health" || !(path == "/api" || path.starts_with("/api/")) {
+        return next.run(req).await;
+    }
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(error_body(
+            "configuration",
+            "保護APIは認証機構の構成が完了するまで閉鎖されています",
+        )),
+    )
+        .into_response()
+}
+
+/// GET /api/entities(設計6章: entity一覧。entry_summary_json互換schemaで
+/// {"entities":[...],"page":n,"total_pages":n}形式・page=1始点)。
+async fn get_entities(uri: axum::http::Uri) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let params = parse_query_params(uri.query());
+    let page = parse_page_param(params.get("page").map(|s| s.as_str()))?;
+    let scope = params.get("scope").cloned();
+    let query = params.get("query").cloned();
+    let category = params.get("category").cloned();
+    let label = params.get("label").cloned();
+    let entries = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(scope.as_deref())?;
+        let db = crate::catalog::CatalogDb::open()?;
+        let (_header, entries) = db.load_entries(&bucket, &prefix)?;
+        Ok(entries)
+    })
+    .await?;
+    // 絞り込み(query=CLI queryと同一規則・category/label=location属性一致)
+    let matched: Vec<&crate::index::IndexFileEntry> = entries
+        .iter()
+        .filter(|e| {
+            query_match(e, query.as_deref())
+                && crate::storage::query::category_matched(e, category.as_deref())
+                && label_match(e, label.as_deref())
+        })
+        .collect();
+    // paging(page=1始点・total_pagesは0件でも1)
+    let total = matched.len();
+    let total_pages = total.div_ceil(ENTITIES_PER_PAGE).max(1);
+    let skip = ((page - 1) as usize).saturating_mul(ENTITIES_PER_PAGE);
+    let page_items: Vec<serde_json::Value> = matched
+        .into_iter()
+        .skip(skip)
+        .take(ENTITIES_PER_PAGE)
+        .map(|e| crate::storage::query::entry_summary_json(e, false))
+        .collect();
+    Ok(axum::Json(serde_json::json!({
+        "entities": page_items,
+        "page": page,
+        "total_pages": total_pages,
+    })))
+}
+
+/// 実効scopeのcacheから対象entityを1件引き当てる(spawn_blocking内で使う)。
+fn find_entry_by_uuid(
+    db: &crate::catalog::CatalogDb,
+    bucket: &str,
+    prefix: &str,
+    uuid: &str,
+) -> BackupResult<crate::index::IndexFileEntry> {
+    let (_header, entries) = db.load_entries(bucket, prefix)?;
+    entries
+        .into_iter()
+        .find(|e| e.uuid == uuid)
+        .ok_or_else(|| BackupError::Target("対象のentityが見つかりません".to_string()))
+}
+
+/// GET /api/entities/:uuid(設計6章: 詳細=versions/pins/locations入り。
+/// version_list付きentry_summary_json互換。不在は404 not_found)。
+async fn get_entity_detail(
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let value = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None)?;
+        let db = crate::catalog::CatalogDb::open()?;
+        let e = find_entry_by_uuid(&db, &bucket, &prefix, &uuid)?;
+        Ok(crate::storage::query::entry_summary_json(&e, true))
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
+/// GET /api/entities/:uuid/versions(list versions --format json相当の
+/// entity object: uuid/title/locations/versions[](state付き)/pins[])。
+async fn get_entity_versions(
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let value = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None)?;
+        let db = crate::catalog::CatalogDb::open()?;
+        let e = find_entry_by_uuid(&db, &bucket, &prefix, &uuid)?;
+        let current_vid = e.versions.first().map(|f| f.version_id.as_str());
+        Ok(serde_json::json!({
+            "uuid": e.uuid,
+            "title": e.title,
+            "locations": e.locations.iter().map(crate::storage::query::location_json).collect::<Vec<_>>(),
+            "versions": e.versions.iter().map(|v| serde_json::json!({
+                "date": v.date,
+                "version_ts": v.version_ts,
+                "version_id": v.version_id,
+                "source_size": v.source_size,
+                "state": if Some(v.version_id.as_str()) == current_vid { "現行" } else { "noncurrent" },
+            })).collect::<Vec<_>>(),
+            "pins": pins_json(&e),
+        }))
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
+/// GET /api/pins(list pins --format json相当: entity単位のuuid/title/pins[]を
+/// {"pins":[...]}形式で返す)。
+async fn get_pins() -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let value = run_blocking(|| {
+        let (bucket, prefix) = resolve_scope(None)?;
+        let db = crate::catalog::CatalogDb::open()?;
+        let (_header, entries) = db.load_entries(&bucket, &prefix)?;
+        Ok(serde_json::json!({
+            "pins": entries.iter().map(|e| serde_json::json!({
+                "uuid": e.uuid,
+                "title": e.title,
+                "pins": pins_json(e),
+            })).collect::<Vec<_>>(),
+        }))
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
+/// GET /api/locations(location_json語彙+entityのuuid/title案内を
+/// {"locations":[...]}形式で返す)。
+async fn get_locations() -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let value = run_blocking(|| {
+        let (bucket, prefix) = resolve_scope(None)?;
+        let db = crate::catalog::CatalogDb::open()?;
+        let (_header, entries) = db.load_entries(&bucket, &prefix)?;
+        let rows: Vec<serde_json::Value> = entries
+            .iter()
+            .flat_map(|e| {
+                e.locations.iter().map(move |l| {
+                    serde_json::json!({
+                        "uuid": e.uuid,
+                        "title": e.title,
+                        "source_path": l.source_path,
+                        "category": l.category,
+                        "label": l.label,
+                        "identity_hash": l.identity_hash,
+                        "last_backup": l.last_backup,
+                    })
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "locations": rows }))
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
+/// GET /api/pending(pending_itemsのschema(source_root/path/size/mtime/status/
+/// last_scan_at)で{"pending":[...]}形式。P3時点はscan(P5)が未実装のため空配列)。
+async fn get_pending() -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let value = run_blocking(|| {
+        let (bucket, prefix) = resolve_scope(None)?;
+        let db = crate::catalog::CatalogDb::open()?;
+        let items = db.pending_items(&bucket, &prefix)?;
+        Ok(serde_json::json!({
+            "pending": items.iter().map(|i| serde_json::json!({
+                "source_root": i.source_root,
+                "path": i.path,
+                "size": i.size,
+                "mtime": i.mtime,
+                "status": i.status,
+                "last_scan_at": i.last_scan_at,
+            })).collect::<Vec<_>>(),
+        }))
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
+/// GET /api/sync(sync_state 1行分。未sync時もstatus=unknownで200=frontendの
+/// staleness表示が常に描画できる)。
+async fn get_sync_state() -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let value = run_blocking(|| {
+        let (bucket, prefix) = resolve_scope(None)?;
+        let db = crate::catalog::CatalogDb::open()?;
+        let st = db.sync_state(&bucket, &prefix)?;
+        Ok(sync_state_json(&bucket, &prefix, st.as_ref()))
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
+/// POST /api/sync(手動refresh: 起動時syncと同一のP1同期層catalog_sync_onceを
+/// single-flightで実行し、最新のsync_stateで応答。未書込namespaceは空cacheの
+/// fresh確定として成功)。
+async fn post_sync_refresh(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    // single-flight(設計1章: syncはsemaphore 1で直列化)
+    let _permit = state
+        .sync_permits
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|e| {
+            eprintln!("serve: sync semaphoreのacquireに失敗(logのみ): {e}");
+            internal("内部エラーが発生しました")
+        })?;
+    let ctx = state.sync_ctx.clone();
+    let value = run_blocking(move || {
+        crate::storage::manage::catalog_sync_once(&ctx)?;
+        let aws = crate::storage::load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
+        let db = crate::catalog::CatalogDb::open()?;
+        let st = db.sync_state(&aws.bucket, &aws.prefix)?;
+        Ok(sync_state_json(&aws.bucket, &aws.prefix, st.as_ref()))
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
+/// POST /api/diff(diff実行: local catalog cache(索引replica)とS3 list_versionsの
+/// 全体突合=cmd_diffのJSON語彙{entries/files/missing/unexpected}+performed_at。
+/// 結果をDBへ保存しGET /api/diffで参照できるようにする)。
+async fn post_diff_run(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    // diff結果のDB保存を伴うためsyncと同じsingle-flightで直列化(設計1章)
+    let _permit = state
+        .sync_permits
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|e| {
+            eprintln!("serve: diff semaphoreのacquireに失敗(logのみ): {e}");
+            internal("内部エラーが発生しました")
+        })?;
+    let ctx = state.sync_ctx.clone();
+    let value = run_blocking(move || {
+        use std::collections::BTreeSet;
+        let session = crate::storage::open_session(&ctx)?;
+        let bucket = session.aws.bucket.clone();
+        let prefix = session.aws.prefix.clone();
+        let db = crate::catalog::CatalogDb::open()?;
+        let (_header, entries) = db.load_entries(&bucket, &prefix)?;
+        let versions = session.backend.list_versions(&bucket, &prefix)?;
+        let present: BTreeSet<&str> = versions
+            .iter()
+            .map(|v| v.key.as_str())
+            .filter(|k| !crate::storage::query::diff_out_of_scope(&prefix, k))
+            .collect();
+        let mut index_keys = BTreeSet::new();
+        for e in &entries {
+            for v in &e.versions {
+                index_keys.insert(v.s3_key.clone());
+            }
+            for p in &e.pins {
+                index_keys.insert(p.s3_key.clone());
+            }
+        }
+        let missing: Vec<String> = index_keys
+            .iter()
+            .filter(|k| !present.contains(k.as_str()))
+            .cloned()
+            .collect();
+        let mut unexpected: Vec<&str> = Vec::new();
+        for k in &present {
+            if !index_keys.contains(*k) {
+                unexpected.push(k);
+            }
+        }
+        let performed_at = crate::storage::now_jst();
+        let result = serde_json::json!({
+            "performed_at": performed_at,
+            "entries": entries.len(),
+            "files": entries
+                .iter()
+                .map(|e| serde_json::json!({"uuid": e.uuid, "title": e.title}))
+                .collect::<Vec<_>>(),
+            "missing": missing,
+            "unexpected": unexpected,
+        });
+        db.save_diff_result(&bucket, &prefix, &performed_at, &result)?;
+        Ok(result)
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
+/// GET /api/diff(保存済みの最終diff結果のみ。未実行は404 not_found)。
+async fn get_diff_last() -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let value = run_blocking(|| {
+        let (bucket, prefix) = resolve_scope(None)?;
+        let db = crate::catalog::CatalogDb::open()?;
+        db.load_diff_result(&bucket, &prefix)?
+            .ok_or_else(|| BackupError::Target("diff結果は未実行です".to_string()))
+    })
+    .await?;
+    Ok(axum::Json(value))
 }
 
 /// routerのfallback: /api/*の未実装endpointはfail-closed、それ以外は静的配信。
@@ -434,12 +1050,14 @@ mod tests {
 
     /// P3 handler testの環境(直列化lock+ABH+最小config+fake S3 state)。
     /// env書換え系のため必ず config_env_lock() を保持したまま使う。
+    /// fieldは宣言順にdropされるため_lockは最後に宣言する(lockが先に解放されると
+    /// 後続testのABH設定を_abhの復元が上書きしてしまう)。
     struct ApiEnv {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        _tmp: TempDir,
-        _abh: crate::testutil::AbhEnvGuard,
         /// ABH home(内部error文字列の無加工返却検出の対象path)
         home: PathBuf,
+        _abh: crate::testutil::AbhEnvGuard,
+        _tmp: TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl Drop for ApiEnv {
@@ -503,7 +1121,7 @@ mod tests {
 
     /// catalog.db(ABH配下)へscope単位でentriesを注入(P1 APIの直接利用)。
     fn api_seed(entries: &[crate::index::IndexFileEntry], bucket: &str, prefix: &str) {
-        use crate::catalog::{CatalogDb, ReflectOrigin, SourceMtimes, Validator, STATUS_FRESH};
+        use crate::catalog::{CatalogDb, ReflectOrigin, STATUS_FRESH, SourceMtimes, Validator};
         let header = crate::index::IndexHeader {
             schema: crate::index::INDEX_SCHEMA,
             record_type: "index_header".into(),
@@ -530,8 +1148,13 @@ mod tests {
     }
 
     /// 手組みのIndexFileEntry(1版・pin・location付き。category/labelは引数)。
-    fn api_entry(uuid: &str, title: &str, category: &str, label: &str) -> crate::index::IndexFileEntry {
-        use crate::index::{IndexFileEntry, IndexLocation, IndexPin, IndexVersion, INDEX_SCHEMA};
+    fn api_entry(
+        uuid: &str,
+        title: &str,
+        category: &str,
+        label: &str,
+    ) -> crate::index::IndexFileEntry {
+        use crate::index::{INDEX_SCHEMA, IndexFileEntry, IndexLocation, IndexPin, IndexVersion};
         IndexFileEntry {
             schema: INDEX_SCHEMA,
             record_type: "file".into(),
@@ -567,10 +1190,23 @@ mod tests {
         }
     }
 
+    /// handler単体test用のAppState(serve起動時のServeArgs省略と同一=CtxArgs全None
+    /// の規定path解決。ABH配下のconfigをapi_envが用意する)。
+    fn api_test_state() -> AppState {
+        AppState::from_ctx_args(crate::storage::CtxArgs {
+            config: None,
+            aws_config: None,
+            key: None,
+            profile: None,
+            format: crate::storage::Format::Human,
+        })
+    }
+
     /// build_routerをoneshotで呼び(status, JSON body)を返す。bodyがJSONで無い場合は
-    /// Null(応答形式の検査でfailする)。
+    /// Null(応答形式の検査でfailする)。P3実装でbuild_routerがAppStateを受け取る
+    /// signatureへ変わったため、この呼び出しのみ追随(期待値は不変)。
     fn api(method: &str, uri: &str) -> (u16, serde_json::Value) {
-        let router = build_router();
+        let router = build_router(api_test_state());
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -603,7 +1239,9 @@ mod tests {
             "error code一致: {body}"
         );
         assert!(
-            error.get("message").is_some_and(|m| m.as_str().is_some_and(|m| !m.is_empty())),
+            error
+                .get("message")
+                .is_some_and(|m| m.as_str().is_some_and(|m| !m.is_empty())),
             "messageは空でないstring: {body}"
         );
     }
@@ -614,11 +1252,26 @@ mod tests {
     #[test]
     fn api_entities_list_responds_entry_summaries_with_filters() {
         let env = api_env("srv-api-entities");
-        let alpha = api_entry("11111111-1111-1111-1111-111111111111", "alpha", "docs", "work");
-        let beta = api_entry("22222222-2222-2222-2222-222222222222", "beta", "unfiled", "");
+        let alpha = api_entry(
+            "11111111-1111-1111-1111-111111111111",
+            "alpha",
+            "docs",
+            "work",
+        );
+        let beta = api_entry(
+            "22222222-2222-2222-2222-222222222222",
+            "beta",
+            "unfiled",
+            "",
+        );
         api_seed(&[alpha, beta], API_TEST_BUCKET, API_TEST_PREFIX);
         // 実効scope外のデータ(scope絞り込みの対照)
-        let gamma = api_entry("33333333-3333-3333-3333-333333333333", "gamma", "docs", "work");
+        let gamma = api_entry(
+            "33333333-3333-3333-3333-333333333333",
+            "gamma",
+            "docs",
+            "work",
+        );
         api_seed(&[gamma], API_OTHER_BUCKET, API_TEST_PREFIX);
 
         // 全体(実効profileのscopeのみ。他scopeは混入しない)
@@ -630,20 +1283,31 @@ mod tests {
             .expect("entities配列");
         assert_eq!(entities.len(), 2, "実効scopeの2entity: {body}");
         assert!(
-            entities.iter().all(|e| e.get("uuid").is_some_and(|u| u != gamma_uuid())),
+            entities
+                .iter()
+                .all(|e| e.get("uuid").is_some_and(|u| u != gamma_uuid())),
             "他scope(other-bucket)のentityは含まれない: {body}"
         );
         // pageing(1page目・総page数)
-        assert_eq!(body.get("page").and_then(|p| p.as_i64()), Some(1), "page=1: {body}");
+        assert_eq!(
+            body.get("page").and_then(|p| p.as_i64()),
+            Some(1),
+            "page=1: {body}"
+        );
         assert!(
-            body.get("total_pages").and_then(|p| p.as_i64()).is_some_and(|p| p >= 1),
+            body.get("total_pages")
+                .and_then(|p| p.as_i64())
+                .is_some_and(|p| p >= 1),
             "total_pages付き: {body}"
         );
         // entry_summary_json互換schema(uuid/title/locations/versions=count/
         // latest_date/latest_size/pins)
         let first = &entities[0];
         for key in ["uuid", "title", "latest_date", "latest_size"] {
-            assert!(first.get(key).is_some(), "entry_summary互換key {key}: {first}");
+            assert!(
+                first.get(key).is_some(),
+                "entry_summary互換key {key}: {first}"
+            );
         }
         assert!(first.get("versions").is_some_and(|v| v.as_i64() == Some(1)));
         let locations = first
@@ -651,38 +1315,62 @@ mod tests {
             .and_then(|v| v.as_array())
             .expect("locations配列");
         let l0 = &locations[0];
-        for key in ["source_path", "category", "label", "identity_hash", "last_backup"] {
+        for key in [
+            "source_path",
+            "category",
+            "label",
+            "identity_hash",
+            "last_backup",
+        ] {
             assert!(
                 l0.get(key).is_some_and(|v| !v.is_null()),
                 "locationのkey {key}: {l0}"
             );
         }
         assert!(
-            first.get("pins").is_some_and(|p| p.as_array().is_some_and(|a| !a.is_empty())),
+            first
+                .get("pins")
+                .is_some_and(|p| p.as_array().is_some_and(|a| !a.is_empty())),
             "pins配列: {first}"
         );
 
         // query絞り込み(title部分一致)
         let (_, body) = api("GET", "/api/entities?query=beta");
-        let entities = body.get("entities").and_then(|v| v.as_array()).expect("entities");
+        let entities = body
+            .get("entities")
+            .and_then(|v| v.as_array())
+            .expect("entities");
         assert_eq!(entities.len(), 1, "query=betaはbetaのみ: {body}");
         assert!(entities[0].get("title").is_some_and(|t| t == "beta"));
 
         // category絞り込み(location.category一致)
         let (_, body) = api("GET", "/api/entities?category=docs");
-        let entities = body.get("entities").and_then(|v| v.as_array()).expect("entities");
+        let entities = body
+            .get("entities")
+            .and_then(|v| v.as_array())
+            .expect("entities");
         assert_eq!(entities.len(), 1, "category=docsはalphaのみ: {body}");
         assert!(entities[0].get("title").is_some_and(|t| t == "alpha"));
 
         // label絞り込み(location.label一致)
         let (_, body) = api("GET", "/api/entities?label=work");
-        let entities = body.get("entities").and_then(|v| v.as_array()).expect("entities");
+        let entities = body
+            .get("entities")
+            .and_then(|v| v.as_array())
+            .expect("entities");
         assert_eq!(entities.len(), 1, "label=workはalphaのみ: {body}");
 
         // scope明示絞り込み(他bucketを明示すればgammaが見える)
         let (_, body) = api("GET", "/api/entities?scope=other-bucket:amazing-backup/");
-        let entities = body.get("entities").and_then(|v| v.as_array()).expect("entities");
-        assert_eq!(entities.len(), 1, "scope=other-bucket:amazing-backup/はgammaのみ: {body}");
+        let entities = body
+            .get("entities")
+            .and_then(|v| v.as_array())
+            .expect("entities");
+        assert_eq!(
+            entities.len(),
+            1,
+            "scope=other-bucket:amazing-backup/はgammaのみ: {body}"
+        );
         assert!(entities[0].get("title").is_some_and(|t| t == "gamma"));
         drop(env);
     }
@@ -698,19 +1386,29 @@ mod tests {
     #[test]
     fn api_entity_detail_returns_full_entry_and_404_for_missing() {
         let env = api_env("srv-api-detail");
-        let alpha = api_entry("11111111-1111-1111-1111-111111111111", "alpha", "docs", "work");
+        let alpha = api_entry(
+            "11111111-1111-1111-1111-111111111111",
+            "alpha",
+            "docs",
+            "work",
+        );
         api_seed(&[alpha], API_TEST_BUCKET, API_TEST_PREFIX);
 
         let (status, body) = api("GET", "/api/entities/11111111-1111-1111-1111-111111111111");
         assert_eq!(status, 200, "entity詳細は200: {body}");
-        assert_eq!(body.get("uuid").and_then(|v| v.as_str()), Some("11111111-1111-1111-1111-111111111111"));
+        assert_eq!(
+            body.get("uuid").and_then(|v| v.as_str()),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
         assert_eq!(body.get("title").and_then(|v| v.as_str()), Some("alpha"));
         assert!(
-            body.get("locations").is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty())),
+            body.get("locations")
+                .is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty())),
             "詳細はlocationsを含む: {body}"
         );
         assert!(
-            body.get("pins").is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty())),
+            body.get("pins")
+                .is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty())),
             "詳細はpinsを含む: {body}"
         );
         let version_list = body
@@ -718,7 +1416,13 @@ mod tests {
             .and_then(|v| v.as_array())
             .expect("詳細はversion_listを含む");
         let v0 = &version_list[0];
-        for key in ["date", "version_ts", "version_id", "batch_id", "source_size"] {
+        for key in [
+            "date",
+            "version_ts",
+            "version_id",
+            "batch_id",
+            "source_size",
+        ] {
             assert!(
                 v0.get(key).is_some_and(|v| !v.is_null()),
                 "version_list[0]のkey {key}: {v0}"
@@ -738,12 +1442,23 @@ mod tests {
     #[test]
     fn api_entity_versions_returns_version_rows_and_404_for_missing() {
         let env = api_env("srv-api-versions");
-        let alpha = api_entry("11111111-1111-1111-1111-111111111111", "alpha", "docs", "work");
+        let alpha = api_entry(
+            "11111111-1111-1111-1111-111111111111",
+            "alpha",
+            "docs",
+            "work",
+        );
         api_seed(&[alpha], API_TEST_BUCKET, API_TEST_PREFIX);
 
-        let (status, body) = api("GET", "/api/entities/11111111-1111-1111-1111-111111111111/versions");
+        let (status, body) = api(
+            "GET",
+            "/api/entities/11111111-1111-1111-1111-111111111111/versions",
+        );
         assert_eq!(status, 200, "versions一覧は200: {body}");
-        assert_eq!(body.get("uuid").and_then(|v| v.as_str()), Some("11111111-1111-1111-1111-111111111111"));
+        assert_eq!(
+            body.get("uuid").and_then(|v| v.as_str()),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
         assert_eq!(body.get("title").and_then(|v| v.as_str()), Some("alpha"));
         let versions = body
             .get("versions")
@@ -762,7 +1477,10 @@ mod tests {
             "versions一覧もpinsを含む(list versions相当): {body}"
         );
 
-        let (status, body) = api("GET", "/api/entities/99999999-9999-9999-9999-999999999999/versions");
+        let (status, body) = api(
+            "GET",
+            "/api/entities/99999999-9999-9999-9999-999999999999/versions",
+        );
         assert_eq!(status, 404, "不在uuidは404: {body}");
         expect_error_body(&body, "not_found");
         drop(env);
@@ -774,7 +1492,12 @@ mod tests {
     #[test]
     fn api_pins_list_returns_pins_per_entity() {
         let env = api_env("srv-api-pins");
-        let alpha = api_entry("11111111-1111-1111-1111-111111111111", "alpha", "docs", "work");
+        let alpha = api_entry(
+            "11111111-1111-1111-1111-111111111111",
+            "alpha",
+            "docs",
+            "work",
+        );
         api_seed(&[alpha], API_TEST_BUCKET, API_TEST_PREFIX);
 
         let (status, body) = api("GET", "/api/pins");
@@ -804,7 +1527,12 @@ mod tests {
     #[test]
     fn api_locations_list_returns_location_rows() {
         let env = api_env("srv-api-locations");
-        let alpha = api_entry("11111111-1111-1111-1111-111111111111", "alpha", "docs", "work");
+        let alpha = api_entry(
+            "11111111-1111-1111-1111-111111111111",
+            "alpha",
+            "docs",
+            "work",
+        );
         api_seed(&[alpha], API_TEST_BUCKET, API_TEST_PREFIX);
 
         let (status, body) = api("GET", "/api/locations");
@@ -815,13 +1543,24 @@ mod tests {
             .expect("locations配列");
         assert_eq!(locations.len(), 1, "location行: {body}");
         let row = &locations[0];
-        for key in ["uuid", "title", "source_path", "category", "label", "identity_hash", "last_backup"] {
+        for key in [
+            "uuid",
+            "title",
+            "source_path",
+            "category",
+            "label",
+            "identity_hash",
+            "last_backup",
+        ] {
             assert!(
                 row.get(key).is_some_and(|v| !v.is_null()),
                 "location行のkey {key}: {row}"
             );
         }
-        assert_eq!(row.get("source_path").and_then(|v| v.as_str()), Some("/data/alpha"));
+        assert_eq!(
+            row.get("source_path").and_then(|v| v.as_str()),
+            Some("/data/alpha")
+        );
         drop(env);
     }
 
@@ -837,10 +1576,7 @@ mod tests {
             .get("pending")
             .and_then(|v| v.as_array())
             .expect("pending配列(schemaの枠)");
-        assert!(
-            pending.is_empty(),
-            "P3時点はscan未実装のため空: {body}"
-        );
+        assert!(pending.is_empty(), "P3時点はscan未実装のため空: {body}");
         drop(env);
     }
 
@@ -853,23 +1589,45 @@ mod tests {
         // 未sync(DBにsync_state行が無い)でもUI描画のため200+unknown
         let (status, body) = api("GET", "/api/sync");
         assert_eq!(status, 200, "未sync時も200: {body}");
-        assert_eq!(body.get("status").and_then(|s| s.as_str()), Some("unknown"), "未syncはunknown: {body}");
+        assert_eq!(
+            body.get("status").and_then(|s| s.as_str()),
+            Some("unknown"),
+            "未syncはunknown: {body}"
+        );
 
         // seed反映後はsync_stateの保存値を返す
-        let alpha = api_entry("11111111-1111-1111-1111-111111111111", "alpha", "docs", "work");
+        let alpha = api_entry(
+            "11111111-1111-1111-1111-111111111111",
+            "alpha",
+            "docs",
+            "work",
+        );
         api_seed(&[alpha], API_TEST_BUCKET, API_TEST_PREFIX);
         let (status, body) = api("GET", "/api/sync");
         assert_eq!(status, 200, "sync状態は200: {body}");
-        assert_eq!(body.get("status").and_then(|s| s.as_str()), Some("fresh"), "seed直後はfresh: {body}");
+        assert_eq!(
+            body.get("status").and_then(|s| s.as_str()),
+            Some("fresh"),
+            "seed直後はfresh: {body}"
+        );
         assert_eq!(
             body.get("scope").and_then(|s| s.as_str()),
             Some("api-bucket:amazing-backup/"),
             "scopeは<bucket>:<prefix>形式: {body}"
         );
-        assert_eq!(body.get("index_etag").and_then(|v| v.as_str()), Some("\"etag-1\""));
-        assert_eq!(body.get("index_version_id").and_then(|v| v.as_str()), Some("vid-1"));
+        assert_eq!(
+            body.get("index_etag").and_then(|v| v.as_str()),
+            Some("\"etag-1\"")
+        );
+        assert_eq!(
+            body.get("index_version_id").and_then(|v| v.as_str()),
+            Some("vid-1")
+        );
         for key in ["fetched_at", "last_write_at", "last_verified_at"] {
-            assert!(body.get(key).is_some_and(|v| v.as_str().is_some()), "key {key}: {body}");
+            assert!(
+                body.get(key).is_some_and(|v| v.as_str().is_some()),
+                "key {key}: {body}"
+            );
         }
         assert_eq!(body.get("entry_count").and_then(|v| v.as_i64()), Some(1));
         drop(env);
@@ -897,7 +1655,11 @@ mod tests {
         // GET /api/syncにも反映される
         let (status, body) = api("GET", "/api/sync");
         assert_eq!(status, 200);
-        assert_eq!(body.get("status").and_then(|s| s.as_str()), Some("fresh"), "refresh後の状態: {body}");
+        assert_eq!(
+            body.get("status").and_then(|s| s.as_str()),
+            Some("fresh"),
+            "refresh後の状態: {body}"
+        );
         drop(env);
     }
 
@@ -918,7 +1680,11 @@ mod tests {
         for key in ["performed_at", "entries", "files", "missing", "unexpected"] {
             assert!(body.get(key).is_some(), "diff結果のkey {key}: {body}");
         }
-        assert_eq!(body.get("entries").and_then(|v| v.as_i64()), Some(0), "空結果: {body}");
+        assert_eq!(
+            body.get("entries").and_then(|v| v.as_i64()),
+            Some(0),
+            "空結果: {body}"
+        );
 
         // GET /api/diffは保存済みの最終結果(POSTと同一内容)を返す
         let (status, got) = api("GET", "/api/diff");
@@ -935,7 +1701,12 @@ mod tests {
     #[test]
     fn api_error_codes_map_to_http_statuses() {
         let env = api_env("srv-api-errors");
-        let alpha = api_entry("11111111-1111-1111-1111-111111111111", "alpha", "docs", "work");
+        let alpha = api_entry(
+            "11111111-1111-1111-1111-111111111111",
+            "alpha",
+            "docs",
+            "work",
+        );
         api_seed(&[alpha], API_TEST_BUCKET, API_TEST_PREFIX);
 
         // invalid_request=400(query paramの形式不正: pageが数値でない)
@@ -965,7 +1736,12 @@ mod tests {
     #[test]
     fn api_error_body_is_generalized_without_internal_leak() {
         let env = api_env("srv-api-error-body");
-        let alpha = api_entry("11111111-1111-1111-1111-111111111111", "alpha", "docs", "work");
+        let alpha = api_entry(
+            "11111111-1111-1111-1111-111111111111",
+            "alpha",
+            "docs",
+            "work",
+        );
         api_seed(&[alpha], API_TEST_BUCKET, API_TEST_PREFIX);
 
         let (status, body) = api("GET", "/api/entities?page=abc");

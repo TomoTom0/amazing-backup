@@ -575,11 +575,29 @@ server.tomlの[meta]をverified=trueへ。server.toml不在時は既定値起動
   新規11赤(handler未実装=503 fallback由来)+server_api追加1緑・pnpm vitest 8緑+3赤。
   server.tomlの[meta]はテスト先行のためverified=falseへ(P3実装後に復帰)
 
+2026-11-05: TASK-9 Phase P3(読取API)実装。src/server.rsへ読取API handler群
+(entities一覧/詳細/versions・pins・locations・pending・sync GET/POST・diff POST/GET)を接続。
+AppState(sync single-flight semaphore 1)導入・build_router(state)signature化・
+BackupError 6区分→ApiError体系(code/HTTP status変換・message一般化・詳細はstderrのみ)・
+protected_fail_closed middleware(/api/health以外の/api/*を503・P4認証まで閉鎖維持)・
+query param手動parse(percent-decode)・全handler spawn_blocking(run_blocking)。src/catalog.rsへ
+migration #2(diff_results table・cache class・最新1件)とPendingItem・save/load_diff_resultを追加。
+src/storage/query.rsのentry_summary_json等をpub(crate)化(--format jsonとAPI schemaの共通source・
+ロジック不変)。frontend: fetchSyncState・isSyncStateResponse型ガード・Pinia sync store・
+SyncStatus/HomeView表示(error guard含む)。テスト側構造修正2件(期待値不変): src/server.rs
+テストApiEnvのfield宣言順(drop順序による並列testのenv競合を解消)・sync-state.spec.tsのfetch
+mockを呼び出しごと新Responseへ(Response body再読不可の構造的欠陥)。cargo test 342pass/0fail・
+vitest 11pass/0fail・verify-conditions.py PASS。server.tomlの[meta]をverified=trueへ復帰・
+catalog.tomlのsource_hashをP3後のsrc/catalog.rsへ更新。実装判断: POST /api/diffはlocal
+catalog DB(索引replica)起点(未書込namespace空結果成功の条件書要求と整合・cmd_diffの
+read_index_for_queryは未書込nsで設定エラーになるため)・GET /api/entities 1page件数は50固定
+(設計未規定・page=0は400)・GET /api/sync未sync時は全key入り(status=unknown)
+
 ## 構成
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(18ファイル・274条件・excluded 60件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-23(--from-list単独許容化・空リスト警告: cli改訂1・plan source追記1+新規2・id不変)とTASK-25(manage reset registry bucket限定化: 廃止1・改訂3・新規3・id不変)とTASK-26(multipart Complete要求のpart checksum SHA256引き継ぎ: upload新規1)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)とTASK-7(pipeline profile化: config新規8・cli新規4+verify/docs文言改訂・除外4)と実運用file schema適合(2026-11-03: 1件)とTASK-9(local catalog DB+Web frontend・P1/P2 wave: 新規feature 2ファイルcatalog 11条件+server 7条件・除外14)とTASK-9 P3(読取APIテスト先行: server +11条件・新規frontend area 5条件・除外整理)反映済み。TASK-1〜5・TASK-20・TASK-23・TASK-25・TASK-26・TASK-7分ともテスト作成済み・実装済み(240条件すべてcover。TASK-7分は2026-11-03実装後に全件pass・条件書4fileの[meta]verified=true)。TASK-9 catalog 11条件はP1実装(2026-11-05)後に全件pass([meta]verified=true)。TASK-9 server 7条件はP2実装後に全件pass・P3分11条件はテスト先行(実装前のため[meta]verified=false・2026-11-05時点で全条件cover済み) |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(18ファイル・274条件・excluded 60件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-23(--from-list単独許容化・空リスト警告: cli改訂1・plan source追記1+新規2・id不変)とTASK-25(manage reset registry bucket限定化: 廃止1・改訂3・新規3・id不変)とTASK-26(multipart Complete要求のpart checksum SHA256引き継ぎ: upload新規1)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)とTASK-7(pipeline profile化: config新規8・cli新規4+verify/docs文言改訂・除外4)と実運用file schema適合(2026-11-03: 1件)とTASK-9(local catalog DB+Web frontend・P1/P2 wave: 新規feature 2ファイルcatalog 11条件+server 7条件・除外14)とTASK-9 P3(読取APIテスト先行: server +11条件・新規frontend area 5条件・除外整理)反映済み。TASK-1〜5・TASK-20・TASK-23・TASK-25・TASK-26・TASK-7分ともテスト作成済み・実装済み(240条件すべてcover。TASK-7分は2026-11-03実装後に全件pass・条件書4fileの[meta]verified=true)。TASK-9 catalog 11条件はP1実装(2026-11-05)後に全件pass([meta]verified=true)。TASK-9 catalog 11条件(P1)・server 18条件(P2+P3)・frontend 5条件(P3)とも2026-11-05実装後に全件pass・[meta]verified=true(frontend.tomlはvitest 11passで同様にverified=true) |
 | tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(TASK-7 profile schema([profiles.dev]+追加profile)組立・AMAZING_BACKUP_HOMEによるXDG規定path統合・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
 | tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |

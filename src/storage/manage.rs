@@ -1022,8 +1022,7 @@ fn cmd_manage_catalog_sync(ctx: &CtxArgs) -> i32 {
 /// 戻り値はCLI向けの結果message(stdoutの`catalog: `以降)。
 pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
     use crate::catalog::{
-        CatalogDb, ReflectOrigin, SourceMtimes, Validator, STATUS_ERROR, STATUS_FRESH,
-        STATUS_STALE,
+        CatalogDb, ReflectOrigin, STATUS_ERROR, STATUS_FRESH, STATUS_STALE, SourceMtimes, Validator,
     };
     let session = open_session_with_pipeline(ctx)?;
     let key_path = resolve_key(ctx, session.cfg.as_ref())?;
@@ -1053,7 +1052,9 @@ pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
     // sync_state行が無く・registry file自体が不在(この環境に書込履歴が一切無い)の場合:
     // 同期すべきremote索引の参照情報も無いため、未書込namespaceとして空cacheを確定し
     // S3へ問い合わせない(registryがある場合は通常どおりHEAD検証から始める)
-    if db.sync_state(&session.aws.bucket, &session.aws.prefix)?.is_none()
+    if db
+        .sync_state(&session.aws.bucket, &session.aws.prefix)?
+        .is_none()
         && !session
             .cfg
             .as_ref()
@@ -1082,7 +1083,11 @@ pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
     let fetch = super::fetch_index_confirmed(&session, &key_path, &head);
     match fetch {
         Ok((header, entries, confirmed, fetched)) => {
-            let status = if confirmed { STATUS_FRESH } else { STATUS_STALE };
+            let status = if confirmed {
+                STATUS_FRESH
+            } else {
+                STATUS_STALE
+            };
             db.replace_scope(
                 &session.aws.bucket,
                 &session.aws.prefix,
@@ -1099,7 +1104,8 @@ pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
                 if confirmed {
                     String::new()
                 } else {
-                    "・WARNING: 取得中に索引が変化したためstale扱いです(再実行で確定します)".to_string()
+                    "・WARNING: 取得中に索引が変化したためstale扱いです(再実行で確定します)"
+                        .to_string()
                 }
             ))
         }

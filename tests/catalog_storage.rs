@@ -7,8 +7,8 @@
 mod common;
 
 use common::{
-    aws_lifecycle_toml, make_archive, read_calls, run_bin_env, write_file, StorageFixture,
-    StorageOpts,
+    StorageFixture, StorageOpts, aws_lifecycle_toml, make_archive, read_calls, run_bin_env,
+    write_file,
 };
 
 /// calls.log追記分(実行前後の差分行)。
@@ -42,7 +42,10 @@ fn catalog_db_path_and_file_permissions() {
     let (code, stdout, stderr) = fx.push_from_list(&[], &[(&a, Some("alpha"))], &[]);
     assert_eq!(code, 0, "push(事前): {stdout}{stderr}");
     let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
-    assert_eq!(code, 0, "manage catalog sync(実装前は64でfailを許容): {stdout}{stderr}");
+    assert_eq!(
+        code, 0,
+        "manage catalog sync(実装前は64でfailを許容): {stdout}{stderr}"
+    );
 
     let db = fx.catalog_db();
     let meta = std::fs::metadata(&db).expect("$ABH/catalog.dbが作成されている");
@@ -54,11 +57,7 @@ fn catalog_db_path_and_file_permissions() {
     );
 
     // XDG_STATE_HOME解決側(ABH未指定): <state>/amazing-backup/ が0700で作られる
-    let xdg_state = fx
-        .state
-        .parent()
-        .expect("tmp dir")
-        .join("xdg-state");
+    let xdg_state = fx.state.parent().expect("tmp dir").join("xdg-state");
     let (code, stdout, stderr) = run_bin_env(
         &[
             "manage",
@@ -179,7 +178,10 @@ fn catalog_list_cache_hit_after_head_check() {
     let before = snapshot_calls(&fx);
     let (code, stdout, stderr) = fx.list("files", &[]);
     assert_eq!(code, 0, "list files: {stdout}{stderr}");
-    assert!(stdout.contains("alpha"), "cache経由でも索引内容を表示: {stdout}");
+    assert!(
+        stdout.contains("alpha"),
+        "cache経由でも索引内容を表示: {stdout}"
+    );
     let after = snapshot_calls(&fx);
     let added = added_calls(&before, &after);
     assert_eq!(
@@ -259,11 +261,8 @@ fn catalog_cache_miss_refreshes_db() {
         }
     }
     fx.rewrite_index(&lines);
-    let (code, stdout, stderr) = fx.list_env(
-        "files",
-        &[],
-        &[("FAKE_S3_FAIL_CP_FOR", index_key.as_str())],
-    );
+    let (code, stdout, stderr) =
+        fx.list_env("files", &[], &[("FAKE_S3_FAIL_CP_FOR", index_key.as_str())]);
     assert_eq!(code, 5, "取得失敗時は転送エラー: {stdout}{stderr}");
 }
 
@@ -313,7 +312,10 @@ fn catalog_push_reflects_db_and_stales_on_failure() {
     let before = snapshot_calls(&fx);
     let (code, stdout, stderr) = fx.list("files", &[]);
     assert_eq!(code, 0, "破損後のlist: {stdout}{stderr}");
-    assert!(stdout.contains("gamma"), "S3経路でも最新内容を表示: {stdout}");
+    assert!(
+        stdout.contains("gamma"),
+        "S3経路でも最新内容を表示: {stdout}"
+    );
     let after = snapshot_calls(&fx);
     let added = added_calls(&before, &after);
     assert!(
@@ -383,12 +385,8 @@ fn catalog_scope_isolation_multi_profile() {
     // prod側: push b.zip + sync(--profile prod)
     let b = fx.data_root.join("b.zip");
     make_archive(&b, 2048);
-    let (code, stdout, stderr) = fx.push_from_list_env(
-        &[],
-        &[(&b, Some("beta"))],
-        &["--profile", "prod"],
-        &[],
-    );
+    let (code, stdout, stderr) =
+        fx.push_from_list_env(&[], &[(&b, Some("beta"))], &["--profile", "prod"], &[]);
     assert_eq!(code, 0, "push(prod): {stdout}{stderr}");
     let (code, stdout, stderr) = fx.manage("catalog", &["sync", "--profile", "prod"]);
     assert_eq!(code, 0, "sync(prod): {stdout}{stderr}");
@@ -397,7 +395,10 @@ fn catalog_scope_isolation_multi_profile() {
     let (code, dev_out, stderr) = fx.list("files", &[]);
     assert_eq!(code, 0, "list(dev): {dev_out}{stderr}");
     assert!(dev_out.contains("alpha"), "dev側の内容: {dev_out}");
-    assert!(!dev_out.contains("beta"), "他scope(prod)のentityは混入しない: {dev_out}");
+    assert!(
+        !dev_out.contains("beta"),
+        "他scope(prod)のentityは混入しない: {dev_out}"
+    );
 
     let (code, prod_out, stderr) = fx.list("files", &["--profile", "prod"]);
     assert_eq!(code, 0, "list(prod): {prod_out}{stderr}");
@@ -426,7 +427,10 @@ fn catalog_cli_refresh_flag_forces_reload() {
     let before = snapshot_calls(&fx);
     let (code, stdout, stderr) = fx.list("files", &["--refresh"]);
     assert_eq!(code, 0, "list --refresh: {stdout}{stderr}");
-    assert!(stdout.contains("alpha"), "再取得した索引内容を表示: {stdout}");
+    assert!(
+        stdout.contains("alpha"),
+        "再取得した索引内容を表示: {stdout}"
+    );
     let after = snapshot_calls(&fx);
     let added = added_calls(&before, &after);
     assert_eq!(
@@ -452,7 +456,10 @@ fn catalog_json_format_compat_between_routes() {
     let (code, cached, stderr) = fx.list("files", &["--format", "json"]);
     assert_eq!(code, 0, "list --format json(cache hit): {cached}{stderr}");
     let (code, refreshed, stderr) = fx.list("files", &["--refresh", "--format", "json"]);
-    assert_eq!(code, 0, "list --refresh --format json(S3): {refreshed}{stderr}");
+    assert_eq!(
+        code, 0,
+        "list --refresh --format json(S3): {refreshed}{stderr}"
+    );
     assert_eq!(
         cached, refreshed,
         "cache経路とS3再取得経路の--format json出力は等価"
@@ -461,8 +468,7 @@ fn catalog_json_format_compat_between_routes() {
     assert!(
         serde_json::from_str::<serde_json::Value>(&cached).is_ok()
             || cached.lines().all(|l| {
-                !l.trim().is_empty()
-                    && serde_json::from_str::<serde_json::Value>(l.trim()).is_ok()
+                !l.trim().is_empty() && serde_json::from_str::<serde_json::Value>(l.trim()).is_ok()
             }),
         "--format json出力はJSONとしてparse可能: {cached}"
     );

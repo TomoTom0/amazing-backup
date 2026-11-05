@@ -107,11 +107,12 @@ pub fn cmd_query(args: &QueryArgs) -> i32 {
 }
 
 /// entityのcategory一致判定(--category絞り込み・いずれかのlocation.category一致)。
-fn category_matched(e: &IndexFileEntry, want: Option<&str>) -> bool {
+pub(crate) fn category_matched(e: &IndexFileEntry, want: Option<&str>) -> bool {
     want.is_none_or(|c| e.locations.iter().any(|l| l.category == c))
 }
 
-fn location_json(l: &IndexLocation) -> serde_json::Value {
+/// location 1行分のJSON(--format json・API共通の語彙。TASK-9 P3読取APIと共用)。
+pub(crate) fn location_json(l: &IndexLocation) -> serde_json::Value {
     serde_json::json!({
         "source_path": l.source_path,
         "category": l.category,
@@ -121,8 +122,8 @@ fn location_json(l: &IndexLocation) -> serde_json::Value {
     })
 }
 
-/// entityの要約JSON(--format json・query/list系共通形)。
-fn entry_summary_json(e: &IndexFileEntry, with_versions: bool) -> serde_json::Value {
+/// entityの要約JSON(--format json・query/list系共通形。TASK-9 P3読取APIと共用)。
+pub(crate) fn entry_summary_json(e: &IndexFileEntry, with_versions: bool) -> serde_json::Value {
     let latest = e.versions.first();
     let mut obj = serde_json::json!({
         "uuid": e.uuid,
@@ -618,7 +619,7 @@ pub fn cmd_diff(args: &DiffArgs) -> i32 {
 
 /// 突合対象外のkey判定: 予約領域(sys)と{prefix}data/配下のmetadata_接頭辞file名
 /// (いずれも索引管理外・TASK-18 5.11)。
-fn diff_out_of_scope(prefix: &str, key: &str) -> bool {
+pub(crate) fn diff_out_of_scope(prefix: &str, key: &str) -> bool {
     let reserve_prefix = format!("{prefix}{}/", layout::RESERVE_SEGMENT);
     if key.starts_with(reserve_prefix.as_str()) {
         return true;

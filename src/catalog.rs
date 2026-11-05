@@ -12,7 +12,9 @@
 //! 置換は単一transactionでdelete+insertする(原子的置換・途中状態を作らない)。
 
 use crate::errors::{BackupError, BackupResult};
-use crate::index::{IndexFileEntry, IndexHeader, IndexLocation, IndexPin, IndexVersion, INDEX_SCHEMA};
+use crate::index::{
+    INDEX_SCHEMA, IndexFileEntry, IndexHeader, IndexLocation, IndexPin, IndexVersion,
+};
 use crate::s3::S3Backend;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -114,8 +116,10 @@ impl SourceMtimes {
         for w in &reduced.file_writes {
             mt.by_identity
                 .insert(w.identity_hash.clone(), w.source_mtime.clone());
-            mt.by_uuid_sha
-                .insert((w.uuid.clone(), w.source_sha256.clone()), w.source_mtime.clone());
+            mt.by_uuid_sha.insert(
+                (w.uuid.clone(), w.source_sha256.clone()),
+                w.source_mtime.clone(),
+            );
         }
         mt
     }
@@ -227,6 +231,18 @@ fn migrations() -> rusqlite_migration::Migrations<'static> {
                 payload_json TEXT NOT NULL);
             "#,
         ),
+        // TASK-9 12章P3: POST /api/diffの最終結果保存(設計6章「結果をDB保存」)。
+        // cache class(再実行で置換される導出物)・scope単位に最新1件のみ保持する。
+        // manage catalog rebuildの置換対象(2章cache class列挙)には含めない(索引由来
+        // でなく突合実行由来のため。突合結果は常に再実行で再構築可能)
+        M::up(
+            r#"
+            CREATE TABLE diff_results (
+                scope TEXT PRIMARY KEY,
+                performed_at TEXT NOT NULL,
+                result_json TEXT NOT NULL);
+            "#,
+        ),
     ])
 }
 
@@ -254,14 +270,20 @@ fn ensure_private_parent(db_path: &Path) -> BackupResult<()> {
         use std::os::unix::fs::DirBuilderExt;
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true).mode(0o700);
-        builder
-            .create(parent)
-            .map_err(|e| BackupError::Config(format!("catalog DB dirの作成に失敗({}): {e}", parent.display())))?;
+        builder.create(parent).map_err(|e| {
+            BackupError::Config(format!(
+                "catalog DB dirの作成に失敗({}): {e}",
+                parent.display()
+            ))
+        })?;
     }
     #[cfg(not(unix))]
     {
         std::fs::create_dir_all(parent).map_err(|e| {
-            BackupError::Config(format!("catalog DB dirの作成に失敗({}): {e}", parent.display()))
+            BackupError::Config(format!(
+                "catalog DB dirの作成に失敗({}): {e}",
+                parent.display()
+            ))
         })?;
     }
     Ok(())
@@ -319,10 +341,7 @@ impl CatalogDb {
             Ok(conn)
         };
         let mut conn = open_db().map_err(|e| {
-            BackupError::Config(format!(
-                "catalog DBを開けない({}): {e}",
-                db_path.display()
-            ))
+            BackupError::Config(format!("catalog DBを開けない({}): {e}", db_path.display()))
         })?;
         migrations()
             .to_latest(&mut conn)
@@ -390,8 +409,15 @@ impl CatalogDb {
     /// freshness判定: sync_state行が存在しstatus=freshかつvalidator一致(設計4章:
     /// 別process起動時のHEAD 1回 validator確認と組合わせて使う)。自端末書込直後の
     /// 反映(Written由来)を含む=照会系cache hitの判定。
-    pub fn is_fresh(&self, bucket: &str, prefix: &str, validator: &Validator) -> BackupResult<bool> {
-        Ok(matches!(self.sync_state(bucket, prefix)?, Some(st) if st.status == STATUS_FRESH && st.validator_matches(validator)))
+    pub fn is_fresh(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        validator: &Validator,
+    ) -> BackupResult<bool> {
+        Ok(
+            matches!(self.sync_state(bucket, prefix)?, Some(st) if st.status == STATUS_FRESH && st.validator_matches(validator)),
+        )
     }
 
     /// replica取得の省略判定(manage catalog sync専用): 照会系のis_freshに加えて
@@ -405,9 +431,11 @@ impl CatalogDb {
         prefix: &str,
         validator: &Validator,
     ) -> BackupResult<bool> {
-        Ok(matches!(self.sync_state(bucket, prefix)?, Some(st) if st.status == STATUS_FRESH
+        Ok(
+            matches!(self.sync_state(bucket, prefix)?, Some(st) if st.status == STATUS_FRESH
             && !st.fetched_at.is_empty()
-            && st.validator_matches(validator)))
+            && st.validator_matches(validator)),
+        )
     }
 
     /// HEAD検証一致の記録(last_verified_at更新・statusはfreshのまま)。
@@ -585,10 +613,14 @@ impl CatalogDb {
                 .prepare("SELECT uuid, title FROM entities WHERE scope = ?1 ORDER BY ordinal")
                 .map_err(|e| BackupError::Internal(format!("entities準備に失敗: {e}")))?;
             let rows = stmt
-                .query_map([&scope], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .query_map([&scope], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
                 .map_err(|e| BackupError::Internal(format!("entities読込に失敗: {e}")))?;
             for row in rows {
-                entities.push(row.map_err(|e| BackupError::Internal(format!("entities行読取に失敗: {e}")))?);
+                entities.push(
+                    row.map_err(|e| BackupError::Internal(format!("entities行読取に失敗: {e}")))?,
+                );
             }
         }
         // versions(uuid・ordinal順)
@@ -622,8 +654,8 @@ impl CatalogDb {
                 })
                 .map_err(|e| BackupError::Internal(format!("versions読込に失敗: {e}")))?;
             for row in rows {
-                let (uuid, v) = row
-                    .map_err(|e| BackupError::Internal(format!("versions行読取に失敗: {e}")))?;
+                let (uuid, v) =
+                    row.map_err(|e| BackupError::Internal(format!("versions行読取に失敗: {e}")))?;
                 versions.entry(uuid).or_default().push(v);
             }
         }
@@ -655,8 +687,8 @@ impl CatalogDb {
                 })
                 .map_err(|e| BackupError::Internal(format!("pins読込に失敗: {e}")))?;
             for row in rows {
-                let (uuid, p) = row
-                    .map_err(|e| BackupError::Internal(format!("pins行読取に失敗: {e}")))?;
+                let (uuid, p) =
+                    row.map_err(|e| BackupError::Internal(format!("pins行読取に失敗: {e}")))?;
                 pins.entry(uuid).or_default().push(p);
             }
         }
@@ -686,8 +718,8 @@ impl CatalogDb {
                 })
                 .map_err(|e| BackupError::Internal(format!("locations読込に失敗: {e}")))?;
             for row in rows {
-                let (uuid, l) = row
-                    .map_err(|e| BackupError::Internal(format!("locations行読取に失敗: {e}")))?;
+                let (uuid, l) =
+                    row.map_err(|e| BackupError::Internal(format!("locations行読取に失敗: {e}")))?;
                 locations.entry(uuid).or_default().push(l);
             }
         }
@@ -718,6 +750,94 @@ impl CatalogDb {
         };
         Ok((header, entries))
     }
+
+    /// 当該scopeのpending_items読み出し(P3時点はscan未実装のため常に空。
+    /// GET /api/pendingのschema枠がこの読み出し経路で接続される)。
+    pub fn pending_items(&self, bucket: &str, prefix: &str) -> BackupResult<Vec<PendingItem>> {
+        let scope = scope_key(bucket, prefix);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT source_root, path, size, mtime, status, last_scan_at \
+                 FROM pending_items WHERE scope = ?1 ORDER BY source_root, path",
+            )
+            .map_err(|e| BackupError::Internal(format!("pending_items準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map([&scope], |r| {
+                Ok(PendingItem {
+                    source_root: r.get(0)?,
+                    path: r.get(1)?,
+                    size: r.get(2)?,
+                    mtime: r.get(3)?,
+                    status: r.get(4)?,
+                    last_scan_at: r.get(5)?,
+                })
+            })
+            .map_err(|e| BackupError::Internal(format!("pending_items読込に失敗: {e}")))?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(
+                row.map_err(|e| BackupError::Internal(format!("pending_items行読取に失敗: {e}")))?,
+            );
+        }
+        Ok(items)
+    }
+
+    /// diff実行結果の保存(設計6章: POST /api/diffの結果をDB保存。scope単位に
+    /// 最新1件のみ保持=再実行で置換)。
+    pub fn save_diff_result(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        performed_at: &str,
+        result_json: &serde_json::Value,
+    ) -> BackupResult<()> {
+        let scope = scope_key(bucket, prefix);
+        let text = serde_json::to_string(result_json)
+            .map_err(|e| BackupError::Internal(format!("diff結果のJSON化に失敗: {e}")))?;
+        self.conn
+            .execute(
+                "INSERT INTO diff_results (scope, performed_at, result_json) VALUES (?1, ?2, ?3)\
+                 ON CONFLICT(scope) DO UPDATE SET performed_at = ?2, result_json = ?3",
+                rusqlite::params![scope, performed_at, text],
+            )
+            .map_err(|e| BackupError::Internal(format!("diff結果の保存に失敗: {e}")))?;
+        Ok(())
+    }
+
+    /// 保存済みの最終diff結果(未実行はNone。result_jsonをparseして返す)。
+    pub fn load_diff_result(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> BackupResult<Option<serde_json::Value>> {
+        let scope = scope_key(bucket, prefix);
+        let mut stmt = self
+            .conn
+            .prepare("SELECT result_json FROM diff_results WHERE scope = ?1")
+            .map_err(|e| BackupError::Internal(format!("diff結果準備に失敗: {e}")))?;
+        let row = stmt
+            .query_row([&scope], |r| r.get::<_, String>(0))
+            .optional()
+            .map_err(|e| BackupError::Internal(format!("diff結果読込に失敗: {e}")))?;
+        match row {
+            None => Ok(None),
+            Some(text) => serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|e| BackupError::Internal(format!("保存済みdiff結果のparseに失敗: {e}"))),
+        }
+    }
+}
+
+/// pending_items 1行分(設計2章schema・§3のscan結果。P5で書込が実装される)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingItem {
+    pub source_root: String,
+    pub path: String,
+    pub size: i64,
+    pub mtime: String,
+    pub status: String,
+    pub last_scan_at: String,
 }
 
 /// 空の索引header(sync_state不在時のload_entries用)。
@@ -739,9 +859,7 @@ fn scope_filter_entries(entries: &[IndexFileEntry], prefix: &str) -> Vec<IndexFi
         .iter()
         .filter_map(|e| {
             let mut scoped = e.clone();
-            scoped
-                .versions
-                .retain(|v| v.s3_key.starts_with(prefix));
+            scoped.versions.retain(|v| v.s3_key.starts_with(prefix));
             scoped.pins.retain(|p| p.s3_key.starts_with(prefix));
             if scoped.versions.is_empty() && scoped.pins.is_empty() {
                 None
@@ -943,23 +1061,43 @@ mod tests {
             ),
             (
                 "pending_items",
-                vec!["scope", "source_root", "path", "size", "mtime", "status", "last_scan_at"],
+                vec![
+                    "scope",
+                    "source_root",
+                    "path",
+                    "size",
+                    "mtime",
+                    "status",
+                    "last_scan_at",
+                ],
             ),
         ];
         for (table, expect_cols) in cache_tables {
             let cols = columns(table);
             for c in expect_cols {
-                assert!(cols.contains(&c.to_string()), "{table}に{c}列がある: {cols:?}");
+                assert!(
+                    cols.contains(&c.to_string()),
+                    "{table}に{c}列がある: {cols:?}"
+                );
             }
         }
         let persistent_tables = [
-            ("credentials", vec!["credential_id", "passkey_json", "name", "created_at"]),
-            ("push_intents", vec!["id", "recorded_at", "kind", "payload_json"]),
+            (
+                "credentials",
+                vec!["credential_id", "passkey_json", "name", "created_at"],
+            ),
+            (
+                "push_intents",
+                vec!["id", "recorded_at", "kind", "payload_json"],
+            ),
         ];
         for (table, expect_cols) in persistent_tables {
             let cols = columns(table);
             for c in expect_cols {
-                assert!(cols.contains(&c.to_string()), "{table}に{c}列がある: {cols:?}");
+                assert!(
+                    cols.contains(&c.to_string()),
+                    "{table}に{c}列がある: {cols:?}"
+                );
             }
         }
     }
@@ -994,14 +1132,30 @@ mod tests {
     #[test]
     fn replace_scope_scopes_cache_and_keeps_persistent_class() {
         let (_tmp, mut db) = open_test_db("cat-scope");
-        db.insert_credential_for_test("cred-1").expect("credentials挿入");
+        db.insert_credential_for_test("cred-1")
+            .expect("credentials挿入");
         let dev_key = "amazing-backup/data/u1/default.age";
         let other_key = "prod-ns/data/u2/default.age";
-        replace_default(&mut db, "b1", "amazing-backup/", &[entry("u1", "a.zip", dev_key)]);
-        replace_default(&mut db, "b1", "prod-ns/", &[entry("u2", "b.zip", other_key)]);
+        replace_default(
+            &mut db,
+            "b1",
+            "amazing-backup/",
+            &[entry("u1", "a.zip", dev_key)],
+        );
+        replace_default(
+            &mut db,
+            "b1",
+            "prod-ns/",
+            &[entry("u2", "b.zip", other_key)],
+        );
 
         // dev側scopeの置換を再度実行してもprod側のcache行は消えない(冪等・衝突なし)
-        replace_default(&mut db, "b1", "amazing-backup/", &[entry("u1", "a.zip", dev_key)]);
+        replace_default(
+            &mut db,
+            "b1",
+            "amazing-backup/",
+            &[entry("u1", "a.zip", dev_key)],
+        );
         let (_, prod_entries) = db.load_entries("b1", "prod-ns/").unwrap();
         assert_eq!(prod_entries.len(), 1, "後からの置換が他scopeを消さない");
         assert_eq!(prod_entries[0].title, "b.zip");
@@ -1009,16 +1163,26 @@ mod tests {
         // 永続classはcache置換でdropされない
         assert_eq!(db.credential_count().unwrap(), 1, "credentialsは保持");
         replace_default(&mut db, "b1", "prod-ns/", &[]);
-        assert_eq!(db.credential_count().unwrap(), 1, "rebuild相当の置換後も保持");
+        assert_eq!(
+            db.credential_count().unwrap(),
+            1,
+            "rebuild相当の置換後も保持"
+        );
 
         // prefix外の版・pinは当該scopeへ格納しない(混入防止)
         let (_, dev_entries) = db.load_entries("b1", "amazing-backup/").unwrap();
         for e in &dev_entries {
             for v in &e.versions {
-                assert!(v.s3_key.starts_with("amazing-backup/"), "prefix外の版は混入しない");
+                assert!(
+                    v.s3_key.starts_with("amazing-backup/"),
+                    "prefix外の版は混入しない"
+                );
             }
             for p in &e.pins {
-                assert!(p.s3_key.starts_with("amazing-backup/"), "prefix外のpinは混入しない");
+                assert!(
+                    p.s3_key.starts_with("amazing-backup/"),
+                    "prefix外のpinは混入しない"
+                );
             }
         }
     }
@@ -1052,15 +1216,16 @@ mod tests {
         // 反映直後は同一process内で無条件fresh(validatorはreflectが確定済み)
         assert!(db.is_fresh("b1", "p1/", &v).unwrap(), "反映直後はfresh");
         // 別validatorではfreshとしない(次process起動時のHEAD検証が不一致を検出する側)
-        assert!(!db
-            .is_fresh("b1", "p1/", &Validator::default())
-            .unwrap());
+        assert!(!db.is_fresh("b1", "p1/", &Validator::default()).unwrap());
         // entry構造の完全復元(並び・versions/pins/locations)
         let (h, loaded) = db.load_entries("b1", "p1/").unwrap();
         assert_eq!(h.entries, 2);
         assert_eq!(loaded, entries, "反映時のentry構造をordinal順に復元");
         // status失効(stale化)でfreshでなくなる(旧freshを残さない)
         db.mark_status("b1", "p1/", STATUS_STALE).unwrap();
-        assert!(!db.is_fresh("b1", "p1/", &v).unwrap(), "stale化後はfreshでない");
+        assert!(
+            !db.is_fresh("b1", "p1/", &v).unwrap(),
+            "stale化後はfreshでない"
+        );
     }
 }

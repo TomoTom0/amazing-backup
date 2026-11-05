@@ -24,6 +24,41 @@ export function isHealthResponse(v: unknown): v is HealthResponse {
   return isRecord(v) && typeof v['status'] === 'string'
 }
 
+/** GET /api/sync の応答形式(TASK-9設計6章: sync状態。未sync時はstatus="unknown"・
+ *  各時刻fieldは空文字列。型ガードで検証し不一致はinternal扱いにする) */
+export type SyncStateResponse = {
+  scope: string
+  status: string
+  index_etag: string
+  index_version_id: string
+  fetched_at: string
+  last_write_at: string
+  last_verified_at: string
+  entry_count: number
+}
+
+export function isSyncStateResponse(v: unknown): v is SyncStateResponse {
+  if (!isRecord(v)) return false
+  const fields = [
+    'scope',
+    'status',
+    'index_etag',
+    'index_version_id',
+    'fetched_at',
+    'last_write_at',
+    'last_verified_at',
+  ]
+  return (
+    fields.every((f) => typeof v[f] === 'string') &&
+    typeof v['entry_count'] === 'number'
+  )
+}
+
+/** sync状態の取得(保護API。P2〜P3はfail-closed 503のためerror扱いになる) */
+export function fetchSyncState(): Promise<ApiResult<SyncStateResponse>> {
+  return apiGet('/api/sync', isSyncStateResponse)
+}
+
 /** API呼び出し結果: 成功(型ガード通過data)または失敗(ApiError+HTTP status) */
 export type ApiResult<T> =
   | { ok: true; data: T }

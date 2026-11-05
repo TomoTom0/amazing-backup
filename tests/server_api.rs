@@ -6,12 +6,16 @@
 
 mod common;
 
-use common::{free_local_port, make_archive, wait_http_ready, TestDir};
+use common::{TestDir, free_local_port, make_archive, wait_http_ready};
 use std::path::PathBuf;
 
 /// serveを起動し(指定portのserver.tomlを書いて)listen待ち合わせる。
 /// 戻り値: (addr, BinChild, stderr log path)。
-fn start_serve(fx: &common::StorageFixture, port: u16, tag: &str) -> (String, common::BinChild, PathBuf) {
+fn start_serve(
+    fx: &common::StorageFixture,
+    port: u16,
+    tag: &str,
+) -> (String, common::BinChild, PathBuf) {
     let body = format!("[server]\nlisten_addr = \"127.0.0.1\"\nport = {port}\n");
     fx.write_server_toml(&body);
     let stderr_path = fx
@@ -158,7 +162,8 @@ fn serve_protected_endpoints_fail_closed() {
 /// 閉鎖維持を回帰検出する)。P3読取APIのendpoint群(+POST)が未認証で内容を返さない。
 #[test]
 fn serve_p3_read_api_still_fail_closed_until_auth() {
-    let Some(fx) = common::StorageFixture::new("srv-closed-p3", common::StorageOpts::default()) else {
+    let Some(fx) = common::StorageFixture::new("srv-closed-p3", common::StorageOpts::default())
+    else {
         return;
     };
     let a = fx.data_root.join("a.zip");
@@ -206,7 +211,8 @@ fn serve_shuts_down_gracefully_on_sigterm() {
 /// [covers:server.startup-sync-blocking-boundary] 起動時syncはasync境界経由でpanicしない
 #[test]
 fn serve_startup_sync_runs_without_panic() {
-    let Some(fx) = common::StorageFixture::new("srv-startup", common::StorageOpts::default()) else {
+    let Some(fx) = common::StorageFixture::new("srv-startup", common::StorageOpts::default())
+    else {
         return;
     };
     // 索引objectが実在する状態(起動時HEAD validator検証+DB反映が実際に走る構成)
