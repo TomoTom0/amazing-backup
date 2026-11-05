@@ -11,16 +11,23 @@
 #   `// [covers:<id>]`形式で紐付け(verify-conditions.pyのTS/Vue走査)。
 #   実装前のためfrontend.sync-state-endpoint-client分のテストは実行failを許容
 #   (pnpm vitest runは実行可能・client.tsへのGET /api/sync対応はP3実装で追加)。
+# 2026-11-05: TASK-9 Phase P4(passkey認証)対応でテスト先行の条件追加(4条件)。
+#   excluded「LoginView・passkey認証UI」分を解消しauth store(src/stores/auth.ts)・
+#   client(src/api/client.tsのauth系)層を条件化。実装前のため新条件のテストは
+#   実行failを許容(pnpm vitest runは実行可能)。実browserのWebAuthn API
+#   (navigator.credentials.create/get)観測はexcluded維持(vitestはnode環境のため
+#   store/client層のみ条件化し、LoginViewのUI誘導状態はauth storeのgetterで担保)。
+#   GET /api/auth/status応答形式はserver.tomlの解釈({authenticated,credentials})に整合。
 
 [meta]
 feature = "frontend"
 source_file = "frontend/src/"
-verified = true
-verified_at = "2026-11-05"
-verified_by = "claude"
+verified = false
+verified_at = ""
+verified_by = ""
 test_command = "pnpm --dir frontend vitest run"
 source_hash = "4afa2bbecccc90f9223556fe20d6dcb6ab60c981"
-note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・12章P3時点のfrontend期待動作。API client(src/api/client.ts)とsync store(src/stores/sync.ts)のvitestで担保(画面の本格実装はP4/P5)。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
+note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3+P4時点のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth)のvitestで担保。P3分5条件は2026-11-05実装後に全件passで検証記録を復帰済み。P4テスト先行(2026-11-05)のためverified=falseへ(P4実装後に復帰)。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
 
 [[condition]]
 id = "frontend.api-error-body-guard"
@@ -67,10 +74,46 @@ given = "fetch mock(503+{\"error\":{\"code\":\"configuration\",\"message\":...}}
 expect_return_shape = "ok=false・error.code=configuration・httpStatus=503としてstoreのlastErrorに保持されdataは返らない"
 source_lines = "frontend/src/api/client.spec.ts:31"
 
+[[condition]]
+id = "frontend.auth-status-client-and-store"
+target_function = "frontend api/client.ts GET /api/auth/status応答型ガード・stores/auth.ts認証状態取得"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GET /api/auth/status=認証状態・登録credential数)・7章(Pinia stores: auth)・8章(D9 single user)・12章P4(LoginView)"
+description = "GET /api/auth/status応答({\"authenticated\": boolean, \"credentials\": number})の型ガードを持ち、auth storeは認証状態・credential数を取得して保持する(LoginViewのUI誘導・passkey登録済み状態表示の基盤。応答形式はserver.auth-status-endpointの解釈に整合) (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(200+{authenticated:false,credentials:1})でのauth storeの取得"
+expect_return_shape = "型ガードは形式一致のみtrue。storeはauthenticated=false・credentialCount=1を保持する(失敗時はlastError)"
+source_lines = "frontend/src/api/auth.spec.ts:12; frontend/src/stores/auth.spec.ts:18"
+
+[[condition]]
+id = "frontend.auth-logout-store"
+target_function = "frontend stores/auth.ts logout(logout状態管理)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: POST /api/auth/logout=認証要・session破棄)・7章(Pinia stores: auth)・12章P4"
+description = "auth storeのlogoutはPOST /api/auth/logoutを呼び、成功で認証状態を未認証へ戻す(logout状態管理。未認証401応答でもUI状態は未認証へ揃う) (vitest)"
+given = "fetch mock(200+{}と401+{\"error\":{\"code\":\"unauthenticated\",...}})でのauth storeのlogout呼び出し"
+expect_return_shape = "いずれもauthenticated=falseへ遷移する(logout後は未認証状態)"
+source_lines = "frontend/src/stores/auth.spec.ts:49"
+
+[[condition]]
+id = "frontend.unauthenticated-401-handling"
+target_function = "frontend api/client.ts・stores/auth.ts(保護API 401の扱い)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(error体系: unauthenticated=401)・12章P4(保護API開放=未認証401)・7章(未認証時のUI誘導)"
+description = "保護APIの401(unauthenticated)はapiGetのerror扱い({ok:false, error:{code:\"unauthenticated\"}, httpStatus:401})となり、P2〜P3の503(configuration=閉鎖)とは区別されて未認証時のUI誘導(login案内)へ接続する(空dataを表示しない点はfail-closed扱いと共通) (vitest)"
+given = "fetch mock(401+{\"error\":{\"code\":\"unauthenticated\",\"message\":...}})での保護API呼び出し(apiGet/fetchSyncState)"
+expect_return_shape = "ok=false・error.code=unauthenticated・httpStatus=401(503 configurationとはcodeで区別可能)"
+source_lines = "frontend/src/api/auth.spec.ts:57"
+
+[[condition]]
+id = "frontend.login-view-auth-ui-state"
+target_function = "frontend stores/auth.ts authUi getter(LoginView UI誘導状態)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: LoginView・bootstrap token入力・login/register UI)・8章(登録UIはtoken提示時のみ=credential数0+token案内)・12章P4(LoginView)"
+description = "auth storeはLoginViewのUI誘導状態をgetterで提供する: 未取得=unknown・未認証かつcredentials=0はregister(bootstrap token入力による登録案内)・未認証かつcredentials>0はlogin・認証済みはauthenticated。component実描画は実browser観測のため本条件はstore層の状態で担保する (vitest)"
+given = "fetchAuthStatus成功後の各状態(未登録・登録済み未認証・認証済み)でのauthUi getter参照"
+expect_return_shape = "状態に応じてunknown/register/login/authenticatedを返す"
+source_lines = "frontend/src/stores/auth.spec.ts:100"
+
 [[excluded]]
-item = "LoginView・passkey認証UI・認証後の本格画面(EntitiesView・EntityDetailViewのdata表示・router guard)"
-source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: LoginView・EntitiesView・EntityDetailView)・8章(D3)・12章P4(passkey認証・LoginView・保護API開放)"
-reason = "P4(passkey認証)の実装phaseでありP3時点では保護APIがfail-closed(503)のため観測可能な動作が閉鎖表示に限られる。後続waveで条件化する(本waveはfrontend.fail-closed-protected-api-handlingが閉鎖扱いを担保)"
+item = "LoginView componentの実描画・WebAuthn API(navigator.credentials.create/get)の実browser呼出・認証後の本格画面(EntitiesView・EntityDetailViewのdata表示・router guard)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: LoginView・EntitiesView・EntityDetailView・vite dev proxy)・8章(D3 passkey)・12章P4(passkey認証・LoginView)"
+reason = "実browserのWebAuthn API・component描画はvitest(node環境)で観測できない(store/client層のみ条件化しUI誘導状態はauthUi getterで担保)。実機login確認は設計12章P4の手動verify項目・認証後の本格画面は後続wave(実装時に条件化)"
 decided_at = "2026-11-05"
 decided_by = "claude"
 

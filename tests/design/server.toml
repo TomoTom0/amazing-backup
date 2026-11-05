@@ -30,16 +30,25 @@
 #     相当・diffはcmd_diffのJSON語彙)=設計6章「JSON schemaを--format jsonと共通化」
 #   - GET /api/syncは未sync時もstatus="unknown"で200( staleness表示のため常に応答)
 #   - GET /api/diffは未実行時404 not_found(保存済みの最終結果のみ200)
+# 2026-11-05: TASK-9 Phase P4(passkey認証)対応でテスト先行の条件追加(3条件)。
+#   excluded「passkey認証(webauthn-rs・challenge・session付替・login/logout API・
+#   auth系endpoint)」を解消し、認証契約の詳細は新設webauthn.toml(認証area)へ条件化。
+#   server.toml側はauth endpoint群のAPIとしての枠(auth-status応答形式・routing)と
+#   保護API開放(未認証401への置換・認証済みでP3読取API応答)を担保する。
+#   実装前のため新条件のテストは実行failを許容(cargo test --no-runのcompileは通る)。
+#   GET /api/auth/statusの応答形式は設計6章に詳細が無いため解釈で確定:
+#   {"authenticated": <bool>, "credentials": <数>}(未認証・未登録でも200=LoginViewの
+#   UI誘導基盤)。
 
 [meta]
 feature = "server"
 source_file = "src/server.rs"
-verified = true
-verified_at = "2026-11-05"
-verified_by = "claude"
+verified = false
+verified_at = ""
+verified_by = ""
 test_command = "cargo test"
 source_hash = "f852529effcd0bc24b42b843d6abc8f529d9d3da"
-note = "TASK-9設計1章(serve subcommand・async実行境界)・6章(API)・8章(server.toml)・9章(D4 localhost既定)・10章(dist二階建て)・12章P2+P3(読取API)の条件化。P2分(7条件)・P3分(11条件)とも2026-11-05実装後にcargo test全件pass・verify-conditions.py PASSを確認して検証記録を復帰"
+note = "TASK-9設計1章(serve subcommand・async実行境界)・6章(API)・8章(server.toml)・9章(D4 localhost既定)・10章(dist二階建て)・12章P2+P3(読取API)+P4(auth endpoint枠・保護API開放)の条件化。P2分7条件・P3分11条件は2026-11-05実装後に全件passで検証記録を復帰済み。P4テスト先行(2026-11-05)のためverified=falseへ(P4実装後に復帰)"
 
 [[condition]]
 id = "server.serve-subcommand-health"
@@ -203,12 +212,32 @@ given = "400(page=abc)・404(不在uuid)・502(HEAD失敗注入のPOST /api/sync
 expect_return_shape = "全error応答が{\"error\":{\"code\",\"message\"}}形式(messageは空でないstring)で、messageにABH・一時dir等の内部pathが含まれない"
 source_lines = "src/server.rs:1733"
 
-[[excluded]]
-item = "passkey認証(webauthn-rs・challenge・session付替・login/logout API・auth系endpoint)"
-source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(D3/D9)・12章Phase P4"
-reason = "P4(passkey認証)の実装phaseでありP3の対象外。後続waveでwebauthn系areaへ条件化する"
-decided_at = "2026-11-04"
-decided_by = "claude"
+[[condition]]
+id = "server.auth-status-endpoint"
+target_function = "server::handler GET /api/auth/status"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GET /api/auth/statusは認証不要=認証状態・登録credential数)・8章(D9 single user・credentials table)・12章P4"
+description = "GET /api/auth/statusは認証不要で認証状態と登録credential数を{\"authenticated\": <bool>, \"credentials\": <数>}形式で200応答する(未認証・未登録でも応答=LoginViewのUI誘導(register/loginどちらを案内するか)の判断基盤。応答形式は設計6章に詳細が無いため本条件書の解釈として確定) (unit, fake seam)"
+given = "credential数0の未認証状態と、credentials tableへ1件挿入後でのrouter oneshot"
+expect_return_shape = "未登録・未認証は200+{\"authenticated\":false,\"credentials\":0}・挿入後は200+credentials=1"
+source_lines = "src/server.rs:1935"
+
+[[condition]]
+id = "server.auth-endpoints-routing"
+target_function = "server::handler auth endpoint群(register/login start/finish・logout)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: POST /api/auth/register/start,/finish=bootstrap token必須・POST /api/auth/login/start,/finish・POST /api/auth/logout=要)・12章P4"
+description = "設計6章のauth endpoint群(POST /api/auth/register/start,/finish・POST /api/auth/login/start,/finish・POST /api/auth/logout)は/api/配下にroutingされ、未認証requestでも404 fallbackではなく定義済みendpointとして応答する(register/startはtoken必須のためtoken無しは401 unauthenticated・logoutは要認証のため未認証401。token/challenge/session契約の詳細はwebauthn areaが担保) (unit, fake seam)"
+given = "各auth endpointへの未認証request(token無しbody・cookie無し)"
+expect_return_shape = "register/start・logoutは401 unauthenticated・login/start・register/finish・login/finishも404でない定義済み応答(実装前はroutingが無くfallbackの503 configurationでfailを許容)"
+source_lines = "src/server.rs:1965"
+
+[[condition]]
+id = "server.protected-api-open-with-auth"
+target_function = "serve router(保護API開放=protected_fail_closedの認証gateへの置換)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 12章P4(passkey認証=保護API開放)・P2(保護APIはfail-closed=未認証503/401)・指摘#11(P3の機密APIはP4までfail-closed)・6章(error体系: unauthenticated=401)"
+description = "P4実装後は保護APIの未認証応答が503(configuration)から401(unauthenticated)へ置換わる(protected_fail_closed middlewareのsession検証gateへの置換)。認証済みsessionではP3読取API(entities等)が応答する。未認証401のerror body詳細はwebauthn.unauthenticated-protected-api-401・認証済みでのflow完結観測はwebauthn.register-login-flow-server-to-serverと共通 (integration, fake seam)"
+given = "serve起動状態でのGET /api/entities(未認証・cookie無し)"
+expect_return_shape = "HTTP 401で{\"error\":{\"code\":\"unauthenticated\",...}}形式(503 configurationでない=P2〜P3のfail-closedからの置換観測。実装前は503のままでfailを許容)"
+source_lines = "src/server.rs:2169; tests/server_api.rs:322"
 
 [[excluded]]
 item = "dist埋め込み時の静的配信応答(release build実機)とVite dev proxy(40512)の実browser接続確認"

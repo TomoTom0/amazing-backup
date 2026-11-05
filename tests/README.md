@@ -593,11 +593,52 @@ catalog DB(索引replica)起点(未書込namespace空結果成功の条件書要
 read_index_for_queryは未書込nsで設定エラーになるため)・GET /api/entities 1page件数は50固定
 (設計未規定・page=0は400)・GET /api/sync未sync時は全key入り(status=unknown)
 
+2026-11-05: TASK-9 Phase P4(passkey認証)テスト先行の条件書更新・テストコード作成
+(tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(passkey認証契約・指摘#8)・6章(auth
+endpoint群)・11章(server-to-server自動検証=指摘#12)・12章P4)。実装前のため新規testは赤を
+許容(cargo test --no-runのcompileは通る・既存342testは緑維持)。
+- webauthn.tomlを新設(14条件): bootstrap token生成(stdout表示・128bit乱数base64)・
+  原子的消費(1回限り)・期限10分・再起動失効・credential数0+token不一致の登録閉鎖
+  (fail-closed)・追加登録はlogin済み+token必須・challenge一度限り/120秒/anonymous
+  session cookie結合・register+login flowのserver-to-server完結・login成功時session ID
+  付替・cookie属性(HttpOnly+SameSite=Strict)・session期限24h・logout session破棄・
+  未認証保護API 401。excluded 6件(実機login確認・manage auth remove・RP ID変更時旧
+  credential無効化・session永続store・依存導入形態・127.0.0.1 origin実挙動)
+- server.tomlへ3条件追加(excluded「passkey認証」を解消): auth-status-endpoint
+  ({"authenticated","credentials"}応答=設計6章に詳細が無いため解釈確定)・
+  auth-endpoints-routing(auth群のroutingとtoken必須/要認証の枠)・
+  protected-api-open-with-auth(503 configurationから401 unauthenticatedへの置換+認証済み
+  でP3読取API応答・protected_fail_closed置換の観測)
+- frontend.tomlへ4条件追加(excluded「LoginView・passkey認証UI」を解消し文言縮小):
+  auth-status-client-and-store・auth-logout-store・unauthenticated-401-handling・
+  login-view-auth-ui-state(authUi getter=unknown/register/login/authenticated。
+  component実描画とWebAuthn API呼出はexcluded維持)
+- webauthn-rs 0.6系test支援の調査(設計「実装時検証事項」2・crates.io/docs.rs):
+  0.6.2がstable最新。virtual authenticator/soft passkey系のtest支援は存在しない
+  (fake moduleはCredentialID偽装生成=account enumeration対策用)。よってserver-to-server
+  検証はWebAuthn仕様準拠の合成認証応答(soft passkey)方式を採用し条件書へ明記
+- 設計8章にrequest/response詳細が規定されない点は解釈を条件書(webauthn.toml header)へ
+  反映: register/startのrequest bodyは{"token":...}・token不正は401 unauthenticated・
+  register/login finishのbodyはWebAuthn応答型相当のJSON。期限系(token 10分・challenge
+  120秒・session 24h)の自動観測のためP4実装への時刻注入seam提供をtestability要求として記載
+- テスト: src/server.rs内#[cfg(test)]へP4 handler単体test 15件(AuthFlow=同一router使い
+  回しでtoken/challenge/sessionのstateful観測・JSON body+Cookie+Set-Cookie拡張・
+  restart()で再起動相当・soft passkey合成応答helperは署名合成をTODO(P4実装時に
+  webauthn-rs応答型へ接続))・tests/server_api.rsへ2件(serve --bootstrapのstdout token
+  観測=stdout piped+thread+recv_timeout・未認証401置換観測)・frontendへ
+  api/auth.spec.ts(4test・うち401扱い1件は既存client実装で緑)+stores/auth.spec.ts
+  (7test・src/stores/auth.ts未実装でfile load error赤)
+- 実行結果: verify-conditions.py PASS(295条件すべてcover・dangling無し)・cargo test
+  --no-fail-fastで既存342緑+新規17赤(lib unit 15+server_api 2=auth endpoint未実装に
+  よる503 fallback/--bootstrap未知のexit 64由来)・pnpm vitest 既存11緑+新規4赤
+  (3fail+store file load error)・新規1緑(401扱い)。server.toml・frontend.tomlの[meta]は
+  テスト先行のためverified=falseへ・webauthn.tomlはverified=falseで新設(P4実装後に復帰)
+
 ## 構成
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(18ファイル・274条件・excluded 60件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-23(--from-list単独許容化・空リスト警告: cli改訂1・plan source追記1+新規2・id不変)とTASK-25(manage reset registry bucket限定化: 廃止1・改訂3・新規3・id不変)とTASK-26(multipart Complete要求のpart checksum SHA256引き継ぎ: upload新規1)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)とTASK-7(pipeline profile化: config新規8・cli新規4+verify/docs文言改訂・除外4)と実運用file schema適合(2026-11-03: 1件)とTASK-9(local catalog DB+Web frontend・P1/P2 wave: 新規feature 2ファイルcatalog 11条件+server 7条件・除外14)とTASK-9 P3(読取APIテスト先行: server +11条件・新規frontend area 5条件・除外整理)反映済み。TASK-1〜5・TASK-20・TASK-23・TASK-25・TASK-26・TASK-7分ともテスト作成済み・実装済み(240条件すべてcover。TASK-7分は2026-11-03実装後に全件pass・条件書4fileの[meta]verified=true)。TASK-9 catalog 11条件はP1実装(2026-11-05)後に全件pass([meta]verified=true)。TASK-9 catalog 11条件(P1)・server 18条件(P2+P3)・frontend 5条件(P3)とも2026-11-05実装後に全件pass・[meta]verified=true(frontend.tomlはvitest 11passで同様にverified=true) |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(19ファイル・295条件・excluded 65件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-23(--from-list単独許容化・空リスト警告: cli改訂1・plan source追記1+新規2・id不変)とTASK-25(manage reset registry bucket限定化: 廃止1・改訂3・新規3・id不変)とTASK-26(multipart Complete要求のpart checksum SHA256引き継ぎ: upload新規1)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)とTASK-7(pipeline profile化: config新規8・cli新規4+verify/docs文言改訂・除外4)と実運用file schema適合(2026-11-03: 1件)とTASK-9(local catalog DB+Web frontend・P1/P2 wave: 新規feature 2ファイルcatalog 11条件+server 7条件・除外14)とTASK-9 P3(読取APIテスト先行: server +11条件・新規frontend area 5条件・除外整理)とTASK-9 P4(passkey認証テスト先行: 新規webauthn area 14条件・server +3条件・frontend +4条件・serverのpasskey除外を解消)反映済み。TASK-1〜5・TASK-20・TASK-23・TASK-25・TASK-26・TASK-7分ともテスト作成済み・実装済み(240条件すべてcover。TASK-7分は2026-11-03実装後に全件pass・条件書4fileの[meta]verified=true)。TASK-9 catalog 11条件はP1実装(2026-11-05)後に全件pass([meta]verified=true)。TASK-9 catalog 11条件(P1)・server 18条件(P2+P3)・frontend 5条件(P3)とも2026-11-05実装後に全件pass・[meta]verified=true(frontend.tomlはvitest 11passで同様にverified=true)。TASK-9 P4分(21条件)はテスト先行のため未実装=赤(server.toml・frontend.tomlの[meta]verified=falseへ・webauthn.tomlはverified=falseで新設) |
 | tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(TASK-7 profile schema([profiles.dev]+追加profile)組立・AMAZING_BACKUP_HOMEによるXDG規定path統合・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
 | tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |
@@ -620,9 +661,10 @@ read_index_for_queryは未書込nsで設定エラーになるため)・GET /api/
 | tests/config_init_unit.rs | TASK-1 config initのunit(render_init_templateのTOML basic string符号化=「"」「\」入りpathのparse復元一致と劣化template内部エラー1・cmd_config_init_with_writerの失敗注入= EEXIST競合/IO失敗によるrollback。lib API直呼び) | 作成済み(TASK-1実装前compile error許容) |
 | tests/docs_pages.rs | TASK-4 docsサブコマンド(unit 4: 変換関数substitute_version_lines合成入力9.9.9+test側独立期待値・対象行が入力末尾の改行あり/なし両caseの保持=レビュー指摘対応・正本version literal sync+対象行count==1・終了コード表の両doc一致(固定期待集合・code→区分・重複拒否・空集合拒否)。integration 8: bin subprocess+AMAZING_BACKUP_HOME空dir固定=各ページbyte一致・usage version行・config marker置換+区切り行・llm skill frontmatter・llm snippet pointer・ページ一覧・invalid syntax 64本文非出力・書込失敗BrokenPipe=0/ENOSPC=4(/dev/full・相手close socketpair)。Write注入系unit観測はsrc/docs.rs内unit test 4件が担う) | 作成済み(TASK-4実装後に全件pass。TASK-7のconfig-marker-replaced改訂分も実装後に全件pass) |
 | tests/catalog_storage.rs | TASK-9 catalogエリア(DB path権限・schema/migration・sync validator取得とGET省略・list cache hit・cache miss反映とerror扱い・書込反映とstale化・rebuild冪等・scope分離・--refresh・--format json互換・diff/get/list jobs従来直接。bin subprocess+fake seam) | 作成済み(P1実装2026-11-05後に全件pass) |
-| tests/server_api.rs | TASK-9 serverエリア(serve subcommand health・server.toml listen/port既定40510・config initのserver.toml生成・dist欠落APIのみ起動warning・保護API fail-closed・graceful shutdown・起動時syncのasync境界+P3読取API endpoint群のserve経由fail-closed維持。bin subprocess+素朴HTTP client+SIGTERM) | 作成済み(P2実装2026-11-05後に全件pass。P3分fail-closed維持testは実装前後とも緑) |
-| src/server.rs 内 #[cfg(test)] P3分 | TASK-9 serverエリアP3(読取API handler単体test: entities/detail/versions/pins/locations/pending/sync状態/sync refresh/diff/error体系。router oneshot=tower ServiceExt・DBはABH配下catalog.dbへP1 API注入・S3側はfake seam空state) | 作成済み(P3実装前のため11test赤=実装後に緑化) |
-| frontend/src/**/*.spec.ts | TASK-9 frontendエリアのvitest(api/client.tsの型ガード・apiGet結果mapping・sync store状態遷移=緑。GET /api/sync応答型ガード・fetchSyncState=P3実装待ちの赤) | 作成済み(pnpm --dir frontend run test。P3実装後に全件緑化) |
+| tests/server_api.rs | TASK-9 serverエリア(serve subcommand health・server.toml listen/port既定40510・config initのserver.toml生成・dist欠落APIのみ起動warning・保護API fail-closed・graceful shutdown・起動時syncのasync境界+P3読取API endpoint群のserve経由fail-closed維持+P4分(serve --bootstrapのstdout token観測=stdout piped spawn・未認証401への置換観測)。bin subprocess+素朴HTTP client+SIGTERM) | 作成済み(P2実装2026-11-05後に全件pass。P3分fail-closed維持testは実装前後とも緑。P4分2testはテスト先行のため赤) |
+| src/server.rs 内 #[cfg(test)] P3分 | TASK-9 serverエリアP3(読取API handler単体test: entities/detail/versions/pins/locations/pending/sync状態/sync refresh/diff/error体系。router oneshot=tower ServiceExt・DBはABH配下catalog.dbへP1 API注入・S3側はfake seam空state) | 作成済み(P3実装後に全件緑化) |
+| src/server.rs 内 #[cfg(test)] P4分 | TASK-9 webauthn/serverエリアP4(passkey認証handler単体test: auth status・auth endpoint routing・bootstrap token消費/期限/再起動失効/登録閉鎖/追加登録条件・challenge消費/session結合・register+login flow(soft passkey合成応答)・session付替/cookie属性/期限・logout・未認証401。AuthFlow=同一router使い回し+JSON body/Cookie/Set-Cookie観測・restart()で再起動相当) | 作成済み(P4テスト先行のため15test赤=実装後に緑化) |
+| frontend/src/**/*.spec.ts | TASK-9 frontendエリアのvitest(api/client.tsの型ガード・apiGet結果mapping・sync store状態遷移・GET /api/sync応答型ガード・fetchSyncState=緑+P4分(auth status型ガード・fetchAuthStatus・401 unauthenticated扱い=緑1件のみ・auth store fetchAuthStatus/logout/authUi getter=src/stores/auth.ts未実装で赤)) | 作成済み(pnpm --dir frontend run test。P4分はテスト先行のため赤=実装後に緑化) |
 | src/**/*.rs 内 #[cfg(test)] | cargo単体test(S3実行はS3Backend fake(FakeS3)差替) | 作成済み |
 
 cargo testの階層: unit=src/各モジュール内`#[cfg(test)] mod tests`、
@@ -666,8 +708,9 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | metadata.toml | metadata | src/metadata.rs | 4 | TASK-18設計2章/5.5(MetadataDoc導出・変更時のみPUT・latest_source_path 3形態・title変更キーローテーション) |
 | docs.toml | docs | src/docs.rs | 10 | TASK-4設計3章・3.9(各ページbyte一致・version置換3段検出=変換関数unit/integration出力/正本sync・config marker置換=render_init_template再利用・終了コード表doc間一致・SKILL.md形式・snippet pointer形式・ページ一覧・invalid-syntax usage error 64・書込失敗0/4)+TASK-7(config-marker-replacedを2profile新schemaのtemplate syncへ文言改訂・id不変) |
 | catalog.toml | catalog | src/catalog.rs | 11 | TASK-9設計2章(DB・D1/D11: path権限・schema・table契約)・4章(同期・D10: validator・freshness)・5章(CLI照会cache・D7)・12章P1 |
-| server.toml | server | src/server.rs | 18 | TASK-9設計1章(D2 serve)・6章(API)・8章(server.toml)・9章(D4)・10章(dist二階建て)・12章P2(serve基盤7条件)+P3(読取API 11条件: entities/versions/pins/locations/pending/sync/diff・error体系=指摘#14) |
-| frontend.toml | frontend | frontend/src/ | 5 | TASK-9設計7章(frontend構成)・6章(error body形式)・4章(D10 staleness)・12章P3時点のfrontend期待動作(api client型ガード・apiGet結果mapping・sync store・GET /api/sync応答・fail-closed扱い) |
+| server.toml | server | src/server.rs | 21 | TASK-9設計1章(D2 serve)・6章(API)・8章(server.toml)・9章(D4)・10章(dist二階建て)・12章P2(serve基盤7条件)+P3(読取API 11条件: entities/versions/pins/locations/pending/sync/diff・error体系=指摘#14)+P4(auth-status応答形式・auth endpoint routing・保護API開放=未認証401への置換の3条件。認証契約の詳細はwebauthn.toml) |
+| webauthn.toml | webauthn | src/server.rs | 14 | TASK-9設計8章(passkey認証契約: bootstrap token生成/原子的消費/期限10分/再起動失効/登録閉鎖/追加登録条件・challenge一度限り・120秒・anonymous session結合・register+login flow(server-to-server・soft passkey合成応答)・session ID付替/cookie属性/期限24h・logout・未認証401)・6章(auth endpoint群)・11章(server-to-server自動検証=指摘#12)・12章P4 |
+| frontend.toml | frontend | frontend/src/ | 9 | TASK-9設計7章(frontend構成)・6章(error body形式)・4章(D10 staleness)・8章(passkey認証UI)・12章P3(api client型ガード・apiGet結果mapping・sync store・GET /api/sync応答・fail-closed扱い)+P4(auth status client/store・logout状態管理・401 unauthenticated扱い・authUi getterによるLoginView UI誘導状態) |
 
 - 分割理由: test-structureの`[meta].source_file`(検証対象の実装ファイル・ファイル単位に1つ)が
   7エリアでそれぞれ別moduleに対応し、単一ファイルでは特定できないため。分割によりidの`<area>`部と
@@ -691,7 +734,7 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | (integration) encrypt実age系・fingerprint.stanza-tag-matches-age-header・verify roundtrip系 | tests/age_roundtrip.rs 等(実age不在環境ではskip扱い) | 設計書4章・6章・8章 |
 | (integration, fake seam) upload系(UPL-015〜019等)・restore系・S3 backend/credential系 | tests/encrypt_batch.rs・tests/restore.rs・tests/s3_backend.rs(bin subprocess・fake seam。実ageを要するtestは不在環境でskip扱い) | TASK-5設計書(tmp/tasks/tm-5/design_restore.md)・TASK-9設計書(tmp/tasks/tm-9/design_sdk_migration.md) |
 | (integration, fake seam) TASK-10のpin / retention / cli追加系 / index構築系 | tests/*.rs(bin subprocess・fake seam。TASK-10段階5のテスト作成で新設) | TASK-10設計書(tmp/tasks/tm-10/design_s3_storage.md) |
-| (unit, fake seam) TASK-9 catalog系 / serverのP3読取API系 | src/catalog.rs・src/server.rs 内`#[cfg(test)]`(server P3はrouter oneshot・DBはP1 API注入・S3側はAMAZING_BACKUP_FAKE_S3_STATE) | TASK-9設計書(tmp/tasks/tm-9/design_catalog-frontend-auth.md) |
+| (unit, fake seam) TASK-9 catalog系 / serverのP3読取API系 / webauthn系(P4) | src/catalog.rs・src/server.rs 内`#[cfg(test)]`(server P3はrouter oneshot・DBはP1 API注入・S3側はAMAZING_BACKUP_FAKE_S3_STATE。P4はAuthFlow=同一router使い回し+soft passkey合成応答) | TASK-9設計書(tmp/tasks/tm-9/design_catalog-frontend-auth.md) |
 | (vitest) TASK-9 frontend系 | frontend/src/**/*.spec.ts(pnpm --dir frontend run test・fetch mock+Pinia) | TASK-9設計書(tmp/tasks/tm-9/design_catalog-frontend-auth.md) |
 
 テストは条件書の各条件に`[covers:<id>]`タグで紐付ける。Rustテストではテスト関数の

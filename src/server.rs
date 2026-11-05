@@ -1776,4 +1776,554 @@ mod tests {
         );
         drop(env);
     }
+
+    // -----------------------------------------------------------------------
+    // P4(passkey認証)のhandler単体test(設計12章P4・8章の認証契約・11章の
+    // server-to-server自動検証=指摘#12)。HTTP request/responseの連鎖(router
+    // oneshot)で認証flowを観測する。bootstrap token・challenge・sessionはserver
+    // stateに保持されるため、P3のapi()(呼び出しごとに新規routerを作る)と違い
+    // AuthFlowで同一routerを使い回す(restart()でstateを作り直す=再起動相当)。
+    // webauthn-rs 0.6系にvirtual authenticator/soft passkeyのtest支援は存在しない
+    // (2026-11-05調査・条件書tests/design/webauthn.toml header参照)ため、WebAuthn
+    // 仕様準拠の合成認証応答(soft passkey)でregister/loginを完結する。
+    // 実装前のため本test群は実行failを許容(cargo test --no-runのcompileは通る)。
+
+    /// test用の固定bootstrap token(秘密ではなく契約観測用の合成値。実装のtoken生成が
+    /// 128bit乱数base64であることの観測はwebauthn.bootstrap-token-generation)。
+    const AUTH_TEST_TOKEN: &str = "YXV0aC10b2tlbi0xMjgtYml0LXRlc3QtdmFsdWU";
+    /// soft passkeyのcredential id(固定値・base64url符号化)。
+    const SOFT_PASSKEY_CREDENTIAL_ID: &str = "c29mdC1wYXNza2V5LWNyZWRlbnRpYWwtaWQ";
+
+    /// P4認証flow観測用環境(api_env+同一routerを使い回す呼び出し経路)。
+    /// bootstrap token・challenge・sessionはrouterのserver stateに保持される
+    /// (callのたびにstateを作り直さない=single-use消費・session継続を観測できる)。
+    struct AuthFlow {
+        /// api_envの生存期間をflowと同じにする(env書換えの復元をtest末尾へ)
+        #[allow(dead_code)]
+        env: ApiEnv,
+        router: axum::Router,
+    }
+
+    impl AuthFlow {
+        fn new(tag: &str) -> AuthFlow {
+            AuthFlow {
+                env: api_env(tag),
+                router: build_router(api_test_state()),
+            }
+        }
+
+        /// server stateを作り直す(serve再起動相当。token・challenge等のin-memory
+        /// 状態は消える=webauthn.bootstrap-token-restart-invalidationの観測)。
+        /// TODO(P4実装): api_test_state()へbootstrap token(AUTH_TEST_TOKEN)を注入する
+        /// seamが加わった場合はこの呼び出しのみ追随(期待値は不変)。
+        fn restart(&mut self) {
+            self.router = build_router(api_test_state());
+        }
+
+        /// oneshot呼び出し(JSON body+Cookie header付き)。応答は
+        /// (status, JSON body, Set-Cookie一覧)。bodyがJSONで無い場合はNull。
+        fn call(
+            &self,
+            method: &str,
+            uri: &str,
+            body: Option<serde_json::Value>,
+            cookie: Option<&str>,
+        ) -> (u16, serde_json::Value, Vec<String>) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("oneshot runtime");
+            rt.block_on(async {
+                use tower::ServiceExt as _;
+                let mut builder = axum::http::Request::builder()
+                    .method(
+                        axum::http::Method::from_bytes(method.as_bytes())
+                            .expect("method"),
+                    )
+                    .uri(uri);
+                if let Some(c) = cookie {
+                    builder = builder.header("cookie", c);
+                }
+                let req = match body {
+                    Some(b) => builder
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(b.to_string()))
+                        .expect("request build"),
+                    None => builder
+                        .body(axum::body::Body::empty())
+                        .expect("request build"),
+                };
+                let resp = self
+                    .router
+                    .clone()
+                    .oneshot(req)
+                    .await
+                    .expect("oneshot");
+                let status = resp.status().as_u16();
+                let set_cookies = resp
+                    .headers()
+                    .get_all(axum::http::header::SET_COOKIE)
+                    .iter()
+                    .filter_map(|v| v.to_str().ok().map(String::from))
+                    .collect();
+                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .expect("body read");
+                let value =
+                    serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+                (status, value, set_cookies)
+            })
+        }
+    }
+
+    /// Set-Cookie列から最初のcookieの(name, value)を抽出(session ID比較用)。
+    fn first_cookie(set_cookies: &[String]) -> Option<(String, String)> {
+        let first = set_cookies.first()?;
+        let pair = first.split(';').next()?.trim();
+        pair.split_once('=')
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+    }
+
+    /// catalog.db(ABH配下)へcredentialを1件挿入(登録済み状態の作成=P1 test用API)。
+    fn auth_seed_credential(credential_id: &str) {
+        let db = crate::catalog::CatalogDb::open().expect("catalog DB open");
+        db.insert_credential_for_test(credential_id)
+            .expect("credential挿入");
+    }
+
+    /// register/finishへ送る合成認証応答(RegisterPublicKeyCredential相当のJSON構造)。
+    /// TODO(P4実装): optionsのchallengeからclientDataJSON(type=webauthn.create・
+    /// challenge・origin=rp_origin)を組み、authenticatorData(rp_idのSHA-256+flags
+    /// UP|UV)・attestationObject(fmt="none"+authData+COSE EC2 P-256 ES256公開鍵)を
+    /// 合成する(P-256鍵pairはtest側で生成)。実装前は構造のみで署名検証に落ちて
+    /// failを許容する(webauthn-rs 0.6系の応答型・base64url符号化への接続はP4実装時)。
+    fn soft_register_response(_options: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "id": SOFT_PASSKEY_CREDENTIAL_ID,
+            "rawId": SOFT_PASSKEY_CREDENTIAL_ID,
+            "type": "public-key",
+            "response": {
+                // TODO(P4): fmt=none+COSE鍵の合成attestationObject
+                "attestationObject": "o2NmbQ",
+                // TODO(P4): challenge束ねのclientDataJSON合成
+                "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIn0",
+                "transports": ["internal"],
+            },
+        })
+    }
+
+    /// login/finishへ送る合成認証応答(PublicKeyCredential相当のJSON構造)。
+    /// TODO(P4実装): challengeからclientDataJSON(type=webauthn.get・challenge・origin)
+    /// を組み、authenticatorData+signature(P-256 ECDSA・SHA-256)を合成する。
+    fn soft_login_assertion(_challenge: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "id": SOFT_PASSKEY_CREDENTIAL_ID,
+            "rawId": SOFT_PASSKEY_CREDENTIAL_ID,
+            "type": "public-key",
+            "response": {
+                // TODO(P4): rp_id_hash+flagsのauthenticatorData合成
+                "authenticatorData": "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2M",
+                // TODO(P4): challenge束ねのclientDataJSON合成
+                "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0",
+                // TODO(P4): P-256 ECDSA署名合成
+                "signature": "MEUCIQDb3ZhbHVlLXNpZ25hdHVyZS1wbGFjZWhvbGRlcg",
+                "userHandle": null,
+            },
+        })
+    }
+
+    /// [covers:server.auth-status-endpoint]
+    /// GET /api/auth/statusは認証不要で認証状態と登録credential数を応答する
+    /// (未登録・未認証でも200=LoginViewのUI誘導基盤)。
+    #[test]
+    fn api_auth_status_responds_auth_state_and_credential_count() {
+        let flow = AuthFlow::new("srv-auth-status");
+        let (status, body, _) = flow.call("GET", "/api/auth/status", None, None);
+        assert_eq!(status, 200, "GET /api/auth/statusは200: {body}");
+        assert_eq!(
+            body.get("authenticated").and_then(|v| v.as_bool()),
+            Some(false),
+            "未認証はauthenticated=false: {body}"
+        );
+        assert_eq!(
+            body.get("credentials").and_then(|v| v.as_i64()),
+            Some(0),
+            "未登録はcredentials=0: {body}"
+        );
+
+        // credentials tableへ1件挿入後はcredentials=1(passkey登録済み状態)
+        auth_seed_credential("soft-credential-1");
+        let (status, body, _) = flow.call("GET", "/api/auth/status", None, None);
+        assert_eq!(status, 200);
+        assert_eq!(
+            body.get("credentials").and_then(|v| v.as_i64()),
+            Some(1),
+            "挿入後はcredentials=1: {body}"
+        );
+    }
+
+    /// [covers:server.auth-endpoints-routing]
+    /// auth endpoint群は404 fallbackでなく定義済みendpointとして応答する
+    /// (register/startはtoken必須401・logoutは要認証401)。
+    #[test]
+    fn api_auth_endpoints_are_routed() {
+        let flow = AuthFlow::new("srv-auth-routing");
+        // register/start: token無しは401 unauthenticated(bootstrap token必須)
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/register/start",
+            Some(serde_json::json!({})),
+            None,
+        );
+        assert_ne!(status, 404, "register/startはroutingされる(404 fallbackでない)");
+        assert_eq!(status, 401, "token無しは401: {body}");
+        expect_error_body(&body, "unauthenticated");
+
+        // 残るauth endpointも404 fallbackでない定義済み応答
+        for (method, path) in [
+            ("POST", "/api/auth/register/finish"),
+            ("POST", "/api/auth/login/start"),
+            ("POST", "/api/auth/login/finish"),
+            ("POST", "/api/auth/logout"),
+        ] {
+            let (status, _, _) =
+                flow.call(method, path, Some(serde_json::json!({})), None);
+            assert_ne!(status, 404, "{method} {path}はroutingされる(404 fallbackでない)");
+        }
+
+        // logoutは要認証(未認証401)
+        let (status, body, _) =
+            flow.call("POST", "/api/auth/logout", Some(serde_json::json!({})), None);
+        assert_eq!(status, 401, "logoutは要認証(未認証401): {body}");
+        expect_error_body(&body, "unauthenticated");
+    }
+
+    /// [covers:webauthn.register-closed-without-valid-token]
+    /// credential数0かつtoken不一致(無し・誤値)なら登録は閉鎖(fail-closed)。
+    #[test]
+    fn api_register_closed_without_valid_token() {
+        let flow = AuthFlow::new("srv-auth-closed");
+        // token無し
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/register/start",
+            Some(serde_json::json!({})),
+            None,
+        );
+        assert_eq!(status, 401, "token無しは401: {body}");
+        expect_error_body(&body, "unauthenticated");
+        // 不一致token
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/register/start",
+            Some(serde_json::json!({"token": "wrong-token-value"})),
+            None,
+        );
+        assert_eq!(status, 401, "不一致tokenは401(登録閉鎖=fail-closed): {body}");
+        expect_error_body(&body, "unauthenticated");
+        // 登録options(challenge)は応答に含まれない
+        assert!(
+            body.get("challenge").is_none() && body.get("publicKey").is_none(),
+            "登録optionsは返らない: {body}"
+        );
+    }
+
+    /// [covers:webauthn.bootstrap-token-single-use]
+    /// tokenは原子的消費(1回限り)。有効tokenでのregister/startは一度だけ成功し、
+    /// 使用済み同一tokenでの再register/startは401で拒否される。
+    #[test]
+    fn api_bootstrap_token_is_consumed_once() {
+        // TODO(P4実装): api_test_state()へのbootstrap token注入seam(AUTH_TEST_TOKEN)を
+        // 通じて有効token状態を作る(実装まで本testはfailを許容)。
+        let flow = AuthFlow::new("srv-auth-token-once");
+        let req = serde_json::json!({"token": AUTH_TEST_TOKEN});
+        // 1回目: 有効tokenでのregister/startは登録options+anonymous session cookie
+        let (status, body, cookies) =
+            flow.call("POST", "/api/auth/register/start", Some(req.clone()), None);
+        assert_eq!(status, 200, "有効tokenでのregister/startは200: {body}");
+        assert!(
+            body.get("challenge").is_some() || body.get("publicKey").is_some(),
+            "登録options(challenge含有)を返す: {body}"
+        );
+        assert!(!cookies.is_empty(), "anonymous session cookie(Set-Cookie)を発行");
+        // 2回目: 同一tokenは消費済みのため拒否(原子的消費=1回限り)
+        let (status, body, _) =
+            flow.call("POST", "/api/auth/register/start", Some(req), None);
+        assert_eq!(status, 401, "使用済みtokenの再使用は401: {body}");
+        expect_error_body(&body, "unauthenticated");
+    }
+
+    /// [covers:webauthn.bootstrap-token-expiry]
+    /// token期限は10分。期限切れtokenでのregister/startは401(登録閉鎖)。
+    #[test]
+    fn api_bootstrap_token_expires_after_10min() {
+        // TODO(P4実装): 時刻注入seamでtoken発行から10分経過を注入してから
+        // register/startを呼ぶ(この位置にseam呼び出しを挿入。実装まで本testは
+        // failを許容・実時間の経過待ちには依存しない)。
+        let flow = AuthFlow::new("srv-auth-token-expiry");
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/register/start",
+            Some(serde_json::json!({"token": AUTH_TEST_TOKEN})),
+            None,
+        );
+        assert_eq!(status, 401, "期限切れtokenは401(不一致と同じ登録閉鎖): {body}");
+        expect_error_body(&body, "unauthenticated");
+    }
+
+    /// [covers:webauthn.bootstrap-token-restart-invalidation]
+    /// tokenはin-memory保持のためserve再起動(=新規server state)で失効する。
+    #[test]
+    fn api_bootstrap_token_invalidated_on_restart() {
+        // TODO(P4実装): api_test_state()へのtoken注入seam(AUTH_TEST_TOKEN)。
+        let mut flow = AuthFlow::new("srv-auth-token-restart");
+        let req = serde_json::json!({"token": AUTH_TEST_TOKEN});
+        let (status, _, _) =
+            flow.call("POST", "/api/auth/register/start", Some(req.clone()), None);
+        assert_eq!(status, 200, "同一state内ではtokenは有効");
+        // stateを作り直す(再起動相当)後は同一tokenは無効(in-memory保持のため)
+        flow.restart();
+        let (status, body, _) = flow.call("POST", "/api/auth/register/start", Some(req), None);
+        assert_eq!(status, 401, "再起動でtokenは失効(永続DBに置かない): {body}");
+        expect_error_body(&body, "unauthenticated");
+    }
+
+    /// [covers:webauthn.additional-register-requires-login-and-token]
+    /// 登録済み(credential数>0)での追加登録はlogin済みsession+tokenの両方必須
+    /// (未loginでのtoken提示のみでは拒否)。
+    #[test]
+    fn api_additional_register_requires_login_and_token() {
+        let flow = AuthFlow::new("srv-auth-additional");
+        auth_seed_credential("existing-credential-1");
+        // TODO(P4実装): token注入seam(AUTH_TEST_TOKEN)。login済みsessionとの併用で
+        // 追加登録が許可される観測はflow test側で強化する。
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/register/start",
+            Some(serde_json::json!({"token": AUTH_TEST_TOKEN})),
+            None,
+        );
+        assert_eq!(status, 401, "未loginでの追加登録は401: {body}");
+        expect_error_body(&body, "unauthenticated");
+    }
+
+    /// [covers:webauthn.challenge-single-use-expiry]
+    /// challengeは一度限り消費・期限120秒。使用済みchallengeでの再finishは拒否。
+    #[test]
+    fn api_challenge_is_consumed_once() {
+        let flow = AuthFlow::new("srv-auth-challenge-once");
+        auth_seed_credential("soft-credential-1");
+        // login/start->finish(soft passkey)完結後に同一challengeで再finish
+        // (finish成功にはP4実装時の署名合成が必要=実装まで本testはfailを許容)
+        let (status, challenge, cookies) =
+            flow.call("POST", "/api/auth/login/start", Some(serde_json::json!({})), None);
+        assert_eq!(status, 200, "login/startはchallengeを返す: {challenge}");
+        let (name, value) = first_cookie(&cookies).expect("anonymous session cookie");
+        let cookie = format!("{name}={value}");
+        let assertion = soft_login_assertion(&challenge);
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/login/finish",
+            Some(assertion.clone()),
+            Some(&cookie),
+        );
+        assert_eq!(status, 200, "login/finish成功(soft passkey): {body}");
+        // 同一challengeでの再finishは拒否(challengeは一度限り消費)
+        let (status, body, _) =
+            flow.call("POST", "/api/auth/login/finish", Some(assertion), Some(&cookie));
+        assert_eq!(status, 401, "使用済みchallengeの再使用は401: {body}");
+        expect_error_body(&body, "unauthenticated");
+        // TODO(P4実装): 時刻注入seamで120秒経過を注入した期限切れchallengeも
+        // 同様に401となることを観測する(実時間の経過待ちには依存しない)。
+    }
+
+    /// [covers:webauthn.challenge-bound-to-session-cookie]
+    /// challengeは発行時のanonymous session cookieと結合(別browserへの転用は拒否)。
+    #[test]
+    fn api_challenge_is_bound_to_anonymous_session_cookie() {
+        let flow = AuthFlow::new("srv-auth-challenge-bind");
+        auth_seed_credential("soft-credential-1");
+        let (status, challenge, cookies) =
+            flow.call("POST", "/api/auth/login/start", Some(serde_json::json!({})), None);
+        assert_eq!(status, 200, "login/start: {challenge}");
+        let (name, _value) = first_cookie(&cookies).expect("anonymous session cookie");
+        // 別cookie(転用先=別browserのsession・同名別値)でfinish
+        let other_cookie = format!("{name}=another-browser-session-value");
+        let assertion = soft_login_assertion(&challenge);
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/login/finish",
+            Some(assertion.clone()),
+            Some(&other_cookie),
+        );
+        assert_eq!(status, 401, "別cookieでのchallenge使用は401(転用拒否): {body}");
+        expect_error_body(&body, "unauthenticated");
+        // cookie無しでも拒否
+        let (status, body, _) =
+            flow.call("POST", "/api/auth/login/finish", Some(assertion), None);
+        assert_eq!(status, 401, "cookie無しのfinishも401: {body}");
+        expect_error_body(&body, "unauthenticated");
+    }
+
+    /// [covers:webauthn.register-login-flow-server-to-server]
+    /// [covers:server.protected-api-open-with-auth]
+    /// server-to-serverでpasskey登録・login flowを完結(soft passkey合成応答)。
+    /// 認証済みsessionで保護API(GET /api/entities)が応答する。
+    #[test]
+    fn api_register_and_login_flow_with_soft_passkey() {
+        let flow = AuthFlow::new("srv-auth-flow");
+        // register: tokenでstart->合成応答でfinish->credentials table(永続class)へ保存
+        // TODO(P4実装): api_test_state()へのtoken注入seam(AUTH_TEST_TOKEN)
+        let (status, options, cookies) = flow.call(
+            "POST",
+            "/api/auth/register/start",
+            Some(serde_json::json!({"token": AUTH_TEST_TOKEN})),
+            None,
+        );
+        assert_eq!(status, 200, "register/start: {options}");
+        let (rname, rvalue) = first_cookie(&cookies).expect("anonymous session cookie");
+        let register_cookie = format!("{rname}={rvalue}");
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/register/finish",
+            Some(soft_register_response(&options)),
+            Some(&register_cookie),
+        );
+        assert_eq!(status, 200, "register/finish(soft passkey): {body}");
+        let db = crate::catalog::CatalogDb::open().expect("catalog DB open");
+        assert_eq!(
+            db.credential_count().expect("credentials計数"),
+            1,
+            "credentials table(永続class)へ保存される"
+        );
+        drop(db);
+
+        // login: start->合成assertionでfinish->認証済みsession
+        let (status, challenge, cookies) =
+            flow.call("POST", "/api/auth/login/start", Some(serde_json::json!({})), None);
+        assert_eq!(status, 200, "login/start: {challenge}");
+        let (lname, lvalue) = first_cookie(&cookies).expect("anonymous session cookie(login)");
+        let login_cookie = format!("{lname}={lvalue}");
+        let (status, body, auth_cookies) = flow.call(
+            "POST",
+            "/api/auth/login/finish",
+            Some(soft_login_assertion(&challenge)),
+            Some(&login_cookie),
+        );
+        assert_eq!(status, 200, "login/finish(soft passkey): {body}");
+        let (aname, avalue) = first_cookie(&auth_cookies).expect("認証済みsession cookie");
+
+        // 認証済みsessionで保護API(P3読取API)が応答する(保護API開放)
+        let auth_cookie = format!("{aname}={avalue}");
+        let (status, body, _) = flow.call("GET", "/api/entities", None, Some(&auth_cookie));
+        assert_eq!(status, 200, "認証済みsessionで保護APIが応答: {body}");
+        assert!(body.get("entities").is_some(), "entity一覧応答: {body}");
+    }
+
+    /// [covers:webauthn.login-session-id-rotation]
+    /// login成功時にsession IDを付け替える(session固定化対策)。
+    #[test]
+    fn api_login_rotates_session_id() {
+        let flow = AuthFlow::new("srv-auth-rotation");
+        auth_seed_credential("soft-credential-1");
+        let (status, _, cookies) =
+            flow.call("POST", "/api/auth/login/start", Some(serde_json::json!({})), None);
+        assert_eq!(status, 200, "login/start");
+        let (name, anon_value) = first_cookie(&cookies).expect("anonymous session cookie");
+        let login_cookie = format!("{name}={anon_value}");
+        let (status, body, cookies) = flow.call(
+            "POST",
+            "/api/auth/login/finish",
+            Some(soft_login_assertion(&serde_json::json!({}))),
+            Some(&login_cookie),
+        );
+        assert_eq!(status, 200, "login成功: {body}");
+        let (_, auth_value) = first_cookie(&cookies).expect("認証済みsession cookie");
+        assert_ne!(
+            anon_value, auth_value,
+            "login成功時にsession IDは付替わる(固定化対策)"
+        );
+    }
+
+    /// [covers:webauthn.session-cookie-attributes]
+    /// session cookieはHttpOnly+SameSite=Strict(localhost既定rp_origin=httpでは
+    /// Secure無し)。
+    #[test]
+    fn api_session_cookie_attributes() {
+        let flow = AuthFlow::new("srv-auth-cookie-attr");
+        auth_seed_credential("soft-credential-1");
+        let (status, _, cookies) =
+            flow.call("POST", "/api/auth/login/start", Some(serde_json::json!({})), None);
+        assert_eq!(status, 200, "login/start");
+        let joined = cookies.join("\n");
+        assert!(joined.contains("HttpOnly"), "HttpOnly必須: {joined}");
+        assert!(
+            joined.contains("SameSite=Strict"),
+            "SameSite=Strict必須: {joined}"
+        );
+        assert!(
+            !joined.contains("Secure"),
+            "localhost既定rp_origin(http)ではSecure無し: {joined}"
+        );
+    }
+
+    /// [covers:webauthn.session-expiry-24h]
+    /// session期限は24時間・非活動で失効(期限切れsessionでの保護API accessは401)。
+    #[test]
+    fn api_session_expires_after_24h() {
+        // TODO(P4実装): 時刻注入seamでlogin成功から24時間経過を注入してから保護API
+        // を呼ぶ(この位置にseam呼び出しを挿入。実装まで本testはfailを許容)。
+        let flow = AuthFlow::new("srv-auth-session-expiry");
+        let (status, body, _) =
+            flow.call("GET", "/api/entities", None, Some("id=expired-session-value"));
+        assert_eq!(status, 401, "期限切れsessionは未認証扱い(401): {body}");
+        expect_error_body(&body, "unauthenticated");
+    }
+
+    /// [covers:webauthn.logout-invalidates-session]
+    /// POST /api/auth/logoutはsessionを破棄する(logout後の同一cookieでの保護API
+    /// accessは401)。
+    #[test]
+    fn api_logout_invalidates_session() {
+        let flow = AuthFlow::new("srv-auth-logout");
+        auth_seed_credential("soft-credential-1");
+        // loginまで完結(soft passkey)
+        let (status, challenge, cookies) =
+            flow.call("POST", "/api/auth/login/start", Some(serde_json::json!({})), None);
+        assert_eq!(status, 200, "login/start");
+        let (name, value) = first_cookie(&cookies).expect("anonymous session cookie");
+        let login_cookie = format!("{name}={value}");
+        let (status, body, cookies) = flow.call(
+            "POST",
+            "/api/auth/login/finish",
+            Some(soft_login_assertion(&challenge)),
+            Some(&login_cookie),
+        );
+        assert_eq!(status, 200, "login成功: {body}");
+        let (aname, avalue) = first_cookie(&cookies).expect("認証済みsession cookie");
+        let auth_cookie = format!("{aname}={avalue}");
+
+        // logoutは200・続く同一cookieでの保護API accessは401(session破棄)
+        let (status, body, _) =
+            flow.call("POST", "/api/auth/logout", None, Some(&auth_cookie));
+        assert_eq!(status, 200, "logoutは200: {body}");
+        let (status, body, _) = flow.call("GET", "/api/entities", None, Some(&auth_cookie));
+        assert_eq!(status, 401, "logout後の同一cookieは401(session破棄): {body}");
+        expect_error_body(&body, "unauthenticated");
+    }
+
+    /// [covers:webauthn.unauthenticated-protected-api-401]
+    /// 未認証での保護endpoint accessは401 unauthenticated(503ではなく。P4の認証gate
+    /// がprotected_fail_closedを置換えた後の観測)。
+    #[test]
+    fn api_unauthenticated_protected_api_is_401() {
+        let flow = AuthFlow::new("srv-auth-401");
+        let (status, body, _) = flow.call("GET", "/api/entities", None, None);
+        assert_eq!(status, 401, "未認証は401(503ではなく): {body}");
+        expect_error_body(&body, "unauthenticated");
+        assert!(
+            body.get("entities").is_none(),
+            "保護対象dataは応答に含まれない: {body}"
+        );
+    }
 }

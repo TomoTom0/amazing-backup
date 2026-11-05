@@ -1,0 +1,210 @@
+# amazing-backup テスト設計条件書(webauthn エリア)
+# 出典: tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(passkey認証: D3/D9・bootstrap
+#   token契約=指摘#8・challenge・session・credential保存=永続class)・6章(auth endpoint群)・
+#   2章(秘密情報境界: bootstrap tokenをAPI応答へ出さない)・11章(server-to-server自動検証=
+#   指摘#12)・12章Phase P4(passkey認証)・「実装時検証事項」2(webauthn-rs 0.6系のtest支援=
+#   virtual authenticator有無)。D1〜D11は2026-11-05ユーザー承認済み。
+# 2026-11-05: TASK-9 Phase P4(passkey認証)waveでテスト先行により新設。server.toml側
+#   excluded「passkey認証(webauthn-rs・challenge・session付替・login/logout API・auth系
+#   endpoint)」を解消し、認証契約を本areaへ条件化する。実装前のため新条件のテストは
+#   実行failを許容(cargo test --no-runのcompileは通る・既存342testは緑維持)。
+#   実装時検証事項2の調査結果(2026-11-05・crates.io/docs.rs): webauthn-rs 0.6.2が
+#   stable最新であり、virtual authenticator/soft passkey系のtest支援moduleは存在しない
+#   (fake moduleはCredentialID生成の偽装=account enumeration対策用で、合成認証応答の
+#   生成ではない)。よってserver-to-server検証はWebAuthn仕様準拠の合成認証応答(soft
+#   passkey)方式とする(test helperはP4実装時にwebauthn-rs 0.6系の応答型・base64url
+#   符号化へ接続する)。
+#   設計8章にrequest/responseの詳細形式が規定されない点は以下の解釈で条件化(実装は
+#   これに従う):
+#   - POST /api/auth/register/startのrequest bodyは {"token": "<bootstrap token>"}。
+#     応答はWebAuthn登録options(PublicKeyCredentialCreationOptions相当のJSON=challenge
+#     含有)+anonymous session cookie(Set-Cookie)。tokenの検証はstart時点で行う
+#   - POST /api/auth/register/finishのrequest bodyはRegisterPublicKeyCredential相当の
+#     JSON(id/rawId/response.attestationObject/clientDataJSON・base64url符号化)
+#   - POST /api/auth/login/startの応答はPublicKeyCredentialRequestOptions相当のJSON
+#     (challenge・allowCredentials)+anonymous session cookie
+#   - POST /api/auth/login/finishのrequest bodyはPublicKeyCredential相当のJSON
+#     (id/rawId/response.authenticatorData/clientDataJSON/signature)
+#   - POST /api/auth/logoutは要認証(未認証は401)・成功で200+session破棄
+#   - tokenの不正(不一致・期限切れ・消費済み)はすべて401 unauthenticated(登録閉鎖=
+#     fail-closed。503や403ではなく認証情報不正の区分)
+#   期限系契約(token 10分・challenge 120秒・session 24h)の自動観測のため、P4実装は
+#   時刻注入seam(testから現在時刻を差し替え可能な経路)を提供する(testability要求。
+
+[meta]
+feature = "webauthn"
+source_file = "src/server.rs"
+verified = false
+verified_at = ""
+verified_by = ""
+test_command = ""
+source_hash = ""
+note = "TASK-9設計8章(passkey認証契約)・6章(auth endpoint群)・12章P4の条件化(P4テスト先行)。bootstrap token・challengeはin-memory、credential保存はcatalog.db credentials table(永続class)。未認証保護API 401・認証済みでの読取API応答はserver.protected-api-open-with-authと連動"
+
+[[condition]]
+id = "webauthn.bootstrap-token-generation"
+target_function = "serve --bootstrap(one-time token生成・stdout表示)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(bootstrap: amazing-backup serve --bootstrapがone-time tokenを生成しstdout表示。tokenは128bit乱数のbase64)・12章P4"
+description = "serve --bootstrapがone-time tokenを生成しstdoutへ表示する。tokenは128bit乱数のbase64(base64 decodeで16byte)で、起動のたびに新規生成される。stdout表示は本人がLoginViewへ入力するための仕様上の出力でありlogへの秘密値出力規律の対象外 (integration, fake seam)"
+given = "server.toml(port=空きport)を配置したABHとfake S3 stateでのserve --bootstrap起動"
+expect_return_shape = "stdoutにtoken行(base64文字列・decodeすると16byte=128bit)が表示され、serveは起動を継続する(health応答可)"
+source_lines = "tests/server_api.rs:269"
+
+[[condition]]
+id = "webauthn.bootstrap-token-single-use"
+target_function = "server::handler POST /api/auth/register/start(token原子的消費)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(指摘#8契約: in-memory保持・原子的消費=consumed flagをatomic swap・1回限り)・6章(register/startはbootstrap token必須)"
+description = "bootstrap tokenは原子的消費(consumed flagのatomic swap・1回限り)。有効tokenでのregister/startは一度だけ成功(登録options+challengeを返す)し、使用済み同一tokenでの再register/startは401 unauthenticatedで拒否される(並行使用を許さないatomic swapが契約。観測は逐次呼び出しで担保) (unit, server-to-server)"
+given = "有効tokenが注入されたserver stateでのregister/startと、同一tokenでの再register/start"
+expect_return_shape = "1回目は200(登録options応答)・2回目は401 unauthenticated"
+source_lines = "src/server.rs:2031"
+
+[[condition]]
+id = "webauthn.bootstrap-token-expiry"
+target_function = "server::handler POST /api/auth/register/start(token期限)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(指摘#8契約: 期限10分)"
+description = "bootstrap tokenの期限は10分。期限切れtokenでのregister/startは401 unauthenticatedで拒否される(期限切れは不一致と同じ登録閉鎖=fail-closed)。観測はP4実装が提供する時刻注入seam経由(実時間10分の経過待ちをしない) (unit, server-to-server)"
+given = "時刻注入seamでtoken発行から10分経過した状態でのregister/start(発行済みtoken)"
+expect_return_shape = "401 unauthenticated(登録optionsは返らない)"
+source_lines = "src/server.rs:2056"
+
+[[condition]]
+id = "webauthn.bootstrap-token-restart-invalidation"
+target_function = "serve(bootstrap tokenのin-memory保持)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(指摘#8契約: in-memory保持・再起動で失効=再発行で運用)・2章(bootstrap one-time tokenはin-memory保持・永続DBに置かない)"
+description = "bootstrap tokenはin-memory保持(永続DBに置かない)のためserve再起動で失効する。同一tokenは新規server state(再起動相当)では無効 (unit, server-to-server)"
+given = "token生成済みserver stateでのregister/start成功後、新規server state(再起動相当)での同一tokenによるregister/start"
+expect_return_shape = "同一state内では200・新規stateでは401 unauthenticated(tokenは永続化されていない)"
+source_lines = "src/server.rs:2074"
+
+[[condition]]
+id = "webauthn.register-closed-without-valid-token"
+target_function = "server::handler POST /api/auth/register/start(登録閉鎖)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(指摘#8契約: credential数0かつtoken不一致なら登録閉鎖=fail-closed・登録UIはtoken提示時のみregister endpointが開く)・12章P4"
+description = "credential数0かつtoken不一致(token無し・誤値)なら登録は閉鎖(fail-closed)される。register/startは登録options・challengeを返さず401 unauthenticatedで応答する(無条件登録開放を許さない) (unit, server-to-server)"
+given = "credential数0(未登録)のserver stateでのregister/start(token無しbody・不一致token)"
+expect_return_shape = "いずれも401 unauthenticated({\"error\":{\"code\",\"message\"}}形式)"
+source_lines = "src/server.rs:2001"
+
+[[condition]]
+id = "webauthn.additional-register-requires-login-and-token"
+target_function = "server::handler POST /api/auth/register/start(追加登録条件)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(追加登録・失効・復旧=指摘#8: 登録済み状態での追加登録はlogin済み+--bootstrap tokenが必要)"
+description = "登録済み(credential数>0)での追加登録はlogin済みsession+bootstrap tokenの両方が必要。未login状態でのtoken提示のみではregister/startは拒否される(single user=D9での乗っ取り登録防止) (unit, server-to-server)"
+given = "credentials tableへ1件挿入済み・未login状態でのregister/start(有効token)"
+expect_return_shape = "401 unauthenticated(未loginでの追加登録は閉鎖)"
+source_lines = "src/server.rs:2091"
+
+[[condition]]
+id = "webauthn.challenge-single-use-expiry"
+target_function = "server::handler POST /api/auth/login(start|finish)のchallenge消費"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(challenge: in-memory・期限120秒・一度限り消費)・6章(login/start,/finish)"
+description = "challengeは期限120秒・一度限り消費。login/finishで使用済みchallengeの再使用は401 unauthenticatedで拒否され、期限120秒経過も同様に拒否される(実時間待ちをしない観測はP4実装の時刻注入seam経由) (unit, server-to-server)"
+given = "login/start->login/finish成功後の同一challengeでの再login/finish"
+expect_return_shape = "再使用は401 unauthenticated(challenge消費済み)"
+source_lines = "src/server.rs:2110"
+
+[[condition]]
+id = "webauthn.challenge-bound-to-session-cookie"
+target_function = "server::handler POST /api/auth/login(start|finish)のchallenge-session結合"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(challenge: 発行時に紐付けるanonymous session cookieと結合=別browserへのchallenge転用防止)・6章"
+description = "challengeは発行時のanonymous session cookieと結合する。login/startで発行されたchallengeを別cookie(別session・cookie無しを含む)でlogin/finishへ送出しても拒否される(別browserへのchallenge転用防止) (unit, server-to-server)"
+given = "login/start応答のchallenge+anonymous session cookie A・finishを別cookie B(およびcookie無し)で送出"
+expect_return_shape = "いずれも401 unauthenticated(challengeとsessionの結合不一致)"
+source_lines = "src/server.rs:2140"
+
+[[condition]]
+id = "webauthn.register-login-flow-server-to-server"
+target_function = "server::handler register/login start/finish(server-to-server認証flow)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 11章(webauthn契約=token期限切れ・再送・challenge転用・未認証拒否をserver-to-serverで自動検証=指摘#12)・8章(D3 webauthn-rs)・12章P4(認証flow自動test緑)・「実装時検証事項」2"
+description = "server-to-serverでpasskey登録・login flowを完結できる: webauthn-rs 0.6系にvirtual authenticator支援は無いため(2026-11-05調査)、WebAuthn仕様準拠の合成認証応答(soft passkey)でregister/start->finish(credentialがcredentials table=永続classへ保存)・login/start->finish(認証済みsession確立)を完結する。test helperの署名合成はP4実装時にwebauthn-rsの応答型・base64url符号化へ接続する (unit, server-to-server)"
+given = "credential数0のserver state・有効bootstrap token・合成passkey応答helper(P4実装時に署名合成を充実)"
+expect_return_shape = "register/finishは200でcredentials tableへ1件保存。login/finishは200で認証済みsession cookieが発行され、当該sessionで保護API(GET /api/entities)が応答する(認証済みでの読取API応答=server.protected-api-open-with-authと共通)"
+source_lines = "src/server.rs:2168"
+
+[[condition]]
+id = "webauthn.login-session-id-rotation"
+target_function = "server::handler POST /api/auth/login/finish(session ID付替)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(session: login成功時にsession IDを付け替える=session固定化対策)・6章"
+description = "login成功時にsession IDを付け替える(session固定化対策)。login/start時のanonymous session cookieとlogin/finish成功応答の認証済みsession cookieのID値は異なる(pre-login sessionの継続使用を許さない) (unit, server-to-server)"
+given = "login/start応答のSet-Cookie(anonymous session)とlogin/finish成功応答のSet-Cookie(認証済みsession)"
+expect_return_shape = "両cookieのsession ID値は異なる(付替え済み)"
+source_lines = "src/server.rs:2223"
+
+[[condition]]
+id = "webauthn.session-cookie-attributes"
+target_function = "server session cookie(tower-sessions・Set-Cookie属性)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(session: cookie HttpOnly+SameSite=Strict・rp_originがhttps時Secure)・2章(秘密情報境界: session鍵をAPI応答へ出さない)"
+description = "session cookieはHttpOnly+SameSite=Strict(rp_originがhttps時はSecure。v1のlocalhost既定rp_origin=httpではSecureは付かない)。Set-Cookie応答headerの属性として観測する (unit, server-to-server)"
+given = "login/start・login/finish応答のSet-Cookie header(localhost既定rp_origin構成)"
+expect_return_shape = "HttpOnly・SameSite=Strictを含む(既定http originではSecure属性無し)"
+source_lines = "src/server.rs:2248"
+
+[[condition]]
+id = "webauthn.session-expiry-24h"
+target_function = "server session(tower-sessions・期限)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(session: 期限24時間・非活動で失効)"
+description = "sessionの期限は24時間(非活動で失効)。期限切れsessionでの保護API accessは401 unauthenticated(未認証扱い)。実時間待ちをしない観測はP4実装の時刻注入seam経由 (unit, server-to-server)"
+given = "時刻注入seamでlogin成功から24時間経過した状態での保護API access(認証済みsession cookie)"
+expect_return_shape = "401 unauthenticated(期限切れsessionは未認証扱い)"
+source_lines = "src/server.rs:2270"
+
+[[condition]]
+id = "webauthn.logout-invalidates-session"
+target_function = "server::handler POST /api/auth/logout(session破棄)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: POST /api/auth/logoutは認証要・session破棄)・8章(session)・12章P4"
+description = "POST /api/auth/logoutはsessionを破棄する。logout成功後の同一cookieでの保護API accessは401 unauthenticatedになる(未認証=要認証endpointであるlogout自体も未認証では401) (unit, server-to-server)"
+given = "login済みsessionでのPOST /api/auth/logout成功後・同一cookieでのGET /api/entities"
+expect_return_shape = "logoutは200。続く保護API accessは401 unauthenticated"
+source_lines = "src/server.rs:2283"
+
+[[condition]]
+id = "webauthn.unauthenticated-protected-api-401"
+target_function = "serve router(未認証保護endpoint 401)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(error体系: unauthenticated=401)・12章P2(保護APIはfail-closed=503/401)・12章P4(保護API開放)・指摘#11(P3の機密APIはP4までfail-closed)"
+description = "未認証での保護endpoint accessは401 unauthenticated(503 configurationではない=P2〜P3のprotected_fail_closedをP4の認証gateが置換える)。応答bodyは既存error体系形式({\"error\":{\"code\",\"message\"}}・code=unauthenticated)で、保護対象dataは含まれない (unit, server-to-server)"
+given = "cookie無しでのGET /api/entities(P4認証gate構成後のrouter)"
+expect_return_shape = "401で{\"error\":{\"code\":\"unauthenticated\",\"message\":...}}形式・entities dataは応答bodyに含まれない"
+source_lines = "src/server.rs:2315"
+
+[[excluded]]
+item = "実機login確認(実browser+実際のpasskeyでの登録・login)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 12章P4(verify可能状態: 認証flow自動test緑・実機login確認)・9章(WebAuthnはsecure context必須)"
+reason = "実browserのWebAuthn API(navigator.credentials)と実際のauthenticatorを要する手動観測であり単体・結合testで観測できない。自動検証可能な契約境界(token・challenge・session・flow)は本条件書が担保し、実機確認は設計12章P4の手動verify項目"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+[[excluded]]
+item = "manage auth remove(CLI)によるcredential失効"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(失効はmanage auth remove(CLI))"
+reason = "CLI管理command系はP4のserver(passkey認証)実装対象外であり後続waveでcli areaへ条件化する。本areaはserverの認証契約(register/login/logout)に限定"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+[[excluded]]
+item = "RP ID変更時の旧credential無効化(再登録要求)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(RP ID変更時は旧credentialは無効化され再登録が必要=仕様上別credential)・9章(同一passkeyはRP ID違いで別credential)"
+reason = "WebAuthn仕様上の帰結(rp_id hash不一致で検証が失敗する)でありserver個別の実装契約ではない。login検証のRP ID束ねはwebauthn.register-login-flow-server-to-serverの検証経路が担保"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+[[excluded]]
+item = "tower-sessionsのSQLite永続store品揃え・session永続化"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(session: tower-sessions in-memory・session永続化は代替案)・「実装時検証事項」3(v1では不要・永続化時の情報)"
+reason = "v1はin-memory session(再login許容・設計8章)。SQLite永続store調査は永続化を採用する際の将来情報であり現時点の振る舞い条件が存在しない"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+[[excluded]]
+item = "danger-allow-state-serialisation不使用・webauthn-rs/tower-sessionsの依存導入形態(serve feature構成・Cargo.toml)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(credential保存: danger-allow-state-serialisation featureは使用しない)・1章(D2依存構成)"
+reason = "実装形態・依存構成の決定であり外部観測可能な振る舞い条件ではない(test-structure §8「書かない」: 挙動に差を生まない内部処理)。challenge stateのin-memory保持・Passkey保存はflow条件・credentials table保存観測が担保"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+[[excluded]]
+item = "http://127.0.0.1 originのWebAuthn実挙動(secure context)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 9章(WebAuthnはsecure context必須・localhostはhttp可)・「実装時検証事項」4(localhost表記運用で回避)"
+reason = "実browserのWebAuthn API観測であり単体・結合testで観測できない(実機login確認のexcludedと同根)。運用はrp_origin既定のlocalhost表記で回避する事項"
+decided_at = "2026-11-05"
+decided_by = "claude"

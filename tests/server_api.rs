@@ -232,3 +232,123 @@ fn serve_startup_sync_runs_without_panic() {
     let _ = child.send_sigterm();
     let _ = child.wait();
 }
+
+// ---------------------------------------------------------------------------
+// TASK-9 Phase P4(passkey認証)の結合test(テスト先行。実装前のため実行failを許容、
+// cargo test --no-runのcompileは通る。認証契約の詳細はsrc/server.rs内unit testと
+// tests/design/webauthn.tomlが担う)。
+
+/// serve --bootstrapのstdoutから最初の空でない行(token行)を期限付き(5秒)で読む。
+/// serveは起動を続けるためstdoutは開いたまま=行単位readがblockする。readを別thread
+/// に逃がしてchannel+recv_timeoutで待つ(実装前は--bootstrap未知のexit 64で即EOF)。
+fn read_bootstrap_token_line(stdout: std::process::ChildStdout) -> Option<String> {
+    use std::io::BufRead as _;
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break, // EOF(実装前=exit 64で即終了)
+                Ok(_) => {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        let _ = tx.send(trimmed.to_string());
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(5)).ok()
+}
+
+/// [covers:webauthn.bootstrap-token-generation]
+/// serve --bootstrapがone-time token(128bit乱数のbase64)を生成しstdoutへ表示し、
+/// 起動を継続する(毎回新規生成=実行のたび異なる値は本観測の対比で担保)。
+#[test]
+fn serve_bootstrap_flag_prints_one_time_token_on_stdout() {
+    let Some(fx) = common::StorageFixture::new("srv-bootstrap", common::StorageOpts::default())
+    else {
+        return;
+    };
+    let port = free_local_port();
+    fx.write_server_toml(&format!(
+        "[server]\nlisten_addr = \"127.0.0.1\"\nport = {port}\n"
+    ));
+    let state_s = fx.state.display().to_string();
+    let home_s = fx.home.display().to_string();
+    // stdoutからtokenを読むためpipedでspawn(spawn_serveはstdout継承のため直組)
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_amazing-backup"))
+        .args(["serve", "--bootstrap"])
+        .env("AMAZING_BACKUP_FAKE_S3_STATE", &state_s)
+        .env("AMAZING_BACKUP_HOME", &home_s)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("serve --bootstrap spawn");
+    let token = read_bootstrap_token_line(child.stdout.take().expect("stdout piped"));
+    let Some(token) = token else {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("serve --bootstrapがstdoutへtoken行を出す(実装前=--bootstrap未知のexit 64で不在は赤許容)");
+    };
+    // tokenは128bit乱数のbase64: base64 decodeすると16byte(標準/URL-safe両方を受容)
+    use base64::Engine as _;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&token)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&token))
+        .unwrap_or_else(|_| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("tokenはbase64文字列である: {token}")
+        });
+    assert_eq!(decoded.len(), 16, "128bit(16byte)のbase64である: {token}");
+    // token表示後もserveは起動を継続する(health応答)
+    let addr = format!("127.0.0.1:{port}");
+    assert!(
+        common::wait_http_ready(&addr, 100),
+        "token表示後もserveは起動を継続する"
+    );
+    let (code, _) = common::http_get(&addr, "/api/health").expect("health応答");
+    assert_eq!(code, 200);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// [covers:server.protected-api-open-with-auth]
+/// P4実装後は保護APIの未認証応答が503(configuration)から401(unauthenticated)へ
+/// 置換わる(protected_fail_closedのsession検証gateへの置換。P4実装前は現行503の
+/// ままでfailを許容=テスト先行)。
+#[test]
+fn serve_protected_api_unauthenticated_401_after_p4() {
+    let Some(fx) = common::StorageFixture::new("srv-open-p4", common::StorageOpts::default())
+    else {
+        return;
+    };
+    // データが存在する状態で観測(保護対象のデータが応答に漏れないことまで確認)
+    let a = fx.data_root.join("a.zip");
+    make_archive(&a, 1024);
+    let (code, stdout, stderr) = fx.push_from_list(&[], &[(&a, Some("alpha"))], &[]);
+    assert_eq!(code, 0, "push(事前): {stdout}{stderr}");
+
+    let (addr, mut child, _err) = start_serve(&fx, free_local_port(), "open-p4");
+    let (code, body) = common::http_get(&addr, "/api/entities").expect("応答");
+    assert_eq!(
+        code, 401,
+        "P4実装後は未認証401(503 configurationでない): status={code} body={body}"
+    );
+    assert!(
+        body.contains("\"unauthenticated\""),
+        "error bodyは既存error体系形式(unauthenticated): {body}"
+    );
+    assert!(
+        !body.contains("alpha"),
+        "保護対象データは応答に含まれない: {body}"
+    );
+    let _ = child.send_sigterm();
+    let _ = child.wait();
+}
