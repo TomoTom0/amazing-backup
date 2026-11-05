@@ -15,9 +15,12 @@
 [meta]
 feature = "frontend"
 source_file = "frontend/src/"
-verified = false
+verified = true
+verified_at = "2026-11-05"
+verified_by = "claude"
 test_command = "pnpm --dir frontend vitest run"
-note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・12章P3時点のfrontend期待動作。API client(src/api/client.ts)とsync store(src/stores/sync.ts)のvitestで担保(画面の本格実装はP4/P5)"
+source_hash = "4afa2bbecccc90f9223556fe20d6dcb6ab60c981"
+note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・12章P3時点のfrontend期待動作。API client(src/api/client.ts)とsync store(src/stores/sync.ts)のvitestで担保(画面の本格実装はP4/P5)。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
 
 [[condition]]
 id = "frontend.api-error-body-guard"
