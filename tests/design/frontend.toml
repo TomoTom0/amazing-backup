@@ -197,6 +197,24 @@ given = "各状態(running中・fetchDiff成功後・未取得・fetchDiff 404�
 expect_return_shape = "状態に応じてrunning/result/not_run/errorを返し(404 not_foundはnot_run=未実行扱い・401はerror扱い)、summaryは{entries, missing, unexpected}の計数を返す(実装前のため実行failを許容)"
 source_lines = "frontend/src/stores/diff.spec.ts:116"
 
+[[condition]]
+id = "frontend.pending-rerun-error-visible"
+target_function = "frontend stores/pending.ts lastScanError(再実行失敗の別状態保持)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(Pinia stores: pending・PendingView)・12章P5・TASK-9レビュー指摘#12(scan再実行失敗が画面で隠れない)"
+description = "scan実行(POST /api/pending/scan)の失敗は取得(fetchPending)のerrorとは別状態(lastScanError)で保持する: POST失敗直後の一覧再取得が成功しても直前のscan失敗が表示から隠されない(PendingViewはlastScanErrorを明示行で案内する)。scan成功でlastScanErrorはクリアされる (vitest)"
+given = "POST /api/pending/scan 500+続くGET /api/pending 200のfetch mockでのrunScan実行と、POST成功後の再実行"
+expect_return_shape = "失敗時はitems(再取得成功分)とlastError=nullを保持したままlastScanError={code:...}が残る。成功時はlastScanError=nullへクリアされる"
+source_lines = "frontend/src/stores/pending.spec.ts:106"
+
+[[condition]]
+id = "frontend.diff-rerun-error-visible"
+target_function = "frontend stores/diff.ts lastRunError・showingStaleResult(再実行失敗と旧結果の併示)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(Pinia stores・diff UI)・12章P6・TASK-9レビュー指摘#12(再実行失敗後も旧結果だけを表示しない)"
+description = "diff実行(POST /api/diff)の失敗は取得系errorとは別状態(lastRunError)で保持し旧resultは破棄しない: 再実行失敗後もdiffViewはresult(旧結果)を示すが、showingStaleResult getterがtrueとなりViewは「直前の実行失敗+保存済みの旧結果」を明示できる(旧結果だけで実行失敗を隠さない)。再実行成功でlastRunErrorはクリアされる (vitest)"
+given = "fetchDiff成功(result保持)後のPOST /api/diff 500でのrunDiff実行と、続くPOST成功での再実行"
+expect_return_shape = "失敗時はresult(旧結果)保持+lastRunError={code:...}+diffView=result+showingStaleResult=true・lastError(fetch系)はnullのまま。成功時はlastRunError=null+showingStaleResult=false"
+source_lines = "frontend/src/stores/diff.spec.ts:169"
+
 [[excluded]]
 item = "DiffView componentの実描画(diff実行ボタン実操作・performed_at/entries/missing/unexpected一覧の実browser描画・routerへのdiff route登録)"
 source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面構成)・12章P6(diff UI)"

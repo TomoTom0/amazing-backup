@@ -73,7 +73,7 @@ function fail(code: string, httpStatus: number): void {
   message.value = code === 'network' ? 'serverに接続できません' : `エラーが発生しました(${code})`
 }
 
-/** passkey登録(token提示時のみ=設計8章) */
+/** passkey登録(token提示時のみ=設計8章。認証済み状態での追加登録も同一経路) */
 async function register(): Promise<void> {
   if (busy.value || token.value === '') {
     if (token.value === '') message.value = 'bootstrap tokenを入力してください'
@@ -81,49 +81,60 @@ async function register(): Promise<void> {
   }
   busy.value = true
   message.value = ''
-  const started = await postRegisterStart(token.value)
-  if (!started.ok) {
-    busy.value = false
-    fail(started.error.code, started.httpStatus)
-    return
-  }
-  const pk = started.data.publicKey
-  const credential = await navigator.credentials.create({
-    publicKey: {
-      challenge: b64urlToBytes(pk.challenge),
-      rp: { name: 'amazing-backup' },
-      user: {
-        id: b64urlToBytes(pk.user.id),
-        name: pk.user.name,
-        displayName: pk.user.displayName,
+  try {
+    const started = await postRegisterStart(token.value)
+    if (!started.ok) {
+      fail(started.error.code, started.httpStatus)
+      return
+    }
+    const pk = started.data.publicKey
+    let credential: Credential | null = null
+    try {
+      credential = await navigator.credentials.create({
+        publicKey: {
+          challenge: b64urlToBytes(pk.challenge),
+          rp: { name: 'amazing-backup' },
+          user: {
+            id: b64urlToBytes(pk.user.id),
+            name: pk.user.name,
+            displayName: pk.user.displayName,
+          },
+          pubKeyCredParams: pk.pubKeyCredParams.map((p) => ({ type: p.type, alg: p.alg })),
+        },
+      })
+    } catch {
+      // WebAuthn APIのreject(キャンセル・timeout等)。start時点でtokenは消費済み
+      // のため再発行を案内する
+      message.value =
+        'passkey登録が中断されました(bootstrap tokenは使用済みです。serve --bootstrapで再発行してください)'
+      return
+    }
+    if (
+      !isPublicKeyCredential(credential) ||
+      !isAttestationResponse(credential.response)
+    ) {
+      message.value =
+        'passkey登録が中断されました(bootstrap tokenは使用済みです。serve --bootstrapで再発行してください)'
+      return
+    }
+    const finished = await postRegisterFinish({
+      id: credential.id,
+      rawId: bufferToB64url(credential.rawId),
+      type: credential.type,
+      response: {
+        attestationObject: bufferToB64url(credential.response.attestationObject),
+        clientDataJSON: bufferToB64url(credential.response.clientDataJSON),
       },
-      pubKeyCredParams: pk.pubKeyCredParams.map((p) => ({ type: p.type, alg: p.alg })),
-    },
-  })
-  if (
-    !isPublicKeyCredential(credential) ||
-    !isAttestationResponse(credential.response)
-  ) {
+    })
+    if (!finished.ok) {
+      fail(finished.error.code, finished.httpStatus)
+      return
+    }
+    message.value = 'passkeyを登録しました'
+    await auth.fetchAuthStatus()
+  } finally {
     busy.value = false
-    message.value = 'passkey登録が中断されました'
-    return
   }
-  const finished = await postRegisterFinish({
-    id: credential.id,
-    rawId: bufferToB64url(credential.rawId),
-    type: credential.type,
-    response: {
-      attestationObject: bufferToB64url(credential.response.attestationObject),
-      clientDataJSON: bufferToB64url(credential.response.clientDataJSON),
-    },
-  })
-  busy.value = false
-  if (!finished.ok) {
-    fail(finished.error.code, finished.httpStatus)
-    return
-  }
-  message.value = 'passkeyを登録しました'
-  await auth.fetchAuthStatus()
 }
 
 /** passkey login */
@@ -131,52 +142,60 @@ async function login(): Promise<void> {
   if (busy.value) return
   busy.value = true
   message.value = ''
-  const started = await postLoginStart()
-  if (!started.ok) {
+  try {
+    const started = await postLoginStart()
+    if (!started.ok) {
+      fail(started.error.code, started.httpStatus)
+      return
+    }
+    const allow =
+      started.data.publicKey.allowCredentials === undefined
+        ? []
+        : started.data.publicKey.allowCredentials.map((c) => ({
+            type: c.type,
+            id: b64urlToBytes(c.id),
+          }))
+    let credential: Credential | null = null
+    try {
+      credential = await navigator.credentials.get({
+        publicKey: {
+          challenge: b64urlToBytes(started.data.publicKey.challenge),
+          allowCredentials: allow,
+        },
+      })
+    } catch {
+      // WebAuthn APIのreject(キャンセル・timeout等)を表示へ変換
+      message.value = 'loginが中断されました'
+      return
+    }
+    if (!isPublicKeyCredential(credential) || !isAssertionResponse(credential.response)) {
+      message.value = 'loginが中断されました'
+      return
+    }
+    const finished = await postLoginFinish({
+      id: credential.id,
+      rawId: bufferToB64url(credential.rawId),
+      type: credential.type,
+      response: {
+        authenticatorData: bufferToB64url(credential.response.authenticatorData),
+        clientDataJSON: bufferToB64url(credential.response.clientDataJSON),
+        signature: bufferToB64url(credential.response.signature),
+        userHandle:
+          credential.response.userHandle === null
+            ? null
+            : bufferToB64url(credential.response.userHandle),
+      },
+    })
+    if (!finished.ok) {
+      fail(finished.error.code, finished.httpStatus)
+      return
+    }
+    await auth.fetchAuthStatus()
+    if (auth.authenticated) {
+      await router.push('/')
+    }
+  } finally {
     busy.value = false
-    fail(started.error.code, started.httpStatus)
-    return
-  }
-  const allow =
-    started.data.publicKey.allowCredentials === undefined
-      ? []
-      : started.data.publicKey.allowCredentials.map((c) => ({
-          type: c.type,
-          id: b64urlToBytes(c.id),
-        }))
-  const credential = await navigator.credentials.get({
-    publicKey: {
-      challenge: b64urlToBytes(started.data.publicKey.challenge),
-      allowCredentials: allow,
-    },
-  })
-  if (!isPublicKeyCredential(credential) || !isAssertionResponse(credential.response)) {
-    busy.value = false
-    message.value = 'loginが中断されました'
-    return
-  }
-  const finished = await postLoginFinish({
-    id: credential.id,
-    rawId: bufferToB64url(credential.rawId),
-    type: credential.type,
-    response: {
-      authenticatorData: bufferToB64url(credential.response.authenticatorData),
-      clientDataJSON: bufferToB64url(credential.response.clientDataJSON),
-      signature: bufferToB64url(credential.response.signature),
-      userHandle:
-        credential.response.userHandle === null
-          ? null
-          : bufferToB64url(credential.response.userHandle),
-    },
-  })
-  busy.value = false
-  if (!finished.ok) {
-    fail(finished.error.code, finished.httpStatus)
-    return
-  }
-  await auth.fetchAuthStatus()
-  if (auth.authenticated) {
-    await router.push('/')
   }
 }
 
@@ -196,7 +215,9 @@ async function logout(): Promise<void> {
 
     <p v-if="auth.authUi === 'unknown'" class="muted">認証状態を確認しています...</p>
     <p v-else-if="auth.authUi === 'authenticated'" class="muted">
-      認証済みです(登録passkey数: {{ auth.credentialCount }})
+      認証済みです(登録passkey数: {{ auth.credentialCount }})。passkeyの追加登録は
+      serve --bootstrap が表示する one-time token を入力して行えます
+      (login済み+tokenの両方が必要=設計8章)。
     </p>
     <p v-else-if="auth.authUi === 'register'" class="muted">
       最初のpasskeyが未登録です。amazing-backup serve --bootstrap が表示する
@@ -216,14 +237,14 @@ async function logout(): Promise<void> {
       login
     </button>
 
-    <button
-      v-if="auth.authUi === 'authenticated'"
-      type="button"
-      :disabled="busy"
-      @click="logout()"
-    >
-      logout
-    </button>
+    <template v-else-if="auth.authUi === 'authenticated'">
+      <label>
+        bootstrap token(追加登録用)
+        <input v-model="token" type="password" autocomplete="off" placeholder="serve --bootstrap の表示値" />
+      </label>
+      <button type="button" :disabled="busy" @click="register()">passkeyを追加登録</button>
+      <button type="button" :disabled="busy" @click="logout()">logout</button>
+    </template>
 
     <p v-if="message" class="message">{{ message }}</p>
     <p v-if="auth.lastError" class="muted">最後のエラー: {{ auth.lastError.code }}</p>

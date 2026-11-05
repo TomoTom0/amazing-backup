@@ -42,6 +42,10 @@ const fmtSize = (size: number): string => {
     <p v-if="pending.lastError" class="message">
       取得に失敗しました({{ pending.lastError.code }})。空のdataは表示していません。
     </p>
+    <p v-if="pending.lastScanError" class="message">
+      直前のscan実行に失敗しました({{ pending.lastScanError.code }})。
+      以下は最後に取得できた一覧です。
+    </p>
 
     <table v-if="pending.items.length > 0" class="pending-table">
       <thead>

@@ -757,6 +757,28 @@ credentials行準備・観測。manage auth未知subcommandのexit 64で赤)
 - cargo test 370pass/0fail・vitest 41pass/0fail・verify-conditions.py PASS・
   docs_pages 11pass
 
+2026-11-05: TASK-9コードレビュー(codex・高4/中8/低1=13件・log: tmp/tasks/tm-9/review_impl_task9.log)
+対応のうち高4(EntitiesView等)を除く12件を修正。
+- 高1: ensure_private_parent/ensure_private_db_file(既存dir 0700是正・既存DB 0600化を
+  migration前に保証・chmod失敗は設定エラー2で起動拒否・WAL/SHM含む)
+- 高2: AppStateへ実効scope保持・読取handler 8本がserve起動時の--profile/--aws-config解決に従属
+  (resolve_scope(explicit, effective)化)
+- 高3: 初回syncの「registry不在でHEAD省略」を削除し常にremote HEADから(別端末・復旧環境の
+  誤0件を解消)。未書込ns確定はHEAD確認後へ。テストXDG側runへfake state追加(権限観測の本質不変)
+- 中5: MAX_PENDING_CHALLENGES=64・期限切れ掃除・1session 1pending・上限時最古破棄
+- 中6: reflect/sync失敗時のmark_status(STALE/ERROR)集約(旧freshを残さない)
+- 中7: load_entriesを単一読取transaction化・load_entries_if_freshでfreshness判定と読込を同一snapshotへ
+- 中8: 起動時syncへ共有semaphore適用・完了失敗はその時点でlog
+- 中9: S3取得経路へもscope_filter_entries適用(cache hit/miss出力一致)
+- 中10/11/12: LoginViewのtry-finally+中断案内(token消費済み再発行案内)・認証済み追加登録UI・
+  pending/diff storeの実行error別state化(lastScanError/lastRunError/showingStaleResult)
+- 低13: release.yml download-artifactへpattern: amazing-backup-*
+- 条件書: 新規5条件(db-permissions-remediate-existing・read-api-uses-serve-profile・
+  challenge-reclaim-and-cap・pending-rerun-error-visible・diff-rerun-error-visible)+
+  既存4条件文言修正(id不変)。テスト新規7件(cargo)+3件(vitest)
+- cargo test 377pass/0fail・vitest 44pass/0fail・verify-conditions.py PASS
+- 条件数315(excluded 63件)
+
 ## 構成
 
 | path | 役割 | 状態 |

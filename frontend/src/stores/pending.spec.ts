@@ -102,3 +102,63 @@ describe('pending storeのscan実行(runScan)', () => {
     expect(pending.scanning).toBe(false)
   })
 })
+
+// [covers:frontend.pending-rerun-error-visible]
+describe('pending storeの再実行失敗の明示(runScan失敗と取得成功の分離)', () => {
+  it('scan(POST)失敗後の一覧再取得が成功しても直前のscan失敗は隠されない', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (url === '/api/pending/scan' && init?.method === 'POST') {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ error: { code: 'internal', message: '内部エラーが発生しました' } }),
+              { status: 500, headers: { 'Content-Type': 'application/json' } },
+            ),
+          )
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ pending: [itemOf('/data/a.zip', 'unbacked')] }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          ),
+        )
+      }),
+    )
+    const pending = usePendingStore()
+    await pending.runScan()
+    // 一覧再取得は成功している(旧データを表示できる)
+    expect(pending.items.length).toBe(1)
+    expect(pending.lastError).toBeNull()
+    // 直前のscan実行の失敗は別状態で保持され表示から隠されない
+    expect(pending.lastScanError?.code).toBe('internal')
+  })
+
+  it('scan成功でlastScanErrorはクリアされる', async () => {
+    const pending = usePendingStore()
+    pending.lastScanError = { code: 'internal', message: '内部エラーが発生しました' }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (url === '/api/pending/scan' && init?.method === 'POST') {
+          return Promise.resolve(
+            new Response(JSON.stringify({ pending: [] }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }),
+          )
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ pending: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        )
+      }),
+    )
+    await pending.runScan()
+    expect(pending.lastScanError).toBeNull()
+  })
+})

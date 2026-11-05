@@ -256,11 +256,56 @@ async fn run_server(cfg: ServerConfig, args: &ServeArgs) -> i32 {
     };
 
     // 起動時sync(設計4章・1章実行境界): P1同期層(manage::catalog_sync_once)を
-    // spawn_blockingから呼ぶ。失敗してもserveは継続(staleness表示はP3+のAPIが担う)
-    let state = AppState::from_ctx_args(serve_ctx_args(args)).with_auth(auth);
+    // spawn_blockingから呼ぶ。失敗してもserveは継続(staleness表示はP3+のAPIが担う)。
+    // single-flight(設計1章): 手動sync(POST /api/sync)等と同じsemaphoreを取得して
+    // 実行する=起動直後の並走・遅延した起動時syncによる新しいsnapshotの上書きを防ぐ
+    let state = match AppState::from_ctx_args(serve_ctx_args(args)) {
+        Ok(s) => s.with_auth(auth),
+        Err(e) => {
+            eprintln!("error: {e}");
+            return e.exit_code();
+        }
+    };
+    let sync_permits = state.sync_permits.clone();
     let sync_ctx = state.sync_ctx.clone();
-    let sync_handle =
-        tokio::task::spawn_blocking(move || crate::storage::manage::catalog_sync_once(&sync_ctx));
+    let sync_handle = tokio::task::spawn(async move {
+        let permit = sync_permits.acquire_owned().await;
+        let result = match permit {
+            Ok(_permit) => {
+                let ctx = sync_ctx;
+                let run = tokio::task::spawn_blocking(move || {
+                    crate::storage::manage::catalog_sync_once(&ctx)
+                })
+                .await;
+                match run {
+                    Ok(Ok(msg)) => {
+                        // 完了はその時点で通知(停止時までlog出力を遅延させない)
+                        eprintln!("serve: 起動時catalog sync: {msg}");
+                        Ok(msg)
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!(
+                            "WARNING: 起動時catalog syncに失敗しました(表示はstale扱い): {e}"
+                        );
+                        Err(e)
+                    }
+                    Err(e) => {
+                        eprintln!("WARNING: 起動時catalog syncが異常終了しました: {e}");
+                        Err(BackupError::Internal(format!(
+                            "起動時catalog syncが異常終了: {e}"
+                        )))
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("WARNING: 起動時sync semaphoreのacquireに失敗: {e}");
+                Err(BackupError::Internal(format!(
+                    "起動時sync semaphoreのacquire失敗: {e}"
+                )))
+            }
+        };
+        result
+    });
 
     // P4(設計12章): 保護APIは認証gate(session検証)構成済み=未認証401。P2〜P3の
     // protected_fail_closed(503)はこのgateへ置換わった
@@ -280,14 +325,11 @@ async fn run_server(cfg: ServerConfig, args: &ServeArgs) -> i32 {
         return 1;
     }
     // graceful shutdown(設計1章): 進行中spawn_blocking(起動時sync)の完了を待つ
+    // (結果のlog出力はtask側で完了時点に済んでいるためここでは待ち合わせのみ)
     if !sync_handle.is_finished() {
         eprintln!("serve: 起動時syncの完了を待っています(graceful shutdown)");
     }
-    match sync_handle.await {
-        Ok(Ok(msg)) => eprintln!("serve: 起動時catalog sync: {msg}"),
-        Ok(Err(e)) => eprintln!("WARNING: 起動時catalog syncに失敗しました(表示はstale扱い): {e}"),
-        Err(e) => eprintln!("WARNING: 起動時catalog syncが異常終了しました: {e}"),
-    }
+    let _ = sync_handle.await;
     eprintln!("serve: gracefulに停止しました");
     0
 }
@@ -305,26 +347,36 @@ fn serve_ctx_args(args: &ServeArgs) -> crate::storage::CtxArgs {
 
 /// serveのAPI共有状態(P3+P4)。
 ///
-/// - `sync_permits`: sync・diff実行のsingle-flight(設計1章: DB書込・syncは
-///   semaphore 1で直列化)
-/// - `sync_ctx`: POST /api/sync・POST /api/diffが呼ぶ同期層(open_session系)への
-///   引数。serve起動時の実効profile解決(ServeArgs由来)をそのまま使う
+/// - `sync_permits`: sync・diff・scan・起動時sync実行のsingle-flight(設計1章:
+///   DB書込・syncはsemaphore 1で直列化)
+/// - `sync_ctx`: POST /api/sync・POST /api/diff・POST /api/pending/scanが呼ぶ
+///   同期層(open_session系)への引数。serve起動時の実効profile解決(ServeArgs由来)
+///   をそのまま使う
+/// - `scope`: serve起動時に解決済みの実効scope(bucket, prefix)。読取APIのscope
+///   省略時既定(設計8章: 単一の実効profileを解決しAPI対象scope・復号鍵はそれに
+///   従う=更新対象(sync/scan/diff)と表示対象(読取API)が同じscopeになる)
 /// - `auth`: P4認証状態。`None`は認証機構未構成のrouter(P3系handler単体testが
 ///   oneshotするgate無効構成。serve起動では常に`Some`)
 #[derive(Clone)]
 struct AppState {
     sync_permits: std::sync::Arc<tokio::sync::Semaphore>,
     sync_ctx: std::sync::Arc<crate::storage::CtxArgs>,
+    scope: (String, String),
     auth: Option<std::sync::Arc<AuthState>>,
 }
 
 impl AppState {
-    fn from_ctx_args(ctx: crate::storage::CtxArgs) -> AppState {
-        AppState {
+    /// 実行context(起動引数)から構築。実効scopeはCtxArgsの解決結果
+    /// (--aws-config/--profile込み)を起動時に一度だけ解決して保持する
+    /// (aws.toml読込を伴うため呼出側の同期文脈で使う)。
+    fn from_ctx_args(ctx: crate::storage::CtxArgs) -> BackupResult<AppState> {
+        let aws = crate::storage::load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
+        Ok(AppState {
             sync_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             sync_ctx: std::sync::Arc::new(ctx),
+            scope: (aws.bucket, aws.prefix),
             auth: None,
-        }
+        })
     }
 
     /// P4認証状態を設定(serve起動・P4 handler test用)。
@@ -344,6 +396,9 @@ impl AppState {
 const BOOTSTRAP_TOKEN_TTL_SECS: u64 = 600;
 /// challengeの期限(設計8章: 120秒)。
 const CHALLENGE_TTL_SECS: u64 = 120;
+/// 保留challengeの全体上限(start時の期限切れ掃除後の保有数上限。超過時は期限が
+/// 最も古いものから破棄する=未認証のstart連打による無制限蓄積を防ぐ)。
+const MAX_PENDING_CHALLENGES: usize = 64;
 
 /// bootstrap one-time token(設計8章指摘#8契約: in-memory保持・期限10分・
 /// 原子的消費=consumed flagのatomic swap 1回限り・再起動で失効)。
@@ -366,6 +421,24 @@ enum PendingChallenge {
         session_id: i128,
         expires_at: std::time::SystemTime,
     },
+}
+
+impl PendingChallenge {
+    /// 結合されたanonymous session id(回収・同一session制限の判定用)。
+    fn bound_session_id(&self) -> i128 {
+        match self {
+            PendingChallenge::Registration { session_id, .. }
+            | PendingChallenge::Authentication { session_id, .. } => *session_id,
+        }
+    }
+
+    /// 期限切れ時刻(回収・上限破棄の順序判定用)。
+    fn expires_at(&self) -> std::time::SystemTime {
+        match self {
+            PendingChallenge::Registration { expires_at, .. }
+            | PendingChallenge::Authentication { expires_at, .. } => *expires_at,
+        }
+    }
 }
 
 /// P4認証のserver状態(WebAuthn instance・bootstrap token・challenge保留・
@@ -452,8 +525,30 @@ impl AuthState {
     }
 
     /// challengeの発行登録(in-memory・期限120秒・anonymous session結合)。
+    /// 未完了challengeの蓄積対策としてstart時に次を回収・制限する:
+    /// (1)期限切れchallengeの掃除 (2)同一sessionの保留challengeは最新1件のみ
+    /// (再startで前のchallengeを無効化=1session 1pending) (3)全体件数上限
+    /// (MAX_PENDING_CHALLENGES。超過時は期限が最も古いものから破棄)。
     fn store_challenge(&self, challenge: String, state: PendingChallenge) {
         let mut guard = self.challenges.lock().unwrap_or_else(|e| e.into_inner());
+        let now = self.now();
+        // (1)期限切れchallengeの回収(finishされないまま残った分を掃除する)
+        guard.retain(|_, pc| pc.expires_at() > now);
+        // (2)同一sessionの保留challengeを破棄(今回の発行のみ有効にする)
+        let session_id = state.bound_session_id();
+        guard.retain(|_, pc| pc.bound_session_id() != session_id);
+        // (3)件数上限: 追加後に上限を超える分だけ期限が古い順に破棄
+        if guard.len() >= MAX_PENDING_CHALLENGES {
+            let mut ordered: Vec<(String, std::time::SystemTime)> = guard
+                .iter()
+                .map(|(k, pc)| (k.clone(), pc.expires_at()))
+                .collect();
+            ordered.sort_by_key(|(_, expires_at)| *expires_at);
+            let evict = guard.len() + 1 - MAX_PENDING_CHALLENGES;
+            for (key, _) in ordered.into_iter().take(evict) {
+                guard.remove(&key);
+            }
+        }
         guard.insert(challenge, state);
     }
 
@@ -467,21 +562,10 @@ impl AuthState {
     ) -> Option<PendingChallenge> {
         let mut guard = self.challenges.lock().unwrap_or_else(|e| e.into_inner());
         let pending = guard.remove(challenge)?;
-        let (bound_session, expires_at, is_registration) = match &pending {
-            PendingChallenge::Registration {
-                session_id,
-                expires_at,
-                ..
-            } => (*session_id, *expires_at, true),
-            PendingChallenge::Authentication {
-                session_id,
-                expires_at,
-                ..
-            } => (*session_id, *expires_at, false),
-        };
+        let is_registration = matches!(pending, PendingChallenge::Registration { .. });
         // 期限切れ・session結合不一致・種別不一致は全て拒否(消費済み=除去済み)
-        if self.now() >= expires_at
-            || bound_session != session_id
+        if self.now() >= pending.expires_at()
+            || pending.bound_session_id() != session_id
             || want_registration != is_registration
         {
             return None;
@@ -706,16 +790,19 @@ fn parse_scope_param(raw: &str) -> Option<(String, String)> {
     Some((bucket.to_string(), prefix.to_string()))
 }
 
-/// 実行scopeの解決(scope明示は<bucket>:<prefix>・省略時は実効profile)。
-/// 設定file読み込みを伴うためspawn_blocking内で使う。
-fn resolve_scope(explicit: Option<&str>) -> BackupResult<(String, String)> {
+/// 実行scopeの解決(scope明示は<bucket>:<prefix>・省略時はserve起動時に解決済みの
+/// 実効profile。設計8章: 読取APIの対象scopeはsync/scan/diffの更新対象と同一の
+/// 実効profileに従う=serveの--profile/--aws-config指定が読取APIにも反映される)。
+fn resolve_scope(
+    explicit: Option<&str>,
+    effective: &(String, String),
+) -> BackupResult<(String, String)> {
     if let Some(scope) = explicit {
         return parse_scope_param(scope).ok_or_else(|| {
             BackupError::Usage("scopeは <bucket>:<prefix> 形式で指定してください".to_string())
         });
     }
-    let aws = crate::storage::load_aws(&None, None)?;
-    Ok((aws.bucket, aws.prefix))
+    Ok(effective.clone())
 }
 
 /// query絞り込み(CLI queryと同一規則: title部分一致/uuid前方一致/所在path部分一致)。
@@ -880,15 +967,19 @@ async fn auth_gate(
 
 /// GET /api/entities(設計6章: entity一覧。entry_summary_json互換schemaで
 /// {"entities":[...],"page":n,"total_pages":n}形式・page=1始点)。
-async fn get_entities(uri: axum::http::Uri) -> Result<axum::Json<serde_json::Value>, ApiError> {
+async fn get_entities(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    uri: axum::http::Uri,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
     let params = parse_query_params(uri.query());
     let page = parse_page_param(params.get("page").map(|s| s.as_str()))?;
     let scope = params.get("scope").cloned();
     let query = params.get("query").cloned();
     let category = params.get("category").cloned();
     let label = params.get("label").cloned();
+    let effective = state.scope.clone();
     let entries = run_blocking(move || {
-        let (bucket, prefix) = resolve_scope(scope.as_deref())?;
+        let (bucket, prefix) = resolve_scope(scope.as_deref(), &effective)?;
         let db = crate::catalog::CatalogDb::open()?;
         let (_header, entries) = db.load_entries(&bucket, &prefix)?;
         Ok(entries)
@@ -937,10 +1028,12 @@ fn find_entry_by_uuid(
 /// GET /api/entities/:uuid(設計6章: 詳細=versions/pins/locations入り。
 /// version_list付きentry_summary_json互換。不在は404 not_found)。
 async fn get_entity_detail(
+    axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(uuid): axum::extract::Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let effective = state.scope.clone();
     let value = run_blocking(move || {
-        let (bucket, prefix) = resolve_scope(None)?;
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
         let db = crate::catalog::CatalogDb::open()?;
         let e = find_entry_by_uuid(&db, &bucket, &prefix, &uuid)?;
         Ok(crate::storage::query::entry_summary_json(&e, true))
@@ -952,10 +1045,12 @@ async fn get_entity_detail(
 /// GET /api/entities/:uuid/versions(list versions --format json相当の
 /// entity object: uuid/title/locations/versions[](state付き)/pins[])。
 async fn get_entity_versions(
+    axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(uuid): axum::extract::Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let effective = state.scope.clone();
     let value = run_blocking(move || {
-        let (bucket, prefix) = resolve_scope(None)?;
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
         let db = crate::catalog::CatalogDb::open()?;
         let e = find_entry_by_uuid(&db, &bucket, &prefix, &uuid)?;
         let current_vid = e.versions.first().map(|f| f.version_id.as_str());
@@ -979,9 +1074,12 @@ async fn get_entity_versions(
 
 /// GET /api/pins(list pins --format json相当: entity単位のuuid/title/pins[]を
 /// {"pins":[...]}形式で返す)。
-async fn get_pins() -> Result<axum::Json<serde_json::Value>, ApiError> {
-    let value = run_blocking(|| {
-        let (bucket, prefix) = resolve_scope(None)?;
+async fn get_pins(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let effective = state.scope.clone();
+    let value = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
         let db = crate::catalog::CatalogDb::open()?;
         let (_header, entries) = db.load_entries(&bucket, &prefix)?;
         Ok(serde_json::json!({
@@ -998,9 +1096,12 @@ async fn get_pins() -> Result<axum::Json<serde_json::Value>, ApiError> {
 
 /// GET /api/locations(location_json語彙+entityのuuid/title案内を
 /// {"locations":[...]}形式で返す)。
-async fn get_locations() -> Result<axum::Json<serde_json::Value>, ApiError> {
-    let value = run_blocking(|| {
-        let (bucket, prefix) = resolve_scope(None)?;
+async fn get_locations(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let effective = state.scope.clone();
+    let value = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
         let db = crate::catalog::CatalogDb::open()?;
         let (_header, entries) = db.load_entries(&bucket, &prefix)?;
         let rows: Vec<serde_json::Value> = entries
@@ -1028,7 +1129,10 @@ async fn get_locations() -> Result<axum::Json<serde_json::Value>, ApiError> {
 /// GET /api/pending(pending_itemsのschema(source_root/path/size/mtime/status/
 /// last_scan_at)で{"pending":[...]}形式。?status=<unbacked|changed|ok|unknown>で
 /// 単一statusへ絞り込み(省略時全件)。不正値は400 invalid_request)。
-async fn get_pending(uri: axum::http::Uri) -> Result<axum::Json<serde_json::Value>, ApiError> {
+async fn get_pending(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    uri: axum::http::Uri,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
     let params = parse_query_params(uri.query());
     let status = match params.get("status") {
         None => None,
@@ -1041,8 +1145,9 @@ async fn get_pending(uri: axum::http::Uri) -> Result<axum::Json<serde_json::Valu
             }
         },
     };
+    let effective = state.scope.clone();
     let value = run_blocking(move || {
-        let (bucket, prefix) = resolve_scope(None)?;
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
         let db = crate::catalog::CatalogDb::open()?;
         let items = db.pending_items(&bucket, &prefix)?;
         let items: Vec<_> = match &status {
@@ -1101,9 +1206,12 @@ async fn post_pending_scan(
 
 /// GET /api/sync(sync_state 1行分。未sync時もstatus=unknownで200=frontendの
 /// staleness表示が常に描画できる)。
-async fn get_sync_state() -> Result<axum::Json<serde_json::Value>, ApiError> {
-    let value = run_blocking(|| {
-        let (bucket, prefix) = resolve_scope(None)?;
+async fn get_sync_state(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let effective = state.scope.clone();
+    let value = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
         let db = crate::catalog::CatalogDb::open()?;
         let st = db.sync_state(&bucket, &prefix)?;
         Ok(sync_state_json(&bucket, &prefix, st.as_ref()))
@@ -1209,9 +1317,12 @@ async fn post_diff_run(
 }
 
 /// GET /api/diff(保存済みの最終diff結果のみ。未実行は404 not_found)。
-async fn get_diff_last() -> Result<axum::Json<serde_json::Value>, ApiError> {
-    let value = run_blocking(|| {
-        let (bucket, prefix) = resolve_scope(None)?;
+async fn get_diff_last(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let effective = state.scope.clone();
+    let value = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
         let db = crate::catalog::CatalogDb::open()?;
         db.load_diff_result(&bucket, &prefix)?
             .ok_or_else(|| BackupError::Target("diff結果は未実行です".to_string()))
@@ -1820,13 +1931,19 @@ mod tests {
             profile: None,
             format: crate::storage::Format::Human,
         })
+        .expect("test AppState構築(aws.tomlはapi_envが用意)")
     }
 
     /// build_routerをoneshotで呼び(status, JSON body)を返す。bodyがJSONで無い場合は
     /// Null(応答形式の検査でfailする)。P3実装でbuild_routerがAppStateを受け取る
     /// signatureへ変わったため、この呼び出しのみ追随(期待値は不変)。
     fn api(method: &str, uri: &str) -> (u16, serde_json::Value) {
-        let router = build_router(api_test_state());
+        api_with_state(method, uri, api_test_state())
+    }
+
+    /// api()のstate差し替え版(serveの--profile指定相当のAppStateを渡す検証用)。
+    fn api_with_state(method: &str, uri: &str, state: AppState) -> (u16, serde_json::Value) {
+        let router = build_router(state);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2389,6 +2506,108 @@ mod tests {
         drop(env);
     }
 
+    /// [covers:server.read-api-uses-serve-profile]
+    /// 読取APIのscope省略時既定はserve起動時の実効profile解決(--profile/--aws-config)
+    /// に従う(更新対象のsync/diffと表示対象の読取APIが同じscopeになる=レビュー指摘#2。
+    /// 設計8章「単一の実効profileを解決しAPI対象scope・復号鍵はそれに従う」)。
+    #[test]
+    fn api_read_api_uses_serve_profile_scope() {
+        use crate::testutil::write_file;
+        let env = api_env("srv-api-profile");
+        // aws.tomlへstg profile(bucket=stg-bucket・prefixはdevと同一)を追加
+        // (active_profileはdevのまま=--profile stg指定での上書き解決を観測する)
+        write_file(
+            &env.home.join("aws.toml"),
+            format!(
+                "[aws]\nactive_profile = \"dev\"\n\
+                 [aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\
+                 [aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"{API_TEST_BUCKET}\"\n\
+                 region = \"ap-northeast-1\"\nprefix = \"{API_TEST_PREFIX}\"\n\
+                 storage_class = \"STANDARD\"\ncredentials_file = \"{}\"\n\
+                 [aws.profiles.stg]\npurpose = \"stg\"\nbucket = \"stg-bucket\"\n\
+                 region = \"ap-northeast-1\"\nprefix = \"{API_TEST_PREFIX}\"\n\
+                 storage_class = \"STANDARD\"\ncredentials_file = \"{}\"\n",
+                env.home.join("aws-credentials.toml").display(),
+                env.home.join("aws-credentials.toml").display(),
+            )
+            .as_bytes(),
+        );
+        // pipeline.tomlへstg profileを追加(recipients+verifyのみの最小構成)
+        let pubkey = crate::testutil::write_test_ed25519_pub(env.home.parent().expect("tmp dir"));
+        let secret = env.home.parent().expect("tmp dir").join("secret.key");
+        write_file(
+            &env.home.join("pipeline.toml"),
+            format!(
+                "[profiles.dev.recipients]\npublic_keys = [\"{}\"]\n\
+                 [profiles.dev.verify]\ndecrypt_key = \"{}\"\n\
+                 [profiles.stg.recipients]\npublic_keys = [\"{}\"]\n\
+                 [profiles.stg.verify]\ndecrypt_key = \"{}\"\n",
+                pubkey.display(),
+                secret.display(),
+                pubkey.display(),
+                secret.display(),
+            )
+            .as_bytes(),
+        );
+        // 両scopeへseed(dev=alpha・stg=stg-alpha)
+        let alpha = api_entry(
+            "11111111-1111-1111-1111-111111111111",
+            "alpha",
+            "docs",
+            "work",
+        );
+        api_seed(&[alpha], API_TEST_BUCKET, API_TEST_PREFIX);
+        let stg_alpha = api_entry(
+            "44444444-4444-4444-4444-444444444444",
+            "stg-alpha",
+            "docs",
+            "work",
+        );
+        api_seed(&[stg_alpha], "stg-bucket", API_TEST_PREFIX);
+
+        // profile指定なし(既定=dev)の読取はdev scopeのみ
+        let (status, body) = api("GET", "/api/entities");
+        assert_eq!(status, 200, "dev既定のGET /api/entities: {body}");
+        let titles: Vec<&str> = body
+            .get("entities")
+            .and_then(|e| e.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.get("title").and_then(|t| t.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(titles, vec!["alpha"], "dev scopeのみ: {body}");
+
+        // serve --profile stg相当のstate: 読取APIもstg scopeに従う
+        let state = AppState::from_ctx_args(crate::storage::CtxArgs {
+            config: None,
+            aws_config: None,
+            key: None,
+            profile: Some("stg".to_string()),
+            format: crate::storage::Format::Human,
+        })
+        .expect("stg profileでAppState構築");
+        assert_eq!(state.scope.0, "stg-bucket", "実効scopeはstg解決");
+        let (status, body) = api_with_state("GET", "/api/entities", state);
+        assert_eq!(status, 200, "stg profileのGET /api/entities: {body}");
+        let titles: Vec<&str> = body
+            .get("entities")
+            .and_then(|e| e.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.get("title").and_then(|t| t.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            titles,
+            vec!["stg-alpha"],
+            "読取APIは実効profileのscope: {body}"
+        );
+        drop(env);
+    }
+
     /// [covers:server.diff-endpoints]
     /// POST /api/diffはdiff実行(未書込namespaceでは空結果)を行い結果を保存・
     /// GET /api/diffは保存済みの最終結果を返す。未実行時のGETはnot_found 404。
@@ -2533,6 +2752,7 @@ mod tests {
             profile: None,
             format: crate::storage::Format::Human,
         })
+        .expect("test AppState構築(aws.tomlはapi_envが用意)")
         .with_auth(auth)
     }
 
@@ -2550,11 +2770,14 @@ mod tests {
 
     impl AuthFlow {
         fn new(tag: &str) -> AuthFlow {
+            // api_env(ABH設定)を先に実行する: AppState構築は実効scope解決のため
+            // aws.tomlを読む(ABH配下のconfigがapi_envの適用後に見える)
             // bootstrap token注入seam(AUTH_TEST_TOKEN)=--bootstrap起動相当
+            let env = api_env(tag);
             let state = api_auth_test_state(Some(AUTH_TEST_TOKEN));
             let auth = state.auth.clone().expect("auth構成済み");
             AuthFlow {
-                env: api_env(tag),
+                env,
                 router: build_router(state),
                 auth,
             }
@@ -2828,6 +3051,94 @@ mod tests {
                 "userHandle": null,
             },
         })
+    }
+
+    /// [covers:webauthn.challenge-reclaim-and-cap]
+    /// 未完了challengeの蓄積対策(レビュー指摘#5): 同一sessionの保留challengeは
+    /// 最新1件のみ(再startで旧challengeを無効化=1session 1pending)。全体件数は
+    /// 上限(64)で最古から破棄される=未認証のstart連打で期限後も無制限に残らない。
+    /// 期限切れ掃除はstart時に実行される(期限切れchallengeはtake時拒否と同じ結果
+    /// になるため、ここではsession制限・上限破棄の観測可能面を担保する)。
+    #[test]
+    fn api_challenges_evicted_per_session_and_capped() {
+        let flow = AuthFlow::new("srv-auth-evict");
+        auth_seed_credential(SOFT_PASSKEY_CREDENTIAL_ID);
+
+        // (1) 同一session(cookie)でlogin/startを2回: 1回目のchallengeは破棄される
+        let (status, first, cookies1) = flow.call(
+            "POST",
+            "/api/auth/login/start",
+            Some(serde_json::json!({})),
+            None,
+        );
+        assert_eq!(status, 200, "1回目のlogin/start: {first}");
+        let c1 = first_cookie(&cookies1).expect("1回目のsession cookie");
+        let cookie_header = format!("{}={}", c1.0, c1.1);
+        let (status, second, _) = flow.call(
+            "POST",
+            "/api/auth/login/start",
+            Some(serde_json::json!({})),
+            Some(&cookie_header),
+        );
+        assert_eq!(status, 200, "同一sessionでの2回目login/start: {second}");
+        // 1回目のchallengeでfinishしても401(同一session再startで旧challengeは無効)
+        let assertion = soft_login_assertion(&first);
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/login/finish",
+            Some(assertion),
+            Some(&cookie_header),
+        );
+        assert_eq!(
+            status, 401,
+            "同一sessionの旧challengeは再startで破棄される: {body}"
+        );
+        // 対照: 最新(2回目)のchallengeなら同一sessionでも検証が通る
+        let assertion = soft_login_assertion(&second);
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/login/finish",
+            Some(assertion),
+            Some(&cookie_header),
+        );
+        assert_eq!(status, 200, "最新challengeは有効: {body}");
+
+        // (2) 全体上限: 別sessionで上限(64)までstartした後に1件追加すると
+        // 最古(先頭)のchallengeが破棄される(未認証start連打による無制限蓄積の防止)
+        let mut oldest: Option<(serde_json::Value, String)> = None;
+        for i in 0..MAX_PENDING_CHALLENGES {
+            let (status, options, cookies) = flow.call(
+                "POST",
+                "/api/auth/login/start",
+                Some(serde_json::json!({})),
+                None,
+            );
+            assert_eq!(status, 200, "{}個目のlogin/start", i + 1);
+            if i == 0 {
+                let c = first_cookie(&cookies).expect("先頭分のsession cookie");
+                oldest = Some((options, format!("{}={}", c.0, c.1)));
+            }
+        }
+        let (oldest_options, oldest_cookie) = oldest.expect("先頭分のchallengeとcookie");
+        // 上限を1つ超える追加(この時点で最古が破棄される)
+        let (status, _, _) = flow.call(
+            "POST",
+            "/api/auth/login/start",
+            Some(serde_json::json!({})),
+            None,
+        );
+        assert_eq!(status, 200, "上限超過のlogin/startも成功(最古を破棄)");
+        let assertion = soft_login_assertion(&oldest_options);
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/login/finish",
+            Some(assertion),
+            Some(&oldest_cookie),
+        );
+        assert_eq!(
+            status, 401,
+            "上限超過で最古challengeは破棄される(蓄積しない): {body}"
+        );
     }
 
     /// [covers:server.auth-status-endpoint]

@@ -90,10 +90,13 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # downloadは配布物artifact(amazing-backup-*)に限定する(frontend-dist等の
+      # build中間artifactをrelease資産へ混入させない)
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+          pattern: amazing-backup-*
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

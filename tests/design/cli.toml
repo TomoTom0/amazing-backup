@@ -817,7 +817,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(追加登録・失
 description = "manage auth listは登録credential一覧(credential_id・name・created_at)を表示し、manage auth remove <credential_id>はcredential_id完全一致の1件をcredentials table(永続class・ABH配下catalog.db)から削除する(S3接続不要のlocal操作)。存在しないcredential_id指定は対象エラー3 (integration)"
 given = "catalog.db credentials tableへ2行挿入(rusqlite直接)後の manage auth list・manage auth remove <一方のid>・manage auth remove <存在しないid> の各実行(rusqlite直接で行数観測)"
 expect_return_shape = "listはexit 0で両credentialの行(id・name)を表示。removeはexit 0で当該1行のみ削除(残1行・他行は不変)。存在しないidはexit 3(実装前は未知subcommandのexit 64でfailを許容)"
-source_lines = "tests/catalog_storage.rs:894"
+source_lines = "tests/catalog_storage.rs:1113"
 
 [[condition]]
 id = "cli.manage-auth-remove-all-guides-rebootstrap"
@@ -826,4 +826,4 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(追加登録・失
 description = "manage auth removeでcredentials 0件(全credential紛失時と同一状態)となった場合は再bootstrap案内(serve --bootstrapの再発行)を表示して未登録状態へ戻る(credential 0ではlogin手段が無く・登録はbootstrap token提示時のみ開く=認証閉鎖fail-closed。閉鎖・登録のserver側契約はwebauthn.register-closed-without-valid-token等が担保し本条件はCLI表示とcredentials 0遷移を観測する) (integration)"
 given = "catalog.db credentials tableへ1行挿入(rusqlite直接)後の manage auth remove <id> 実行(rusqlite直接で行数観測)"
 expect_return_shape = "exit 0でcredentials tableは0行・stdoutに再bootstrap案内(--bootstrapを含む語)が表示される(実装前は未知subcommandのexit 64でfailを許容)"
-source_lines = "tests/catalog_storage.rs:931"
+source_lines = "tests/catalog_storage.rs:1150"

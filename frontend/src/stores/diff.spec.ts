@@ -165,3 +165,45 @@ describe('diff storeのdiffView getter(DiffView UI誘導状態)', () => {
     expect(diff.summary).toEqual({ entries: 2, missing: 2, unexpected: 1 })
   })
 })
+
+// [covers:frontend.diff-rerun-error-visible]
+describe('diff storeの再実行失敗の明示(runDiff失敗で旧result保持)', () => {
+  it('再実行失敗時は旧resultを保持しlastRunErrorを別状態で示す(旧結果のみ表示しない)', async () => {
+    // まず取得に成功してresultを保持させる
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(responseOf(200, diffBody))),
+    )
+    const diff = useDiffStore()
+    await diff.fetchDiff()
+    expect(diff.result).not.toBeNull()
+
+    // 再実行(POST)が失敗: 旧resultは保持され実行errorは別状態へ
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          responseOf(500, {
+            error: { code: 'internal', message: '内部エラーが発生しました' },
+          }),
+        ),
+      ),
+    )
+    await diff.runDiff()
+    expect(diff.result).not.toBeNull('実行失敗で旧結果を破棄しない')
+    expect(diff.lastRunError?.code).toBe('internal')
+    expect(diff.lastError).toBeNull('取得系errorとは別状態')
+    expect(diff.diffView).toBe('result')
+    // 旧結果を表示している状態での実行失敗の明示フラグ(Viewの案内行用)
+    expect(diff.showingStaleResult).toBe(true)
+
+    // 再実行が成功すれば実行errorはクリアされ明示も消える
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(responseOf(200, diffBody))),
+    )
+    await diff.runDiff()
+    expect(diff.lastRunError).toBeNull()
+    expect(diff.showingStaleResult).toBe(false)
+  })
+})

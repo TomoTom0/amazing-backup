@@ -226,19 +226,27 @@ pub(crate) fn read_index_cached(
         // DBを開けない(未sync・破損): cache無しで従来のS3取得へ(照会は継続)
         eprintln!("WARNING: catalog DBを開けないためS3から取得します({e})");
     }
-    if !refresh
-        && let Ok(db) = &db
-        && db.is_fresh(&session.aws.bucket, &session.aws.prefix, &validator)?
-    {
-        // cache hit: HEAD検証一致済みのためS3 GETを行わない
-        let loaded = db.load_entries(&session.aws.bucket, &session.aws.prefix)?;
-        let _ = db.mark_verified_fresh(&session.aws.bucket, &session.aws.prefix);
-        return Ok(loaded);
+    if !refresh && let Ok(db) = &db {
+        // cache hit判定とentries読込は同一の読取transaction(snapshot)で行う
+        // (判定と読込の間にsyncがcommitしてもfresh判定と内容がずれない)
+        if let Some(loaded) =
+            db.load_entries_if_fresh(&session.aws.bucket, &session.aws.prefix, &validator)?
+        {
+            // HEAD検証一致済みのためS3 GETを行わない
+            let _ = db.mark_verified_fresh(&session.aws.bucket, &session.aws.prefix);
+            return Ok(loaded);
+        }
     }
     // cache miss(stale・未sync)または--refresh: S3 GET+復号+DB反映
     let fetch = fetch_index_confirmed(session, key_path, &head);
     match fetch {
         Ok((header, entries, confirmed, fetched)) => {
+            // S3取得経路の戻りにもDB保存側(replace_scope)と同一のscope分離filterを
+            // 適用する(同一bucket複数prefixの索引でcache hit時と--refresh時の
+            // entity・version・pinの集合が変わらないようにする)
+            let scoped = crate::catalog::scope_filter_entries(&entries, &session.aws.prefix);
+            let mut scoped_header = header;
+            scoped_header.entries = scoped.len() as i64;
             if let Ok(db) = db.as_mut() {
                 let status = if confirmed {
                     STATUS_FRESH
@@ -248,8 +256,8 @@ pub(crate) fn read_index_cached(
                 let result = db.replace_scope(
                     &session.aws.bucket,
                     &session.aws.prefix,
-                    &header,
-                    &entries,
+                    &scoped_header,
+                    &scoped,
                     &crate::catalog::SourceMtimes::empty(),
                     &fetched,
                     status,
@@ -262,7 +270,7 @@ pub(crate) fn read_index_cached(
                     let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_STALE);
                 }
             }
-            Ok((header, entries))
+            Ok((scoped_header, scoped))
         }
         Err(e) => {
             // 取得失敗(転送・復号): sync_state.status=error(旧freshを残さない)

@@ -39,6 +39,11 @@ onMounted(() => {
       diffは未実行です(diff実行ボタンで突合を実行できます)。
     </p>
 
+    <p v-if="diff.showingStaleResult" class="message">
+      直前のdiff実行に失敗しました({{ diff.lastRunError?.code }})。
+      以下は保存済みの旧結果です。
+    </p>
+
     <template v-if="diff.diffView === 'result' && diff.result">
       <table v-if="diff.result.files.length > 0" class="pending-table">
         <thead>

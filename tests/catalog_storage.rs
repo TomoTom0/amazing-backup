@@ -56,7 +56,9 @@ fn catalog_db_path_and_file_permissions() {
         "DB fileは0600(group/other読取不可)"
     );
 
-    // XDG_STATE_HOME解決側(ABH未指定): <state>/amazing-backup/ が0700で作られる
+    // XDG_STATE_HOME解決側(ABH未指定): <state>/amazing-backup/ が0700で作られる。
+    // 初回syncもremote(HEAD)確認から始めるためfake S3 stateを渡す(索引objectは
+    // 事前pushでfake state内にある。権限観測が本題のためS3接続はfake seamで足す)
     let xdg_state = fx.state.parent().expect("tmp dir").join("xdg-state");
     let (code, stdout, stderr) = run_bin_env(
         &[
@@ -70,7 +72,13 @@ fn catalog_db_path_and_file_permissions() {
             "--key",
             &fx.secret.display().to_string(),
         ],
-        &[("XDG_STATE_HOME", &xdg_state.display().to_string())],
+        &[
+            ("XDG_STATE_HOME", &xdg_state.display().to_string()),
+            (
+                "AMAZING_BACKUP_FAKE_S3_STATE",
+                &fx.state.display().to_string(),
+            ),
+        ],
     );
     assert_eq!(code, 0, "manage catalog sync(XDG): {stdout}{stderr}");
     let dir = xdg_state.join("amazing-backup");
@@ -80,6 +88,60 @@ fn catalog_db_path_and_file_permissions() {
     let xdb = dir.join("catalog.db");
     let xmeta = std::fs::metadata(&xdb).expect("XDG側catalog.dbが作成されている");
     assert_eq!(xmeta.permissions().mode() & 0o777, 0o600);
+}
+
+/// [covers:catalog.db-permissions-remediate-existing]
+/// 既存dir(0755)・既存DB file(0644)の権限不備をopen前に是正する(chmod失敗を
+/// 無視せず、既存平文DBへの接続前に0600を保証する=レビュー指摘#1)。
+#[test]
+fn catalog_db_permissions_remediate_existing_dir_and_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(fx) = StorageFixture::new("cat-perm-fix", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    make_archive(&a, 1024);
+    let (code, stdout, stderr) = fx.push_from_list(&[], &[(&a, Some("alpha"))], &[]);
+    assert_eq!(code, 0, "push(事前): {stdout}{stderr}");
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(事前): {stdout}{stderr}");
+
+    // 既存環境の権限緩みを人為的に作る(0755 dir・0644 DB)
+    let db = fx.catalog_db();
+    std::fs::set_permissions(&fx.home, std::fs::Permissions::from_mode(0o755))
+        .expect("ABH dirを0755へ緩める");
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644))
+        .expect("catalog.dbを0644へ緩める");
+
+    // 再syncは接続前に権限を是正して成功する
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "権限緩み状態での再sync: {stdout}{stderr}");
+    let dmeta = std::fs::metadata(&fx.home).expect("ABH dir");
+    assert_eq!(
+        dmeta.permissions().mode() & 0o777,
+        0o700,
+        "既存dirは0700へ是正される"
+    );
+    let meta = std::fs::metadata(&db).expect("catalog.db");
+    assert_eq!(
+        meta.permissions().mode() & 0o777,
+        0o600,
+        "既存DB fileは0600へ是正される"
+    );
+    // WALも同一境界(fake S3+WAL運用で作られていれば0600)
+    for ext in ["-wal", "-shm"] {
+        let mut p = db.as_os_str().to_os_string();
+        p.push(ext);
+        let side = std::path::PathBuf::from(p);
+        if side.exists() {
+            let m = std::fs::metadata(&side).expect("WAL/SHM metadata");
+            assert_eq!(
+                m.permissions().mode() & 0o777,
+                0o600,
+                "WAL/SHM({ext})も0600"
+            );
+        }
+    }
 }
 
 /// [covers:catalog.schema-migration] 新規作成でSQLite DB fileが生成される(migration冪等)
@@ -158,6 +220,44 @@ fn catalog_sync_fetches_replica_on_change_only() {
         1,
         "索引変化後のsyncは再度取得する: {added:?}"
     );
+}
+
+/// [covers:catalog.sync-fetches-replica-on-change]
+/// local履歴(registry・sync_stateとも)不在でもremote索引の存在をHEADで確認して
+/// から取得する(別端末・復旧環境の初回syncがremote確認なしで空をfresh確定しない
+/// =レビュー指摘#3。local履歴の不在はremote索引の不在の証拠にならない)。
+#[test]
+fn catalog_first_sync_on_new_host_fetches_remote_index() {
+    let Some(fx) = StorageFixture::new("cat-first", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    make_archive(&a, 1024);
+    let (code, stdout, stderr) = fx.push_from_list(&[], &[(&a, Some("alpha"))], &[]);
+    assert_eq!(code, 0, "push(事前): {stdout}{stderr}");
+
+    // 別端末・復旧環境相当: localのregistry・catalog DBを消した状態
+    // (remoteのfake S3 stateには索引objectが残る)
+    std::fs::remove_file(&fx.registry).expect("registry削除");
+    std::fs::remove_file(fx.catalog_db()).expect("catalog.db削除");
+
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "初回sync(別端末相当): {stdout}{stderr}");
+    let calls = snapshot_calls(&fx);
+    let index_key = fx.index_key();
+    assert!(
+        calls
+            .lines()
+            .any(|l| l.starts_with("s3 GetObject") && l.contains(&format!("key={index_key}"))),
+        "remote索引をHEAD確認のうえ取得する: {calls}"
+    );
+    let (code, stdout, stderr) = fx.list("files", &[]);
+    assert_eq!(code, 0, "sync後のlist: {stdout}{stderr}");
+    assert!(
+        stdout.contains("alpha"),
+        "remote索引の内容を同期している(空をfresh確定しない): {stdout}"
+    );
+    assert_eq!(sync_state_status(&fx), "fresh", "同期結果はfresh確定");
 }
 
 /// [covers:catalog.list-cache-hit-after-head-check] 検証済みfresh時の照会はHEAD 1回でS3 GETをskip
@@ -324,6 +424,71 @@ fn catalog_push_reflects_db_and_stales_on_failure() {
     );
 }
 
+/// catalog.dbのsync_state.statusを読む(single scope前提・行不在はpanic)。
+fn sync_state_status(fx: &StorageFixture) -> String {
+    let conn = rusqlite::Connection::open(fx.catalog_db()).expect("catalog.db open");
+    conn.query_row("SELECT status FROM sync_state", [], |r| r.get(0))
+        .expect("sync_state行(sync済み前提)")
+}
+
+/// [covers:catalog.sync-fetches-replica-on-change]
+/// [covers:catalog.append-then-reflect-with-stale-on-failure]
+/// 正常DBのままHEAD失敗・書込反映(HEAD)失敗を注入した場合も旧freshを残さない
+/// (syncはstatus=error・pushの反映失敗は当該scopeのstale化=レビュー指摘#6)。
+#[test]
+fn catalog_sync_and_reflect_failures_mark_status_on_healthy_db() {
+    let Some(fx) = StorageFixture::new("cat-stale", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    make_archive(&a, 1024);
+    let (code, stdout, stderr) = fx.push_from_list(&[], &[(&a, Some("alpha"))], &[]);
+    assert_eq!(code, 0, "push(事前): {stdout}{stderr}");
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(事前): {stdout}{stderr}");
+    assert_eq!(sync_state_status(&fx), "fresh", "事前はfresh");
+    let index_key = fx.index_key();
+
+    // syncのHEAD失敗: 正常DBのままerror化(旧freshを残さない)
+    let (code, _stdout, _stderr) = fx.manage_env(
+        "catalog",
+        &["sync"],
+        &[("FAKE_S3_FAIL_HEAD_FOR", index_key.as_str())],
+    );
+    assert_eq!(code, 5, "HEAD失敗注入のsyncは転送エラー");
+    assert_eq!(
+        sync_state_status(&fx),
+        "error",
+        "HEAD失敗もerror化経路(status=error)"
+    );
+
+    // 再syncでfresh復帰することも確認(失敗が恒続化しない)
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "再sync: {stdout}{stderr}");
+    assert_eq!(sync_state_status(&fx), "fresh", "再syncでfresh復帰");
+
+    // pushの書込反映(reflect内のHEAD)失敗: push自体は継続し当該scopeをstale化
+    let b = fx.data_root.join("b.zip");
+    make_archive(&b, 2048);
+    let (code, stdout, stderr) = fx.push_from_list_env(
+        &[],
+        &[(&b, Some("beta"))],
+        &[],
+        &[("FAKE_S3_FAIL_HEAD_FOR", index_key.as_str())],
+    );
+    assert_eq!(code, 0, "反映HEAD失敗でもpush自体は成功: {stdout}{stderr}");
+    assert!(
+        stderr.contains("catalog")
+            && (stderr.contains("警告") || stderr.to_lowercase().contains("warn")),
+        "反映失敗の警告がstderrへ表示される: {stderr}"
+    );
+    assert_ne!(
+        sync_state_status(&fx),
+        "fresh",
+        "反映失敗時は当該scopeをstale化(旧freshを残さない)"
+    );
+}
+
 /// [covers:catalog.rebuild-scoped-to-cache-class] rebuildはcache classのみ置換・冪等
 #[test]
 fn catalog_rebuild_scoped_and_idempotent() {
@@ -471,6 +636,60 @@ fn catalog_json_format_compat_between_routes() {
                 !l.trim().is_empty() && serde_json::from_str::<serde_json::Value>(l.trim()).is_ok()
             }),
         "--format json出力はJSONとしてparse可能: {cached}"
+    );
+}
+
+/// [covers:catalog.json-format-compat]
+/// 同一bucketに複数prefixの記録が混在する索引でも --refresh(S3直接経路)と次回の
+/// cache hit(DB経路)の出力が一致する(両経路へDB保存側と同一のscope分離filterを
+/// 適用=レビュー指摘#9)。
+#[test]
+fn catalog_json_format_compat_multi_prefix_scope() {
+    let opts = StorageOpts {
+        extra_pipeline_profiles: vec!["prod".to_string()],
+        ..StorageOpts::default()
+    };
+    let Some(fx) = StorageFixture::new("cat-json-mp", opts) else {
+        return;
+    };
+    // aws.tomlを2 profile(dev=amazing-backup/・prod=prod-ns/。同一bucket・別prefix)へ
+    let body = format!(
+        "[aws]\nactive_profile = \"dev\"\n\n\
+         [aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\n\
+         prefix = \"{}\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{}\"\n\n\
+         [aws.profiles.prod]\npurpose = \"prod\"\nbucket = \"it-bucket\"\nregion = \"ap-northeast-1\"\n\
+         prefix = \"prod-ns/\"\nstorage_class = \"STANDARD\"\ncredentials_file = \"{}\"\n{}",
+        fx.prefix,
+        fx.credentials.display(),
+        fx.credentials.display(),
+        aws_lifecycle_toml(180, 10, 7),
+    );
+    fx.rewrite_aws_toml(&body);
+
+    // dev・prod両方へpush(索引objectはbucket単位で構築され両prefixの記録を含む)
+    let a = fx.data_root.join("a.zip");
+    make_archive(&a, 1024);
+    let (code, stdout, stderr) = fx.push_from_list(&[], &[(&a, Some("alpha"))], &[]);
+    assert_eq!(code, 0, "push(dev): {stdout}{stderr}");
+    let b = fx.data_root.join("b.zip");
+    make_archive(&b, 2048);
+    let (code, stdout, stderr) =
+        fx.push_from_list_env(&[], &[(&b, Some("beta"))], &["--profile", "prod"], &[]);
+    assert_eq!(code, 0, "push(prod): {stdout}{stderr}");
+
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(dev): {stdout}{stderr}");
+
+    // dev側scopeの照会: cache hit(DB経路)と--refresh(S3直接経路)の出力が一致
+    // (混在索引から当該prefix外の記録を両経路とも同一規則で除外する)
+    let (code, cached, stderr) = fx.list("files", &["--format", "json"]);
+    assert_eq!(code, 0, "list(cache hit): {cached}{stderr}");
+    assert!(cached.contains("alpha"), "dev側の内容: {cached}");
+    let (code, refreshed, stderr) = fx.list("files", &["--refresh", "--format", "json"]);
+    assert_eq!(code, 0, "list --refresh(S3直接): {refreshed}{stderr}");
+    assert_eq!(
+        cached, refreshed,
+        "複数prefix混在索引でも経路間で出力が一致(他prefixの記録は両経路とも混入しない)"
     );
 }
 

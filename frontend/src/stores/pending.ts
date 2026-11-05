@@ -10,12 +10,17 @@ import {
  * pending catalog store(TASK-9設計7章・12章P5): アップロード前カタログの一覧保持・
  * status別集計・scan実行。PendingView(未backup/changed/unknown一覧+scanボタン)の
  * 基盤。取得失敗時はlastErrorを保持し一覧を空へ戻す(空dataを表示しない)。
+ * 実行(scan)の失敗はlastScanErrorへ別保持する(POST失敗直後の再取得が成功しても
+ * 直前のscan失敗を表示から隠さない)。
  */
 export const usePendingStore = defineStore('pending', {
   state: () => ({
-    /** pending_items一覧(未取得・失敗時は空) */
+    /** pending_items一覧(未取得・取得失敗時は空) */
     items: [] as PendingItem[],
     lastError: null as ApiError | null,
+    /** 直近のscan実行(POST /api/pending/scan)のerror(成功でクリア。再取得では
+     * クリアしない=旧一覧表示中も直前の実行失敗を明示できる) */
+    lastScanError: null as ApiError | null,
     /** scan実行中状態(POST /api/pending/scan+一覧再取得の間) */
     scanning: false,
   }),
@@ -48,12 +53,15 @@ export const usePendingStore = defineStore('pending', {
       this.items = []
       this.lastError = result.error
     },
-    /** scan実行(POST後に一覧を再取得してitemsを更新=手動トリガのUI基盤) */
+    /** scan実行(POST後に一覧を再取得してitemsを更新=手動トリガのUI基盤。
+     * POST失敗はlastScanErrorへ保持する=続く再取得の成否で上書きされない) */
     async runScan(): Promise<void> {
       this.scanning = true
       const result = await postPendingScan()
       if (!result.ok) {
-        this.lastError = result.error
+        this.lastScanError = result.error
+      } else {
+        this.lastScanError = null
       }
       await this.fetchPending()
       this.scanning = false

@@ -246,23 +246,87 @@ fn migrations() -> rusqlite_migration::Migrations<'static> {
     ])
 }
 
-/// file権限0600・dir権限0700の適用(D11: 平文replicaを含むための権限境界)。
-fn apply_private_permissions(db_path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o600));
-    for ext in ["-wal", "-shm"] {
-        let mut p = db_path.as_os_str().to_os_string();
-        p.push(ext);
-        let _ = std::fs::set_permissions(Path::new(&p), std::fs::Permissions::from_mode(0o600));
+/// file権限0600の適用(D11: 平文replicaを含むための権限境界)。chmod失敗は
+/// エラーにする(権限境界の保証を黙って諦めない=他user所有等で直せない配置は
+/// 設定エラーとして起動拒否が安全側)。WAL/SHMは存在する場合のみ適用
+/// (open直後は未作成の場合があるため)。
+fn apply_private_permissions(db_path: &Path) -> BackupResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let apply = |p: &Path| -> BackupResult<()> {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+                BackupError::Config(format!(
+                    "catalog DBの権限を0600へ設定できません({}): {e}\
+                     (他user所有の配置が疑われる場合は配置を確認してください)",
+                    p.display()
+                ))
+            })
+        };
+        apply(db_path)?;
+        for ext in ["-wal", "-shm"] {
+            let mut p = db_path.as_os_str().to_os_string();
+            p.push(ext);
+            let side = Path::new(&p);
+            if side.exists() {
+                apply(side)?;
+            }
+        }
     }
+    #[cfg(not(unix))]
+    {
+        let _ = db_path;
+    }
+    Ok(())
+}
+
+/// 既存DB fileの権限0600保証(open前=平文露出の時間窓を開けない)。unix以外は
+/// chmod相当が無いため何もしない。
+fn ensure_private_db_file(db_path: &Path) -> BackupResult<()> {
+    #[cfg(unix)]
+    if db_path.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            BackupError::Config(format!(
+                "catalog DB fileの権限を0600へ設定できません({}): {e}",
+                db_path.display()
+            ))
+        })?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = db_path;
+    }
+    Ok(())
 }
 
 /// DB親dirの作成(不在時のみ・0700。設計2章: 専用directoryは0700で作成)。
+/// 既存dirは0700で無ければchmod 0700で是正する(既存0755 dirを残さない)。
 fn ensure_private_parent(db_path: &Path) -> BackupResult<()> {
     let Some(parent) = db_path.parent() else {
         return Ok(());
     };
     if parent.is_dir() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(parent).map_err(|e| {
+                BackupError::Config(format!(
+                    "catalog DB dirの読取に失敗({}): {e}",
+                    parent.display()
+                ))
+            })?;
+            if meta.permissions().mode() & 0o777 != 0o700 {
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
+                    |e| {
+                        BackupError::Config(format!(
+                            "catalog DB dirの権限を0700へ設定できません({}): {e}",
+                            parent.display()
+                        ))
+                    },
+                )?;
+            }
+        }
         return Ok(());
     }
     #[cfg(unix)]
@@ -312,7 +376,9 @@ impl CatalogDb {
     /// 指定pathで開く(unit test・seam用)。
     pub fn open_at(db_path: &Path) -> BackupResult<CatalogDb> {
         ensure_private_parent(db_path)?;
-        // 新規fileは0600で作成してからopen(既存fileの権限はopen後に0600へ合わせる)
+        // 既存fileはopen前に0600へ是正(0644等の平文露出状態で接続しない)。
+        // 新規fileは0600で作成してからopen
+        ensure_private_db_file(db_path)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -355,7 +421,8 @@ impl CatalogDb {
         migrations()
             .to_latest(&mut conn)
             .map_err(|e| BackupError::Config(format!("catalog DBのmigrationに失敗: {e}")))?;
-        apply_private_permissions(db_path);
+        // open後に作られるWAL/SHMも同一の権限境界へ(失敗はエラー)
+        apply_private_permissions(db_path)?;
         Ok(CatalogDb { conn })
     }
 
@@ -445,32 +512,7 @@ impl CatalogDb {
 
     /// sync_state読み出し(行が無いNone)。
     pub fn sync_state(&self, bucket: &str, prefix: &str) -> BackupResult<Option<SyncState>> {
-        let scope = scope_key(bucket, prefix);
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT index_etag, index_version_id, fetched_at, last_write_at, \
-                 last_verified_at, status, entry_count, index_updated_at, index_run_id \
-                 FROM sync_state WHERE scope = ?1",
-            )
-            .map_err(|e| BackupError::Internal(format!("sync_state準備に失敗: {e}")))?;
-        let row = stmt
-            .query_row([scope], |r| {
-                Ok(SyncState {
-                    index_etag: r.get(0)?,
-                    index_version_id: r.get(1)?,
-                    fetched_at: r.get(2)?,
-                    last_write_at: r.get(3)?,
-                    last_verified_at: r.get(4)?,
-                    status: r.get(5)?,
-                    entry_count: r.get(6)?,
-                    index_updated_at: r.get(7)?,
-                    index_run_id: r.get(8)?,
-                })
-            })
-            .optional()
-            .map_err(|e| BackupError::Internal(format!("sync_state読込に失敗: {e}")))?;
-        Ok(row)
+        read_sync_state(&self.conn, &scope_key(bucket, prefix))
     }
 
     /// freshness判定: sync_state行が存在しstatus=freshかつvalidator一致(設計4章:
@@ -663,159 +705,61 @@ impl CatalogDb {
 
     /// cacheから索引entriesを復元(ordinal順=反映時の索引並び。headerはsync_stateの
     /// 保存値から再構築)。照会系のcache hit経路が使い、entry構造はS3経路と同一。
+    /// 一連の読取(sync_state・entities・versions・pins・locations)は単一の読取
+    /// transactionで行う=同一snapshot(読取間にsyncがcommitしても旧entityと新版を
+    /// 組み合わせた混在snapshotを返さない)。
     pub fn load_entries(
         &self,
         bucket: &str,
         prefix: &str,
     ) -> BackupResult<(IndexHeader, Vec<IndexFileEntry>)> {
         let scope = scope_key(bucket, prefix);
-        let Some(st) = self.sync_state(bucket, prefix)? else {
+        let tx = self.read_snapshot_tx()?;
+        let st = read_sync_state(&tx, &scope)?;
+        let Some(st) = st else {
+            commit_read_tx(tx)?;
             return Ok((empty_header(), Vec::new()));
         };
-        // entities(ordinal順)
-        let mut entities: Vec<(String, String)> = Vec::new();
-        {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT uuid, title FROM entities WHERE scope = ?1 ORDER BY ordinal")
-                .map_err(|e| BackupError::Internal(format!("entities準備に失敗: {e}")))?;
-            let rows = stmt
-                .query_map([&scope], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })
-                .map_err(|e| BackupError::Internal(format!("entities読込に失敗: {e}")))?;
-            for row in rows {
-                entities.push(
-                    row.map_err(|e| BackupError::Internal(format!("entities行読取に失敗: {e}")))?,
-                );
-            }
-        }
-        // versions(uuid・ordinal順)
-        let mut versions: std::collections::HashMap<String, Vec<IndexVersion>> =
-            std::collections::HashMap::new();
-        {
-            let mut stmt = self
-                .conn
-                .prepare(
-                    "SELECT uuid, date, version_ts, batch_id, s3_key, version_id, \
-                     source_sha256, age_sha256, source_size, age_size FROM versions \
-                     WHERE scope = ?1 ORDER BY uuid, ordinal",
-                )
-                .map_err(|e| BackupError::Internal(format!("versions準備に失敗: {e}")))?;
-            let rows = stmt
-                .query_map([&scope], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        IndexVersion {
-                            date: r.get(1)?,
-                            version_ts: r.get(2)?,
-                            batch_id: r.get(3)?,
-                            s3_key: r.get(4)?,
-                            version_id: r.get(5)?,
-                            source_sha256: r.get(6)?,
-                            age_sha256: r.get(7)?,
-                            source_size: r.get::<_, i64>(8)?.max(0) as u64,
-                            age_size: r.get::<_, i64>(9)?.max(0) as u64,
-                        },
-                    ))
-                })
-                .map_err(|e| BackupError::Internal(format!("versions読込に失敗: {e}")))?;
-            for row in rows {
-                let (uuid, v) =
-                    row.map_err(|e| BackupError::Internal(format!("versions行読取に失敗: {e}")))?;
-                versions.entry(uuid).or_default().push(v);
-            }
-        }
-        // pins(uuid・ordinal順)
-        let mut pins: std::collections::HashMap<String, Vec<IndexPin>> =
-            std::collections::HashMap::new();
-        {
-            let mut stmt = self
-                .conn
-                .prepare(
-                    "SELECT uuid, pin, s3_key, created_at, date, source_sha256, age_sha256,\
-                     source_size FROM pins WHERE scope = ?1 ORDER BY uuid, ordinal",
-                )
-                .map_err(|e| BackupError::Internal(format!("pins準備に失敗: {e}")))?;
-            let rows = stmt
-                .query_map([&scope], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        IndexPin {
-                            pin: r.get(1)?,
-                            s3_key: r.get(2)?,
-                            created_at: r.get(3)?,
-                            date: r.get(4)?,
-                            source_sha256: r.get(5)?,
-                            age_sha256: r.get(6)?,
-                            source_size: r.get::<_, i64>(7)?.max(0) as u64,
-                        },
-                    ))
-                })
-                .map_err(|e| BackupError::Internal(format!("pins読込に失敗: {e}")))?;
-            for row in rows {
-                let (uuid, p) =
-                    row.map_err(|e| BackupError::Internal(format!("pins行読取に失敗: {e}")))?;
-                pins.entry(uuid).or_default().push(p);
-            }
-        }
-        // locations(uuid・ordinal順)
-        let mut locations: std::collections::HashMap<String, Vec<IndexLocation>> =
-            std::collections::HashMap::new();
-        {
-            let mut stmt = self
-                .conn
-                .prepare(
-                    "SELECT uuid, source_path, category, label, identity_hash, last_backup \
-                     FROM locations WHERE scope = ?1 ORDER BY uuid, ordinal",
-                )
-                .map_err(|e| BackupError::Internal(format!("locations準備に失敗: {e}")))?;
-            let rows = stmt
-                .query_map([&scope], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        IndexLocation {
-                            source_path: r.get(1)?,
-                            category: r.get(2)?,
-                            label: r.get(3)?,
-                            identity_hash: r.get(4)?,
-                            last_backup: r.get(5)?,
-                        },
-                    ))
-                })
-                .map_err(|e| BackupError::Internal(format!("locations読込に失敗: {e}")))?;
-            for row in rows {
-                let (uuid, l) =
-                    row.map_err(|e| BackupError::Internal(format!("locations行読取に失敗: {e}")))?;
-                locations.entry(uuid).or_default().push(l);
-            }
-        }
-        let entries = entities
-            .into_iter()
-            .map(|(uuid, title)| {
-                let versions = versions.remove(&uuid).unwrap_or_default();
-                let pins = pins.remove(&uuid).unwrap_or_default();
-                let locations = locations.remove(&uuid).unwrap_or_default();
-                IndexFileEntry {
-                    schema: INDEX_SCHEMA,
-                    record_type: "file".into(),
-                    uuid,
-                    title,
-                    versions,
-                    pins,
-                    locations,
-                }
-            })
-            .collect();
-        let header = IndexHeader {
-            schema: INDEX_SCHEMA,
-            record_type: "index_header".into(),
-            updated_at: st.index_updated_at,
-            run_id: st.index_run_id,
-            tool_version: env!("CARGO_PKG_VERSION").to_string(),
-            entries: st.entry_count,
-        };
+        let entries = read_scoped_entries(&tx, &scope)?;
+        let header = header_from_state(&st);
+        commit_read_tx(tx)?;
         Ok((header, entries))
+    }
+
+    /// freshness判定とentries読込を同一の読取transaction(snapshot)で行う(cache hit
+    /// 経路用)。検証済みfresh(HEAD応答のvalidator一致)ならSomeでentriesを返し、
+    /// そうでなければNone(呼出側はS3取得経路へ)。判定と読込の間にsyncがcommit
+    /// してもfresh判定と内容がずれない。
+    pub fn load_entries_if_fresh(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        validator: &Validator,
+    ) -> BackupResult<Option<(IndexHeader, Vec<IndexFileEntry>)>> {
+        let scope = scope_key(bucket, prefix);
+        let tx = self.read_snapshot_tx()?;
+        let st = read_sync_state(&tx, &scope)?;
+        let fresh = matches!(
+            &st,
+            Some(st) if st.status == STATUS_FRESH && st.validator_matches(validator)
+        );
+        if !fresh {
+            commit_read_tx(tx)?;
+            return Ok(None);
+        }
+        let st = st.expect("fresh判定通過時はsync_state行が存在する");
+        let entries = read_scoped_entries(&tx, &scope)?;
+        let header = header_from_state(&st);
+        commit_read_tx(tx)?;
+        Ok(Some((header, entries)))
+    }
+
+    /// 読取snapshot用のtransaction開始(WAL modeのdeferred transactionは最初の
+    /// SELECT時点でsnapshotを取る)。
+    fn read_snapshot_tx(&self) -> BackupResult<rusqlite::Transaction<'_>> {
+        self.conn
+            .unchecked_transaction()
+            .map_err(|e| BackupError::Internal(format!("読取transactionの開始に失敗: {e}")))
     }
 
     /// 当該scopeのpending_items読み出し(P3時点はscan未実装のため常に空。
@@ -1034,9 +978,198 @@ fn empty_header() -> IndexHeader {
     }
 }
 
+/// sync_state読み出し(行が無いNone)。connectionはTransactionも渡せる
+/// (DerefでConnectionへ透過するため同一snapshot内の読取に使う)。
+fn read_sync_state(conn: &Connection, scope: &str) -> BackupResult<Option<SyncState>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT index_etag, index_version_id, fetched_at, last_write_at, \
+             last_verified_at, status, entry_count, index_updated_at, index_run_id \
+             FROM sync_state WHERE scope = ?1",
+        )
+        .map_err(|e| BackupError::Internal(format!("sync_state準備に失敗: {e}")))?;
+    let row = stmt
+        .query_row([scope], |r| {
+            Ok(SyncState {
+                index_etag: r.get(0)?,
+                index_version_id: r.get(1)?,
+                fetched_at: r.get(2)?,
+                last_write_at: r.get(3)?,
+                last_verified_at: r.get(4)?,
+                status: r.get(5)?,
+                entry_count: r.get(6)?,
+                index_updated_at: r.get(7)?,
+                index_run_id: r.get(8)?,
+            })
+        })
+        .optional()
+        .map_err(|e| BackupError::Internal(format!("sync_state読込に失敗: {e}")))?;
+    Ok(row)
+}
+
+/// 当該scopeのcache行からentriesを復元(entities・versions・pins・locationsを
+/// ordinal順=反映時の索引並びで読む。読取transaction内で使う)。
+fn read_scoped_entries(conn: &Connection, scope: &str) -> BackupResult<Vec<IndexFileEntry>> {
+    // entities(ordinal順)
+    let mut entities: Vec<(String, String)> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT uuid, title FROM entities WHERE scope = ?1 ORDER BY ordinal")
+            .map_err(|e| BackupError::Internal(format!("entities準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map([scope], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|e| BackupError::Internal(format!("entities読込に失敗: {e}")))?;
+        for row in rows {
+            entities.push(
+                row.map_err(|e| BackupError::Internal(format!("entities行読取に失敗: {e}")))?,
+            );
+        }
+    }
+    // versions(uuid・ordinal順)
+    let mut versions: std::collections::HashMap<String, Vec<IndexVersion>> =
+        std::collections::HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT uuid, date, version_ts, batch_id, s3_key, version_id, \
+                 source_sha256, age_sha256, source_size, age_size FROM versions \
+                 WHERE scope = ?1 ORDER BY uuid, ordinal",
+            )
+            .map_err(|e| BackupError::Internal(format!("versions準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map([scope], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    IndexVersion {
+                        date: r.get(1)?,
+                        version_ts: r.get(2)?,
+                        batch_id: r.get(3)?,
+                        s3_key: r.get(4)?,
+                        version_id: r.get(5)?,
+                        source_sha256: r.get(6)?,
+                        age_sha256: r.get(7)?,
+                        source_size: r.get::<_, i64>(8)?.max(0) as u64,
+                        age_size: r.get::<_, i64>(9)?.max(0) as u64,
+                    },
+                ))
+            })
+            .map_err(|e| BackupError::Internal(format!("versions読込に失敗: {e}")))?;
+        for row in rows {
+            let (uuid, v) =
+                row.map_err(|e| BackupError::Internal(format!("versions行読取に失敗: {e}")))?;
+            versions.entry(uuid).or_default().push(v);
+        }
+    }
+    // pins(uuid・ordinal順)
+    let mut pins: std::collections::HashMap<String, Vec<IndexPin>> =
+        std::collections::HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT uuid, pin, s3_key, created_at, date, source_sha256, age_sha256,\
+                 source_size FROM pins WHERE scope = ?1 ORDER BY uuid, ordinal",
+            )
+            .map_err(|e| BackupError::Internal(format!("pins準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map([scope], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    IndexPin {
+                        pin: r.get(1)?,
+                        s3_key: r.get(2)?,
+                        created_at: r.get(3)?,
+                        date: r.get(4)?,
+                        source_sha256: r.get(5)?,
+                        age_sha256: r.get(6)?,
+                        source_size: r.get::<_, i64>(7)?.max(0) as u64,
+                    },
+                ))
+            })
+            .map_err(|e| BackupError::Internal(format!("pins読込に失敗: {e}")))?;
+        for row in rows {
+            let (uuid, p) =
+                row.map_err(|e| BackupError::Internal(format!("pins行読取に失敗: {e}")))?;
+            pins.entry(uuid).or_default().push(p);
+        }
+    }
+    // locations(uuid・ordinal順)
+    let mut locations: std::collections::HashMap<String, Vec<IndexLocation>> =
+        std::collections::HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT uuid, source_path, category, label, identity_hash, last_backup \
+                 FROM locations WHERE scope = ?1 ORDER BY uuid, ordinal",
+            )
+            .map_err(|e| BackupError::Internal(format!("locations準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map([scope], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    IndexLocation {
+                        source_path: r.get(1)?,
+                        category: r.get(2)?,
+                        label: r.get(3)?,
+                        identity_hash: r.get(4)?,
+                        last_backup: r.get(5)?,
+                    },
+                ))
+            })
+            .map_err(|e| BackupError::Internal(format!("locations読込に失敗: {e}")))?;
+        for row in rows {
+            let (uuid, l) =
+                row.map_err(|e| BackupError::Internal(format!("locations行読取に失敗: {e}")))?;
+            locations.entry(uuid).or_default().push(l);
+        }
+    }
+    Ok(entities
+        .into_iter()
+        .map(|(uuid, title)| {
+            let versions = versions.remove(&uuid).unwrap_or_default();
+            let pins = pins.remove(&uuid).unwrap_or_default();
+            let locations = locations.remove(&uuid).unwrap_or_default();
+            IndexFileEntry {
+                schema: INDEX_SCHEMA,
+                record_type: "file".into(),
+                uuid,
+                title,
+                versions,
+                pins,
+                locations,
+            }
+        })
+        .collect())
+}
+
+/// sync_stateの保存値から索引headerを再構築(cache hit時にheaderを忠実に復元)。
+fn header_from_state(st: &SyncState) -> IndexHeader {
+    IndexHeader {
+        schema: INDEX_SCHEMA,
+        record_type: "index_header".into(),
+        updated_at: st.index_updated_at.clone(),
+        run_id: st.index_run_id.clone(),
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        entries: st.entry_count,
+    }
+}
+
+/// 読取transactionの終了(読取のみのためrollbackでも等価。commit失敗は読取自体の
+/// 異常として伝播させる)。
+fn commit_read_tx(tx: rusqlite::Transaction<'_>) -> BackupResult<()> {
+    tx.commit()
+        .map_err(|e| BackupError::Internal(format!("読取transactionの終了に失敗: {e}")))
+}
+
 /// scope分離filter: prefix外のs3_keyを持つ版・pinを除外し、版もpinも無くなった
 /// entityは落とす(指摘#3。L-R1と同一の意味論をscope単位へ適用)。
-fn scope_filter_entries(entries: &[IndexFileEntry], prefix: &str) -> Vec<IndexFileEntry> {
+/// DB保存側(replace_scope)とS3取得経路(storage::read_index_cached)の両方が適用する
+/// =cache hitとS3直接で出力のscope適用を同一規則に保つ。
+pub(crate) fn scope_filter_entries(
+    entries: &[IndexFileEntry],
+    prefix: &str,
+) -> Vec<IndexFileEntry> {
     entries
         .iter()
         .filter_map(|e| {
@@ -1054,7 +1187,9 @@ fn scope_filter_entries(entries: &[IndexFileEntry], prefix: &str) -> Vec<IndexFi
 
 /// 書込系(push/pin/prune等)の索引upload成功後の同一process内DB反映(設計2章の書込時序
 /// ・4章の自端末書込直後fresh)。反映の成否のみをResultで返し、呼び出し側は失敗時に
-/// 警告表示して処理継続する(JSONLが正本のため)。
+/// 警告表示して処理継続する(JSONLが正本のため)。反映失敗(HEAD失敗・置換失敗)時は
+/// 当該scopeをstale化して旧freshを残さない(設計2章「反映失敗時は当該scopeをstale化
+/// して警告」。mark_status自体の失敗は元のerrorに優先させない=警告logのみ)。
 pub fn reflect_written_index(
     backend: &dyn S3Backend,
     bucket: &str,
@@ -1067,8 +1202,18 @@ pub fn reflect_written_index(
         let mut db = CatalogDb::open()?;
         let index_key = crate::layout::index_object_key(prefix);
         // 直前にuploadした索引objectのvalidatorをHEAD 1回で確定する(この時点のsnapshot
-        // 鮮度=自端末書込直後の無条件fresh。HEAD失敗時はstale化して旧freshを残さない)
-        let validator = match backend.head(bucket, &index_key)? {
+        // 鮮度=自端末書込直後の無条件fresh)
+        let head = match backend.head(bucket, &index_key) {
+            Ok(h) => h,
+            Err(e) => {
+                // HEAD失敗=validator確定不能: 当該scopeをstale化して旧freshを残さない
+                if let Err(mark_e) = db.mark_status(bucket, prefix, STATUS_STALE) {
+                    eprintln!("WARNING: sync_stateのstale化に失敗(logのみ): {mark_e}");
+                }
+                return Err(e);
+            }
+        };
+        let validator = match head {
             Some(h) => Validator::from_head(&h),
             None => Validator::default(),
         };
@@ -1077,7 +1222,7 @@ pub fn reflect_written_index(
         } else {
             STATUS_FRESH
         };
-        db.replace_scope(
+        if let Err(e) = db.replace_scope(
             bucket,
             prefix,
             header,
@@ -1086,7 +1231,13 @@ pub fn reflect_written_index(
             &validator,
             status,
             ReflectOrigin::Written,
-        )?;
+        ) {
+            // 置換失敗もstale化して旧freshを残さない
+            if let Err(mark_e) = db.mark_status(bucket, prefix, STATUS_STALE) {
+                eprintln!("WARNING: sync_stateのstale化に失敗(logのみ): {mark_e}");
+            }
+            return Err(e);
+        }
         Ok(())
     };
     reflect().map_err(|e| format!("{e}"))
@@ -1408,6 +1559,57 @@ mod tests {
         assert!(
             !db.is_fresh("b1", "p1/", &v).unwrap(),
             "stale化後はfreshでない"
+        );
+    }
+
+    /// [covers:catalog.list-cache-hit-after-head-check]
+    /// load_entries_if_freshはfreshness判定とentries読込を同一の読取
+    /// transaction(snapshot)で行う(cache hit経路の結合点=レビュー指摘#7)。
+    /// validator一致+freshのみSomeを返し、不一致・stale・未syncはNone。
+    #[test]
+    fn load_entries_if_fresh_combines_check_and_read() {
+        let (_tmp, mut db) = open_test_db("cat-if-fresh");
+        let entries = vec![entry("u1", "a.zip", "p1/data/u1/default.age")];
+        let v = Validator {
+            etag: "\"etag-if\"".into(),
+            version_id: "v7".into(),
+        };
+        // 未sync(sync_state行が無い)はNone
+        assert!(db.load_entries_if_fresh("b1", "p1/", &v).unwrap().is_none());
+        replace_default(&mut db, "b1", "p1/", &entries);
+        // 既定のreplace_defaultはvalidator etag-1/v1・fresh
+        let hit = db
+            .load_entries_if_fresh(
+                "b1",
+                "p1/",
+                &Validator {
+                    etag: "\"etag-1\"".into(),
+                    version_id: "v1".into(),
+                },
+            )
+            .unwrap();
+        let (h, loaded) = hit.expect("validator一致+freshはSome");
+        assert_eq!(loaded.len(), 1, "同一snapshotでentriesを読む");
+        assert_eq!(h.entries, 1);
+        // HEAD応答のvalidator不一致(stale)はNone(呼出側はS3取得へ)
+        assert!(
+            db.load_entries_if_fresh("b1", "p1/", &Validator::default())
+                .unwrap()
+                .is_none()
+        );
+        // status失効もNone(旧freshを残さない)
+        db.mark_status("b1", "p1/", STATUS_STALE).unwrap();
+        assert!(
+            db.load_entries_if_fresh(
+                "b1",
+                "p1/",
+                &Validator {
+                    etag: "\"etag-1\"".into(),
+                    version_id: "v1".into(),
+                },
+            )
+            .unwrap()
+            .is_none()
         );
     }
 }

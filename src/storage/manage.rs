@@ -1122,6 +1122,9 @@ fn cmd_manage_catalog_sync(ctx: &CtxArgs) -> i32 {
 /// catalog syncの処理本体(印刷しない)。TASK-9 12章P2: serve起動時syncもこの関数を
 /// spawn_blocking経由で呼ぶ(P1同期層の再利用・Runtime混在panic回避)。
 /// 戻り値はCLI向けの結果message(stdoutの`catalog: `以降)。
+/// 初回(sync_state・local registryともに無い状態)でもremoteのHEAD確認を省略
+/// しない(local履歴の不在はremote索引の不在の証拠にならない=別端末・復旧環境で
+/// S3に索引が存在するなら初回syncで取得する)。
 pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
     use crate::catalog::{
         CatalogDb, ReflectOrigin, STATUS_ERROR, STATUS_FRESH, STATUS_STALE, SourceMtimes, Validator,
@@ -1151,26 +1154,27 @@ pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
         )?;
         Ok("未書込namespaceです(空のcacheを同期しました)".to_string())
     };
-    // sync_state行が無く・registry file自体が不在(この環境に書込履歴が一切無い)の場合:
-    // 同期すべきremote索引の参照情報も無いため、未書込namespaceとして空cacheを確定し
-    // S3へ問い合わせない(registryがある場合は通常どおりHEAD検証から始める)
-    if db
-        .sync_state(&session.aws.bucket, &session.aws.prefix)?
-        .is_none()
-        && !session
+    // remote索引の存在確認から(HEAD)。HEAD失敗もerror化経路へ集約する
+    // (sync_state.status=errorを残し旧freshを持ち越さない)
+    let head = match session.backend.head(&session.aws.bucket, &index_key) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+            return Err(e);
+        }
+    };
+    let Some(head) = head else {
+        // 索引object不在: 未書込namespace例外(HEADでremote不在を確認した上での
+        // 空cache+fresh確定・exit 0)。未書込の判定は registry file自体が無い
+        // (この環境に書込履歴が一切無い)場合か file_upload記録に当該prefix配下が
+        // 無い場合。書込実績があるnamespaceの索引不在は案内エラーにする
+        let registry_absent = !session
             .cfg
             .as_ref()
             .expect("pipeline.toml必須経路(open_session_with_pipeline)")
             .registry_path
-            .is_file()
-    {
-        return empty_cache(&mut db);
-    }
-    let head = session.backend.head(&session.aws.bucket, &index_key)?;
-    let Some(head) = head else {
-        // 索引object不在: 従来の未書込namespace例外と同じ規則(空cache+freshでexit 0・
-        // 書込実績があるnamespaceは索引不在を案内エラーにする)
-        if super::namespace_never_written(&session)? {
+            .is_file();
+        if registry_absent || super::namespace_never_written(&session)? {
             return empty_cache(&mut db);
         }
         return Err(BackupError::Config(format!(
