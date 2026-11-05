@@ -1,0 +1,86 @@
+# amazing-backup テスト設計条件書(frontend エリア)
+# 出典: tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(frontend構成)・
+#   6章(API設計・error体系=指摘#14)・4章(D10 staleness表示)・11章(frontend.toml・
+#   scanner拡張=指摘#12)・12章Phase P2(frontend最小build)・P3(読取API・vitest緑)。
+#   D1〜D11は2026-11-05ユーザー承認済み。
+# 2026-11-05: TASK-9 Phase P3(読取API)waveで新設(テスト先行)。設計11章・12章P3の
+#   「verify-conditions.pyのTS走査拡張」と合わせ、frontend/src配下の期待動作を
+#   条件化する(P2のexcluded(server.toml側)からfrontend/src配下のvitest対象分を移管)。
+#   P3時点で観測可能な条件のみ。P4(LoginView・passkey)・P5(PendingView・scan)分は
+#   excludedへ(後続waveで条件化)。テストはvitest(frontend/src/**/*.spec.ts)で
+#   `// [covers:<id>]`形式で紐付け(verify-conditions.pyのTS/Vue走査)。
+#   実装前のためfrontend.sync-state-endpoint-client分のテストは実行failを許容
+#   (pnpm vitest runは実行可能・client.tsへのGET /api/sync対応はP3実装で追加)。
+
+[meta]
+feature = "frontend"
+source_file = "frontend/src/"
+verified = false
+test_command = "pnpm --dir frontend vitest run"
+note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・12章P3時点のfrontend期待動作。API client(src/api/client.ts)とsync store(src/stores/sync.ts)のvitestで担保(画面の本格実装はP4/P5)"
+
+[[condition]]
+id = "frontend.api-error-body-guard"
+target_function = "frontend api/client.ts isApiErrorResponse"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(指摘#14: error bodyは{\"error\":{\"code\",\"message\"}}形式・一般化messageのみ)・7章(api/client)・11章(frontend test=vitest)"
+description = "API clientはerror body形式({\"error\":{\"code\",\"message\"}}・code/messageともstring)を型ガードで判定し、不一致(形式違い・null・code非string等)を検出する (vitest)"
+given = "isApiErrorResponseへの合成入力(形式一致・code非string・message欠落・空object・null)"
+expect_return_shape = "形式一致のみtrue・他はfalse"
+source_lines = "frontend/src/api/client.spec.ts:6"
+
+[[condition]]
+id = "frontend.api-get-result-mapping"
+target_function = "frontend api/client.ts apiGet"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(指摘#14: 非2xxはerror code+HTTP status)・7章(api/client・型ガードで検証し不一致はinternal扱い)・11章(vitest)"
+description = "apiGetは成功(2xx+型ガード通過)は{ok:true,data}・非2xxでerror body形式なら{ok:false,error:{code,message},httpStatus}・network失敗は{ok:false,error:{code:\"network\"},httpStatus:0}・2xxでも型ガード不一致は{ok:false,error:{code:\"internal\"}}へ結果をmappingする (vitest)"
+given = "fetchのmock(200+ガード通過body・503+{\"error\":{\"code\":\"configuration\",...}}・network reject・200+形式不一致body)でのapiGet呼び出し"
+expect_return_shape = "各入力を上記のok/error/httpStatusへ一方にmapping(guard通過data・error code・httpStatus=503/0)"
+source_lines = "frontend/src/api/client.spec.ts:30"
+
+[[condition]]
+id = "frontend.health-state-store"
+target_function = "frontend stores/sync.ts fetchHealth"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(Pinia stores・sync)・12章P2(liveness表示)・11章(vitest)"
+description = "sync storeのfetchHealthはhealth状態(checking→ok/error)とmessageを遷移させ、失敗時はlastError(ApiError)を保持する(P2のliveness表示。P3以降のstaleness表示の基盤) (vitest)"
+given = "setActivePinia後のsync storeへのfetch mock(200+{status:\"ok\"}とnetwork reject)"
+expect_return_shape = "成功時health=ok・message=ok・lastError=null。失敗時health=error・lastError={code:\"network\",...}"
+source_lines = "frontend/src/stores/sync.spec.ts:15"
+
+[[condition]]
+id = "frontend.sync-state-endpoint-client"
+target_function = "frontend api/client.ts GET /api/sync応答型ガード・stores/sync.ts sync状態取得"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GET /api/sync=sync状態fetched_at/validator/staleness)・4章(D10: frontendにstaleness表示+手動refresh)・7章(stores/sync)・12章P3"
+description = "GET /api/sync応答(status=fresh|stale|error|unknown・scope・index_etag/index_version_id・fetched_at/last_write_at/last_verified_at・entry_count)の型ガードを持ち、sync storeはsync状態を取得して保持する(手動refreshのUI表示基盤。P3時点では保護APIのためAPI未構成状態からの応答は503 error扱い) (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(503+{\"error\":{\"code\":\"configuration\",...}}・200+sync状態body)でのstoreのsync状態取得"
+expect_return_shape = "型ガードは形式一致のみtrue。storeは200時にsync状態(status等)を保持し、503ではlastError(configuration)を保持する(実装前のため本条件のテストは実行failを許容)"
+source_lines = "frontend/src/api/sync-state.spec.ts:18"
+
+[[condition]]
+id = "frontend.fail-closed-protected-api-handling"
+target_function = "frontend api/client.ts・stores/sync.ts(保護API 503の扱い)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 12章P2〜P3(保護APIはP4までfail-closed=503 configuration)・指摘#11・6章(error code体系)・7章(HomeViewの閉鎖表示)"
+description = "保護API(読取系)が未認証で503(configuration)を返すP2〜P3段階では、frontendはapiGetのerror扱い(code=configuration+httpStatus=503)としてdataの表示を行わず、閉鎖されている状態をlastError・UI文案で示す(認証未構成時に空dataを表示しない) (vitest)"
+given = "fetch mock(503+{\"error\":{\"code\":\"configuration\",\"message\":...}})でのapiGet経由の保護API呼び出しとsync storeのerror状態"
+expect_return_shape = "ok=false・error.code=configuration・httpStatus=503としてstoreのlastErrorに保持されdataは返らない"
+source_lines = "frontend/src/api/client.spec.ts:31"
+
+[[excluded]]
+item = "LoginView・passkey認証UI・認証後の本格画面(EntitiesView・EntityDetailViewのdata表示・router guard)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: LoginView・EntitiesView・EntityDetailView)・8章(D3)・12章P4(passkey認証・LoginView・保護API開放)"
+reason = "P4(passkey認証)の実装phaseでありP3時点では保護APIがfail-closed(503)のため観測可能な動作が閉鎖表示に限られる。後続waveで条件化する(本waveはfrontend.fail-closed-protected-api-handlingが閉鎖扱いを担保)"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+[[excluded]]
+item = "PendingView(未backup/changed/unknown一覧+scanボタン)・pending周りのUI"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: PendingView)・12章P5(pending catalog・PendingView)"
+reason = "P5(pending catalog)の実装phaseでありP3対象外。GET /api/pendingのendpoint/schema枠はserver.pending-endpoint-schemaが担保"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+[[excluded]]
+item = "Vite dev proxy(40512)経由の実browser接続・dist埋め込み配信の実機確認・testing libraryによるcomponent描画test"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(vite.config.ts dev proxy)・10章(dist二階建て)・11章(vitest+testing library)・12章P2/P3"
+reason = "実browser・release build産物を要する観測は単体testで観測できない(dev proxy・dist配信)。testing libraryは未導入のためcomponent描画testは本waveでは書かずstore・clientのunit testで担保する(導入はP4+の画面実装waveで判断)"
+decided_at = "2026-11-05"
+decided_by = "claude"

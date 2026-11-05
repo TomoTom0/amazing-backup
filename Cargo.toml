@@ -55,3 +55,5 @@ rust-embed = { version = "8", optional = true }
 # aws-smithy-http-client(test-util)にあり、aws-smithy-runtime(test-util)は設計12.1どおりの基盤feature
 aws-smithy-runtime = { version = "1", features = ["test-util"] }
 aws-smithy-http-client = { version = "1", features = ["test-util"] }
+# TASK-9 12章P3(handler単体test): routerへのoneshot request(tower::ServiceExt)
+tower = { version = "0.5", features = ["util"] }

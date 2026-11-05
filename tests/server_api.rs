@@ -152,6 +152,43 @@ fn serve_protected_endpoints_fail_closed() {
     let _ = child.wait();
 }
 
+/// [covers:server.protected-endpoints-fail-closed]
+/// P3で読取API endpointが実装された後も、serve経由はP4(認証)までfail-closedの
+/// まま(指摘#11: P3の機密APIはP4までfail-closed。handler単体testとは別にserve経由の
+/// 閉鎖維持を回帰検出する)。P3読取APIのendpoint群(+POST)が未認証で内容を返さない。
+#[test]
+fn serve_p3_read_api_still_fail_closed_until_auth() {
+    let Some(fx) = common::StorageFixture::new("srv-closed-p3", common::StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    make_archive(&a, 1024);
+    let (code, stdout, stderr) = fx.push_from_list(&[], &[(&a, Some("alpha"))], &[]);
+    assert_eq!(code, 0, "push(事前): {stdout}{stderr}");
+
+    let (addr, mut child, _err) = start_serve(&fx, free_local_port(), "closed-p3");
+    for path in [
+        "/api/entities",
+        "/api/pins",
+        "/api/locations",
+        "/api/pending",
+        "/api/sync",
+        "/api/diff",
+    ] {
+        let (code, body) = common::http_get(&addr, path).expect("応答");
+        assert!(
+            code == 401 || code == 503,
+            "P3実装後も未認証の{path}は401/503(fail-closed維持): status={code} body={body}"
+        );
+        assert!(
+            !body.contains("alpha"),
+            "{path}の応答に保護対象データは含まれない: {body}"
+        );
+    }
+    let _ = child.send_sigterm();
+    let _ = child.wait();
+}
+
 /// [covers:server.graceful-shutdown] SIGTERMでgracefulにexit 0
 #[test]
 fn serve_shuts_down_gracefully_on_sigterm() {
