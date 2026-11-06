@@ -1262,3 +1262,239 @@ fn manage_auth_remove_last_guides_rebootstrap() {
     );
     assert_eq!(credential_rows(&fx).len(), 0, "credentials 0行=未登録状態");
 }
+
+// --- manage auth api-key(TASK-13設計D12・2.2/2.5章: api-key生成・list統合表示・
+//     remove両table・0件案内合計判定) ---
+//     実装前のためapi_keys table不在のrusqlite直接操作・未知subcommandのexit 64に
+//     より本系testは実行failを許容(赤)。
+
+/// SHA-256 hex符号化(api_keysのkey_hash算出=設計2.1と同一形式)。
+fn sha256_hex(s: &str) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(s.as_bytes());
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// api_keys tableへ1行挿入(rusqlite直接=実装後のinsert_api_key APIと同一schema)。
+fn insert_api_key(fx: &StorageFixture, credential_id: &str, key: &str, name: &str) {
+    let conn = rusqlite::Connection::open(fx.catalog_db()).expect("catalog.db open");
+    conn.execute(
+        "INSERT INTO api_keys (credential_id, key_hash, name, created_at) \
+         VALUES (?1, ?2, ?3, '2026-11-05T00:00:00+09:00')",
+        rusqlite::params![credential_id, sha256_hex(key), name],
+    )
+    .expect("api_keys挿入(実装前はtable不在でfail=赤)");
+}
+
+/// catalog.dbのapi_keys行(credential_id, key_hash, name, created_at)を読む。
+fn api_key_rows(fx: &StorageFixture) -> Vec<(String, String, String, String)> {
+    let conn = rusqlite::Connection::open(fx.catalog_db()).expect("catalog.db open");
+    let mut stmt = conn
+        .prepare(
+            "SELECT credential_id, key_hash, name, created_at FROM api_keys \
+             ORDER BY credential_id",
+        )
+        .expect("api_keys準備(migration済みschema)");
+    let rows = stmt
+        .query_map(
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .expect("api_keys読込");
+    rows.collect::<Result<Vec<_>, _>>()
+        .expect("api_keys行読取")
+}
+
+/// [covers:cli.manage-auth-api-key-generates]
+/// manage auth api-keyは`abk_`前置のkeyを1回だけstdout表示し・SHA-256(key) hexを
+/// api_keys tableへ保存する(再表示不可・hashから復元不可)。直後のlistに表示。
+#[test]
+fn manage_auth_api_key_generates_and_shows_once() {
+    let Some(fx) = StorageFixture::new("cli-auth-apikey-gen", StorageOpts::default()) else {
+        return;
+    };
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(DB作成・事前): {stdout}{stderr}");
+
+    let (code, stdout, stderr) = fx.manage("auth", &["api-key", "--name", "laptop"]);
+    assert_eq!(code, 0, "manage auth api-key: {stdout}{stderr}");
+    // abk_前置のkeyがstdoutに1回だけ表示される(再表示しない)
+    let key = stdout
+        .split_whitespace()
+        .find(|w| w.starts_with("abk_"))
+        .expect("stdoutにabk_前置のkey表示");
+    assert_eq!(
+        stdout.matches(key).count(),
+        1,
+        "key表示は1回のみ(再表示不可): {stdout}"
+    );
+    // api_keys tableへ1行(key_hash=SHA-256(key全文)hex・credential_idはak-前置)
+    let rows = api_key_rows(&fx);
+    assert_eq!(rows.len(), 1, "api_keys 1行: {rows:?}");
+    let (id, hash, name, created) = &rows[0];
+    assert!(id.starts_with("ak-"), "credential_idはak-前置: {id}");
+    assert_eq!(hash, &sha256_hex(key), "key_hash=SHA-256(key全文)hex");
+    assert_eq!(name, "laptop", "--name指定: {rows:?}");
+    assert!(!created.is_empty(), "created_at非空: {rows:?}");
+    // 直後のlistに当該credential_idが表示(平文keyは再表示しない)
+    let (code, stdout, stderr) = fx.manage("auth", &["list"]);
+    assert_eq!(code, 0, "list: {stdout}{stderr}");
+    assert!(stdout.contains(id.as_str()), "listにapi-key行: {stdout}");
+    assert!(
+        !stdout.contains(key),
+        "listに平文keyは再表示しない: {stdout}"
+    );
+}
+
+/// [covers:cli.manage-auth-api-key-rejects-empty-name]
+/// manage auth api-key --name ""(空文字)はusage error(exit 64)でapi_keysへ保存しない
+/// (name未指定時の既定"api-key"は現状維持=cli.manage-auth-api-key-generatesが担保)。
+#[test]
+fn manage_auth_api_key_empty_name_is_usage_error() {
+    let Some(fx) = StorageFixture::new("cli-auth-apikey-empty-name", StorageOpts::default()) else {
+        return;
+    };
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(DB作成・事前): {stdout}{stderr}");
+
+    let (code, stdout, stderr) = fx.manage("auth", &["api-key", "--name", ""]);
+    assert_eq!(code, 64, "空文字nameはusage error: {stdout}{stderr}");
+    assert!(
+        stderr.contains("--nameは空文字を指定できません"),
+        "usage error文言: {stderr}"
+    );
+    assert_eq!(api_key_rows(&fx).len(), 0, "api_keysへ保存しない");
+}
+
+/// [covers:cli.manage-auth-list-integrates-api-keys]
+/// manage auth listはcredentials(passkey)とapi_keys(api-key)を統合表示する
+/// (kind区別付き・合計件数フッタ)。
+#[test]
+fn manage_auth_list_integrates_passkey_and_api_key() {
+    let Some(fx) = StorageFixture::new("cli-auth-list-integ", StorageOpts::default()) else {
+        return;
+    };
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(DB作成・事前): {stdout}{stderr}");
+    insert_credential(&fx, "cred-a", "laptop-passkey");
+    insert_api_key(&fx, "ak-list-1", "abk_list_testkey_0001", "scan-key");
+
+    let (code, stdout, stderr) = fx.manage("auth", &["list"]);
+    assert_eq!(code, 0, "list: {stdout}{stderr}");
+    assert!(
+        stdout.contains("cred-a") && stdout.contains("laptop-passkey"),
+        "passkey行表示: {stdout}"
+    );
+    assert!(
+        stdout.contains("ak-list-1") && stdout.contains("scan-key"),
+        "api-key行表示: {stdout}"
+    );
+    assert!(stdout.contains("passkey"), "kind=passkey: {stdout}");
+    assert!(stdout.contains("api_key"), "kind=api_key: {stdout}");
+    assert!(stdout.contains("2件"), "合計2件のフッタ: {stdout}");
+}
+
+/// [covers:cli.manage-auth-remove-both-tables]
+/// [covers:cli.manage-auth-list-and-remove]
+/// manage auth removeはcredentials→api_keysの順に完全一致削除する(api-keyの
+/// credential_idでも削除可)。合計削除0行は対象エラー3。
+#[test]
+fn manage_auth_remove_deletes_from_both_tables() {
+    let Some(fx) = StorageFixture::new("cli-auth-rm-both", StorageOpts::default()) else {
+        return;
+    };
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(DB作成・事前): {stdout}{stderr}");
+    insert_credential(&fx, "cred-a", "laptop");
+    insert_api_key(&fx, "ak-rm-1", "abk_rm_testkey_0001", "api-key");
+
+    // api-key id指定: api_keysのみ削除(credentialsは不変)
+    let (code, stdout, stderr) = fx.manage("auth", &["remove", "ak-rm-1"]);
+    assert_eq!(code, 0, "api-key idのremove: {stdout}{stderr}");
+    assert_eq!(api_key_rows(&fx).len(), 0, "api_keys 0行");
+    assert_eq!(credential_rows(&fx).len(), 1, "credentials不変");
+
+    // passkey id指定: credentialsのみ削除(api_keysは不変)
+    insert_api_key(&fx, "ak-rm-2", "abk_rm_testkey_0002", "api-key");
+    let (code, stdout, stderr) = fx.manage("auth", &["remove", "cred-a"]);
+    assert_eq!(code, 0, "passkey idのremove: {stdout}{stderr}");
+    assert_eq!(credential_rows(&fx).len(), 0, "credentials 0行");
+    assert_eq!(api_key_rows(&fx).len(), 1, "api_keys不変");
+
+    // 存在しないid(両table合計削除0行)は対象エラー3・削除しない
+    insert_credential(&fx, "cred-b", "phone");
+    let (code, stdout, stderr) = fx.manage("auth", &["remove", "cred-missing"]);
+    assert_eq!(
+        code, 3,
+        "合計削除0行は対象エラー3: {stdout}{stderr}"
+    );
+    assert_eq!(credential_rows(&fx).len(), 1, "失敗時はcredentials不変");
+    assert_eq!(api_key_rows(&fx).len(), 1, "失敗時はapi_keys不変");
+}
+
+/// [covers:cli.manage-auth-zero-guides-total-count]
+/// [covers:cli.manage-auth-remove-all-guides-rebootstrap]
+/// 0件案内(bootstrap案内)・削除後の再bootstrap案内は両table合計0件時のみ
+/// (api_keys残存時はapi-key login可能のため案内しない)。
+#[test]
+fn manage_auth_zero_guides_by_total_count() {
+    let Some(fx) = StorageFixture::new("cli-auth-zero-total", StorageOpts::default()) else {
+        return;
+    };
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(DB作成・事前): {stdout}{stderr}");
+
+    // api_keys 1行のみ(credentials 0): 合計1件のため案内しない
+    insert_api_key(&fx, "ak-z-1", "abk_zero_testkey_01", "api-key");
+    let (code, stdout, stderr) = fx.manage("auth", &["list"]);
+    assert_eq!(code, 0, "list: {stdout}{stderr}");
+    assert!(
+        !stdout.contains("--bootstrap"),
+        "api_keys残存時のlistはbootstrap案内なし(合計1件): {stdout}"
+    );
+
+    // 削除(合計0件): 再bootstrap案内を表示
+    let (code, stdout, stderr) = fx.manage("auth", &["remove", "ak-z-1"]);
+    assert_eq!(code, 0, "remove: {stdout}{stderr}");
+    assert!(
+        stdout.contains("--bootstrap"),
+        "合計0件のremoveは再bootstrap案内: {stdout}"
+    );
+
+    // 両table 0件でのlistも案内
+    let (code, stdout, stderr) = fx.manage("auth", &["list"]);
+    assert_eq!(code, 0, "0件list: {stdout}{stderr}");
+    assert!(
+        stdout.contains("--bootstrap"),
+        "0件listはbootstrap案内: {stdout}"
+    );
+}
+
+/// [covers:catalog.api-keys-table-persistent-class]
+/// api_keys tableは永続class: manage catalog rebuildのcache class置換でも
+/// dropされない(credentials/push_intentsと同一契約)。
+#[test]
+fn api_keys_table_survives_rebuild() {
+    let Some(fx) = StorageFixture::new("cat-apikey-persist", StorageOpts::default()) else {
+        return;
+    };
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(DB作成・事前): {stdout}{stderr}");
+    insert_api_key(&fx, "ak-p-1", "abk_persist_testkey_1", "api-key");
+
+    let (code, stdout, stderr) = fx.manage("catalog", &["rebuild"]);
+    assert_eq!(code, 0, "rebuild: {stdout}{stderr}");
+    assert_eq!(
+        api_key_rows(&fx).len(),
+        1,
+        "rebuild後もapi_keys行は保持(永続class)"
+    );
+}

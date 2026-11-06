@@ -376,6 +376,18 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// /dev/urandomから乱数bytesを読む(bootstrap token(server)・api-key/credential_id
+/// 生成(manage auth)の共用helper。open・読取失敗は内部error)。
+pub(crate) fn random_bytes(len: usize) -> BackupResult<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open("/dev/urandom")
+        .map_err(|e| crate::errors::BackupError::Internal(format!("乱数源のopenに失敗: {e}")))?;
+    let mut buf = vec![0u8; len];
+    f.read_exact(&mut buf)
+        .map_err(|e| crate::errors::BackupError::Internal(format!("乱数の読取に失敗: {e}")))?;
+    Ok(buf)
+}
+
 pub(crate) fn sha256_hex_file(path: &Path) -> BackupResult<String> {
     let bytes = std::fs::read(path).map_err(|e| {
         crate::errors::BackupError::Transfer(format!(

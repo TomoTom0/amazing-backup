@@ -25,7 +25,7 @@ NASバックアップアーカイブ(zip/7z)をageで暗号化し、S3(versionin
 | 管理 | `pin add/rm` | 世代管理対象外のピン留め版の付与・解除 |
 | 管理 | `manage prune/lifecycle/index/location/jobs/reset` | 世代削除・bucket保持設定・索引再構築・旧所在除去・復元job再発行・dev bucket初期化 |
 | 管理 | `manage catalog sync/rebuild/scan` | local catalog DB(2.2)の同期・再構築・アップロード前カタログscan(5.10) |
-| 管理 | `manage auth list/remove` | passkey credentialの一覧・失効(5.10・serveの認証管理) |
+| 管理 | `manage auth list/remove/api-key` | passkey credential・api-keyの一覧・失効・生成(5.10・serveの認証管理) |
 | 閲覧 | `serve` | Web frontend+APIの起動(passkey認証・5.14) |
 | 設定 | `config init` | 設定file群(pipeline.toml・aws.toml・credential雛形)の初期生成 |
 | 設定 | `edit metadata/files/layout/policy` | 設定sectionの確認 |
@@ -571,6 +571,7 @@ amazing-backup manage reset [--apply]
 amazing-backup manage catalog sync|rebuild|scan [--sha256]
 amazing-backup manage auth list
 amazing-backup manage auth remove <credential_id>
+amazing-backup manage auth api-key [--name NAME]
 ```
 
 | subcommand | 動作 |
@@ -586,8 +587,9 @@ amazing-backup manage auth remove <credential_id>
 | `catalog sync` | remote索引をlocal catalog DB(2.2)へ同期(遅延refresh)。HEAD 1回でvalidator(ETag+VersionId)を検証し、変化(初回含む)あればGET+復号でDBへ反映・変化なければGETを省略。書込実績の無いnamespaceは空cacheとして確定(S3問い合わせなし)。索引object不在は`index rebuild`案内の設定エラー2(未書込namespace例外は除く) |
 | `catalog rebuild` | ローカルregistry(JSONL)からcatalog DBのcache class(entities/versions/pins/locations/sync_state/pending_items)を置換再構築(冪等)。永続class(credential・実行記録)は保持・削除しない。cacheは常にregistry+S3から再構築可能な導出index(2.2) |
 | `catalog scan` | アップロード前カタログscan。pipeline.toml `[profiles.<name>.catalog.scan]`(3.1)の登録root配下をlocal FS走査し(S3接続不要・symlink不追従)、各fileをcatalog DBの保存値とsize+mtime比較で4状態(unbacked=未backup・changed=変更あり・ok=backup済み・unknown=確認不能)へ分類してpending_itemsを全置換(再scanで前回結果は残らない)。`--sha256`指定時のみsha256を再計算しsha一致合流(registryのsha_uuid_lookup)でunknownをokへ確定する(既定はsize+mtime比較のみ)。serveのpending画面(5.14)は同一scanをボタン実行できる |
-| `auth list` | 登録済みpasskey credential一覧(credential_id・name・created_at)を表示。catalog DB(2.2)のcredentials table(永続class)を直接読むlocal操作でS3接続不要 |
-| `auth remove <credential_id>` | credentialの失効(削除)。credential_id完全一致の1件をcredentials tableから削除するlocal操作(S3接続不要。nameは一意性が無いため対象指定に使わない)。存在しないcredential_idは対象エラー3。削除後にcredential 0件となった場合は再登録のための`serve --bootstrap`案内を表示する(credential 0ではlogin手段が無く・登録はbootstrap token提示時のみ開く=fail-closed。5.14) |
+| `auth list` | 登録済みcredential一覧(passkey・api-keyの統合表示: credential_id・kind=passkey/api_key・name・created_at)。catalog DB(2.2)のcredentials tableとapi_keys table(永続class)を直接読むlocal操作でS3接続不要。0件案内(bootstrap案内)は両table合計0件時のみ(5.14) |
+| `auth remove <credential_id>` | credentialの失効(削除)。credential_id完全一致の1行をcredentials table→api_keys tableの順に検索して削除するlocal操作(S3接続不要。nameは一意性が無いため対象指定に使わない。passkey・api-keyいずれのcredential_idでも削除可)。両table合計削除0行(存在しないcredential_id)は対象エラー3。削除後に両table合計0件となった場合は再登録のための`serve --bootstrap`案内を表示する(合計0件ではlogin手段が無く・passkey登録はbootstrap token提示時のみ開く=fail-closed。api-key失効は既存sessionを破棄しない。5.14) |
+| `auth api-key [--name NAME]` | serve用api-keyの生成。32byte乱数から`abk_`前置+base64url(43文字)のkeyを生成し**1回だけstdoutへ表示**する(再表示不可・hashから復元不可。SHA-256 hexのみapi_keys tableへ保存し平文keyは保存しない)。`--name`はlist表示での確認用表示名(既定`api-key`・空文字指定はusage error)。S3接続不要のlocal操作。受け渡し・有効条件は5.14 |
 
 `prune`/`index`/`location rm`/`reset`/`catalog`は`--config`必須。`lifecycle`/`jobs reissue`/`auth`はconfig不要。
 
@@ -661,6 +663,16 @@ Web frontend(埋め込み静的配信)と読取API(`/api/*`・axum)を起動す�
 これらの閲覧はfrontendの各画面(entity一覧=検索・category絞込・paging・sync状態表示と手動refreshボタン・entity詳細=所在・pins・版一覧・アップロード前カタログ・diff)から操作できる(CLIの`query`/`list`と同一の索引語彙で表示)。
 
 未認証の閲覧系APIは401で拒否される(空dataを返さない)。操作系CLI(backup push/pull・get・pin・manage系のfile操作)のAPIは提供しない(操作はCLI既存のまま)。
+
+**api-key認証(接続元LAN内限定)**: passkeyが使えない端末・browser向けに、api-keyでの認証をもう一つのlogin手段として提供する(passkey認証に追加する第二手段・接続元がLAN内の場合のみ有効):
+
+1. `amazing-backup manage auth api-key [--name NAME]`(5.10)でapi-keyを生成する。**keyはこの時のstdout表示に1回限り**で現れる(再表示不可・SHA-256 hashのみcatalog DBへ保存のため紛失時は再生成)
+2. browserのLoginView(api-key欄は未認証時に常時表示)へkeyを入力して認証する(`POST /api/auth/api-key`)。成功するとpasskey loginと同一のsession(24時間)へ合流し、以降は同じ閲覧APIが開放される
+3. **有効条件は接続元address**: 接続元がLAN内(loopback・RFC1918 private・link-local。IPv6はloopback・ULA・link-local。`::ffff:a.b.c.d`のv4-mappedはIPv4へ正規化して判定)の場合のみ受理し、LAN外はkey検証の前に403で受理自体を拒否する。**passkey認証にはこの条件を掛けない**(passkeyは接続元を問わず従来どおり)
+4. 失効は `manage auth remove <credential_id>`(5.10・listで確認したapi-keyのcredential_id=`ak-`前置)。失効後の新規loginは同一keyでも401になる。**失効は既存sessionを破棄しない**(in-memory 24hで自然失効・passkey失効と同一挙動)
+
+- LAN内の他端末から使うには、server.toml(3.4)の`listen_addr`を`0.0.0.0`等へ変更してserveを起動する。**LAN IP直結ではWebAuthnのsecure context違反のためpasskeyの登録・loginはできない**(localhostはhttp可)ため、この構成ではapi-keyが主認証手段になる(passkeyの初回登録はlocalhost接続のbrowserで行えば併用可)
+- **既知の帰結(cf-tunnel等でのdomain公開時)**: tunnel接続はcloudflaredからlocalhostへの接続として現れるためremote addressがloopback(=LAN内)と判定され、api-key認証がinternet経由でも有効になる。これは「接続元address判定」による有効条件の帰結であり、tunnel運用時の無効化機構は設けない。**tunnelでdomain公開して運用する場合はapi-keyの失効(remove)を推奨する**(passkey認証は影響なし)
 
 **APIの実装確定値**:
 

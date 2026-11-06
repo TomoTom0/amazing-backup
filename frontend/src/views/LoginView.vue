@@ -19,6 +19,9 @@ const router = useRouter()
 /** bootstrap token入力(serve --bootstrapのstdout値)
  * 入力値はAPI呼び出し時のみ使用しlog等へ出さない */
 const token = ref('')
+/** api-key入力(manage auth api-keyのstdout値。TASK-13)
+ * 入力値はAPI呼び出し時のみ使用しlog等へ出さない */
+const apiKeyInput = ref('')
 const busy = ref(false)
 const message = ref('')
 
@@ -207,6 +210,26 @@ async function logout(): Promise<void> {
   busy.value = false
   await auth.fetchAuthStatus()
 }
+
+/** api-key認証(TASK-13設計2.4: 接続元LAN内限定。失敗表示はpasskey/bootstrap欄の
+ * fail()変換と分離しapiKeyErrorのcodeをそのまま表示=401をbootstrap再発行案内へ
+ * 誤変換しない。成功時はpasskey loginと同一遷移) */
+async function authWithApiKey(): Promise<void> {
+  if (busy.value || apiKeyInput.value === '') {
+    if (apiKeyInput.value === '') message.value = 'api-keyを入力してください'
+    return
+  }
+  busy.value = true
+  message.value = ''
+  try {
+    await auth.authenticateWithApiKey(apiKeyInput.value)
+    if (auth.authenticated) {
+      await router.push('/')
+    }
+  } finally {
+    busy.value = false
+  }
+}
 </script>
 
 <template>
@@ -246,7 +269,23 @@ async function logout(): Promise<void> {
       <button type="button" :disabled="busy" @click="logout()">logout</button>
     </template>
 
+    <!-- api-key認証(TASK-13: authUi状態に依存せず未認証時に常時表示。接続元LAN内限定) -->
+    <template v-if="auth.showApiKeyField">
+      <label>
+        api-key
+        <input
+          v-model="apiKeyInput"
+          type="password"
+          autocomplete="off"
+          placeholder="manage auth api-key の表示値"
+        />
+      </label>
+      <button type="button" :disabled="busy" @click="authWithApiKey()">api-keyで認証</button>
+    </template>
+
     <p v-if="message" class="message">{{ message }}</p>
+    <!-- api-key認証の専用失敗表示(codeをそのまま表示=bootstrap案内へ誤変換しない) -->
+    <p v-if="auth.apiKeyError" class="message">api-key認証に失敗しました({{ auth.apiKeyError.code }})</p>
     <p v-if="auth.lastError" class="muted">最後のエラー: {{ auth.lastError.code }}</p>
   </section>
 </template>

@@ -96,18 +96,20 @@ export async function postSyncRefresh(): Promise<ApiResult<SyncStateResponse>> {
   }
 }
 
-/** GET /api/auth/status の応答形式(TASK-9設計6章: 認証状態と登録credential数) */
+/** GET /api/auth/status の応答形式(TASK-9設計6章: 認証状態と登録credential数。
+ *  api_keys(登録api-key数・TASK-13追加)は応答に含まれない場合はundefined) */
 export type AuthStatusResponse = {
   authenticated: boolean
   credentials: number
+  api_keys?: number
 }
 
 export function isAuthStatusResponse(v: unknown): v is AuthStatusResponse {
-  return (
-    isRecord(v) &&
-    typeof v['authenticated'] === 'boolean' &&
-    typeof v['credentials'] === 'number'
-  )
+  if (!isRecord(v)) return false
+  if (typeof v['authenticated'] !== 'boolean') return false
+  if (typeof v['credentials'] !== 'number') return false
+  const apiKeys = v['api_keys']
+  return apiKeys === undefined || typeof apiKeys === 'number'
 }
 
 /** 認証状態の取得(認証不要endpoint。LoginViewのUI誘導基盤) */
@@ -604,6 +606,21 @@ export function postLoginFinish(credential: {
     credential,
     (v): v is Record<string, unknown> => isRecord(v),
   )
+}
+
+/** POST /api/auth/api-key の応答(login finishと同一の{"status":"ok"}形式) */
+export type StatusOkResponse = { status: string }
+
+function isStatusOkResponse(v: unknown): v is StatusOkResponse {
+  return isRecord(v) && typeof v['status'] === 'string'
+}
+
+/** api-key認証(TASK-13設計D13・2.4: {"api_key"}bodyでPOSTし既存sessionへ合流。
+ *  401 unauthenticated(key不一致)・403 forbidden_source(LAN外)はerror扱いで
+ *  codeをそのまま専用失敗表示へ返す。fetchは同一origin cookie既定のため
+ *  session cookieはpasskey loginと同一扱い) */
+export function postApiKeyAuth(apiKey: string): Promise<ApiResult<StatusOkResponse>> {
+  return apiPost('/api/auth/api-key', { api_key: apiKey }, isStatusOkResponse)
 }
 
 /** API呼び出し結果: 成功(型ガード通過data)または失敗(ApiError+HTTP status) */

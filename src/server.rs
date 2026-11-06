@@ -319,7 +319,14 @@ async fn run_server(cfg: ServerConfig, args: &ServeArgs) -> i32 {
         ),
     );
 
-    let serve = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+    // ConnectInfo<SocketAddr>の挿入(TASK-13設計2.3: api-key認証のD14接続元判定に
+    // remote addrを渡す。本番はaxumがこの機構でextensionsへ挿入する=testの
+    // Request extension挿入と同一経路)
+    let serve = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal());
     if let Err(e) = serve.await {
         eprintln!("error: 内部エラー: serverの実行に失敗: {e}");
         return 1;
@@ -574,14 +581,10 @@ impl AuthState {
     }
 }
 
-/// bootstrap tokenの生成(128bit乱数のbase64・設計8章。/dev/urandom由来)。
+/// bootstrap tokenの生成(128bit乱数のbase64・設計8章。/dev/urandom由来=
+/// 共通helper storage::random_bytes)。
 fn generate_bootstrap_token() -> BackupResult<String> {
-    use std::io::Read;
-    let mut f = std::fs::File::open("/dev/urandom")
-        .map_err(|e| BackupError::Internal(format!("乱数源のopenに失敗: {e}")))?;
-    let mut buf = [0u8; 16];
-    f.read_exact(&mut buf)
-        .map_err(|e| BackupError::Internal(format!("乱数の読取に失敗: {e}")))?;
+    let buf = crate::storage::random_bytes(16)?;
     use base64::Engine as _;
     Ok(base64::engine::general_purpose::STANDARD.encode(buf))
 }
@@ -634,6 +637,16 @@ fn unauthenticated(message: &'static str) -> ApiError {
     ApiError {
         status: axum::http::StatusCode::UNAUTHORIZED,
         code: "unauthenticated",
+        message,
+    }
+}
+
+/// 受理拒否(403・TASK-13 D14: api-key認証の接続元LAN外。key検証の前に受理自体を
+/// 拒否する区分。passkey認証はこの条件を掛けないため現状api-key専用)。
+fn forbidden_source(message: &'static str) -> ApiError {
+    ApiError {
+        status: axum::http::StatusCode::FORBIDDEN,
+        code: "forbidden_source",
         message,
     }
 }
@@ -907,6 +920,7 @@ fn build_router(state: AppState) -> axum::Router {
                 "/api/auth/login/finish",
                 axum::routing::post(auth_login_finish),
             )
+            .route("/api/auth/api-key", axum::routing::post(auth_api_key))
             .route("/api/auth/logout", axum::routing::post(auth_logout))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
@@ -1378,20 +1392,22 @@ fn challenge_from_options(options: &serde_json::Value) -> Option<String> {
         .map(String::from)
 }
 
-/// GET /api/auth/status(認証不要: 認証状態と登録credential数。未認証・未登録でも
-/// 200=LoginViewのUI誘導基盤)。
+/// GET /api/auth/status(認証不要: 認証状態と登録credential数・api-key数。未認証・
+/// 未登録でも200=LoginViewのUI誘導基盤。api_keysはTASK-13追加・credentialsは
+/// passkey件数のまま)。
 async fn auth_status(
     session: tower_sessions::Session,
 ) -> Result<axum::Json<serde_json::Value>, ApiError> {
     let authenticated = session_is_authenticated(&session).await;
-    let credentials = run_blocking(|| {
+    let (credentials, api_keys) = run_blocking(|| {
         let db = crate::catalog::CatalogDb::open()?;
-        db.credential_count()
+        Ok((db.credential_count()?, db.api_key_count()?))
     })
     .await?;
     Ok(axum::Json(serde_json::json!({
         "authenticated": authenticated,
         "credentials": credentials,
+        "api_keys": api_keys,
     })))
 }
 
@@ -1601,6 +1617,69 @@ async fn auth_login_finish(
         eprintln!("serve: session状態の保存に失敗(logのみ): {e}");
         internal("内部エラーが発生しました")
     })?;
+    Ok(axum::Json(serde_json::json!({"status": "ok"})).into_response())
+}
+
+/// remote addrのIPがLAN内か(TASK-13設計D14のLAN内定義)。
+/// IPv4: loopback(127/8)・private(RFC1918: 10/8・172.16/12・192.168/16)・
+/// link-local(169.254/16)。IPv6: loopback(::1)・ULA(fc00::/7)・link-local(fe80::/10)。
+/// v4-mapped(`::ffff:a.b.c.d`)はto_ipv4_mappedでIPv4へ正規化してから判定
+/// (dual-stack listen `[::]`構成でv4接続がこの形で現れるため)。
+fn is_lan_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_lan_ip(std::net::IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            v6.is_loopback()
+                || (first & 0xfe00) == 0xfc00 // ULA fc00::/7
+                || (first & 0xffc0) == 0xfe80 // link-local fe80::/10
+        }
+    }
+}
+
+/// POST /api/auth/api-key(TASK-13 D13/D14: api-key認証。接続元LAN内限定)。
+/// 1. ConnectInfoのremote addrでLAN内判定(v4-mapped正規化込み)。LAN外はkey検証の
+///    前に403 forbidden_sourceで受理拒否
+/// 2. SHA-256(api_key)のhexでapi_keysを検索。不在は401 unauthenticated(passkey
+///    login finish検証失敗と同一・key存在特定防止の一般化message)
+/// 3. hit時はpasskey login finishと同一手順でsession確立(cycle_id→authenticated
+///    insert→establish_session_id("api_key")。以降はpasskeyと同一のsession経路)
+async fn auth_api_key(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    session: tower_sessions::Session,
+    body: axum::body::Bytes,
+) -> Result<axum::response::Response, ApiError> {
+    if !is_lan_ip(addr.ip()) {
+        return Err(forbidden_source("api-key認証はLAN内接続のみ有効です"));
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|_| invalid_request("リクエストの形式が不正です"))?;
+    let api_key = parsed
+        .get("api_key")
+        .and_then(|k| k.as_str())
+        .ok_or_else(|| unauthenticated("認証に失敗しました"))?;
+    let key_hash = crate::storage::sha256_hex(api_key.as_bytes());
+    let hit = run_blocking(move || {
+        let db = crate::catalog::CatalogDb::open()?;
+        db.find_api_key_by_hash(&key_hash)
+    })
+    .await?;
+    if hit.is_none() {
+        return Err(unauthenticated("認証に失敗しました"));
+    }
+    // session ID付替(設計2.3: passkey login finishと同一手順=session固定化対策)
+    session.cycle_id().await.map_err(|e| {
+        eprintln!("serve: session IDの付替に失敗(logのみ): {e}");
+        internal("内部エラーが発生しました")
+    })?;
+    session.insert("authenticated", true).await.map_err(|e| {
+        eprintln!("serve: session状態の保存に失敗(logのみ): {e}");
+        internal("内部エラーが発生しました")
+    })?;
+    establish_session_id(&session, "api_key").await?;
     Ok(axum::Json(serde_json::json!({"status": "ok"})).into_response())
 }
 
@@ -2800,12 +2879,34 @@ mod tests {
 
         /// oneshot呼び出し(JSON body+Cookie header付き)。応答は
         /// (status, JSON body, Set-Cookie一覧)。bodyがJSONで無い場合はNull。
+        /// remote addrは既定=127.0.0.1(LAN内=D14のLAN内判定を通るaddr)。
         fn call(
             &self,
             method: &str,
             uri: &str,
             body: Option<serde_json::Value>,
             cookie: Option<&str>,
+        ) -> (u16, serde_json::Value, Vec<String>) {
+            self.call_from(
+                method,
+                uri,
+                body,
+                cookie,
+                "127.0.0.1:41000".parse().expect("LAN内既定remote addr"),
+            )
+        }
+
+        /// oneshot呼び出し(remote addr明示=D14 LAN内判定の観測seam)。
+        /// Request extensionへConnectInfo(addr)を挿入する=本番の
+        /// into_make_service_with_connect_infoが挿入するものと同一のextensions機構
+        /// (TASK-13設計4章レビューH-1)。
+        fn call_from(
+            &self,
+            method: &str,
+            uri: &str,
+            body: Option<serde_json::Value>,
+            cookie: Option<&str>,
+            remote_addr: std::net::SocketAddr,
         ) -> (u16, serde_json::Value, Vec<String>) {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -2815,7 +2916,8 @@ mod tests {
                 use tower::ServiceExt as _;
                 let mut builder = axum::http::Request::builder()
                     .method(axum::http::Method::from_bytes(method.as_bytes()).expect("method"))
-                    .uri(uri);
+                    .uri(uri)
+                    .extension(axum::extract::ConnectInfo(remote_addr));
                 if let Some(c) = cookie {
                     builder = builder.header("cookie", c);
                 }
@@ -3173,7 +3275,9 @@ mod tests {
 
     /// [covers:server.auth-endpoints-routing]
     /// auth endpoint群は404 fallbackでなく定義済みendpointとして応答する
-    /// (register/startはtoken必須401・logoutは要認証401)。
+    /// (register/startはtoken必須401・logoutは要認証401・api-keyはLAN内ならkey検証
+    /// へ進む=不正keyは401。TASK-13改訂分のapi-key caseは実装前はrouting無しの
+    /// 404 fallbackでfailを許容)。
     #[test]
     fn api_auth_endpoints_are_routed() {
         let flow = AuthFlow::new("srv-auth-routing");
@@ -3197,6 +3301,7 @@ mod tests {
             ("POST", "/api/auth/login/start"),
             ("POST", "/api/auth/login/finish"),
             ("POST", "/api/auth/logout"),
+            ("POST", "/api/auth/api-key"),
         ] {
             let (status, _, _) = flow.call(method, path, Some(serde_json::json!({})), None);
             assert_ne!(
@@ -3213,6 +3318,18 @@ mod tests {
             None,
         );
         assert_eq!(status, 401, "logoutは要認証(未認証401): {body}");
+        expect_error_body(&body, "unauthenticated");
+
+        // api-keyはLAN内既定remote addrならkey検証へ進む(bodyにapi_key不在のため
+        // 不正扱い=401。TASK-13実装前はroutingが無く404 fallbackでfailを許容)
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/api-key",
+            Some(serde_json::json!({"api_key": "abk-not-registered-key"})),
+            None,
+        );
+        assert_ne!(status, 404, "api-keyはroutingされる(404 fallbackでない)");
+        assert_eq!(status, 401, "LAN内の不正keyは401(key検証へ進む): {body}");
         expect_error_body(&body, "unauthenticated");
     }
 
@@ -3606,6 +3723,237 @@ mod tests {
         assert!(
             body.get("entities").is_none(),
             "保護対象dataは応答に含まれない: {body}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TASK-13(api-key認証・2026-11-05テスト先行)のhandler単体test
+    // (tmp/tasks/tm-13/design_api-key-auth.md D12〜D14・2.3/2.4章・4章)。
+    // remote addr観測はAuthFlow::call_fromのConnectInfo挿入seam=本番の
+    // into_make_service_with_connect_infoと同一のextensions機構(レビューH-1)。
+    // api_keys tableへの行挿入・削除はrusqlite直接(実装後のinsert_api_key/
+    // remove_api_key APIと同一schema)。実装前はendpoint未routingの404 fallback・
+    // api_keys table不在の挿入失敗により実行failを許容(赤)。
+
+    /// api-key test用の固定key(検索はSHA-256 hash一致のみのため任意の文字列)。
+    const TEST_API_KEY: &str = "abk_test-key_0123456789abcdefghijklmnopqrstuv";
+    /// TEST_API_KEYと異なるhashになる対照key(不一致401観測用)。
+    const TEST_API_KEY_OTHER: &str = "abk_other-key_9876543210zyxwvutsrqponmlk";
+
+    /// SHA-256 hex符号化(api_keysのkey_hash算出=設計2.1と同一形式)。
+    fn sha256_hex_of(s: &str) -> String {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(s.as_bytes());
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    /// api_keys table(ABH配下catalog.db)へ1行挿入(rusqlite直接=実装後の
+    /// insert_api_key APIと同一schema)。
+    fn auth_seed_api_key(credential_id: &str, key: &str, name: &str) {
+        // 先にP1 APIでopen=migrationを実行(実装後はapi_keys tableが作られる)
+        crate::catalog::CatalogDb::open().expect("catalog DB open(migration実行)");
+        let abh = std::env::var("AMAZING_BACKUP_HOME").expect("ABH設定済み(api_env)");
+        let conn = rusqlite::Connection::open(std::path::Path::new(&abh).join("catalog.db"))
+            .expect("catalog.db open");
+        conn.execute(
+            "INSERT INTO api_keys (credential_id, key_hash, name, created_at) \
+             VALUES (?1, ?2, ?3, '2026-11-05T00:00:00+09:00')",
+            rusqlite::params![credential_id, sha256_hex_of(key), name],
+        )
+        .expect("api_keys挿入(実装前はtable不在でfail=赤)");
+    }
+
+    /// api_keys tableから1行削除(manage auth remove相当=api-key失効の模擬)。
+    fn auth_remove_api_key(credential_id: &str) {
+        let abh = std::env::var("AMAZING_BACKUP_HOME").expect("ABH設定済み(api_env)");
+        let conn = rusqlite::Connection::open(std::path::Path::new(&abh).join("catalog.db"))
+            .expect("catalog.db open");
+        conn.execute(
+            "DELETE FROM api_keys WHERE credential_id = ?1",
+            rusqlite::params![credential_id],
+        )
+        .expect("api_keys削除");
+    }
+
+    /// [covers:server.api-key-auth-establishes-session]
+    /// LAN内remote addr+登録済みkey一致のPOST /api/auth/api-keyはlogin finishと
+    /// 同一形式で200応答しsessionを確立する(以降の保護APIをsession cookieで通過)。
+    #[test]
+    fn api_key_auth_succeeds_from_lan_and_passes_protected_api() {
+        let flow = AuthFlow::new("srv-apikey-ok");
+        auth_seed_api_key("ak-test-1", TEST_API_KEY, "api-key");
+        let (status, body, cookies) = flow.call(
+            "POST",
+            "/api/auth/api-key",
+            Some(serde_json::json!({"api_key": TEST_API_KEY})),
+            None,
+        );
+        assert_eq!(status, 200, "api-key認証は200: {body}");
+        assert_eq!(
+            body.get("status").and_then(|v| v.as_str()),
+            Some("ok"),
+            "応答shapeはlogin finishと同一: {body}"
+        );
+        let (name, value) = first_cookie(&cookies).expect("session cookie(Set-Cookie)");
+        let cookie = format!("{name}={value}");
+        // 確立したsessionで保護APIを通過
+        let (status, body, _) = flow.call("GET", "/api/entities", None, Some(&cookie));
+        assert_eq!(status, 200, "session cookieで保護API通過: {body}");
+    }
+
+    /// [covers:server.api-key-invalid-key-401]
+    /// 登録されていないapi_key(LAN内)は401 unauthenticated(passkey login finish
+    /// 検証失敗と同一・key存在特定防止の一般化message)。
+    #[test]
+    fn api_key_auth_wrong_key_is_401() {
+        let flow = AuthFlow::new("srv-apikey-401");
+        auth_seed_api_key("ak-w-1", TEST_API_KEY, "api-key");
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/api-key",
+            Some(serde_json::json!({"api_key": TEST_API_KEY_OTHER})),
+            None,
+        );
+        assert_eq!(
+            status, 401,
+            "不一致keyは401(403でない=LAN内はkey検証へ進む): {body}"
+        );
+        expect_error_body(&body, "unauthenticated");
+    }
+
+    /// [covers:server.api-key-outside-lan-403]
+    /// LAN外remote addrはkey検証前に403 forbidden_sourceで受理拒否(正keyでも)。
+    /// IPv4-mapped IPv6も正規化後にLAN外判定(dual-stack listen [::]構成)。
+    #[test]
+    fn api_key_auth_from_outside_lan_is_403() {
+        let flow = AuthFlow::new("srv-apikey-lan");
+        auth_seed_api_key("ak-lan-1", TEST_API_KEY, "api-key");
+        // LAN外IPv4(正keyでも受理拒否=D14)
+        let outside: std::net::SocketAddr = "8.8.8.8:51000".parse().expect("LAN外addr");
+        let (status, body, _) = flow.call_from(
+            "POST",
+            "/api/auth/api-key",
+            Some(serde_json::json!({"api_key": TEST_API_KEY})),
+            None,
+            outside,
+        );
+        assert_eq!(status, 403, "LAN外は正keyでも403(受理自体の拒否): {body}");
+        expect_error_body(&body, "forbidden_source");
+        // IPv4-mapped IPv6はto_ipv4_mapped正規化後に判定
+        let mapped: std::net::SocketAddr = "[::ffff:8.8.8.8]:51001".parse().expect("v4-mapped");
+        let (status, body, _) = flow.call_from(
+            "POST",
+            "/api/auth/api-key",
+            Some(serde_json::json!({"api_key": TEST_API_KEY})),
+            None,
+            mapped,
+        );
+        assert_eq!(status, 403, "v4-mappedは正規化後にLAN外判定(403): {body}");
+        expect_error_body(&body, "forbidden_source");
+        // 対照: LAN内は403でない(不正keyはkey検証へ進み401)
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/api-key",
+            Some(serde_json::json!({"api_key": TEST_API_KEY_OTHER})),
+            None,
+        );
+        assert_eq!(status, 401, "LAN内は403でなくkey検証へ進む: {body}");
+        expect_error_body(&body, "unauthenticated");
+    }
+
+    /// [covers:server.api-key-lan-boundary-table]
+    /// is_lan_ipのLAN境界IP表(RFC1918 172.16/12・link-local 169.254/16・ULA fc00::/7・
+    /// link-local fe80::/10の内外境界。v4-mappedはIPv4正規化後に判定)。
+    #[test]
+    fn is_lan_ip_boundary_ips() {
+        let cases: &[(&str, bool)] = &[
+            // RFC1918 172.16.0.0/12(172.15=外・172.16=内・172.31=内・172.32=外)
+            ("172.15.255.255", false),
+            ("172.16.0.0", true),
+            ("172.31.255.255", true),
+            ("172.32.0.0", false),
+            // link-local 169.254.0.0/16(169.253=外・169.254=内・169.255=外)
+            ("169.253.255.255", false),
+            ("169.254.0.0", true),
+            ("169.254.255.255", true),
+            ("169.255.0.0", false),
+            // ULA fc00::/7(fbff=外・fc00=内・fdff=内)
+            ("fbff::", false),
+            ("fc00::", true),
+            ("fdff::", true),
+            // link-local fe80::/10(fe7f=外・fe80=内・febf=内・fec0=外)
+            ("fe7f::", false),
+            ("fe80::", true),
+            ("febf::", true),
+            ("fec0::", false),
+            // v4-mappedはto_ipv4_mappedでIPv4へ正規化後に判定(dual-stack listen [::])
+            ("::ffff:10.0.0.1", true),
+        ];
+        for (addr, expect_lan) in cases {
+            let ip: std::net::IpAddr = addr.parse().expect("境界IPのparse");
+            assert_eq!(is_lan_ip(ip), *expect_lan, "境界IP {addr}のLAN内外判定");
+        }
+    }
+
+    /// [covers:server.api-key-removal-invalidates-login]
+    /// api-key失効(api_keys行削除=manage auth remove相当)後は同一keyで401。失効は
+    /// 既存sessionを破棄しない(in-memory 24h=passkey removeと同一挙動)。
+    #[test]
+    fn api_key_auth_removed_key_is_401_and_session_survives() {
+        let flow = AuthFlow::new("srv-apikey-rm");
+        auth_seed_api_key("ak-rm-1", TEST_API_KEY, "api-key");
+        let (status, _, cookies) = flow.call(
+            "POST",
+            "/api/auth/api-key",
+            Some(serde_json::json!({"api_key": TEST_API_KEY})),
+            None,
+        );
+        assert_eq!(status, 200, "事前のapi-key認証は成功");
+        let (name, value) = first_cookie(&cookies).expect("session cookie");
+        let cookie = format!("{name}={value}");
+
+        // 失効(api_keysから当該行を削除)
+        auth_remove_api_key("ak-rm-1");
+
+        // 同一keyでの新規loginは401
+        let (status, body, _) = flow.call(
+            "POST",
+            "/api/auth/api-key",
+            Some(serde_json::json!({"api_key": TEST_API_KEY})),
+            None,
+        );
+        assert_eq!(status, 401, "失効keyでのloginは401: {body}");
+        expect_error_body(&body, "unauthenticated");
+        // 既存sessionは破棄されない(継続)
+        let (status, body, _) = flow.call("GET", "/api/entities", None, Some(&cookie));
+        assert_eq!(status, 200, "既存sessionは破棄しない(in-memory 24h): {body}");
+    }
+
+    /// [covers:server.auth-status-api-keys-count]
+    /// GET /api/auth/statusの応答へapi_keys(件数)が含まれる(credentialsはpasskey
+    /// 件数のまま)。
+    #[test]
+    fn api_auth_status_includes_api_keys_count() {
+        let flow = AuthFlow::new("srv-apikey-status");
+        let (status, body, _) = flow.call("GET", "/api/auth/status", None, None);
+        assert_eq!(status, 200, "statusは200: {body}");
+        assert_eq!(
+            body.get("api_keys").and_then(|v| v.as_i64()),
+            Some(0),
+            "api_keys 0件: {body}"
+        );
+        auth_seed_api_key("ak-c-1", TEST_API_KEY, "api-key");
+        let (status, body, _) = flow.call("GET", "/api/auth/status", None, None);
+        assert_eq!(status, 200);
+        assert_eq!(
+            body.get("api_keys").and_then(|v| v.as_i64()),
+            Some(1),
+            "挿入後はapi_keys=1: {body}"
         );
     }
 }

@@ -38,6 +38,11 @@
 #     ため対象外」と同一・索引由来でないため)
 #   - sha256再計算optionはCLI(manage catalog scan --sha256)のみ。API(POST
 #     /api/pending/scan)は既定のsize+mtime比較のみ
+# 2026-11-05: TASK-13(serve認証へのapi-key認証追加)対応でテスト先行の条件追加(1条件)・
+#   文言改訂(1条件=catalog.schema-migrationの9 tables化。id不変)。出典:
+#   tmp/tasks/tm-13/design_api-key-auth.md 2.1(api_keys table・永続class・migration
+#   M::up list追加で既存DBへ適用=レビューL-1)・4章。
+#   api_keys tableは実装前のためrusqlite直接の行挿入・行数観測は失敗(fail=赤を許容)。
 
 [meta]
 feature = "catalog"
@@ -46,8 +51,8 @@ verified = true
 verified_at = "2026-11-05"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "19da2ee30064220ee142af94b00314ab34576593"
-note = "TASK-9設計2章(DB層)・4章(replica同期)・5章(CLI照会cache)・12章P1+3章(D6承認)・12章P5(pending catalog)の条件化。DB真正はJSONL registryのまま・DBは導出index+S3索引replica(平文view・D11承認)。テストはbin subprocess+fake seam(StorageFixture)で観測しsrc/catalog.rs直接参照のunit testは実装時に追加。P5分6条件はテスト先行(2026-11-05)のためverified=falseへ(P5実装後に復帰)"
+source_hash = "dfcec062938af73461dd83b77524b2d6ae40517e"
+note = "TASK-9設計2章(DB層)・4章(replica同期)・5章(CLI照会cache)・12章P1+3章(D6承認)・12章P5(pending catalog)の条件化。DB真正はJSONL registryのまま・DBは導出index+S3索引replica(平文view・D11承認)。テストはbin subprocess+fake seam(StorageFixture)で観測しsrc/catalog.rs直接参照のunit testは実装時に追加。P5分6条件はテスト先行(2026-11-05)のためverified=falseへ(P5実装後に復帰)。2026-11-05 TASK-13(api_keys table)実装後にcargo test --lib catalog::全緑(5 tests・schema 9 table観測含む)・cargo test --test catalog_storage全緑(29 tests・api_keys永続class観測含む)を確認してverified=trueへ復帰・source_hashを更新"
 
 [[condition]]
 id = "catalog.db-path-and-file-permissions"
@@ -70,11 +75,11 @@ source_lines = "tests/catalog_storage.rs:93"
 [[condition]]
 id = "catalog.schema-migration"
 target_function = "catalog::migrations(rusqlite_migration)"
-source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(schema要約・table契約)・12章P1(schema/migration)"
-description = "DB新規作成はmigrationによりschemaを構築する: cache class 6 table(entities/versions/pins/locations/sync_state/pending_items)+永続class 2 table(credentials/push_intents)。versions/locationsはfile_write由来のsource_mtimeを保存する(3章の比較基準供給源)。migrationは冪等(既存DBへの再適用で内容を壊さない)。WAL modeで運用する (unit; integrationではDB file生成を観測)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(schema要約・table契約)・12章P1(schema/migration) + TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.1(api_keys table追加・migration M::up listへの追加で既存DBへ適用=レビューL-1)"
+description = "DB新規作成はmigrationによりschemaを構築する: cache class 6 table(entities/versions/pins/locations/sync_state/pending_items)+永続class 3 table(credentials/push_intents/api_keys)(TASK-13でapi_keysを追加=計9 table。api_keysはcredential_id PK・key_hash(SHA-256 hex)・name・created_atで平文keyは保存しない)。versions/locationsはfile_write由来のsource_mtimeを保存する(3章の比較基準供給源)。migrationは冪等(既存DBへの再適用で内容を壊さない)。WAL modeで運用する (unit; integrationではDB file生成を観測)"
 given = "存在しないpathへの初回DB作成(manage catalog sync実行)と、同一DBへの再実行"
-expect_return_shape = "初回実行でSQLite database file(magic header \"SQLite format 3\")が作成され後続の照会が動作。再実行はexit 0で既存内容を壊さない(schema各tableの詳細構造・WAL modeの直接観測はsrc/catalog.rs実装時のunit test)"
-source_lines = "src/catalog.rs:1322; src/catalog.rs:1438; tests/catalog_storage.rs:147"
+expect_return_shape = "初回実行でSQLite database file(magic header \"SQLite format 3\")が作成され後続の照会が動作。再実行はexit 0で既存内容を壊さない(TASK-13改訂分=api_keys tableの9 table化観測はsrc/catalog.rs unit test。実装前はapi_keys table不在でfailを許容)"
+source_lines = "src/catalog.rs:1428; src/catalog.rs:1551; tests/catalog_storage.rs:147"
 
 [[condition]]
 id = "catalog.sync-fetches-replica-on-change"
@@ -110,7 +115,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(freshness整合規
 description = "list files/versions/pins/runs・queryは別process起動時にHEAD 1回のvalidator一致確認を行い、検証済みfreshならS3 GETを行わずDBから回答する(cache hit。HEADとGETの毎回取得を廃止)。HEAD validator一致確認は毎process起動時に必須(検証なしfreshの持ち越し期限は設けない) (integration, fake seam)"
 given = "manage catalog sync済み(fresh)状態での list files と query の実行(いずれもsyncとは別process)"
 expect_return_shape = "索引objectへのHeadObject 1回のみでGetObjectは呼ばれず、表示結果はS3索引の内容と一致する"
-source_lines = "src/catalog.rs:1523; src/catalog.rs:1565; tests/catalog_storage.rs:263"
+source_lines = "src/catalog.rs:1636; src/catalog.rs:1678; tests/catalog_storage.rs:263"
 
 [[condition]]
 id = "catalog.cache-miss-refreshes-db"
@@ -137,7 +142,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(table契約: rebui
 description = "manage catalog rebuildはローカルregistry(JSONL)からcache class(entities/versions/pins/locations/sync_state/pending_items)のみを置換再構築し、永続class(credentials/push_intents)はdropしない。再実行で同一内容(冪等)。cacheは常にJSONL+S3から再構築可能 (integration, fake seam; 永続class保持の直接観測はsrc/catalog.rs実装時のunit test)"
 given = "sync済みDBへの manage catalog rebuild 2回実行と、rebuild後のlist files実行"
 expect_return_shape = "rebuildはexit 0でS3索引由来と同一の照会結果をDBから回答し、2回のrebuild後のlist結果は同一(冪等)"
-source_lines = "src/catalog.rs:1461; tests/catalog_storage.rs:586"
+source_lines = "src/catalog.rs:1574; tests/catalog_storage.rs:586"
 
 [[condition]]
 id = "catalog.scope-isolation-multi-profile"
@@ -269,4 +274,22 @@ item = "SQLCipher等の暗号化DBの不採用(D11で平文replica保存を受�
 source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(代替案・D11)"
 reason = "不採用の決定事項であり検証対象コードの振る舞い条件が存在しない(test-structure §8)。平文保存の緩和措置(権限0600/0700)はcatalog.db-path-and-file-permissionsが担保"
 decided_at = "2026-11-04"
+decided_by = "claude"
+
+# --- TASK-13(api_keys table・2026-11-05テスト先行) ---
+
+[[condition]]
+id = "catalog.api-keys-table-persistent-class"
+target_function = "catalog::migration(api_keys追加) / manage catalog rebuild(永続class保持)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.1(api_keys table(永続class)・rebuildでもdropしない・migration M::up listへの追加で既存DBへ適用)・4章"
+description = "api_keys table(credential_id TEXT PRIMARY KEY・key_hash TEXT NOT NULL(SHA-256(api-key全文)のhex=平文keyは保存しない)・name TEXT NOT NULL・created_at TEXT NOT NULL)は永続classとして作成され(migration M::up listへの追加で既存DBへも適用)、manage catalog rebuildのcache class置換(replace_scope)でもdropされない(credentials/push_intentsと同一契約) (integration, fake seam)"
+given = "sync済みDBのapi_keysへ1行挿入(rusqlite直接=insert_api_key APIと同一schema)後の manage catalog rebuild 実行(rusqlite直接で行数観測)"
+expect_return_shape = "rebuildはexit 0でapi_keys行は保持される(永続class=cache class置換の対象外)(実装前はapi_keys table不在によりfailを許容)"
+source_lines = "tests/catalog_storage.rs:1481"
+
+[[excluded]]
+item = "api_keyをcredentials tableへkind列追加で統合する移行(同一table化)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.1(passkey(credentials table)と別table(schemaが異なるため。同一tableへkind列を足す移行は不採用)"
+reason = "不採用の決定事項であり検証される振る舞いが存在しない(test-structure §8)。採用された別table構成の契約はcatalog.schema-migration(9 tables)・catalog.api-keys-table-persistent-classが担保"
+decided_at = "2026-11-05"
 decided_by = "claude"

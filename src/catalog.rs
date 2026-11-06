@@ -7,7 +7,7 @@
 //!
 //! table契約(2章・指摘#2):
 //! - cache class(削除再構築可): entities/versions/pins/locations/sync_state/pending_items
-//! - 永続class(rebuildでもdropしない): credentials/passkey・push_intents
+//! - 永続class(rebuildでもdropしない): credentials/passkey・push_intents・api_keys
 //! 全cache tableはscope(bucket+prefix)をPK/検索条件に持ち(指摘#3)、scope単位の
 //! 置換は単一transactionでdelete+insertする(原子的置換・途中状態を作らない)。
 
@@ -243,6 +243,18 @@ fn migrations() -> rusqlite_migration::Migrations<'static> {
                 result_json TEXT NOT NULL);
             "#,
         ),
+        // TASK-13(api-key認証・D12): api-keyのSHA-256 hash一覧。永続classのため
+        // manage catalog rebuildのcache class置換でもdropしない。平文keyは保存
+        // しない(key_hashから復元不可)。M::up listへの追加で既存DBにも適用
+        M::up(
+            r#"
+            CREATE TABLE api_keys (
+                credential_id TEXT PRIMARY KEY,
+                key_hash TEXT NOT NULL,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL);
+            "#,
+        ),
     ])
 }
 
@@ -363,6 +375,15 @@ pub struct CatalogDb {
 pub struct CredentialRow {
     pub credential_id: String,
     pub passkey_json: String,
+    pub name: String,
+    pub created_at: String,
+}
+
+/// api_keys tableの1行(TASK-13 D12: api-key認証の保存先=永続class。key_hashは
+/// SHA-256(api-key全文)のhexで平文keyは保存しない=hashから復元不可)。
+pub struct ApiKeyRow {
+    pub credential_id: String,
+    pub key_hash: String,
     pub name: String,
     pub created_at: String,
 }
@@ -510,6 +531,91 @@ impl CatalogDb {
             .map_err(|e| BackupError::Internal(format!("credentials削除に失敗: {e}")))
     }
 
+    /// api-keyの保存(TASK-13設計2.1: `manage auth api-key`用)。credential_idは
+    /// "ak-"+16hex・key_hashはSHA-256(api-key全文)のhex(平文keyは受け取らない
+    /// =保存しない)。
+    pub fn insert_api_key(
+        &self,
+        credential_id: &str,
+        key_hash: &str,
+        name: &str,
+    ) -> BackupResult<()> {
+        self.conn
+            .execute(
+                "INSERT INTO api_keys (credential_id, key_hash, name, created_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![credential_id, key_hash, name, crate::storage::now_jst()],
+            )
+            .map_err(|e| BackupError::Internal(format!("api_keys挿入に失敗: {e}")))?;
+        Ok(())
+    }
+
+    /// api_keys行数(manage auth list/removeの両table合計0件判定・auth statusの
+    /// api_keys件数)。
+    pub fn api_key_count(&self) -> BackupResult<i64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM api_keys", [], |r| r.get(0))
+            .map_err(|e| BackupError::Internal(format!("api_keys計数に失敗: {e}")))
+    }
+
+    /// api_keys行の一覧(manage auth listの統合表示用)。
+    pub fn load_api_keys(&self) -> BackupResult<Vec<ApiKeyRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT credential_id, key_hash, name, created_at FROM api_keys \
+                 ORDER BY created_at, credential_id",
+            )
+            .map_err(|e| BackupError::Internal(format!("api_keys読取の準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(ApiKeyRow {
+                    credential_id: r.get(0)?,
+                    key_hash: r.get(1)?,
+                    name: r.get(2)?,
+                    created_at: r.get(3)?,
+                })
+            })
+            .map_err(|e| BackupError::Internal(format!("api_keys読取に失敗: {e}")))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| BackupError::Internal(format!("api_keys行の取り出しに失敗: {e}")))
+    }
+
+    /// api-keyの失効(TASK-13設計2.5: `manage auth remove`用。credentials→api_keys
+    /// の順の削除を受け持つ側)。戻り値は削除行数(0=対象不在)。
+    pub fn remove_api_key(&self, credential_id: &str) -> BackupResult<usize> {
+        self.conn
+            .execute(
+                "DELETE FROM api_keys WHERE credential_id = ?1",
+                [credential_id],
+            )
+            .map_err(|e| BackupError::Internal(format!("api_keys削除に失敗: {e}")))
+    }
+
+    /// key_hash一致のapi-key検索(TASK-13設計2.3: serveのapi-key認証。
+    /// SHA-256 hash一致=key一致のため検索はhashのみ)。
+    pub fn find_api_key_by_hash(&self, key_hash: &str) -> BackupResult<Option<ApiKeyRow>> {
+        self.conn
+            .query_row(
+                "SELECT credential_id, key_hash, name, created_at FROM api_keys \
+                 WHERE key_hash = ?1",
+                [key_hash],
+                |r| {
+                    Ok(ApiKeyRow {
+                        credential_id: r.get(0)?,
+                        key_hash: r.get(1)?,
+                        name: r.get(2)?,
+                        created_at: r.get(3)?,
+                    })
+                },
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(BackupError::Internal(format!("api_keys検索に失敗: {other}"))),
+            })
+    }
+
     /// sync_state読み出し(行が無いNone)。
     pub fn sync_state(&self, bucket: &str, prefix: &str) -> BackupResult<Option<SyncState>> {
         read_sync_state(&self.conn, &scope_key(bucket, prefix))
@@ -575,7 +681,7 @@ impl CatalogDb {
     /// scope単位の原子的置換(設計2章: 単一transactionで当該scopeのcache行を
     /// delete+insert。混在状態を作らない)。対象はentities/versions/pins/locations/
     /// sync_state(cache class。pending_itemsはscan領域のため対象外)。
-    /// 永続class(credentials/push_intents)には触れない。
+    /// 永続class(credentials/push_intents/api_keys)には触れない。
     ///
     /// entriesは当該scopeのprefix外のs3_keyを持つ版・pinを除外して格納する
     /// (指摘#3: 複数scope混在時の衝突・混入防止。索引はbucket単位で構築されるため
@@ -1321,10 +1427,11 @@ mod tests {
 
     /// [covers:catalog.schema-migration]
     /// migrationはcache class 6 table(entities/versions/pins/locations/sync_state/
-    /// pending_items)+永続class 2 table(credentials/push_intents)を構築する。
-    /// 各tableの主要column(設計2章schema要約)を直接観測する。
+    /// pending_items)+永続class 3 table(credentials/push_intents/api_keys)=9 table
+    /// を構築する(TASK-13でapi_keysを追加)。各tableの主要column(設計2章schema要約)
+    /// を直接観測する。
     #[test]
-    fn migration_builds_eight_tables_with_expected_columns() {
+    fn migration_builds_nine_tables_with_expected_columns() {
         let (_tmp, db) = open_test_db("cat-schema");
         let columns = |table: &str| -> Vec<String> {
             let mut stmt = db
@@ -1422,6 +1529,12 @@ mod tests {
             (
                 "push_intents",
                 vec!["id", "recorded_at", "kind", "payload_json"],
+            ),
+            // TASK-13(api-key認証): api-keyのhash一覧(永続class・rebuildでもdropしない。
+            // key_hashはSHA-256(api-key全文)のhexで平文keyは保存しない)
+            (
+                "api_keys",
+                vec!["credential_id", "key_hash", "name", "created_at"],
             ),
         ];
         for (table, expect_cols) in persistent_tables {

@@ -63,16 +63,35 @@
 #   詳細失効・詳細/versionsのerror状態分離・旧result無しのdiff実行失敗が隠れる)対応で
 #   条件追加(4条件)。①のsubmit統合はapplyFilters action・②はrefetchEntitiesでの
 #   詳細系resetとしてstore層で観測する(実描画はexcluded維持)。
+# 2026-11-05: TASK-13(serve認証へのapi-key認証追加)対応でテスト先行の条件追加(3条件)・
+#   文言改訂(2条件=frontend.login-view-auth-ui-state・frontend.unauthenticated-401-handling。
+#   id不変)。出典: tmp/tasks/tm-13/design_api-key-auth.md D13・2.4章(LoginView api-key欄・
+#   postApiKeyAuth・専用失敗表示=レビューM-3/M-4・L-2反映済み)・4章。
+#   実装前のため新規条件のテストは実行failを許容(未実装参照は新規spec file
+#   api/api-key-auth.spec.ts・stores/api-key-auth.spec.ts内に閉じる=既存spec・buildを
+#   壊さない)。
+#   設計2.4に詳細が規定されない点は以下の解釈で条件化(実装はこれに従う):
+#   - api-key欄の表示基盤はauth storeのgetter(認証状態取得済み(fetchState=ok)かつ
+#     未認証時にtrue。未取得・認証済みはfalse)で提供する。authUi(register/login)に
+#     依存しない=passkey 0件+api-keyのみのuserがlogin画面へ到達できない状態を作らない
+#   - api-key認証実行はauth storeのaction(postApiKeyAuth呼出・成功時は認証状態を
+#     再取得してauthenticatedへ=passkey loginと同一遷移)
+#   - 失敗表示はpasskey/bootstrap欄の失敗(lastError)とは分離した専用状態(apiKeyError)。
+#     messageはcodeをそのまま表示し401をbootstrap再発行案内へ誤変換しない(=M-4)
+# 2026-11-06: TASK-13コードレビュー指摘対応(低重要度)で文言改訂(1条件=
+#   frontend.api-key-failure-dedicated-state。id不変)。apiKeyErrorの寿命をlastErrorと
+#   同一へ: fetchAuthStatus成功・logoutでもクリア(未認証状態へ失敗表示を持ち越さない)。
+#   stores/auth.ts変更のためverified=falseへ戻す(全件verify後にtrueへ復帰)。
 
 [meta]
 feature = "frontend"
 source_file = "frontend/src/"
 verified = true
-verified_at = "2026-11-05"
+verified_at = "2026-11-06"
 verified_by = "claude"
 test_command = "pnpm --dir frontend vitest run"
-source_hash = "f5a4b0fab47d0e5b848b08d29277093fc7b5e8f3"
-note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3〜P6時点+コードレビュー指摘高4(EntitiesView・EntityDetailView・手動sync)分+レビュー再指摘①〜④分のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff・entities)のvitestで担保。P3分5条件・P4分4条件・P5分2条件・P6分3条件+レビュー分2条件は2026-11-05実装後に全件pass(44 tests)で検証記録を復帰済み。レビュー高4分5条件(entities-client・entities-store・sync-refresh-trigger・entities-view-state・entities-routes-nav)も2026-11-05実装後に全件pass(61 tests)で検証記録を復帰。レビュー再指摘①〜④分4条件(entities-filter-apply・sync-refresh-invalidates-detail-state・entities-detail-versions-error-separation・diff-run-error-visible-without-result)も2026-11-05実装後に全件pass(66 tests)で検証記録を更新。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)"
+source_hash = "8b33d710b1d2a37aa16811c973ffc76a56bad794"
+note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3〜P6時点+コードレビュー指摘高4(EntitiesView・EntityDetailView・手動sync)分+レビュー再指摘①〜④分のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff・entities)のvitestで担保。P3分5条件・P4分4条件・P5分2条件・P6分3条件+レビュー分2条件は2026-11-05実装後に全件pass(44 tests)で検証記録を復帰済み。レビュー高4分5条件(entities-client・entities-store・sync-refresh-trigger・entities-view-state・entities-routes-nav)も2026-11-05実装後に全件pass(61 tests)で検証記録を復帰。レビュー再指摘①〜④分4条件(entities-filter-apply・sync-refresh-invalidates-detail-state・entities-detail-versions-error-separation・diff-run-error-visible-without-result)も2026-11-05実装後に全件pass(66 tests)で検証記録を更新。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)。2026-11-05 TASK-13(api-key認証UI)実装後にfrontend vitest全緑(80 tests・api-key系14test+文言改訂分含む)・frontend build成功を確認してverified=trueへ復帰・source_hashを更新。2026-11-06 TASK-13レビュー指摘対応(apiKeyErrorの寿命をlastErrorと同一へ=stores/auth.ts変更)でverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-06 全件verify(vitest 82tests緑・apiKeyErrorクリア分2test含む・frontend build成功・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新"
 
 [[condition]]
 id = "frontend.api-error-body-guard"
@@ -140,8 +159,8 @@ source_lines = "frontend/src/stores/auth.spec.ts:49"
 [[condition]]
 id = "frontend.unauthenticated-401-handling"
 target_function = "frontend api/client.ts・stores/auth.ts(保護API 401の扱い)"
-source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(error体系: unauthenticated=401)・12章P4(保護API開放=未認証401)・7章(未認証時のUI誘導)"
-description = "保護APIの401(unauthenticated)はapiGetのerror扱い({ok:false, error:{code:\"unauthenticated\"}, httpStatus:401})となり、P2〜P3の503(configuration=閉鎖)とは区別されて未認証時のUI誘導(login案内)へ接続する(空dataを表示しない点はfail-closed扱いと共通) (vitest)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(error体系: unauthenticated=401)・12章P4(保護API開放=未認証401)・7章(未認証時のUI誘導) + TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.4(api-key認証の401もcodeをそのまま専用失敗表示へ=401をbootstrap再発行案内へ誤変換しない=レビューM-4)"
+description = "保護APIの401(unauthenticated)はapiGetのerror扱い({ok:false, error:{code:\"unauthenticated\"}, httpStatus:401})となり、P2〜P3の503(configuration=閉鎖)とは区別されて未認証時のUI誘導(login案内)へ接続する(空dataを表示しない点はfail-closed扱いと共通)。api-key認証(POST /api/auth/api-key)の401も同一code体系(unauthenticated)だがpasskey/bootstrap欄の失敗表示へは接続せず専用失敗状態へ返す(詳細はfrontend.api-key-failure-dedicated-state) (vitest)"
 given = "fetch mock(401+{\"error\":{\"code\":\"unauthenticated\",\"message\":...}})での保護API呼び出し(apiGet/fetchSyncState)"
 expect_return_shape = "ok=false・error.code=unauthenticated・httpStatus=401(503 configurationとはcodeで区別可能)"
 source_lines = "frontend/src/api/auth.spec.ts:57"
@@ -149,16 +168,16 @@ source_lines = "frontend/src/api/auth.spec.ts:57"
 [[condition]]
 id = "frontend.login-view-auth-ui-state"
 target_function = "frontend stores/auth.ts authUi getter(LoginView UI誘導状態)"
-source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: LoginView・bootstrap token入力・login/register UI)・8章(登録UIはtoken提示時のみ=credential数0+token案内)・12章P4(LoginView)"
-description = "auth storeはLoginViewのUI誘導状態をgetterで提供する: 未取得=unknown・未認証かつcredentials=0はregister(bootstrap token入力による登録案内)・未認証かつcredentials>0はlogin・認証済みはauthenticated。component実描画は実browser観測のため本条件はstore層の状態で担保する (vitest)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: LoginView・bootstrap token入力・login/register UI)・8章(登録UIはtoken提示時のみ=credential数0+token案内)・12章P4(LoginView) + TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.4(api-key欄はauthUi状態(register/login)に依存せず未認証時に常時表示)"
+description = "auth storeはLoginViewのUI誘導状態をgetterで提供する: 未取得=unknown・未認証かつcredentials=0はregister(bootstrap token入力による登録案内)・未認証かつcredentials>0はlogin・認証済みはauthenticated。api-key欄の表示はこのauthUi状態に依存しない(未認証時に常時表示=frontend.login-view-api-key-field。passkey 0件+api-keyのみのuserがlogin画面へ到達できない状態を作らない)。component実描画は実browser観測のため本条件はstore層の状態で担保する (vitest)"
 given = "fetchAuthStatus成功後の各状態(未登録・登録済み未認証・認証済み)でのauthUi getter参照"
 expect_return_shape = "状態に応じてunknown/register/login/authenticatedを返す"
 source_lines = "frontend/src/stores/auth.spec.ts:100"
 
 [[excluded]]
 item = "LoginView componentの実描画・WebAuthn API(navigator.credentials.create/get)の実browser呼出・認証後の本格画面(EntitiesView・EntityDetailViewのdata表示・router guard)"
-source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: LoginView・EntitiesView・EntityDetailView・vite dev proxy)・8章(D3 passkey)・12章P4(passkey認証・LoginView)"
-reason = "実browserのWebAuthn API・component描画はvitest(node環境)で観測できない(store/client層のみ条件化しUI誘導状態はauthUi getterで担保)。実機login確認は設計12章P4の手動verify項目・認証後の本格画面は後続wave(実装時に条件化)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: LoginView・EntitiesView・EntityDetailView・vite dev proxy)・8章(D3 passkey)・12章P4(passkey認証・LoginView) + TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.4(LoginViewのapi-key入力欄(type=password+autocomplete=off)・認証ボタンの実描画)"
+reason = "実browserのWebAuthn API・component描画はvitest(node環境)で観測できない(store/client層のみ条件化しUI誘導状態はauthUi getterで担保)。実機login確認は設計12章P4の手動verify項目・認証後の本格画面は後続wave(実装時に条件化)。TASK-13のapi-key欄実描画・ボタン実操作も本entryに包含(表示基盤はfrontend.login-view-api-key-fieldのstore層・入力属性はbootstrap token欄と同一=設計L-2のため新規除外entryを立てない)"
 decided_at = "2026-11-05"
 decided_by = "claude"
 
@@ -335,6 +354,35 @@ description = "diff実行(POST /api/diff)の失敗は旧resultの有無に関係
 given = "保存済みresultが無い状態(result=null)でのPOST /api/diff 500でのrunDiff実行と、続くPOST成功での再実行"
 expect_return_shape = "失敗時はresult=nullのままlastRunError={code:...}を保持しhasRunError=true・showingStaleResult=false。成功時はlastRunError=null+hasRunError=false"
 source_lines = "frontend/src/stores/diff.spec.ts:213"
+
+# --- TASK-13(api-key認証UI・2026-11-05テスト先行) ---
+
+[[condition]]
+id = "frontend.api-key-auth-client"
+target_function = "frontend api/client.ts postApiKeyAuth"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) D13・2.3(POST /api/auth/api-key body {\"api_key\": \"<key>\"})・2.4(postApiKeyAuth(apiKey)=apiPost共通経路。fetchは同一origin cookie既定のためsession cookieは既存と同一扱い)・4章"
+description = "api-key認証のclient(postApiKeyAuth(apiKey))はPOST /api/auth/api-keyへ{\"api_key\": apiKey}のJSON bodyを送る(apiPost共通経路)。応答はlogin finishと同一の{\"status\":\"ok\"}形式の型ガードで検証し、401 unauthenticated・403 forbidden_sourceはerror扱い({ok:false, error:{code,message}, httpStatus})として専用失敗表示へ接続する(LAN外403とkey不一致401のcodeでUI表示を区別できる) (vitest)"
+given = "fetch mock(200+{\"status\":\"ok\"}・401+{\"error\":{\"code\":\"unauthenticated\",...}}・403+{\"error\":{\"code\":\"forbidden_source\",...}}・network reject)でのpostApiKeyAuth呼び出しのmethod/URL/body観測"
+expect_return_shape = "POST /api/auth/api-keyへ{\"api_key\"}bodyで呼ばれ、200はok:true・401は{code:\"unauthenticated\",httpStatus:401}・403は{code:\"forbidden_source\",httpStatus:403}・networkは{code:\"network\",httpStatus:0}(実装前のためclient.tsのpostApiKeyAuth未実装で実行failを許容)"
+source_lines = "frontend/src/api/api-key-auth.spec.ts:12"
+
+[[condition]]
+id = "frontend.login-view-api-key-field"
+target_function = "frontend stores/auth.ts api-key欄表示getter・authenticateWithApiKey(LoginView UI基盤)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.4(LoginViewにapi-key入力欄+認証ボタンを追加。api-key欄はauthUi状態(register/login)に依存せず未認証時に常時表示=passkey 0件+api-keyのみのuserがlogin画面へ到達できない状態を作らない。成功時はpasskey loginと同一遷移)・4章"
+description = "api-key欄の表示基盤をauth storeのgetterで提供する: 認証状態取得済み(fetchState=ok)かつ未認証時にtrue・未取得・認証済みはfalse(authUiのregister/loginいずれの状態でも未認証なら表示=常時表示)。api-key認証実行はauthenticateWithApiKey(apiKey) action(postApiKeyAuth呼出。成功時は認証状態を再取得してauthenticatedへ=passkey loginと同一遷移。component実描画は実browser観測のためstore層の状態で担保する) (vitest)"
+given = "fetchAuthStatus成功後の各状態(未登録=register・登録済み未認証=login・認証済み)でのapi-key欄getter参照と、fetch mock(POST /api/auth/api-key 200・続くGET /api/auth/status 200+authenticated:true)でのauthenticateWithApiKey実行"
+expect_return_shape = "register・loginのいずれでもapi-key欄getterはtrue・未取得・認証済みはfalse。authenticateWithApiKey成功後はauthenticated=true(実装前のためsrc/stores/auth.tsのapi-key系未実装で実行failを許容)"
+source_lines = "frontend/src/stores/api-key-auth.spec.ts:31; frontend/src/stores/api-key-auth.spec.ts:73"
+
+[[condition]]
+id = "frontend.api-key-failure-dedicated-state"
+target_function = "frontend stores/auth.ts apiKeyError(api-key認証の専用失敗状態)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.4(失敗表示はpasskey/bootstrap欄のfail()変換と分離した専用message。codeをそのまま表示・401をbootstrap再発行案内へ誤変換しない=レビューM-4)・4章"
+description = "api-key認証(401 unauthenticated・403 forbidden_source・network失敗)の失敗はpasskey/bootstrap欄の失敗(lastError)とは分離した専用状態(apiKeyError)で保持する(messageはerror codeをそのまま表示する=Viewで401 unauthenticatedをbootstrap token再発行案内へ誤変換しない。passkey側のfail()変換と分離)。apiKeyErrorの寿命はlastErrorと同一で認証成功・fetchAuthStatus成功・logoutでクリアされる(TASK-13レビュー指摘対応: 未認証状態へ失敗表示を持ち越さない) (vitest)"
+given = "fetch mock(POST /api/auth/api-key 401+{\"error\":{\"code\":\"unauthenticated\",...}}・403+{\"error\":{\"code\":\"forbidden_source\",...}}・network reject)でのauthenticateWithApiKey実行と、続くPOST成功での再実行・fetchAuthStatus成功・logout"
+expect_return_shape = "401はapiKeyError={code:\"unauthenticated\"}(codeは変換されない・passkey側lastErrorはnullのまま分離)・403はapiKeyError={code:\"forbidden_source\"}・networkは{code:\"network\"}。認証成功・fetchAuthStatus成功・logout後はapiKeyError=null(実装前のため実行failを許容)"
+source_lines = "frontend/src/stores/api-key-auth.spec.ts:100"
 
 [[excluded]]
 item = "EntitiesView・EntityDetailView componentの実描画(entity一覧table・検索box・category絞込・詳細・versions一覧の実browser描画)・HomeViewの「後続phase」文言解消後のnav link実描画・sync refreshボタン実操作・router guardの実navigation(未認証時login誘導の実挙動)"

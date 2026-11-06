@@ -4,7 +4,10 @@
 //! auth(TASK-9 passkey credential管理)。
 
 use super::get::{RestoreCheck, ensure_restored, restore_guidance};
-use super::{CtxArgs, now_jst, open_session, open_session_with_pipeline, resolve_key, sha256_hex};
+use super::{
+    CtxArgs, now_jst, open_session, open_session_with_pipeline, random_bytes, resolve_key,
+    sha256_hex,
+};
 use crate::errors::{BackupError, BackupResult};
 use crate::index::{INDEX_SCHEMA, IndexFileEntry, IndexLocation, IndexPin, IndexVersion};
 use crate::layout;
@@ -69,7 +72,7 @@ pub enum ManageSub {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum AuthSub {
-    /// 登録credential一覧(credential_id・name・created_at)
+    /// 登録credential一覧(credential_id・kind・name・created_at)
     List {
         #[command(flatten)]
         ctx: CtxArgs,
@@ -80,6 +83,14 @@ pub enum AuthSub {
         ctx: CtxArgs,
         /// 削除するcredential_id(完全一致・manage auth listで確認)
         credential_id: String,
+    },
+    /// api-keyの生成(`abk_`前置のkeyを1回だけstdout表示。S3接続不要のlocal操作)
+    ApiKey {
+        #[command(flatten)]
+        ctx: CtxArgs,
+        /// api-keyの表示名(manage auth listで確認用に使う。既定"api-key"。空文字はerror)
+        #[arg(long)]
+        name: Option<String>,
     },
 }
 
@@ -206,28 +217,39 @@ pub fn cmd_manage(args: &ManageArgs) -> i32 {
                 ctx: _,
                 credential_id,
             } => cmd_manage_auth_remove(credential_id),
+            AuthSub::ApiKey { ctx: _, name } => cmd_manage_auth_api_key(name.as_deref()),
         },
     }
 }
 
-/// manage auth list(TASK-9設計8章・12章P6): catalog DB(2.2のcatalog.db)の
-/// credentials table(永続class)に登録されたpasskey credential一覧を表示する
-/// (credential_id・name・created_at)。S3接続不要のlocal操作。
+/// manage auth list(TASK-9設計8章・12章P6+TASK-13設計2.5): catalog DB(2.2の
+/// catalog.db)のcredentials table(passkey)とapi_keys table(api-key)を統合表示
+/// する(credential_id・kind=passkey/api_key・name・created_at)。S3接続不要の
+/// local操作。0件案内(bootstrap案内)は両table合計0件時のみ(api_keys残存時は
+/// api-key login可能のため)。
 fn cmd_manage_auth_list() -> i32 {
     let run = (|| -> BackupResult<i32> {
         let db = crate::catalog::CatalogDb::open()?;
-        let rows = db.load_credentials()?;
-        if rows.is_empty() {
+        let credentials = db.load_credentials()?;
+        let api_keys = db.load_api_keys()?;
+        let total = credentials.len() + api_keys.len();
+        if total == 0 {
             println!("登録されたcredentialはありません(0件)");
             println!(
                 "案内: 初回登録は `amazing-backup serve --bootstrap` でbootstrap tokenを発行してください"
             );
             return Ok(0);
         }
-        for r in &rows {
-            println!("{} {} {}", r.credential_id, r.name, r.created_at);
+        for r in &credentials {
+            println!(
+                "{} passkey {} {}",
+                r.credential_id, r.name, r.created_at
+            );
         }
-        println!("{}件(credential_id・name・created_at)", rows.len());
+        for k in &api_keys {
+            println!("{} api_key {} {}", k.credential_id, k.name, k.created_at);
+        }
+        println!("{total}件(credential_id・kind・name・created_at)");
         Ok(0)
     })();
     match run {
@@ -239,28 +261,92 @@ fn cmd_manage_auth_list() -> i32 {
     }
 }
 
-/// manage auth remove <credential_id>(TASK-9設計8章・12章P6): credential_id完全一致の
-/// 1行をcredentials table(永続class)から削除する(失効=nameは一意性が無いため
-/// 削除対象指定に使わない)。不在のcredential_idは対象エラー3。削除後に
-/// credentials 0件(全credential紛失時と同一状態)となった場合は再bootstrap案内
-/// (serve --bootstrap)を表示する(credential 0ではlogin手段が無く登録はbootstrap
-/// token提示時のみ開く=認証閉鎖fail-closed)。S3接続不要のlocal操作。
+/// manage auth remove <credential_id>(TASK-9設計8章・12章P6+TASK-13設計2.5):
+/// credential_id完全一致の1行をcredentials table→api_keys tableの順に削除する
+/// (失効=nameは一意性が無いため削除対象指定に使わない)。両table合計削除0行の
+/// credential_idは対象エラー3。削除後に両table合計0件(全認証手段紛失時と同一
+/// 状態)となった場合は再bootstrap案内(serve --bootstrap)を表示する(合計0件では
+/// passkey login・api-key loginのいずれの手段も無く・passkey登録はbootstrap
+/// token提示時のみ開く=認証閉鎖fail-closed。api_keys残存時は案内しない)。
+/// S3接続不要のlocal操作。api-key失効は既存sessionを破棄しない(in-memory 24h・
+/// passkey removeと同一挙動)。
 fn cmd_manage_auth_remove(credential_id: &str) -> i32 {
     let run = (|| -> BackupResult<i32> {
         let db = crate::catalog::CatalogDb::open()?;
-        let removed = db.remove_credential(credential_id)?;
-        if removed == 0 {
+        let removed_credentials = db.remove_credential(credential_id)?;
+        let removed_api_keys = db.remove_api_key(credential_id)?;
+        if removed_credentials + removed_api_keys == 0 {
             return Err(BackupError::Target(format!(
                 "credential_id({credential_id})は登録されていません(`manage auth list`で確認してください)"
             )));
         }
-        println!("ok: credentialを削除しました (credential_id={credential_id})");
-        let rest = db.credential_count()?;
+        let kind = if removed_credentials > 0 {
+            "passkey"
+        } else {
+            "api_key"
+        };
+        println!("ok: credentialを削除しました (kind={kind} credential_id={credential_id})");
+        let rest = db.credential_count()? + db.api_key_count()?;
         if rest == 0 {
             println!(
                 "案内: credentialが0件になりました(未登録状態・login不可)。再登録は `amazing-backup serve --bootstrap` でbootstrap tokenを発行してください"
             );
         }
+        Ok(0)
+    })();
+    match run {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// api-keyの生成(TASK-13設計D12・2.2: 32byte乱数を`abk_`+base64url(43文字)へ。
+/// 乱数源はbootstrap token生成(serve)と同じ/dev/urandom=共通helper(random_bytes))。
+fn generate_api_key() -> BackupResult<String> {
+    let buf = random_bytes(32)?;
+    use base64::Engine as _;
+    Ok(format!(
+        "abk_{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
+    ))
+}
+
+/// api-keyのcredential_id生成("ak-"+8byte乱数の16hex表示・random_bytes)。
+fn generate_api_key_credential_id() -> BackupResult<String> {
+    let buf = random_bytes(8)?;
+    Ok(format!(
+        "ak-{}",
+        buf.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ))
+}
+
+/// manage auth api-key [--name <name>](TASK-13設計D12・2.2): api-keyを生成して
+/// **1回だけstdoutへ表示**する(再表示不可・hashから復元不可=SHA-256 hexのみ
+/// api_keys table(永続class)へ保存。平文keyは保存しない)。nameは既定"api-key"
+/// (空文字指定はusage error)。
+/// S3接続不要のlocal操作(既存auth系と同一)。
+fn cmd_manage_auth_api_key(name: Option<&str>) -> i32 {
+    let run = (|| -> BackupResult<i32> {
+        let name = name.unwrap_or("api-key");
+        // 空文字nameは無検査で保存させない(usage error 64。未指定既定"api-key"は維持)
+        if name.is_empty() {
+            return Err(BackupError::Usage(
+                "--nameは空文字を指定できません(省略時は既定のapi-key)".to_string(),
+            ));
+        }
+        let api_key = generate_api_key()?;
+        let credential_id = generate_api_key_credential_id()?;
+        let key_hash = sha256_hex(api_key.as_bytes());
+        let db = crate::catalog::CatalogDb::open()?;
+        db.insert_api_key(&credential_id, &key_hash, name)?;
+        // 保存後に1回限り表示(保存失敗時はkeyを表示しない)
+        println!("api-keyを生成しました(この表示は1回限りです。紛失時は再生成してください):");
+        println!("{api_key}");
+        println!("name: {name}");
+        println!("credential_id: {credential_id}");
         Ok(0)
     })();
     match run {

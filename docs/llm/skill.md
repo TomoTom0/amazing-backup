@@ -23,6 +23,7 @@ description: NASバックアップアーカイブ(zip/7z)の暗号化・S3(versi
 
 - `backup push`は冪等(変更の無いfileはskip判定。失敗時の再実行で残りが処理される)
 - bucket側保持設定は `manage lifecycle apply`
+- serveのapi-key認証を使う場合は `manage auth api-key` で発行する(表示は1回限り・接続元LAN内限定。失効は `manage auth remove`)
 
 ## 非常時
 
