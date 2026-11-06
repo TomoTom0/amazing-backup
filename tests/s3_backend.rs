@@ -50,11 +50,11 @@ fn fake_seam_uses_fake_backend_with_warning() {
     let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "a.zip", &[]) else {
         return;
     };
-    let stderr = "WARNING: FAKE S3 MODE"; // pty経由のstderrは結合出力に含まれる
     assert_eq!(
         code, 0,
         "fake seamでbackup push成功(ダミーcredentialでも=実network不使用): {stdout}"
     );
+    // pty経由のstderrは結合出力(stdout)に含まれるためWARNINGはstdoutで検証する
     assert!(
         stdout.contains("WARNING: FAKE S3 MODE"),
         "fake選択時のWARNING表示: {stdout}"

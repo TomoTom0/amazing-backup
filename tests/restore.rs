@@ -286,17 +286,6 @@ fn plain_conflict_unreadable_existing_file_protected_get_and_pull() {
     };
     assert_eq!(code, 0, "v2 push(同一title別entity): {stdout}");
     let uuid2 = uuid_of_path(&fx, &a);
-    // v2 runのみを対象範囲にする(pull --run。全対象だと同一title別entityの復元先が
-    // 衝突するため)
-    let run2 = fx
-        .registry_values()
-        .into_iter()
-        .find(|r| {
-            r.get("record_type").and_then(|t| t.as_str()) == Some("file_write")
-                && r.get("uuid").and_then(|u| u.as_str()) == Some(uuid2.as_str())
-        })
-        .and_then(|r| r.get("batch_id").and_then(|b| b.as_str()).map(String::from))
-        .expect("v2のbatch_id");
     let dest = out.join("a.zip");
     use std::os::unix::fs::PermissionsExt as _;
     let make_unreadable = || {

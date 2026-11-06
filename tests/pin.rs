@@ -556,7 +556,6 @@ fn push_pin_write_once_violation_skips_file_and_completes_run() {
     // 同一pin名での同一entity再push(crash残存re-put経路で2版化・設計4.4):
     // pin key既存=write-once違反でもrunは中断しない
     let ids = add_version_via_reput(&fx, &a, &["--pin", "pm1"]);
-    let out = String::new();
     assert_eq!(ids.len(), 2, "2版のfile_upload記録(記録復元付き): {ids:?}");
     let calls = fx.calls();
     assert!(
