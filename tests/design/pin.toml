@@ -123,7 +123,7 @@ source = "TASK-11(Phase B)コードレビュー指摘L-1+tmp/tasks/tm-10/design_
 description = "pin rmはS3削除成功後にpin_remove記録をregistryへappendするが、この記録に失敗した場合のerror文に`manage index rebuild`による回復案内を含める(索引pins[]由来の再実行は記録失敗のままではexitを繰返すため、索引再構築による回復経路を利用者へ示す。最小対応) (integration, fake seam)"
 given = "pin付与済みfileへの pin rm 実行時にregistry.jsonlへの追記が失敗する状態(registry.jsonlをdirectoryへ差し替え)での pin rm 実行"
 expect_return_shape = "S3削除は行われたうえでexit 4(処理エラー・終了コードは従来どおり)。error文に manage index rebuild による回復案内が含まれる"
-source_lines = "tests/pin.rs:580"
+source_lines = "tests/pin.rs:579"
 
 [[condition]]
 id = "pin.pin-resolution-bucket-isolated"

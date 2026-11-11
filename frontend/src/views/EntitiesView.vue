@@ -68,7 +68,7 @@ const fmtSize = (size: number): string => {
   <section class="card">
     <h2>entity一覧</h2>
     <div class="scan-actions">
-      <button type="button" :disabled="sync.refreshing" @click="sync.refresh()">
+      <button type="button" class="btn-primary" :disabled="sync.refreshing" @click="sync.refresh()">
         {{ sync.refreshing ? 'sync実行中...' : 'sync手動refresh' }}
       </button>
       <span class="muted">remote索引を再取得して一覧を更新します(POST /api/sync)</span>
@@ -87,8 +87,8 @@ const fmtSize = (size: number): string => {
         category絞込(locationのcategory一致・空で無し)
         <input v-model="categoryInput" type="search" name="category" />
       </label>
-      <button type="submit">適用</button>
-      <button type="button" @click="clearFilters">解除</button>
+      <button type="submit" class="btn-primary">適用</button>
+      <button type="button" class="btn-quiet" @click="clearFilters">解除</button>
     </form>
 
     <p v-if="entities.entitiesView === 'loading'" class="muted">読み込み中...</p>
@@ -114,11 +114,11 @@ const fmtSize = (size: number): string => {
           <td>
             <router-link :to="`/entities/${item.uuid}`">{{ item.title }}</router-link>
           </td>
-          <td>{{ item.uuid }}</td>
+          <td class="mono">{{ item.uuid }}</td>
           <td>{{ item.locations.length }}</td>
           <td>{{ item.versions }}</td>
-          <td>{{ item.latest_date }}</td>
-          <td>{{ fmtSize(item.latest_size) }}</td>
+          <td class="mono">{{ item.latest_date }}</td>
+          <td class="mono">{{ fmtSize(item.latest_size) }}</td>
           <td>{{ item.pins.length }}</td>
         </tr>
       </tbody>
@@ -128,12 +128,13 @@ const fmtSize = (size: number): string => {
     </p>
 
     <nav v-if="entities.entitiesView === 'result' && entities.totalPages > 1" class="entity-pager">
-      <button type="button" :disabled="entities.page <= 1" @click="gotoPage(entities.page - 1)">
+      <button type="button" class="btn-quiet" :disabled="entities.page <= 1" @click="gotoPage(entities.page - 1)">
         前へ
       </button>
       <span class="muted">{{ entities.page }} / {{ entities.totalPages }} page</span>
       <button
         type="button"
+        class="btn-quiet"
         :disabled="entities.page >= entities.totalPages"
         @click="gotoPage(entities.page + 1)"
       >

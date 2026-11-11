@@ -127,10 +127,10 @@ const fmtSize = (size: number): string => {
         <tbody>
           <tr v-for="v in entities.detail.version_list" :key="v.version_id">
             <td>{{ v.date }}</td>
-            <td>{{ v.version_ts }}</td>
-            <td>{{ v.version_id }}</td>
-            <td>{{ v.batch_id }}</td>
-            <td>{{ fmtSize(v.source_size) }}</td>
+            <td class="mono">{{ v.version_ts }}</td>
+            <td class="mono">{{ v.version_id }}</td>
+            <td class="mono">{{ v.batch_id }}</td>
+            <td class="mono">{{ fmtSize(v.source_size) }}</td>
           </tr>
         </tbody>
       </table>
@@ -153,9 +153,9 @@ const fmtSize = (size: number): string => {
         <tbody>
           <tr v-for="v in entities.versions.versions" :key="v.version_id">
             <td>{{ v.date }}</td>
-            <td>{{ v.version_ts }}</td>
-            <td>{{ v.version_id }}</td>
-            <td>{{ fmtSize(v.source_size) }}</td>
+            <td class="mono">{{ v.version_ts }}</td>
+            <td class="mono">{{ v.version_id }}</td>
+            <td class="mono">{{ fmtSize(v.source_size) }}</td>
             <td>{{ v.state }}</td>
           </tr>
         </tbody>

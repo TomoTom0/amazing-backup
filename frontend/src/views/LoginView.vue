@@ -233,7 +233,7 @@ async function authWithApiKey(): Promise<void> {
 </script>
 
 <template>
-  <section class="card">
+  <section class="card login-card">
     <h2>passkey認証</h2>
 
     <p v-if="auth.authUi === 'unknown'" class="muted">認証状態を確認しています...</p>
@@ -253,10 +253,10 @@ async function authWithApiKey(): Promise<void> {
         bootstrap token
         <input v-model="token" type="password" autocomplete="off" placeholder="serve --bootstrap の表示値" />
       </label>
-      <button type="button" :disabled="busy" @click="register()">passkeyを登録</button>
+      <button type="button" class="btn-primary" :disabled="busy" @click="register()">passkeyを登録</button>
     </template>
 
-    <button v-else-if="auth.authUi === 'login'" type="button" :disabled="busy" @click="login()">
+    <button v-else-if="auth.authUi === 'login'" type="button" class="btn-primary" :disabled="busy" @click="login()">
       login
     </button>
 
@@ -265,8 +265,8 @@ async function authWithApiKey(): Promise<void> {
         bootstrap token(追加登録用)
         <input v-model="token" type="password" autocomplete="off" placeholder="serve --bootstrap の表示値" />
       </label>
-      <button type="button" :disabled="busy" @click="register()">passkeyを追加登録</button>
-      <button type="button" :disabled="busy" @click="logout()">logout</button>
+      <button type="button" class="btn-primary" :disabled="busy" @click="register()">passkeyを追加登録</button>
+      <button type="button" class="btn-quiet" :disabled="busy" @click="logout()">logout</button>
     </template>
 
     <!-- api-key認証(TASK-13: authUi状態に依存せず未認証時に常時表示。接続元LAN内限定) -->
@@ -280,7 +280,7 @@ async function authWithApiKey(): Promise<void> {
           placeholder="manage auth api-key の表示値"
         />
       </label>
-      <button type="button" :disabled="busy" @click="authWithApiKey()">api-keyで認証</button>
+      <button type="button" class="btn-primary" :disabled="busy" @click="authWithApiKey()">api-keyで認証</button>
     </template>
 
     <p v-if="message" class="message">{{ message }}</p>

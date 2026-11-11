@@ -19,6 +19,13 @@ const fmtSize = (size: number): string => {
   if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`
   return `${size} B`
 }
+
+// TASK-16設計3章(pending status列): status -> 色分けclass(visual design。
+// st-* class selector単層でCSS側は解釈=構造位置selectorに依存しない)
+const statusClass = (status: string): string =>
+  status === 'unbacked' || status === 'changed' || status === 'ok'
+    ? `st-${status}`
+    : 'st-unknown'
 </script>
 
 <template>
@@ -31,7 +38,7 @@ const fmtSize = (size: number): string => {
     </p>
 
     <div class="scan-actions">
-      <button type="button" :disabled="pending.scanning" @click="pending.runScan()">
+      <button type="button" class="btn-primary" :disabled="pending.scanning" @click="pending.runScan()">
         {{ pending.scanning ? 'scan実行中...' : 'scan実行' }}
       </button>
       <span v-if="pending.counts.unbacked + pending.counts.changed > 0" class="muted">
@@ -58,10 +65,10 @@ const fmtSize = (size: number): string => {
       </thead>
       <tbody>
         <tr v-for="item in pending.items" :key="`${item.source_root}:${item.path}`">
-          <td>{{ item.status }}</td>
-          <td>{{ item.path }}</td>
-          <td>{{ fmtSize(item.size) }}</td>
-          <td>{{ item.mtime }}</td>
+          <td :class="statusClass(item.status)">{{ item.status }}</td>
+          <td class="mono">{{ item.path }}</td>
+          <td class="mono">{{ fmtSize(item.size) }}</td>
+          <td class="mono">{{ item.mtime }}</td>
         </tr>
       </tbody>
     </table>

@@ -193,7 +193,7 @@ source = "TASK-11(Phase B)再レビュー指摘M-R1+tmp/tasks/tm-10/design_s3_st
 description = "索引pins[]の構築・復元はregistry記録のs3_bucket一致(registry::record_bucket_matchedと同一規則。欠損空文字は正本bucket相当)を伴う: (a) pin_write記録はs3_bucketが当該実行の実効bucketと一致するもののみ採用(同一prefix・別bucket構成で他方bucketのみのpinが当方bucketの索引へ混入せず、get --pinが当方bucketでNoSuchKeyの転送エラー5にならない) (b) pin_remove記録はs3_bucket一致するもののみ削除済み扱い(pin_s3_key一致のみでは照合しない。誤ったprofileでのpin rm等・他方bucketでの解除が正bucket側の索引からpinを消さない=pin object残留を防ぐ)。manage index rebuildのローカルregistryからのpins復元も同一規則 (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成での、(1)dev push+pin add(pm1)後のprod側pushで再構築されたprod側索引 (2)get --pin pm1 --profile prod と pin rm --pin pm1 --profile prod の各実行 (3)registryへ他方bucket(bucket-prod)のs3_bucketを持つpin_remove記録を混入した状態と正bucket(bucket-dev)のs3_bucketを持つpin_remove記録を混入した状態での、dev側索引再構築(all-skip push)と manage index rebuild"
 expect_return_shape = "(1)prod側索引の当該entry pins[]は空(dev側pm1は混入しない。dev側索引はpm1を保持) (2)いずれも exit 3(pin名は当該索引に無し)でpin objectへのS3 API呼び出し(取得・削除)を行わず、dev側索引pins[]・pin objectは不変 (3)他方bucketのpin_removeではpinは索引に残り、正bucketのpin_removeでは除去される。manage index rebuildの復元も同一結果"
-source_lines = "src/index.rs:629; tests/phase_b_options.rs:556; tests/pin.rs:651"
+source_lines = "src/index.rs:629; tests/phase_b_options.rs:556; tests/pin.rs:650"
 
 [[condition]]
 id = "index.entries-without-bucket-versions-excluded"

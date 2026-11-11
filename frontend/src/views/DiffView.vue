@@ -23,7 +23,7 @@ onMounted(() => {
     </p>
 
     <div class="scan-actions">
-      <button type="button" :disabled="diff.running" @click="diff.runDiff()">
+      <button type="button" class="btn-primary" :disabled="diff.running" @click="diff.runDiff()">
         {{ diff.running ? 'diff実行中...' : 'diff実行' }}
       </button>
       <span v-if="diff.diffView === 'result'" class="muted">
