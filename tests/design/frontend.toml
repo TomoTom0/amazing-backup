@@ -82,16 +82,37 @@
 #   frontend.api-key-failure-dedicated-state。id不変)。apiKeyErrorの寿命をlastErrorと
 #   同一へ: fetchAuthStatus成功・logoutでもクリア(未認証状態へ失敗表示を持ち越さない)。
 #   stores/auth.ts変更のためverified=falseへ戻す(全件verify後にtrueへ復帰)。
+# 2026-11-14: TASK-17(Web UI全体設計)9章W1(TASK-18)対応でテスト先行の条件追加
+#   (3条件)・文言改訂(1条件=frontend.entities-routes-navの5タブ化。id不変=設計
+#   11章の指定)・excluded 1件追加。出典: tmp/tasks/tm-17/design_webui-overall.md
+#   (2026-11-13ユーザー承認済み) 2.0(nav 5タブ)・2.1(ホームサマリ)・2.2(filter
+#   view)・3.2(runs/jobs API)・5.3(pollingはW4)・9章W1行・11章。
+#   - frontend.entities-routes-nav(文言改訂・id不変): 5タブ(/・/backups・/transfer・
+#     /settings・/admin)+既存4画面の再配置(一覧/詳細→/backups配下・pending/diff→
+#     /backupsのfilter view=独立routeなし。旧path /entities・/pending・/diffは
+#     routesへ登録しない)
+#   - frontend.runs-client-and-store: GET /api/runs型ガード+fetchRuns+runs store
+#     (直近run getter=ホームbackup概况の基盤)
+#   - frontend.jobs-client-and-store: GET /api/jobs型ガード+fetchJobs+jobs store
+#     (W1は空一覧・pollingなし=手動表示のみ。pollingはW4の転送タブ実装で追加=
+#     設計5.3・9章W4行)
+#   - frontend.ui-refresh-interval-localstorage: 自動更新間隔設定のlocalStorage
+#     保存(既定10秒・無効可・server設定でない=設計2.4)
+#   実装前のため新規・改訂条件のテスト(router spec改訂1件+新規spec 5file)は実行
+#   failを許容(未実装参照は新規spec file内に閉じる=既存specはrouter改訂分を除き
+#   緑維持)。HomeViewサマリ区画・filter view・navの実描画はcomponent実描画のため
+#   excluded(excluded entryへW1分を追加)。
+#   [meta]はテスト先行のためverified=falseへ(W1実装後に全件verifyでtrueへ復帰)。
 
 [meta]
 feature = "frontend"
 source_file = "frontend/src/"
 verified = true
-verified_at = "2026-11-11"
+verified_at = "2026-11-14"
 verified_by = "claude"
 test_command = "pnpm --dir frontend test"
-source_hash = "3c11d5746e7968526c05f2bd9f8b4f817e1d3371"
-note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3〜P6時点+コードレビュー指摘高4(EntitiesView・EntityDetailView・手動sync)分+レビュー再指摘①〜④分のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff・entities)のvitestで担保。P3分5条件・P4分4条件・P5分2条件・P6分3条件+レビュー分2条件は2026-11-05実装後に全件pass(44 tests)で検証記録を復帰済み。レビュー高4分5条件(entities-client・entities-store・sync-refresh-trigger・entities-view-state・entities-routes-nav)も2026-11-05実装後に全件pass(61 tests)で検証記録を復帰。レビュー再指摘①〜④分4条件(entities-filter-apply・sync-refresh-invalidates-detail-state・entities-detail-versions-error-separation・diff-run-error-visible-without-result)も2026-11-05実装後に全件pass(66 tests)で検証記録を更新。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)。2026-11-05 TASK-13(api-key認証UI)実装後にfrontend vitest全緑(80 tests・api-key系14test+文言改訂分含む)・frontend build成功を確認してverified=trueへ復帰・source_hashを更新。2026-11-06 TASK-13レビュー指摘対応(apiKeyErrorの寿命をlastErrorと同一へ=stores/auth.ts変更)でverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-06 全件verify(vitest 82tests緑・apiKeyErrorクリア分2test含む・frontend build成功・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新。2026-11-11 TASK-16(visual design)実装のためverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-11 全件verify(vitest 82tests緑・frontend build成功・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新(TASK-16分: style.css全面書換・View属性追加・nav追加・IBM Plex latin同梠。条件本文の追加・削除なし=visual designはexcluded領域のため。test_commandをpnpm --dir frontend testへ修正=直接的vitest run形式はpnpm v10でERR_PNPM_RECURSIVE_EXEC_FIRST_FAILとなるため・package.json test script=vitest runと同一)2026-11-11 レビュー指摘#5対応でsource_hashをfrontend/src tree自身のhashへ方式統一(旧方式は上位tree hashでnote説明と不一致。TASK-13時旧値8b33d71はrepo root tree相当だった)"
+source_hash = "35bbf511065a6095467afe45bf962e194bec8ea0"
+note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3〜P6時点+コードレビュー指摘高4(EntitiesView・EntityDetailView・手動sync)分+レビュー再指摘①〜④分のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff・entities)のvitestで担保。P3分5条件・P4分4条件・P5分2条件・P6分3条件+レビュー分2条件は2026-11-05実装後に全件pass(44 tests)で検証記録を復帰済み。レビュー高4分5条件(entities-client・entities-store・sync-refresh-trigger・entities-view-state・entities-routes-nav)も2026-11-05実装後に全件pass(61 tests)で検証記録を復帰。レビュー再指摘①〜④分4条件(entities-filter-apply・sync-refresh-invalidates-detail-state・entities-detail-versions-error-separation・diff-run-error-visible-without-result)も2026-11-05実装後に全件pass(66 tests)で検証記録を更新。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)。2026-11-05 TASK-13(api-key認証UI)実装後にfrontend vitest全緑(80 tests・api-key系14test+文言改訂分含む)・frontend build成功を確認してverified=trueへ復帰・source_hashを更新。2026-11-06 TASK-13レビュー指摘対応(apiKeyErrorの寿命をlastErrorと同一へ=stores/auth.ts変更)でverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-06 全件verify(vitest 82tests緑・apiKeyErrorクリア分2test含む・frontend build成功・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新。2026-11-11 TASK-16(visual design)実装のためverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-11 全件verify(vitest 82tests緑・frontend build成功・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新(TASK-16分: style.css全面書換・View属性追加・nav追加・IBM Plex latin同梠。条件本文の追加・削除なし=visual designはexcluded領域のため。test_commandをpnpm --dir frontend testへ修正=直接的vitest run形式はpnpm v10でERR_PNPM_RECURSIVE_EXEC_FIRST_FAILとなるため・package.json test script=vitest runと同一)2026-11-11 レビュー指摘#5対応でsource_hashをfrontend/src tree自身のhashへ方式統一(旧方式は上位tree hashでnote説明と不一致。TASK-13時旧値8b33d71はrepo root tree相当だった)。2026-11-14 TASK-17 W1(TASK-18)条件追加3件+entities-routes-nav改訂(id不変)+spec改訂1件/新規5fileでテスト先行のためverified=falseへ(W1実装後に全件verifyでtrueへ復帰)。2026-11-14 全件verify(vitest 19file/98tests緑・frontend build成功・verify-conditions PASS 347条件・cargo test 392 passedは同一revisionで実装委任先が確認)を経てverified=trueへ復帰・source_hashを更新(W1分: routes 5タブ化・client runs/jobs・stores 3新規・HomeView/EntitiesView再編・TransferView/SettingsView/AdminView枠新規・PendingView/DiffView削除)。2026-11-14 コードレビュー指摘対応(diff filterのentity一覧をmissing対象のみへ絞り込み・空job時ホーム区画非表示・store失敗testを非空保持からの消去検証へ強化)後にvitest 98tests緑・build成功・cargo test全緑・verify-conditions PASSを確認してsource_hashを更新"
 
 [[condition]]
 id = "frontend.api-error-body-guard"
@@ -303,12 +324,12 @@ source_lines = "frontend/src/stores/entities.spec.ts:175; frontend/src/stores/en
 
 [[condition]]
 id = "frontend.entities-routes-nav"
-target_function = "frontend/src/router/routes.ts routes配列(EntitiesView・EntityDetailViewの登録)"
-source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesView・EntityDetailView・router)・TASK-9レビュー指摘高4(HomeViewの「後続phase」表示解消後のnav)"
-description = "routerは/entities(EntitiesView)と/entities/:uuid(EntityDetailView)をroutesへ登録する(HomeViewの「後続phase」表示解消後の各画面へのnav基盤)。routes配列はvitest(node環境)からimport可能な単独module(frontend/src/router/routes.ts)としてrouter/index.tsから切り出す=createWebHistoryがnode環境(window依存)で動かないための観測seam。HomeViewのnav link・「後続phase」文言解消後の表示はcomponent実描画のためexcluded(router guardの実navigationも含む) (vitest)"
+target_function = "frontend/src/router/routes.ts routes配列(5タブ+既存4画面の再配置)"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.0(navは5タブ(ホーム/・バックアップ/backups・転送/transfer・設定/settings・管理/admin)へ拡張=既存4linkの再編。未認証時はLoginViewへ)・2.2(一覧/詳細→/backups配下・pending/diff→/backupsのfilter view)・9章W1行・11章(frontend.entities-routes-navのid不変文言改訂) + TASK-9設計7章(router・routes.ts観測seam)"
+description = "routerのroutes配列は5タブ構成(ホーム`/`・バックアップ`/backups`・転送`/transfer`・設定`/settings`・管理`/admin`)へ再編する: 既存4画面は再配置(一覧/詳細→`/backups`と`/backups/:uuid`・pending/diff→`/backups`のfilter view(`?filter=pending:<status>`・`?filter=diff`のquery paramのため独立routeを持たない))され、旧path(/entities・/entities/:uuid・/pending・/diff)はroutesへ登録しない。`/login`は未認証時誘導のため維持。W1の/transfer・/settings・/adminはroute登録の枠(中身はW4〜W7)。routes配列はvitest(node環境)からimport可能な単独module(frontend/src/router/routes.ts)の観測seamを維持。nav link実描画・filter viewの実表示・router guardの実navigationはcomponent実描画のためexcluded (vitest)"
 given = "frontend/src/router/routes.tsのroutes配列参照"
-expect_return_shape = "routesのpathに/entitiesと/entities/:uuidが含まれる(実装前のためroutes.ts未作成=module解決failで実行failを許容)"
-source_lines = "frontend/src/router/index.spec.ts:12"
+expect_return_shape = "routesのpathに`/`・`/login`・`/backups`・`/backups/:uuid`・`/transfer`・`/settings`・`/admin`が含まれ、`/entities`・`/entities/:uuid`・`/pending`・`/diff`は含まれない(実装前のためW1再編前の現行routes(旧path登録)でfailを許容)"
+source_lines = "frontend/src/router/index.spec.ts:13"
 
 [[condition]]
 id = "frontend.entities-filter-apply"
@@ -389,4 +410,40 @@ item = "EntitiesView・EntityDetailView componentの実描画(entity一覧table�
 source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesView=一覧・検索・絞込・sync状態+refresh・EntityDetailView・HomeView)・4章(D10 staleness表示)・TASK-9レビュー指摘高4"
 reason = "component実描画はvitest(node環境)で観測できない(store/client層+routes配列で担保=P4 LoginView・P5 PendingView・P6 DiffViewと同一扱い。UI誘導状態はentitiesView getter・絞込はquery/category状態+applyFilters・stalenessはsync状態+refresh action・navはroutes登録で担保)。createWebHistoryはwindow依存のためguard実navigationのnode観測も不能。実機画面確認は実装waveの手動verify項目"
 decided_at = "2026-11-05"
+decided_by = "claude"
+
+# --- TASK-17 W1(5タブrouter・runs/jobs・UI更新挙動・2026-11-14テスト先行) ---
+
+[[condition]]
+id = "frontend.runs-client-and-store"
+target_function = "frontend api/client.ts GET /api/runs応答型ガード・fetchRuns / stores/runs.ts run一覧取得"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.1(ホームbackup概况=前回backup(直近runの日時・対象数)・データ源GET /api/runs)・3.2(GET /api/runsの応答{runs:[{batch_id,date,entity_count}]})・9章W1行"
+description = "GET /api/runs応答({\"runs\": [{batch_id: string, date: string, entity_count: number}]})の型ガード(isRunsResponse)とrun一覧取得fetchRunsを持ち、runs storeは一覧(items)を取得して保持し直近run getter(latestRun=降順応答の先頭要素・一覧空時null)を提供する(ホームbackup概况の前回backup表示基盤)。取得失敗時はlastErrorを保持しitemsは空へ戻しlatestRun=null(空dataを表示しない=fail-closedと共通)。応答schema・降順はserver.runs-listの解釈に整合 (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(200+runs一覧body(降順2run)・401+{\"error\":{\"code\":\"unauthenticated\",...}})でのfetchRuns呼び出しのmethod/URL観測・runs store(fetchRuns)の取得"
+expect_return_shape = "型ガードは形式一致のみtrue(runs欠落・runs非配列・要素のentity_count非number・batch_id欠落・nullはfalse)。fetchRunsはGET /api/runsへ向かい200はruns一覧をdataへ・401は{code:\"unauthenticated\",httpStatus:401}。storeは成功時items=2run+latestRun=先頭runを保持しlastError=null・失敗時はitems空+lastError={code:...}+latestRun=null(実装前のためclient.tsのruns系・src/stores/runs.ts未実装で実行failを許容)"
+source_lines = "frontend/src/api/runs.spec.ts:26; frontend/src/api/runs.spec.ts:42; frontend/src/stores/runs.spec.ts:31"
+
+[[condition]]
+id = "frontend.jobs-client-and-store"
+target_function = "frontend api/client.ts GET /api/jobs応答型ガード・fetchJobs / stores/jobs.ts job一覧取得"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.1(ホーム実行中job区画・空時は表示なし)・2.3(job一覧の表示語彙)・3.2(GET /api/jobs?status=&kind=)・5.3(進行報告pollingは転送タブ実装(W4)で追加)・9章W1行(GET /api/jobs空応答・polling制御なし=W1は手動表示のみ)"
+description = "GET /api/jobs応答({\"jobs\": [...]})の型ガード(isJobsResponse。要素は{id: number, kind: string, status: string, created_at: string, updated_at: string}の最小schemaで検証し進行(params/progress/result/error)の詳細fieldはW4のjob実装時に拡張)とjob一覧取得fetchJobsを持ち、jobs storeは一覧(items)を取得して保持する(ホーム実行中job区画・転送タブのW1基盤。W1のserver応答は常に空配列=server.jobs-list)。W1ではpolling(setInterval等の自動更新)を行わずfetchJobsは手動呼出のみとする(設計5.3のpollingはW4の転送タブ実装で追加。自動更新間隔設定の保持はfrontend.ui-refresh-interval-localstorage)。取得失敗時はlastErrorを保持しitemsは空へ戻す(空dataを表示しない) (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(200+{\"jobs\":[]}・401+{\"error\":{\"code\":\"unauthenticated\",...}})でのfetchJobs呼び出しのmethod/URL観測・jobs store(fetchJobs)の取得とfetch後のfake timer進行(vi.useFakeTimers)"
+expect_return_shape = "型ガードは形式一致のみtrue(jobs欠落・jobs非配列・要素のkind欠落・status非string・id非number・nullはfalse。{\"jobs\":[]}はtrue)。fetchJobsはGET /api/jobsへ向かう。storeは成功時items(空)を保持しlastError=null・失敗時はitems空+lastError={code:...}。fetch後にtimerを進めてもfetch呼出は増えない(W1はpolling無し=手動表示のみ)(実装前のためclient.tsのjobs系・src/stores/jobs.ts未実装で実行failを許容)"
+source_lines = "frontend/src/api/jobs.spec.ts:28; frontend/src/api/jobs.spec.ts:64; frontend/src/stores/jobs.spec.ts:25"
+
+[[condition]]
+id = "frontend.ui-refresh-interval-localstorage"
+target_function = "frontend stores/ui-refresh.ts 自動更新間隔設定の保存・読込"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.4(UI更新挙動=一覧・job一覧の自動更新間隔。既定10秒・無効可。保存はfrontend側(localStorage)・server設定でない)・5.3(polling間隔は設定で調整可)・9章W1行(UI更新挙動(localStorage))"
+description = "UI更新挙動(自動更新間隔)の設定はfrontend側で保持する: ui-refresh storeは間隔(intervalMs・未保存時の既定10000ms=10秒)と無効(null)を扱い、設定値の保存・読込はlocalStorage(key=amazing-backup.ui-refresh-interval・数値は10進文字列・無効は\"null\")のみで行いserver側設定へは含めない(設計2.4「server設定でない」。GET/PUT /api/settings自体はW7実装)。localStorageに不正な保存値(非数値文字列)がある場合は既定10000msへ戻す。localStorageはbrowser APIのためvitest(node環境)ではvi.stubGlobalでStorage相当を注入して観測する(seam)。本設定の使用側(polling実行)はW4の転送タブ実装のためW1では保持のみ (vitest)"
+given = "vi.stubGlobalで注入したStorage相当への保存値の有無(未保存・\"5000\"・\"null\"・非数値)でのui-refresh storeのload呼び出しとsetIntervalMs(30000/null)呼び出し後のstate・localStorage内容・fetch呼出観測"
+expect_return_shape = "未保存・非数値保存値のloadはintervalMs=10000(既定)・\"5000\"のloadは5000・\"null\"のloadはnull。setIntervalMs(30000)はstateとlocalStorage(\"30000\")へ・setIntervalMs(null)はnullとlocalStorage(\"null\")へ反映。load/setIntervalMsはfetchを呼ばない(server設定非依存)(実装前のためsrc/stores/ui-refresh.ts未実装で実行failを許容)"
+source_lines = "frontend/src/stores/ui-refresh.spec.ts:61"
+
+[[excluded]]
+item = "W1のcomponent実描画面: HomeViewサマリ区画(sync状態・backup概况・未対応サマリ・実行中job)とサマリ行のlink遷移(/backups?filter=pending:<status>・/backups?filter=diff・/transfer)・/backupsのfilter view(pending一覧・diffのmissing対象entity一覧+unexpected object key一覧の両表示)・/transfer・/settings・/adminのW1枠画面・5タブnavの実描画・router guardの実navigation"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.0(nav 5タブ)・2.1(ホーム)・2.2(filter view)・9章W1行(受入条件: 5タブ遷移・現行機能の新配置での動作・ホームサマリ表示・diff viewの両一覧表示)"
+reason = "component実描画・実navigationはvitest(node環境)で観測できない(既有excludedと同一扱い。5タブと再配置はroutes配列=frontend.entities-routes-nav・backup概况dataはfrontend.runs-client-and-store・実行中job区画dataはfrontend.jobs-client-and-store・sync/pending/diffサマリdataは既有frontend.sync-state-endpoint-client/pending-client-and-store/diff-client-and-storeが担保)。diff viewのmissing/unexpected両一覧はdiff storeのresult(missing/unexpected配列)とsummary getter(frontend.diff-view-state)で表示dataを担保済みのため重複条件化しない。実機画面確認はW1実装waveの手動verify項目"
+decided_at = "2026-11-14"
 decided_by = "claude"

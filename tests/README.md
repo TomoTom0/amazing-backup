@@ -897,13 +897,38 @@ router routes.tsは未作成)。
 - server/cli/frontend/catalog条件書の[meta]はテスト先行のためverified=falseへ
   (実装後に復帰)
 
+2026-11-14: TASK-18(TASK-17 Web UI全体設計9章W1: nav 5タブ化・画面再配置・ホーム
+サマリ・runs/jobs API・UI更新挙動localStorage)テスト先行の条件書更新・テストコード
+作成(tmp/tasks/tm-17/design_webui-overall.md 2.0〜2.3・3.2・5.3・6章・9章W1行・
+11章。2026-11-13ユーザー承認済み設計)。実装前のため新規・改訂条件のテストは
+赤を許容(compile/module解決を除き既存testは緑維持)。
+- server.tomlへ2条件追加(runs-list=versionsのbatch_id集約run一覧{runs:[{batch_id,
+  date,entity_count}]}・date降順・scopeは読取API共通。jobs-list=W1はjob機構(W4)
+  未実装のため常に200+{"jobs":[]}の空応答・status/kind paramはW4で実質化・
+  保護API未認証401)。応答schema詳細は設計に規定されない点の解釈として条件本文へ確定
+- frontend.tomlへ3条件追加(runs-client-and-store=型ガード+fetchRuns+store
+  (latestRun getter=直近run)・jobs-client-and-store=型ガード+fetchJobs+store
+  (W1はpollingなし手動表示のみ。pollingはW4)・ui-refresh-interval-localstorage=
+  自動更新間隔のlocalStorage保存(既定10秒・無効可・server設定でない))+文言改訂1件
+  (entities-routes-navの5タブ+再配置化。id不変=設計11章指定)+excluded 1件
+  (W1のcomponent実描画面: HomeViewサマリ区画・filter view・5タブnav等)
+- テスト: src/server.rsへhandler単体test 2件(api_env+api_seed注入は既有helper・
+  api_entry_with_batch helper追加・jobsの未認証401はAuthFlowで観測)。
+  frontendはrouter/index.spec.tsを5タブ期待値へ改訂+api/runs.spec.ts・
+  api/jobs.spec.ts・stores/runs.spec.ts・stores/jobs.spec.ts・
+  stores/ui-refresh.spec.ts(MemoryStorage seam)を新規作成
+- 実行結果: pnpm vitest 81pass+8fail/3file load error(すべて新規・改訂分)。
+  verify-conditions.py PASS(347条件すべてcover)
+- 条件数342→347(excluded 70→71件)。server・frontend条件書の[meta]はテスト先行の
+  ためverified=falseへ(W1実装後に全件verifyでtrueへ復帰)
+
 ## 構成
 
 ## 構成
 
 | path | 役割 | 状態 |
 |---|---|---|
-| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(19ファイル・340条件・excluded 70件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-23(--from-list単独許容化・空リスト警告: cli改訂1・plan source追記1+新規2・id不変)とTASK-25(manage reset registry bucket限定化: 廃止1・改訂3・新規3・id不変)とTASK-26(multipart Complete要求のpart checksum SHA256引き継ぎ: upload新規1)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)とTASK-7(pipeline profile化: config新規8・cli新規4+verify/docs文言改訂・除外4)と実運用file schema適合(2026-11-03: 1件)とTASK-9(local catalog DB+Web frontend・P1/P2 wave: 新規feature 2ファイルcatalog 11条件+server 7条件・除外14)とTASK-9 P3(読取APIテスト先行: server +11条件・新規frontend area 5条件・除外整理)とTASK-9 P4(passkey認証テスト先行: 新規webauthn area 14条件・server +3条件・frontend +4条件・serverのpasskey除外を解消)とTASK-9 P5(pending catalog: テスト先行+実装とも完了・2026-11-05全件passでcatalog/server/frontend条件書の[meta]verified=true復帰)とTASK-9 P6(diff UI・manage auth removeテスト先行: frontend +3条件・cli +2条件・server/webauthnの除外を解消)とTASK-13(api-key認証テスト先行: server新規5+改訂1・cli新規4+改訂2・frontend新規3+改訂2・catalog新規1+改訂1・除外6)反映済み。TASK-1〜5・TASK-20・TASK-23・TASK-25・TASK-26・TASK-7分ともテスト作成済み・実装済み(240条件すべてcover。TASK-7分は2026-11-03実装後に全件pass・条件書4fileの[meta]verified=true)。TASK-9 catalog 11条件はP1実装(2026-11-05)後に全件pass([meta]verified=true)。TASK-9 catalog 11条件(P1)・server 18条件(P2+P3)・frontend 5条件(P3)とも2026-11-05実装後に全件pass・[meta]verified=true(frontend.tomlはvitest 11passで同様にverified=true)。TASK-9 P4分(21条件)も2026-11-05実装後に全件passでverified=trueへ復帰済み。TASK-9 P6分5条件(frontend 3・cli 2)も実装後に全件passでverified=trueへ復帰済み。TASK-9レビュー指摘12件対応分5条件も全件pass(315条件)。TASK-9レビュー高4分(EntitiesView・EntityDetailView・手動syncのfrontend 5条件)は実装後に全件pass(325条件)。TASK-13分13条件+改訂6条件はテスト先行のため未実装=赤(server・cli・frontend・catalog条件書の[meta]verified=falseへ) |
+| tests/design/*.toml | テスト設計条件書(正本) | 作成済み(19ファイル・347条件・excluded 71件)。TASK-11 Phase B棚卸し(廃止47・改訂39・新規11・事後条件化4)とレビュー指摘対応(9件+再レビュー3件)とprod 3bucket構成移行(2件)とTASK-12(1件)とTASK-15(2件)とTASK-18(廃止6・改訂33・新規35・除外7・新規feature 2ファイル)とTASK-18追加仕様manage reset(除外解消1・新規5)とTASK-19(XDG配置+--out必須化: 新規5・改訂13)とTASK-20(rel_path→label改名・schema 3化: 改訂21・必須case 2追加・id不変)とTASK-23(--from-list単独許容化・空リスト警告: cli改訂1・plan source追記1+新規2・id不変)とTASK-25(manage reset registry bucket限定化: 廃止1・改訂3・新規3・id不変)とTASK-26(multipart Complete要求のpart checksum SHA256引き継ぎ: upload新規1)とTASK-1(config init: 新規6・除外2)とTASK-2(completions: 新規6・除外1)とTASK-4(docs: 新規10・除外2・新規docs area)とTASK-7(pipeline profile化: config新規8・cli新規4+verify/docs文言改訂・除外4)と実運用file schema適合(2026-11-03: 1件)とTASK-9(local catalog DB+Web frontend・P1/P2 wave: 新規feature 2ファイルcatalog 11条件+server 7条件・除外14)とTASK-9 P3(読取APIテスト先行: server +11条件・新規frontend area 5条件・除外整理)とTASK-9 P4(passkey認証テスト先行: 新規webauthn area 14条件・server +3条件・frontend +4条件・serverのpasskey除外を解消)とTASK-9 P5(pending catalog: テスト先行+実装とも完了・2026-11-05全件passでcatalog/server/frontend条件書の[meta]verified=true復帰)とTASK-9 P6(diff UI・manage auth removeテスト先行: frontend +3条件・cli +2条件・server/webauthnの除外を解消)とTASK-13(api-key認証テスト先行: server新規5+改訂1・cli新規4+改訂2・frontend新規3+改訂2・catalog新規1+改訂1・除外6)反映済み。TASK-1〜5・TASK-20・TASK-23・TASK-25・TASK-26・TASK-7分ともテスト作成済み・実装済み(240条件すべてcover。TASK-7分は2026-11-03実装後に全件pass・条件書4fileの[meta]verified=true)。TASK-9 catalog 11条件はP1実装(2026-11-05)後に全件pass([meta]verified=true)。TASK-9 catalog 11条件(P1)・server 18条件(P2+P3)・frontend 5条件(P3)とも2026-11-05実装後に全件pass・[meta]verified=true(frontend.tomlはvitest 11passで同様にverified=true)。TASK-9 P4分(21条件)も2026-11-05実装後に全件passでverified=trueへ復帰済み。TASK-9 P6分5条件(frontend 3・cli 2)も実装後に全件passでverified=trueへ復帰済み。TASK-9レビュー指摘12件対応分5条件も全件pass(315条件)。TASK-9レビュー高4分(EntitiesView・EntityDetailView・手動syncのfrontend 5条件)は実装後に全件pass(325条件)。TASK-13分13条件+改訂6条件はテスト先行のため未実装=赤(server・cli・frontend・catalog条件書の[meta]verified=falseへ) |
 | tests/common/mod.rs | 結合test共用(age/ssh-keygen有無判定・鍵pair生成・tmp dir fixture・StorageFixture(TASK-7 profile schema([profiles.dev]+追加profile)組立・AMAZING_BACKUP_HOMEによるXDG規定path統合・索引の復号/再暗号化)・fake seam用helper等) | 作成済み |
 | tests/age_roundtrip.rs | 実ageでの暗号化roundtrip・ヘッダ照合(結合) | 作成済み |
 | tests/encrypt_batch.rs | registry/manifestを含むbatch単位・fake seamでの暗号化・upload(backup push統合経路。結合) | 作成済み(TASK-11 Phase Bでbackup push経路へ全面書換) |

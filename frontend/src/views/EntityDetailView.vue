@@ -54,7 +54,7 @@ const fmtSize = (size: number): string => {
   <section class="card">
     <h2>entity詳細</h2>
     <p>
-      <router-link to="/entities">entity一覧へ戻る</router-link>
+      <router-link to="/backups">entity一覧へ戻る</router-link>
     </p>
 
     <p v-if="entities.detailError" class="message">

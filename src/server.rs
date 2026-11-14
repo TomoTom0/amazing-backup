@@ -4,7 +4,8 @@
 //!
 //! - HTTP層はaxum。mount prefixは`/api/`。P3が読取API(entities/versions/pins/
 //!   locations/pending/sync/diff)をrouteし、P4が認証API(register/login start/finish・
-//!   logout・status)と保護API開放(session検証gate)を担う
+//!   logout・status)と保護API開放(session検証gate)を担う。TASK-17 W1がruns/jobs
+//!   読取API(run履歴集約・W1はjob空応答)を追加
 //! - 保護APIのgate(設計12章P4・指摘#11の解消): 認証機構構成後(P4)は
 //!   `/api/health`・`/api/auth/*`以外の`/api/*`をsession検証し、未認証は
 //!   401(unauthenticated)で応答する(P2〜P3の503 fail-closedからの置換)。
@@ -900,6 +901,8 @@ fn build_router(state: AppState) -> axum::Router {
             "/api/diff",
             axum::routing::get(get_diff_last).post(post_diff_run),
         )
+        .route("/api/runs", axum::routing::get(get_runs))
+        .route("/api/jobs", axum::routing::get(get_jobs))
         .fallback(fallback);
     if has_auth {
         router = router
@@ -1343,6 +1346,79 @@ async fn get_diff_last(
     })
     .await?;
     Ok(axum::Json(value))
+}
+
+/// GET /api/runs(TASK-17設計3.2・2.1: run(batch_id)毎の履歴)。catalogのversionsを
+/// batch_id単位で集約し`{"runs":[{batch_id,date,entity_count}]}`形式で応答する
+/// (ホームの前回backup・管理のbackup実行履歴(W7)の基盤)。集約規則は
+/// server.runs-list条件の解釈に従う: entity_count=当該batch_idのversion数(=runの
+/// 対象実体数)・date=当該runのversion日付の最新(dateは`YYYY-MM-DD`のため辞書順
+/// 比較で最新が決まる)・並びはdate降順(直近runが先頭=前回backup表示は先頭要素で
+/// 成立。同date内はrun内の最新version_ts降順=実行順。batch_idの接尾辞は時刻の
+/// hashのため辞書順は実行順を保証せず、sort keyには使わない)。version_tsはJST
+/// 固定のISO8601のため辞書順比較で時刻順になる。応答schemaにversion_tsは含め
+/// ない(内部sort keyのみ)。scopeは読取API共通(server.read-api-
+/// uses-serve-profileと同一扱い)。
+async fn get_runs(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    uri: axum::http::Uri,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let params = parse_query_params(uri.query());
+    let scope = params.get("scope").cloned();
+    let effective = state.scope.clone();
+    let runs = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(scope.as_deref(), &effective)?;
+        let db = crate::catalog::CatalogDb::open()?;
+        let (_header, entries) = db.load_entries(&bucket, &prefix)?;
+        // batch_id集約: (date=run内version日付の最新, 最新version_ts, version数)
+        let mut agg: std::collections::HashMap<String, (String, String, i64)> =
+            std::collections::HashMap::new();
+        for entry in &entries {
+            for v in &entry.versions {
+                let slot = agg
+                    .entry(v.batch_id.clone())
+                    .or_insert((v.date.clone(), v.version_ts.clone(), 0));
+                slot.2 += 1;
+                if v.date > slot.0 {
+                    slot.0 = v.date.clone();
+                }
+                if v.version_ts > slot.1 {
+                    slot.1 = v.version_ts.clone();
+                }
+            }
+        }
+        let mut rows: Vec<(String, String, String, i64)> = agg
+            .into_iter()
+            .map(|(batch_id, (date, latest_ts, entity_count))| {
+                (batch_id, date, latest_ts, entity_count)
+            })
+            .collect();
+        // date降順・同date内はrun内の最新version_ts降順(実行順。batch_id接尾辞は
+        // 時刻hashのためkeyにしない)
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
+        Ok(rows
+            .into_iter()
+            .map(|(batch_id, date, _latest_ts, entity_count)| {
+                serde_json::json!({
+                    "batch_id": batch_id,
+                    "date": date,
+                    "entity_count": entity_count,
+                })
+            })
+            .collect::<Vec<_>>())
+    })
+    .await?;
+    Ok(axum::Json(serde_json::json!({ "runs": runs })))
+}
+
+/// GET /api/jobs(TASK-17設計3.2・9章W1: job一覧`{"jobs":[...]}`)。W1時点では
+/// job機構(get/push job発行・jobs table=設計4.1)がW4未実装のため常に200+空配列で
+/// 応答する(ホーム実行中job区画・転送タブのW1表示基盤)。status/kind絞り込みparam
+/// はW4のjob実装で実質化するためW1では読み捨て(空配列に影響しない)。scope絞り
+/// 込みparamは設計3.2どおり持たない(実効1 scope)。保護は/api/*共通のauth_gateが
+/// 構造的に担う(job系APIも同一session gate=設計6章D-W11)。
+async fn get_jobs() -> impl axum::response::IntoResponse {
+    axum::Json(serde_json::json!({"jobs": []}))
 }
 
 // ---------------------------------------------------------------------------
@@ -3955,5 +4031,215 @@ mod tests {
             Some(1),
             "挿入後はapi_keys=1: {body}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // TASK-17 W1(TASK-18: Web UI全体設計9章W1行)のruns/jobs API handler単体
+    // test(テスト先行・2026-11-14)。実装前のため/api/runs・/api/jobsのroutingが
+    // 無くfallback 404で実行failを許容(compileは通る。W1実装で緑化)。
+
+    /// runs集約観測用: api_entryの単一versionへbatch_id・date・version_tsを上書き。
+    fn api_entry_with_batch(
+        uuid: &str,
+        title: &str,
+        category: &str,
+        label: &str,
+        batch_id: &str,
+        date: &str,
+        version_ts: &str,
+    ) -> crate::index::IndexFileEntry {
+        let mut entry = api_entry(uuid, title, category, label);
+        let v = entry.versions.first_mut().expect("api_entryは1版を含む");
+        v.batch_id = batch_id.into();
+        v.date = date.into();
+        v.version_ts = version_ts.into();
+        entry
+    }
+
+    /// [covers:server.runs-list]
+    /// GET /api/runsはversionsのbatch_id集約run一覧を{"runs":[{batch_id,date,
+    /// entity_count}]}・date降順(直近run先頭)で返す。scopeは読取API共通(省略時
+    /// 実効scope・明示で対照scope分。他scopeのrunは混入しない)。
+    #[test]
+    fn api_runs_list_aggregates_versions_by_batch_id() {
+        let env = api_env("srv-api-runs");
+        // 実効scope: run-1(2026-11-05)=alpha単独・run-2(2026-11-06)=beta+deltaの2entity
+        let alpha = api_entry_with_batch(
+            "11111111-1111-1111-1111-111111111111",
+            "alpha",
+            "docs",
+            "work",
+            "20261105-abcdef01",
+            "2026-11-05",
+            "2026-11-05T10:00:00+09:00",
+        );
+        let beta = api_entry_with_batch(
+            "22222222-2222-2222-2222-222222222222",
+            "beta",
+            "unfiled",
+            "",
+            "20261106-abcdef02",
+            "2026-11-06",
+            "2026-11-06T10:00:00+09:00",
+        );
+        let delta = api_entry_with_batch(
+            "44444444-4444-4444-4444-444444444444",
+            "delta",
+            "docs",
+            "work",
+            "20261106-abcdef02",
+            "2026-11-06",
+            "2026-11-06T11:00:00+09:00",
+        );
+        api_seed(&[alpha, beta, delta], API_TEST_BUCKET, API_TEST_PREFIX);
+        // 対照scope(実効profile外): run-3(2026-11-07)=gamma
+        let gamma = api_entry_with_batch(
+            "33333333-3333-3333-3333-333333333333",
+            "gamma",
+            "docs",
+            "work",
+            "20261107-abcdef03",
+            "2026-11-07",
+            "2026-11-07T10:00:00+09:00",
+        );
+        api_seed(&[gamma], API_OTHER_BUCKET, API_TEST_PREFIX);
+
+        // 実効scopeのみ(run-3は混入しない)・date降順で直近runが先頭
+        let (status, body) = api("GET", "/api/runs");
+        assert_eq!(status, 200, "GET /api/runsは200: {body}");
+        let runs = body
+            .get("runs")
+            .and_then(|v| v.as_array())
+            .expect("runs配列");
+        assert_eq!(runs.len(), 2, "実効scopeの2run: {body}");
+        let first = &runs[0];
+        assert_eq!(
+            first.get("batch_id").and_then(|b| b.as_str()),
+            Some("20261106-abcdef02"),
+            "date降順で直近run(run-2)が先頭: {body}"
+        );
+        assert_eq!(
+            first.get("date").and_then(|d| d.as_str()),
+            Some("2026-11-06"),
+            "runの日時(=run内version日時の最新): {body}"
+        );
+        assert_eq!(
+            first.get("entity_count").and_then(|c| c.as_i64()),
+            Some(2),
+            "run-2の対象実体数はbeta+deltaの2: {body}"
+        );
+        let second = &runs[1];
+        assert_eq!(
+            second.get("batch_id").and_then(|b| b.as_str()),
+            Some("20261105-abcdef01"),
+            "2番目は古いrun(run-1): {body}"
+        );
+        assert_eq!(
+            second.get("entity_count").and_then(|c| c.as_i64()),
+            Some(1),
+            "run-1の対象実体数はalpha単独: {body}"
+        );
+
+        // scope明示(対照scopeを明示すればgammaのrunが見える)
+        let (_, body) = api("GET", "/api/runs?scope=other-bucket:amazing-backup/");
+        let runs = body
+            .get("runs")
+            .and_then(|v| v.as_array())
+            .expect("runs配列");
+        assert_eq!(runs.len(), 1, "scope明示はrun-3のみ: {body}");
+        assert_eq!(
+            runs[0].get("batch_id").and_then(|b| b.as_str()),
+            Some("20261107-abcdef03"),
+            "対照scopeのrun: {body}"
+        );
+        drop(env);
+    }
+
+    /// [covers:server.runs-list]
+    /// 同dateの複数runはrun内の最新version_ts降順(実行順)で並ぶ: batch_idの接尾辞
+    /// は時刻のhashのため辞書順は実行順を保証せず、batch_id降順だと同日の古いrunが
+    /// 先頭になる(直近run=前回backup表示が誤る)ことを防ぐ。
+    #[test]
+    fn api_runs_list_orders_same_date_runs_by_execution_order() {
+        let env = api_env("srv-api-runs-sameday");
+        // 同日(2026-11-06)の2run: run-lateはbatch_id辞書順で小さいが実行は後
+        // (version_ts 23:00)・run-earlyは辞書順で大きいが実行は前(10:00)
+        let early = api_entry_with_batch(
+            "11111111-1111-1111-1111-111111111111",
+            "early",
+            "docs",
+            "work",
+            "20261106-zzzzzz99",
+            "2026-11-06",
+            "2026-11-06T10:00:00+09:00",
+        );
+        let late = api_entry_with_batch(
+            "22222222-2222-2222-2222-222222222222",
+            "late",
+            "docs",
+            "work",
+            "20261106-aaaaaa10",
+            "2026-11-06",
+            "2026-11-06T23:00:00+09:00",
+        );
+        api_seed(&[early, late], API_TEST_BUCKET, API_TEST_PREFIX);
+
+        let (status, body) = api("GET", "/api/runs");
+        assert_eq!(status, 200, "GET /api/runsは200: {body}");
+        let runs = body
+            .get("runs")
+            .and_then(|v| v.as_array())
+            .expect("runs配列");
+        assert_eq!(runs.len(), 2, "同日の2run: {body}");
+        assert_eq!(
+            runs[0].get("batch_id").and_then(|b| b.as_str()),
+            Some("20261106-aaaaaa10"),
+            "先頭はversion_tsが新しいrun(batch_id降順だと誤ってzzzzzz99が先頭): {body}"
+        );
+        assert_eq!(
+            runs[1].get("batch_id").and_then(|b| b.as_str()),
+            Some("20261106-zzzzzz99"),
+            "2番目は実行が古いrun: {body}"
+        );
+        // 応答schemaは不変(version_tsを含まない・date降順+同日内実行順)
+        assert_eq!(
+            runs[0].as_object().map(|m| m.len()),
+            Some(3),
+            "応答要素はbatch_id/date/entity_countのみ: {body}"
+        );
+        drop(env);
+    }
+
+    /// [covers:server.jobs-list]
+    /// GET /api/jobsはW1時点ではjob機構(W4)未実装のため常に200+{"jobs":[]}の
+    /// 空応答(status/kind param付きも同様)。auth構成routerでの未認証は401
+    /// unauthenticated(job系APIも同一session gate=設計6章)。
+    #[test]
+    fn api_jobs_list_responds_empty_in_w1_and_requires_auth() {
+        // api_envはAuthFlow::new内で取得する(lock競合防止のため本testでは追加しない)。
+        // api()は認証機構未構成のrouterでhandlerを直接観測する(ABHはflowのenvが設定)
+        let flow = AuthFlow::new("srv-api-jobs");
+        let (status, body) = api("GET", "/api/jobs");
+        assert_eq!(status, 200, "GET /api/jobsは200: {body}");
+        let jobs = body
+            .get("jobs")
+            .and_then(|v| v.as_array())
+            .expect("jobs配列");
+        assert!(jobs.is_empty(), "W1は常に空配列: {body}");
+
+        // 絞り込みparam付きもW1では空配列のまま(実質化はW4)
+        let (status, body) = api("GET", "/api/jobs?status=running&kind=get");
+        assert_eq!(status, 200, "param付きも200: {body}");
+        assert!(
+            body.get("jobs")
+                .and_then(|v| v.as_array())
+                .is_some_and(|j| j.is_empty()),
+            "param付きもW1は空配列: {body}"
+        );
+
+        // 保護API: auth構成routerでの未認証は401(job系APIも同一session gate)
+        let (status, body, _) = flow.call("GET", "/api/jobs", None, None);
+        assert_eq!(status, 401, "未認証のGET /api/jobsは401: {body}");
+        expect_error_body(&body, "unauthenticated");
     }
 }

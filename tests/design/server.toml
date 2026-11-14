@@ -77,16 +77,31 @@
 #   - src/server.rsのbootstrap token乱数読取を共通helper(storage::random_bytes)へ
 #     切替(挙動不変)。src/server.rsが変わるためverified=falseへ戻す(全件verify後に
 #     trueへ復帰)。
+# 2026-11-14: TASK-17(Web UI全体設計)9章W1(TASK-18)対応でテスト先行の条件追加
+#   (2条件)。出典: tmp/tasks/tm-17/design_webui-overall.md(2026-11-13ユーザー承認
+#   済み) 3.2(GET /api/runs・GET /api/jobs)・2.1(ホームbackup概况・実行中job区画)・
+#   6章(job系APIも同一auth_gate)・9章W1行。
+#   - server.runs-list: versionsのbatch_id集約run一覧。応答schema
+#     ({runs:[{batch_id,date,entity_count}]})・並び(date降順=直近run先頭)・
+#     entity_count(=runのversion数=対象実体数)・date(=run内version日時の最新)は
+#     設計3.2に詳細が規定されない点の解釈として条件本文へ確定(実装はこれに従う)。
+#     scopeは読取API共通(server.read-api-uses-serve-profileと同一扱い)
+#   - server.jobs-list: W1時点はjob機構(job発行・jobs table)がW4のため常に
+#     200+{"jobs":[]}の空応答。status/kind絞り込みparamはW4で実質化。scope絞り
+#     込みparamは設計3.2どおり持たない(実効1 scope)。保護API(未認証401)
+#   実装前のため新条件のテスト(src/server.rs内handler単体test 2件)は実行failを
+#   許容(routingが無くfallback 404由来。cargo test --no-runのcompileは通る)。
+#   [meta]はテスト先行のためverified=falseへ(W1実装後に全件verifyでtrueへ復帰)。
 
 [meta]
 feature = "server"
 source_file = "src/server.rs"
 verified = true
-verified_at = "2026-11-06"
+verified_at = "2026-11-14"
 verified_by = "claude"
 test_command = "cargo test"
-source_hash = "7328d1f834db0c4bdeab37a8d3dfd765020eed8f"
-note = "TASK-9設計1章(serve subcommand・async実行境界)・6章(API)・8章(server.toml)・9章(D4 localhost既定)・10章(dist二階建て)・12章P2+P3(読取API)+P4(auth endpoint枠・保護API開放)+P5(pending API実質)の条件化。P2分7条件・P3分11条件・P4分3条件は2026-11-05実装後に全件passで検証記録を復帰済み。2026-11-05 TASK-13(api-key認証)実装後にcargo test --lib server::全緑(38 tests・api-key系5test+routing改訂含む)を確認してverified=trueへ復帰・source_hashを更新。2026-11-06 TASK-13レビュー指摘対応(LAN境界IP条件追加+乱数読取helper共通化=src/server.rs変更)でverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-06 全件verify(cargo test全binary緑・is_lan_ip_boundary_ips含む・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新"
+source_hash = "8fea1e20ea61b5a32732528891ef427e3c43dec8"
+note = "TASK-9設計1章(serve subcommand・async実行境界)・6章(API)・8章(server.toml)・9章(D4 localhost既定)・10章(dist二階建て)・12章P2+P3(読取API)+P4(auth endpoint枠・保護API開放)+P5(pending API実質)の条件化。P2分7条件・P3分11条件・P4分3条件は2026-11-05実装後に全件passで検証記録を復帰済み。2026-11-05 TASK-13(api-key認証)実装後にcargo test --lib server::全緑(38 tests・api-key系5test+routing改訂含む)を確認してverified=trueへ復帰・source_hashを更新。2026-11-06 TASK-13レビュー指摘対応(LAN境界IP条件追加+乱数読取helper共通化=src/server.rs変更)でverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-06 全件verify(cargo test全binary緑・is_lan_ip_boundary_ips含む・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新。2026-11-14 TASK-17 W1(TASK-18)条件追加(runs/jobs API 2条件+handler単体test 2件)でテスト先行のためverified=falseへ(W1実装後に全件verifyでtrueへ復帰)。2026-11-14 全件verify(cargo test 392 passed(lib 140+integration 25 suite)・frontend vitest 98tests緑・build成功・verify-conditions PASS 347条件)を確認してverified=trueへ復帰・source_hashを更新(W1分: GET /api/runs(batch_id集約・date降順)・GET /api/jobs(W1は空応答))。2026-11-14 コードレビュー指摘対応(runs同日sortをrun内最新version_ts降順の実行順へ・同日逆順test追加・server.runs-list文言改訂=同date内実順保証)後に全件verify(cargo test全binary緑・verify-conditions PASS 347条件)を確認してsource_hashを更新"
 
 [[condition]]
 id = "server.serve-subcommand-health"
@@ -104,7 +119,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(server.toml: liste
 description = "server.toml([server] listen_addr・port・rp_id・rp_origin)はserver共通設定のみを持ちbackup profile(pipeline/aws)とは分離する。listen_addr/portはserveのlistenへ反映する(listen_addr既定127.0.0.1・port既定40510=D5本番serve。rp_id既定\"localhost\"・rp_origin既定\"http://localhost:<port>\"はP4のWebAuthnで使用=本条件の観測対象外) (integration, fake seam)"
 given = "port(空きport)を明示したserver.tomlでのserve起動と、[server]からport keyを省略したserver.tomlでのserve起動"
 expect_return_shape = "明示時は当該portでHTTP応答し、port省略時は40510で応答する(listenは127.0.0.1)"
-source_lines = "src/server.rs:1790; src/server.rs:1820; src/server.rs:1830; tests/server_api.rs:52"
+source_lines = "src/server.rs:1866; src/server.rs:1896; src/server.rs:1906; tests/server_api.rs:52"
 
 [[condition]]
 id = "server.config-init-generates-server-toml"
@@ -158,7 +173,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(D8 endpoint一覧:
 description = "GET /api/entitiesは実効profileのscopeのentity一覧をentry_summary_json互換schema(uuid/title/locations[]/versions=count/latest_date/latest_size/pins[])で返す({\"entities\": [...], \"page\": n, \"total_pages\": n}形式・page=1始点)。query(title部分一致/uuid前方一致/所在path部分一致=CLI queryと同一規則)・category(location.category一致)・label(location.label一致)・page・scope(scope=<bucket>:<prefix>明示・他scopeのentityは混入しない=設計2章scope分離)の絞り込みが機能する (unit, fake seam)"
 given = "ABH配下catalog.dbの実効scope(api-bucket+amazing-backup/)に2entity(alpha=category docs/label work・beta=unfiled)と対照scope(other-bucket)に1entity(gamma)を注入した状態でのrouter oneshot"
 expect_return_shape = "200でentities配列はalpha/betaの2要素(gammaは含まれない)。?query=beta・?category=docs・?label=workはいずれも1要素に絞り込まれ、?scope=other-bucket:amazing-backup/はgammaのみ"
-source_lines = "src/server.rs:2065"
+source_lines = "src/server.rs:2141"
 
 [[condition]]
 id = "server.entity-detail-endpoint"
@@ -167,7 +182,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: �
 description = "GET /api/entities/:uuidはversion_list付きentry_summary_json互換(versions/pins/locationsを含む詳細)を返す。対象uuidが存在しない場合はnot_found 404のerror body(詳細はserver.error-code-status-mapping/error-body-generalizedと共通) (unit, fake seam)"
 given = "catalog.dbの実効scopeに1entity(alpha・1版+1pin+1location)を注入した状態でのrouter oneshot"
 expect_return_shape = "200でuuid/title/locations/pins/version_list(版毎のdate/version_ts/version_id/batch_id/source_size)を含む。不在uuidは404"
-source_lines = "src/server.rs:2199"
+source_lines = "src/server.rs:2275"
 
 [[condition]]
 id = "server.entity-versions-endpoint"
@@ -176,7 +191,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: ve
 description = "GET /api/entities/:uuid/versionsはlist versions --format json相当のentity object(uuid/title/locations/versions[](date/version_ts/version_id/source_size/state=現行|noncurrent)/pins[])を返す。不在uuidはnot_found 404 (unit, fake seam)"
 given = "catalog.dbの実効scopeに1entity(alpha・1版)を注入した状態でのrouter oneshot"
 expect_return_shape = "200でversions配列は1要素(全key入り・stateは現行)。不在uuidは404"
-source_lines = "src/server.rs:2255"
+source_lines = "src/server.rs:2331"
 
 [[condition]]
 id = "server.pins-list-endpoint"
@@ -185,7 +200,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: pi
 description = "GET /api/pinsはlist pins --format json相当(entity単位のuuid/title/pins[](pin/date/source_size))のpin一覧を{\"pins\": [...]}形式で返す (unit, fake seam)"
 given = "catalog.dbの実効scopeにpin 1件を持つentity(alpha)を注入した状態でのrouter oneshot"
 expect_return_shape = "200でpins配列は1要素(alphaのtitleとpin行のpin/date/source_sizeを含む)"
-source_lines = "src/server.rs:2305"
+source_lines = "src/server.rs:2381"
 
 [[condition]]
 id = "server.locations-list-endpoint"
@@ -194,7 +209,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: lo
 description = "GET /api/locationsはlocation一覧を{\"locations\": [{uuid, title, source_path, category, label, identity_hash, last_backup}]}形式で返す(uuid/titleはentity所属の案内用・他fieldはlocation_json語彙) (unit, fake seam)"
 given = "catalog.dbの実効scopeにlocation 1件(/data/alpha・category docs)を持つentity(alpha)を注入した状態でのrouter oneshot"
 expect_return_shape = "200でlocations配列は1要素(全key入り・source_path=/data/alpha)"
-source_lines = "src/server.rs:2341"
+source_lines = "src/server.rs:2417"
 
 [[condition]]
 id = "server.pending-endpoint-schema"
@@ -203,7 +218,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: �
 description = "GET /api/pendingはpending_itemsのschema(source_root/path/size/mtime/status/last_scan_at)で{\"pending\": [...]}形式で応答する。P3時点ではscan(P5実装)が無いため空配列で応答する(endpointとschemaの枠のみの中身はP5対象) (unit, fake seam)"
 given = "ABH配下catalog.db(pending_items空=scan未実行)でのrouter oneshot"
 expect_return_shape = "200でpending配列は空(実装前のP2段階では503 fallback)"
-source_lines = "src/server.rs:2383"
+source_lines = "src/server.rs:2459"
 
 [[condition]]
 id = "server.sync-state-endpoint"
@@ -212,7 +227,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: sy
 description = "GET /api/syncはsync_state 1行分(scope=<bucket>:<prefix>形式・status(fresh|stale|error)・index_etag/index_version_id(validator)・fetched_at/last_write_at/last_verified_at・entry_count)を返す。sync_state行が無い(未sync)場合もstatus=\"unknown\"で200応答する(frontendのstaleness表示が常に描画できる。404にしない) (unit, fake seam)"
 given = "ABH配下catalog.db(未sync状態と、実効scopeへのP1 API注入(sync_state=fresh・validator=etag-1/vid-1)後)でのrouter oneshot"
 expect_return_shape = "未sync時は200+status=unknown。注入後は200+status=fresh・scope=api-bucket:amazing-backup/・validator・各時刻・entry_count=1"
-source_lines = "src/server.rs:2505"
+source_lines = "src/server.rs:2581"
 
 [[condition]]
 id = "server.sync-refresh-endpoint"
@@ -221,7 +236,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: �
 description = "POST /api/syncは手動refresh(起動時syncと同一のP1同期層=manage::catalog_sync_once相当)を実行し最新のsync_state(GET /api/syncと同形式)で応答する。未書込namespace(索引object・registryともに無い)では空cacheのfresh確定として成功する。serve内のsyncはsingle-flight(semaphore 1)で直列化する(設計1章。並列実行の観測は本条件では規定しない) (unit, fake seam)"
 given = "最小config(実効profile dev)と空のfake S3 state(未書込namespace)でのrouter oneshot"
 expect_return_shape = "200+status=fresh+fetched_at刻み済み。続くGET /api/syncにも反映される"
-source_lines = "src/server.rs:2558"
+source_lines = "src/server.rs:2634"
 
 [[condition]]
 id = "server.read-api-uses-serve-profile"
@@ -230,7 +245,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(単一の実効pro
 description = "読取API(entities/versions/pins/locations/pending/sync/diff各GET)のscope省略時既定はserve起動時に一度だけ解決した実効profileのscope(AppState保持。--profile/--aws-config/--config起動引数を反映)。更新対象(POST /api/sync・scan・diff)と表示対象(読取API)が同じscopeになる(serve --profile stg指定時に表示だけ既定profileへ戻らない)。?scope=<bucket>:<prefix>明示は従来どおり優先 (unit, fake seam)"
 given = "dev(既定)+stg(--profile指定相当)の2 profile構成のaws.toml/pipeline.tomlと両scopeへのcatalog.db注入でのrouter oneshot(profile指定なしと--profile stg相当のAppState)"
 expect_return_shape = "profile指定なしはdev scopeのentityのみ・stg相当AppStateはstg scopeのentityのみ(scope解決は起動時1回の結果に従う)"
-source_lines = "src/server.rs:2588"
+source_lines = "src/server.rs:2664"
 
 [[condition]]
 id = "server.diff-endpoints"
@@ -239,7 +254,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: di
 description = "POST /api/diffはdiff実行(全体突合=cmd_diffのJSON語彙{entries/files/missing/unexpected})を行いperformed_at付きで応答・結果を保存する。GET /api/diffは保存済みの最終diff結果(POSTと同一内容)を返す。未実行時のGETはnot_found 404。未書込namespaceでは空結果(entries=0)で成功する(P3はendpointとschemaの枠・実データでの突合詳細はP5/P6と接続) (unit, fake seam)"
 given = "最小configと空のfake S3 state(未書込namespace)でのrouter oneshot(GET->POST->GETの順)"
 expect_return_shape = "最初のGETは404 not_found。POSTは200+{performed_at, entries=0, files, missing, unexpected}。実行後のGETは200でPOSTと同一内容"
-source_lines = "src/server.rs:2690"
+source_lines = "src/server.rs:2766"
 
 [[condition]]
 id = "server.error-code-status-mapping"
@@ -248,7 +263,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(指摘#14: invalid
 description = "APIのerrorは原因別error code+HTTP statusに変換する(invalid_request=400・unauthenticated=401・forbidden=403・not_found=404・duplicate=409・validation_failed=422・configuration=503・upstream=502・internal=500)。P3時点でhandler観測可能な代表はinvalid_request(query param形式不正)=400・not_found(対象不在)=404・upstream(S3転送・remote索引問題)=502(unauthenticated 401はP4認証構成後・configuration 503はserver.protected-endpoints-fail-closedで観測) (unit, fake seam)"
 given = "catalog.db注入済みでの ?page=abc(形式不正)と不在uuidと、registry file在り+FAKE_S3_FAIL_HEAD_FOR=索引keyのHEAD失敗注入でのPOST /api/sync"
 expect_return_shape = "page=abcは400 invalid_request・不在uuidは404 not_found・syncのS3失敗は502 upstream(いずれも{\"error\":{...}}形式)"
-source_lines = "src/server.rs:2720"
+source_lines = "src/server.rs:2796"
 
 [[condition]]
 id = "server.error-body-generalized"
@@ -257,7 +272,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(指摘#14: error b
 description = "APIのerror bodyは{\"error\":{\"code\",\"message\"}}形式でmessageは一般化された文言とし、内部error文字列(一時dir等の内部path・内部構造の文言)を無加工で含まない(詳細はserver logのみ)。AWS秘密鍵・age秘密鍵・bootstrap token・session鍵をAPI応答へ出さない秘密情報境界(設計2章)のうちAPI応答面の担保 (unit, fake seam)"
 given = "400(page=abc)・404(不在uuid)・502(HEAD失敗注入のPOST /api/sync)の各error応答"
 expect_return_shape = "全error応答が{\"error\":{\"code\",\"message\"}}形式(messageは空でないstring)で、messageにABH・一時dir等の内部pathが含まれない"
-source_lines = "src/server.rs:2757"
+source_lines = "src/server.rs:2833"
 
 [[condition]]
 id = "server.auth-status-endpoint"
@@ -266,7 +281,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GE
 description = "GET /api/auth/statusは認証不要で認証状態と登録credential数を{\"authenticated\": <bool>, \"credentials\": <数>}形式で200応答する(未認証・未登録でも応答=LoginViewのUI誘導(register/loginどちらを案内するか)の判断基盤。応答形式は設計6章に詳細が無いため本条件書の解釈として確定) (unit, fake seam)"
 given = "credential数0の未認証状態と、credentials tableへ1件挿入後でのrouter oneshot"
 expect_return_shape = "未登録・未認証は200+{\"authenticated\":false,\"credentials\":0}・挿入後は200+credentials=1"
-source_lines = "src/server.rs:3246"
+source_lines = "src/server.rs:3322"
 
 [[condition]]
 id = "server.auth-endpoints-routing"
@@ -275,7 +290,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: PO
 description = "設計6章のauth endpoint群(POST /api/auth/register/start,/finish・POST /api/auth/login/start,/finish・POST /api/auth/logout)とTASK-13追加のPOST /api/auth/api-keyは/api/配下にroutingされ、未認証requestでも404 fallbackではなく定義済みendpointとして応答する(register/startはtoken必須のためtoken無しは401 unauthenticated・logoutは要認証のため未認証401・api-keyはLAN内ならkey検証へ進む=不正keyは401。token/challenge/session契約の詳細はwebauthn area・api-key契約の詳細はserver.api-key-*が担保) (unit, fake seam)"
 given = "各auth endpointへの未認証request(token無しbody・cookie無し。api-keyはLAN内既定remote addrでのbody {\"api_key\": \"<不正key>\"})"
 expect_return_shape = "register/start・logoutは401 unauthenticated・login/start・register/finish・login/finishも404でない定義済み応答・api-keyは404でなく401(LAN内のためkey検証へ進み不正keyは401)(実装前はapi-keyのroutingが無くfallbackの404でfailを許容=TASK-13改訂分のassertのみ赤)"
-source_lines = "src/server.rs:3276"
+source_lines = "src/server.rs:3352"
 
 [[condition]]
 id = "server.protected-api-open-with-auth"
@@ -284,7 +299,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 12章P4(passkey認証=�
 description = "P4実装後は保護APIの未認証応答が503(configuration)から401(unauthenticated)へ置換わる(protected_fail_closed middlewareのsession検証gateへの置換)。認証済みsessionではP3読取API(entities等)が応答する。未認証401のerror body詳細はwebauthn.unauthenticated-protected-api-401・認証済みでのflow完結観測はwebauthn.register-login-flow-server-to-serverと共通 (integration, fake seam)"
 given = "serve起動状態でのGET /api/entities(未認証・cookie無し)"
 expect_return_shape = "HTTP 401で{\"error\":{\"code\":\"unauthenticated\",...}}形式(503 configurationでない=P2〜P3のfail-closedからの置換観測。実装前は503のままでfailを許容)"
-source_lines = "src/server.rs:3542; tests/server_api.rs:324"
+source_lines = "src/server.rs:3618; tests/server_api.rs:324"
 
 [[excluded]]
 item = "dist埋め込み時の静的配信応答(release build実機)とVite dev proxy(40512)の実browser接続確認"
@@ -300,7 +315,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: PO
 description = "POST /api/pending/scanは保護API(未認証401=auth_gate)でscanを実行する(manage catalog scanと同一のP5同期層・scan対象はpipeline.toml [profiles.<n>.catalog.scan]・spawn_blocking経由・syncと同一のsingle-flight直列化)。request body無し。応答はscan実行後の最新一覧をGET /api/pendingと同一schema({\"pending\":[...]})で返す。scan対象未登録でも200で0件 (unit+integration, fake seam)"
 given = "pipeline.tomlへ[profiles.dev.catalog.scan] roots=<dir>(比較基準となるbackup記録なし=x.zip/y.zip配置)を追記した状態でのrouter oneshot(POST->GET)と、serve起動状態での未認証POST"
 expect_return_shape = "router oneshotは200でpending配列2要素(各itemはsource_root/path/size/mtime/status/last_scan_at入り・比較基準なしのためstatus=unbacked・last_scan_at非空)で続くGET /api/pendingにも反映される。serve経由の未認証POSTは401 {\"error\":{\"code\":\"unauthenticated\"}}(保護対象dataは応答に含まれない)(実装前はroutingが無くfallbackの404でfailを許容・未認証401観測はauth_gate実装済みのため緑)"
-source_lines = "src/server.rs:2426; tests/server_api.rs:363"
+source_lines = "src/server.rs:2502; tests/server_api.rs:363"
 
 [[condition]]
 id = "server.pending-list-status-filter"
@@ -309,7 +324,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GE
 description = "GET /api/pendingはP3のschema枠(server.pending-endpoint-schema)に対し実効scopeのpending_itemsを実質応答する: query param ?status=<unbacked|changed|ok|unknown>で単一statusへ絞り込み(省略時全件)。各itemのlast_scan_atは直近scan時刻。不正なstatus値は400 invalid_request(既存error体系=server.error-code-status-mappingと共通) (unit, fake seam)"
 given = "POST /api/pending/scan実行後(unbacked項目あり)での GET /api/pending?status=unbacked・?status=ok・?status=bogus"
 expect_return_shape = "?status=unbackedは200でunbacked項目のみ。?status=okは200で空配列。?status=bogusは400 invalid_request({\"error\":{...}}形式)(実装前はparam無視の200でfailを許容)"
-source_lines = "src/server.rs:2475"
+source_lines = "src/server.rs:2551"
 
 [[excluded]]
 item = "release CIのfrontend先行build job+artifact共有(現行4 matrix jobへの先行job追加)"
@@ -348,7 +363,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) D13・2.3(POST /
 description = "POST /api/auth/api-keyはapi_keyのSHA-256 hexでapi_keys table(永続class)を検索し、LAN内接続+登録済みkey一致ならpasskey login finishと同一手順でsessionを確立する(session.cycle_id()=session固定化対策→session.insert(\"authenticated\", true)→establish_session_id(&session, \"api_key\"))。応答はlogin finishと同一の{\"status\":\"ok\"}形式・Set-Cookieにsession cookie。確立したsession cookieで以降の保護API(auth_gate)を通過する(D13=api-keyはsession交換に単純化。api-key検索はrun_blocking経由=設計2.3) (unit, fake seam)"
 given = "api_keys tableへkey挿入(rusqlite直接=insert_api_key APIと同一schema)済み・remote addr=127.0.0.1(LAN内)での POST /api/auth/api-key {\"api_key\": <key>} と、そのSet-CookieでのGET /api/entities"
 expect_return_shape = "POSTは200+{\"status\":\"ok\"}+session cookie(Set-Cookie)。続くGET /api/entitiesは200(session認証で保護API通過)(実装前はroutingが無くfallbackの404でfailを許容)"
-source_lines = "src/server.rs:3783"
+source_lines = "src/server.rs:3859"
 
 [[condition]]
 id = "server.api-key-invalid-key-401"
@@ -357,7 +372,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.3(SHA-256(api_
 description = "api_keyのSHA-256 hexがapi_keysに登録されていない(不一致・不在)場合はLAN内でも401 {\"error\":{\"code\":\"unauthenticated\"}}で応答する(passkey login finish検証失敗と同一の一般化message=keyの存在特定防止。ログインsessionは確立しない) (unit, fake seam)"
 given = "api_keys tableへ別key挿入済み・remote addr=127.0.0.1(LAN内)での POST /api/auth/api-key {\"api_key\": <登録されていないkey>}"
 expect_return_shape = "401で{\"error\":{\"code\":\"unauthenticated\", \"message\":...}形式(403 forbidden_sourceでない=LAN内はkey検証へ進む)(実装前はroutingが無くfallbackの404でfailを許容)"
-source_lines = "src/server.rs:3809"
+source_lines = "src/server.rs:3885"
 
 [[condition]]
 id = "server.api-key-outside-lan-403"
@@ -366,7 +381,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) D14・2.3(remote
 description = "remote addrがLAN内(正規化: SocketAddrのto_ipv4_mappedでIPv4へ写せるものはIPv4へ正規化後に判定。IPv4=loopback 127.0.0.0/8・RFC1918 private(10/8・172.16/12・192.168/16)・link-local 169.254/16。IPv6=::1・fc00::/7 ULA・fe80::/10 link-local)に含まれない場合はkey検証の前に403 {\"error\":{\"code\":\"forbidden_source\"}}で受理を拒否する(正keyでもLAN外は認証不可=D14。passkey認証は従来どおり条件を追加しない=本条件はapi-key endpointのみの条件) (unit, fake seam)"
 given = "api_keys tableへ正key挿入済みでの、remote addr=8.8.8.8(LAN外IPv4)・[::ffff:8.8.8.8](IPv4-mapped IPv6)での POST /api/auth/api-key {\"api_key\": <正key>} と、remote addr=127.0.0.1(LAN内)での POST {\"api_key\": <不正key>}"
 expect_return_shape = "LAN外IPv4は正keyでも403 forbidden_source・IPv4-mappedも正規化後にLAN外判定で403・LAN内は403でない(不正keyは401=key検証へ進む。test seamのremote addrはRequest extensionのConnectInfo挿入=本番のinto_make_service_with_connect_infoと同一機構)(実装前はroutingが無くfallbackの404でfailを許容)"
-source_lines = "src/server.rs:3829"
+source_lines = "src/server.rs:3905"
 
 [[condition]]
 id = "server.api-key-lan-boundary-table"
@@ -375,7 +390,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 1章D14のLAN内
 description = "is_lan_ipは各rangeの境界IPで正しくLAN内/外を判定する: RFC1918 172.16.0.0/12(172.15.255.255=外・172.16.0.0=内・172.31.255.255=内・172.32.0.0=外)・link-local 169.254.0.0/16(169.253.x=外・169.254.x=内・169.255.x=外)・ULA fc00::/7(fbff::=外・fc00::=内・fdff::=内)・link-local fe80::/10(fe7f::=外・fe80::=内・febf::=内・fec0::=外)。v4-mapped(::ffff:10.0.0.1)はIPv4へ正規化後にLAN内と判定する (unit)"
 given = "境界IP表(上記rangeの内外境界IPとv4-mappedアドレス)のis_lan_ip直接呼出"
 expect_return_shape = "表の各IPが期待するLAN内(true)/LAN外(false)を返す"
-source_lines = "src/server.rs:3869"
+source_lines = "src/server.rs:3945"
 
 [[condition]]
 id = "server.api-key-removal-invalidates-login"
@@ -384,7 +399,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.3(api-key失�
 description = "api-key失効(manage auth removeによるapi_keys行削除)後は同一keyでのapi-key認証は401になる(失効keyでの新規login不可)。失効は既存sessionを破棄しない(失効前に確立したsession cookieは引き続き保護APIを通過する=in-memory 24h・passkey removeと同一挙動) (unit, fake seam)"
 given = "api-key認証成功(session cookie取得済み)後にapi_keysの当該行を削除(rusqlite直接=manage auth remove相当)しての POST /api/auth/api-key {\"api_key\": <同一key>} と、取得済みcookieでのGET /api/entities"
 expect_return_shape = "同一keyのPOSTは401(key検証はapi_keys検索によるため)。取得済みcookieでのGET /api/entitiesは200のまま(既存sessionは破棄しない)(実装前はroutingが無くfallbackの404でfailを許容)"
-source_lines = "src/server.rs:3903"
+source_lines = "src/server.rs:3979"
 
 [[condition]]
 id = "server.auth-status-api-keys-count"
@@ -393,7 +408,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.4(GET /api/aut
 description = "GET /api/auth/statusの応答へapi_keys(件数)を追加する({\"authenticated\", \"credentials\", \"api_keys\"}。credentialsはpasskey件数のまま=api_keysはapi_keys tableの件数。LoginViewのapi-key欄表示の判断基盤) (unit, fake seam)"
 given = "api_keys 0件の状態と、api_keysへ1行挿入(rusqlite直接)後での GET /api/auth/status"
 expect_return_shape = "0件は200+api_keys=0・挿入後は200+api_keys=1(credentials・authenticatedは従来どおり)(実装前はapi_keys keyが応答に無くfailを許容)"
-source_lines = "src/server.rs:3937"
+source_lines = "src/server.rs:4013"
 
 [[excluded]]
 item = "api-key認証へのrate limit/試行回数制限"
@@ -422,3 +437,23 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 1章(既知の�
 reason = "D14=address判定を条件とする承認済み決定の帰結であり追加の振る舞い分岐ではない(loopback=LAN内の判定自体はserver.api-key-outside-lan-403が担保)。docs注意書きはdocs更新でありコードの振る舞い条件ではない(実装waveのdocs工程で反映)"
 decided_at = "2026-11-05"
 decided_by = "claude"
+
+# --- TASK-17 W1(runs/jobs API・2026-11-14テスト先行) ---
+
+[[condition]]
+id = "server.runs-list"
+target_function = "server::handler GET /api/runs"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(GET /api/runs=run(batch_id)毎の履歴・versionsのbatch_id集約・{runs:[{batch_id,date,entity_count}]})・2.1(ホームbackup概况=前回backup(直近runの日時・対象数))・2.5(backup実行履歴=run毎の対象実体数・日時)・9章W1行"
+description = "GET /api/runsはcatalogのversionsをbatch_id単位で集約したrun一覧を{\"runs\":[{batch_id,date,entity_count}]}形式で応答する(ホームの前回backup・管理のbackup実行履歴(W7)の基盤)。集約規則(設計に詳細が規定されない点の解釈。実装はこれに従う): entity_count=当該batch_idのversion数(=runの対象実体数)・date=当該runのversion日時の最新・並びはdate降順(直近runが先頭=ホームの前回backup表示は先頭要素で成立。同date内はrun内の最新version_ts降順=実行順で並べる。batch_idの接尾辞は時刻のhashのため辞書順は実行順を保証せずsort keyには使わない。version_tsは応答schemaに含めない内部sort key=JST固定ISO8601のため辞書順比較で時刻順)。scopeは読取API共通(server.read-api-uses-serve-profileと同一扱い: 省略時は実効profileのscopeで他scopeのrunは混入しない・?scope=<bucket>:<prefix>明示は優先)。保護API(未認証401=既存auth_gateが構造的に対象のため本条件では観測しない) (unit, fake seam)"
+given = "ABH配下catalog.dbの実効scope(api-bucket+amazing-backup/)へrun-1(batch 20261105-abcdef01=alpha 1version)とrun-2(batch 20261106-abcdef02=beta+deltaの2version)を注入し、対照scope(other-bucket)へrun-3(batch 20261107-abcdef03=gamma)を注入した状態でのrouter oneshot(GET /api/runs・GET /api/runs?scope=other-bucket:amazing-backup/)。加えて同日(2026-11-06)の2run(batch 20261106-zzzzzz99=version_ts 10:00が実行前・batch 20261106-aaaaaa10=version_ts 23:00が実行後=batch_id辞書順と実行順が逆)を注入した状態でのrouter oneshot(GET /api/runs)"
+expect_return_shape = "実効scopeは200でruns配列2要素(先頭=run-2: batch_id/date/entity_count=2・2番目=run-1: entity_count=1=date降順)。run-3(対照scope)は含まれない。scope明示はrun-3のみ1要素。同日の2runはversion_tsが新しいrun(20261106-aaaaaa10)が先頭(batch_id降順だと誤ってzzzzzz99が先頭になる)。応答要素はbatch_id/date/entity_countのみ(version_tsを含まない)"
+source_lines = "src/server.rs:4059; src/server.rs:4158"
+
+[[condition]]
+id = "server.jobs-list"
+target_function = "server::handler GET /api/jobs"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(GET /api/jobs?status=&kind= はjob一覧・進行中優先・降順。scope絞り込みparamは不要=実効1 scope)・2.1(ホーム実行中job区画・空時は表示なし)・6章(job系APIも同一のauth_gateで保護・未認証は401)・9章W1行(GET /api/jobs(空応答))"
+description = "GET /api/jobsはjob一覧を{\"jobs\":[...]}形式で応答する。W1時点ではjob機構(get/push job発行・jobs table=4.1)がW4未実装のため常に200+{\"jobs\":[]}の空応答とする(ホーム実行中job区画・転送タブのW1表示基盤。status/kind絞り込みparamはW4のjob実装で実質化しW1では空配列に影響しない。scope絞り込みparamは設計3.2どおり持たない=実効1 scope)。保護APIで未認証は401 unauthenticated(設計6章: job系APIも同一session gate。/api/*の既存gateが構造的に対応するため本条件で観測) (unit, fake seam)"
+given = "api_envでのrouter oneshot(GET /api/jobs・GET /api/jobs?status=running&kind=get。認証機構未構成の直接呼出)と、AuthFlow(auth構成router)での未認証GET /api/jobs"
+expect_return_shape = "前者はいずれも200+jobs配列は空。後者は401+{\"error\":{\"code\":\"unauthenticated\"}}(実装前はroutingが無くfallbackの404のため応答部のみfailを許容・401観測はauth_gate実装済みのため緑)"
+source_lines = "src/server.rs:4213"

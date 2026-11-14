@@ -466,6 +466,65 @@ export function fetchEntityVersions(uuid: string): Promise<ApiResult<EntityVersi
   return apiGet(`/api/entities/${uuid}/versions`, isEntityVersionsResponse)
 }
 
+// --- runs/jobs(TASK-17設計2.1(ホームbackup概况・実行中job区画)・3.2(GET /api/runs・
+//     GET /api/jobs)・9章W1。応答schemaはserver.runs-list・server.jobs-listの解釈に整合) ---
+
+/** GET /api/runs のrun schema(batch_id=run識別・date=runの日付・entity_count=対象実体数) */
+export type RunItem = { batch_id: string; date: string; entity_count: number }
+
+/** GET /api/runs の応答形式({"runs":[...]}・date降順=直近runが先頭) */
+export type RunsResponse = { runs: RunItem[] }
+
+/** GET /api/runs応答の型ガード(runs配列+各要素のbatch_id/date/entity_count一致のみtrue) */
+export function isRunsResponse(v: unknown): v is RunsResponse {
+  if (!isRecord(v) || !Array.isArray(v['runs'])) return false
+  return v['runs'].every(
+    (r) =>
+      isRecord(r) &&
+      typeof r['batch_id'] === 'string' &&
+      typeof r['date'] === 'string' &&
+      typeof r['entity_count'] === 'number',
+  )
+}
+
+/** run一覧の取得(保護API。ホームの前回backup表示基盤。失敗時はerror扱い) */
+export function fetchRuns(): Promise<ApiResult<RunsResponse>> {
+  return apiGet('/api/runs', isRunsResponse)
+}
+
+/** GET /api/jobs のjob schema(W1の最小schema。params/progress/result/errorの詳細
+ *  fieldはW4のjob実装時に拡張) */
+export type JobItem = {
+  id: number
+  kind: string
+  status: string
+  created_at: string
+  updated_at: string
+}
+
+/** GET /api/jobs の応答形式({"jobs":[...]}・W1のserver応答は常に空配列) */
+export type JobsResponse = { jobs: JobItem[] }
+
+/** GET /api/jobs応答の型ガード(jobs配列+各要素のid/kind/status/created_at/
+ *  updated_at一致のみtrue) */
+export function isJobsResponse(v: unknown): v is JobsResponse {
+  if (!isRecord(v) || !Array.isArray(v['jobs'])) return false
+  return v['jobs'].every(
+    (j) =>
+      isRecord(j) &&
+      typeof j['id'] === 'number' &&
+      typeof j['kind'] === 'string' &&
+      typeof j['status'] === 'string' &&
+      typeof j['created_at'] === 'string' &&
+      typeof j['updated_at'] === 'string',
+  )
+}
+
+/** job一覧の取得(保護API。W1のserver応答は常に空配列。失敗時はerror扱い) */
+export function fetchJobs(): Promise<ApiResult<JobsResponse>> {
+  return apiGet('/api/jobs', isJobsResponse)
+}
+
 // --- passkey登録・login(TASK-9設計8章・12章P4。LoginViewから使用) ---
 // server応答はbase64url文字列のWebAuthn options。ここでは文字列のまま受け取り
 // LoginViewでBufferSourceへ変換する(ArrayBufferとbase64urlの往来はUI層の責務)。

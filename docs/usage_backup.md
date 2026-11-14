@@ -178,7 +178,7 @@ unfiled_category = "unfiled"
 auto_path_roots = ["/home/yourname/data"]
 
 # [profiles.dev.catalog.scan](省略可=アップロード前カタログscan対象の明示登録。
-# manage catalog scan・serveのpending画面がこのroot配下をlocal FS走査する):
+# manage catalog scan・serveの未対応一覧(pending絞り込み)がこのroot配下をlocal FS走査する):
 # [profiles.dev.catalog.scan]
 # roots = ["/home/yourname/data"]      # 走査root(絶対path・1つ以上必須)。symlinkは辿らない
 # extensions = [".zip"]                # 対象拡張子(省略・空=全regular file)
@@ -221,7 +221,7 @@ auto_path_roots = ["/mnt/nas/family"]
 | `[profiles.<name>.layout].unfiled_category` | 分類解決のfallback先category(既定`unfiled`) |
 | `[profiles.<name>.layout].auto_path_roots` | source_pathを相対化するroot列挙(最初に一致したrootを採用) |
 | `[profiles.<name>.files."<basename>"]` | 手動写像。`category`(必須・category名規則の文字列検査のみ)と`label`(所在label・空文字列=なし) |
-| `[profiles.<name>.catalog.scan]` | アップロード前カタログscan(5.10 `manage catalog scan`・serveのpending画面)の対象登録。省略可。`roots`(必須: 走査rootの絶対path列挙。この配下のみ走査しsymlinkは辿らない)・`extensions`(対象拡張子`.zip`形式の列挙。省略・空=全regular file)・`exclude`(走査root基準の相対path部分一致による除外。一致dir配下も対象外。省略可)。**`auto_path_roots`は転用しない**(分類・相対化用の設定でありbackup対象の登録ではないため。誤った範囲拡大防止) |
+| `[profiles.<name>.catalog.scan]` | アップロード前カタログscan(5.10 `manage catalog scan`・serveの未対応一覧(pending絞り込み))の対象登録。省略可。`roots`(必須: 走査rootの絶対path列挙。この配下のみ走査しsymlinkは辿らない)・`extensions`(対象拡張子`.zip`形式の列挙。省略・空=全regular file)・`exclude`(走査root基準の相対path部分一致による除外。一致dir配下も対象外。省略可)。**`auto_path_roots`は転用しない**(分類・相対化用の設定でありbackup対象の登録ではないため。誤った範囲拡大防止) |
 
 省略時の既定: `[layout]`全体省略時はunfiled_category="unfiled"+auto_path_roots=[]・`[metadata]`省略時はlatest_source_path="plain"・`keep_artifacts`省略時は"run"。`[recipients]`のみ必須(選択profileに対して)。`[categories]`・`[output]`セクションの存在は(top-level・profile内のいずれでも)未知キーとして設定エラー2(静的に廃止を確定。registry・cache dirのpathはXDG規定path固定)。
 
@@ -586,7 +586,7 @@ amazing-backup manage auth api-key [--name NAME]
 | `reset` | dev bucketの初期化(S3全消去・registryはbucket限定・冪等)。**dry-runが既定**(消去対象version数=Versions・DeleteMarkers別・registry退避先path・registry再書込の除去/残行数を表示)。`--apply`で 1) ローカルregistryを`./tmp/<yyyymmdd>_<bucket>_registry_before_reset.jsonl`へ全体退避(証跡。不在ならskip。同日再実行は上書き) 2) root prefix配下の全object version(Versions・DeleteMarkers)をDeleteObjectVersionで削除(`{prefix}data/`配下に留まらず`sys/`索引・manifestも消去) 3) ローカルregistryから当該bucket由来行(対象bucket宛file_uploadはuuid共有(非対象bucketにもuploadされたuuid)に関わらず全て除去+S3実体削除後の記録残存はregistry-only skipとの不整合のため。他のupload系記録と対象bucketのみにuploadされたuuidのfile_write)のみ除去して再書込(temp+fsync+rename+親dir fsync。他bucket宛記録・共有uuidのfile_write・crash残存file_write・prune/sweep等は温存。torn write最終行は破棄。残0行ならfile削除。cache dirは対象外・手動掃除) 4) 再list_versionsで0件確認。安全弁(違反は設定エラー2+案内・S3 API呼び出しなし): 実効profileのpurpose=dev限定。`--config`必須 |
 | `catalog sync` | remote索引をlocal catalog DB(2.2)へ同期(遅延refresh)。HEAD 1回でvalidator(ETag+VersionId)を検証し、変化(初回含む)あればGET+復号でDBへ反映・変化なければGETを省略。書込実績の無いnamespaceは空cacheとして確定(S3問い合わせなし)。索引object不在は`index rebuild`案内の設定エラー2(未書込namespace例外は除く) |
 | `catalog rebuild` | ローカルregistry(JSONL)からcatalog DBのcache class(entities/versions/pins/locations/sync_state/pending_items)を置換再構築(冪等)。永続class(credential・実行記録)は保持・削除しない。cacheは常にregistry+S3から再構築可能な導出index(2.2) |
-| `catalog scan` | アップロード前カタログscan。pipeline.toml `[profiles.<name>.catalog.scan]`(3.1)の登録root配下をlocal FS走査し(S3接続不要・symlink不追従)、各fileをcatalog DBの保存値とsize+mtime比較で4状態(unbacked=未backup・changed=変更あり・ok=backup済み・unknown=確認不能)へ分類してpending_itemsを全置換(再scanで前回結果は残らない)。`--sha256`指定時のみsha256を再計算しsha一致合流(registryのsha_uuid_lookup)でunknownをokへ確定する(既定はsize+mtime比較のみ)。serveのpending画面(5.14)は同一scanをボタン実行できる |
+| `catalog scan` | アップロード前カタログscan。pipeline.toml `[profiles.<name>.catalog.scan]`(3.1)の登録root配下をlocal FS走査し(S3接続不要・symlink不追従)、各fileをcatalog DBの保存値とsize+mtime比較で4状態(unbacked=未backup・changed=変更あり・ok=backup済み・unknown=確認不能)へ分類してpending_itemsを全置換(再scanで前回結果は残らない)。`--sha256`指定時のみsha256を再計算しsha一致合流(registryのsha_uuid_lookup)でunknownをokへ確定する(既定はsize+mtime比較のみ)。serveの未対応一覧(pending絞り込み)(5.14)は同一scanをボタン実行できる |
 | `auth list` | 登録済みcredential一覧(passkey・api-keyの統合表示: credential_id・kind=passkey/api_key・name・created_at)。catalog DB(2.2)のcredentials tableとapi_keys table(永続class)を直接読むlocal操作でS3接続不要。0件案内(bootstrap案内)は両table合計0件時のみ(5.14) |
 | `auth remove <credential_id>` | credentialの失効(削除)。credential_id完全一致の1行をcredentials table→api_keys tableの順に検索して削除するlocal操作(S3接続不要。nameは一意性が無いため対象指定に使わない。passkey・api-keyいずれのcredential_idでも削除可)。両table合計削除0行(存在しないcredential_id)は対象エラー3。削除後に両table合計0件となった場合は再登録のための`serve --bootstrap`案内を表示する(合計0件ではlogin手段が無く・passkey登録はbootstrap token提示時のみ開く=fail-closed。api-key失効は既存sessionを破棄しない。5.14) |
 | `auth api-key [--name NAME]` | serve用api-keyの生成。32byte乱数から`abk_`前置+base64url(43文字)のkeyを生成し**1回だけstdoutへ表示**する(再表示不可・hashから復元不可。SHA-256 hexのみapi_keys tableへ保存し平文keyは保存しない)。`--name`はlist表示での確認用表示名(既定`api-key`・空文字指定はusage error)。S3接続不要のlocal操作。受け渡し・有効条件は5.14 |
@@ -659,8 +659,9 @@ Web frontend(埋め込み静的配信)と読取API(`/api/*`・axum)を起動す�
 - アップロード前カタログ(`GET /api/pending`)とscan実行(`POST /api/pending/scan`)
 - sync状態(`GET /api/sync`)と手動refresh(`POST /api/sync`)
 - diff実行(`POST /api/diff`)と最終diff結果参照(`GET /api/diff`)
+- backup実行run一覧(`GET /api/runs`・batch単位の集約)とjob一覧(`GET /api/jobs`・取得/uploadのjob発行は今後の版で追加)
 
-これらの閲覧はfrontendの各画面(entity一覧=検索・category絞込・paging・sync状態表示と手動refreshボタン・entity詳細=所在・pins・版一覧・アップロード前カタログ・diff)から操作できる(CLIの`query`/`list`と同一の索引語彙で表示)。
+これらの閲覧はfrontendの各画面(5タブ構成: ホーム=sync状態・前回backup・未対応・diff・実行中jobのサマリ、バックアップ=検索・category絞込・paging・pending/diff絞り込み表示・entity詳細=所在・pins・版一覧、転送・設定・管理=今後の版で整備)から操作できる(CLIの`query`/`list`と同一の索引語彙で表示)。
 
 未認証の閲覧系APIは401で拒否される(空dataを返さない)。操作系CLI(backup push/pull・get・pin・manage系のfile操作)のAPIは提供しない(操作はCLI既存のまま)。
 
