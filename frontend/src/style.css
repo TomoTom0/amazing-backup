@@ -464,7 +464,152 @@ a:hover {
 }
 
 /* ---------------------------------------------------------------------------
- * 18. media query(動きの停止・窄幅)
+ * 18. W2部品(TASK-17設計8章: ビュー切替tab・tag chip・folder tree・選択pane)
+ * ------------------------------------------------------------------------- */
+
+/* ビュー切替tab: 一覧上部の横並びlink(現位置はnavと同一active表現=本文色+下線) */
+.view-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 0 0 0.75rem;
+  font-size: 13px;
+}
+
+.view-tabs button {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+
+.view-tabs button:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+/* 現位置表示(app-nav a.router-link-activeと同一表現) */
+.view-tabs button.is-active {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+/* tag chip: inline-block・1px --border・radius 4px・13px・色はneutral(fg)。
+ * 選択中のみ--accent-soft背景(principles「色は意味にのみ」のためchip自体は無色) */
+.tag-chip {
+  display: inline-block;
+  margin: 0 0.25rem 0.25rem 0;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+a.tag-chip {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+a.tag-chip:hover {
+  border-color: var(--border-strong);
+}
+
+.tag-chip.is-selected {
+  background: var(--accent-soft);
+}
+
+/* tag chipのx(削除)button: chip内の素朴なquiet button */
+.tag-chip-x {
+  margin-left: 0.3rem;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tag-chip-x:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+/* tag追加form(詳細画面のtag編集): 入力とbuttonの横並び */
+.tag-add-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: end;
+  max-width: 26rem;
+}
+
+.tag-add-form label {
+  margin-bottom: 0;
+  flex: 1;
+}
+
+.tag-add-form input {
+  max-width: none;
+}
+
+/* folderビュー: 左folder tree・右選択folderの一覧(treeは隠れる時は1段積み) */
+.folder-pane {
+  display: grid;
+  grid-template-columns: minmax(13rem, 18rem) 1fr;
+  gap: 1.25rem;
+  align-items: start;
+}
+
+/* folder tree: ul入れ子・13px・展開はdetails open(JS不要) */
+.folder-tree ul {
+  margin: 0.15rem 0;
+  padding-left: 1rem;
+  list-style: none;
+  font-size: 13px;
+}
+
+.folder-tree > ul {
+  padding-left: 0;
+}
+
+.folder-tree summary {
+  margin: 0.15rem 0;
+  cursor: pointer;
+}
+
+.folder-tree summary::marker {
+  color: var(--fg-muted);
+}
+
+.folder-tree a {
+  color: var(--fg-muted);
+  text-decoration: none;
+}
+
+.folder-tree a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+/* 選択folderは--fg+下線(router-link-activeと同一表現) */
+.folder-tree a.is-selected {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+/* folder/tag/collectionの件数(tabular数値) */
+.folder-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* tag/collectionビューの選択pane(一覧上部のchip列挙) */
+.filter-select {
+  margin-block: 0.5rem 0.75rem;
+}
+
+/* ---------------------------------------------------------------------------
+ * 19. media query(動きの停止・窄幅)
  * ------------------------------------------------------------------------- */
 
 @media (prefers-reduced-motion: reduce) {
@@ -476,5 +621,14 @@ a:hover {
 @media (max-width: 40rem) {
   .entity-filters {
     grid-template-columns: 1fr;
+  }
+
+  .folder-pane {
+    grid-template-columns: 1fr;
+  }
+
+  .tag-add-form {
+    flex-direction: column;
+    align-items: stretch;
   }
 }

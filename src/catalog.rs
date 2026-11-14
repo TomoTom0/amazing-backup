@@ -7,7 +7,9 @@
 //!
 //! table契約(2章・指摘#2):
 //! - cache class(削除再構築可): entities/versions/pins/locations/sync_state/pending_items
-//! - 永続class(rebuildでもdropしない): credentials/passkey・push_intents・api_keys
+//! - 永続class(rebuildでもdropしない): credentials/passkey・push_intents・api_keys・
+//!   tags/collections/collection_items/audit_log(TASK-17 W2=local語彙とUI書込操作の
+//!   履歴。cache側に置くとrebuildでtag・履歴が失われるため)
 //! 全cache tableはscope(bucket+prefix)をPK/検索条件に持ち(指摘#3)、scope単位の
 //! 置換は単一transactionでdelete+insertする(原子的置換・途中状態を作らない)。
 
@@ -255,6 +257,42 @@ fn migrations() -> rusqlite_migration::Migrations<'static> {
                 created_at TEXT NOT NULL);
             "#,
         ),
+        // TASK-17 W2(TASK-19・設計4.1): tag/collection(local語彙)とUI書込操作の
+        // 履歴。4 tableとも永続class(cache側に置くとmanage catalog rebuildで
+        // tag・履歴が失われるため=replace_scopeの置換対象外)。scopeはAPI表示と
+        // 同一の<bucket>:<prefix>形式(cache tableのscope_key区切りと異なる点に
+        // 注意。条件書server.write-api-audit-log-recordedの契約)
+        M::up(
+            r#"
+            CREATE TABLE tags (
+                scope TEXT NOT NULL,
+                uuid TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (scope, uuid, tag));
+            CREATE TABLE collections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (scope, name));
+            CREATE TABLE collection_items (
+                collection_id INTEGER NOT NULL,
+                scope TEXT NOT NULL,
+                uuid TEXT NOT NULL,
+                added_at TEXT NOT NULL,
+                PRIMARY KEY (collection_id, scope, uuid),
+                FOREIGN KEY (collection_id) REFERENCES collections (id) ON DELETE CASCADE);
+            CREATE TABLE audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail_json TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                error_code TEXT);
+            "#,
+        ),
     ])
 }
 
@@ -386,6 +424,47 @@ pub struct ApiKeyRow {
     pub key_hash: String,
     pub name: String,
     pub created_at: String,
+}
+
+/// collections一覧の1行(TASK-17 W2・GET /api/collectionsの要素)。
+pub struct CollectionRow {
+    pub id: i64,
+    pub name: String,
+    /// 構成entity数(collection_itemsの行数)
+    pub entity_count: i64,
+}
+
+/// collection詳細(TASK-17 W2・GET /api/collections/:id系の応答要素。
+/// uuidsは追加順)。
+pub struct CollectionDetail {
+    pub id: i64,
+    pub name: String,
+    pub uuids: Vec<String>,
+}
+
+/// W2 tag/collection書込の失敗区分(TASK-17 W2。storage層は状態遷移の可否だけを
+/// 返し、HTTPのerror codeへの変換はserver側が行う)。
+#[derive(Debug)]
+pub enum W2WriteError {
+    /// 同一(scope,name)等の重複(UNIQUE制約由来=409 duplicate)
+    Duplicate,
+    /// 対象(collection・構成uuid)が当該scopeに不在(404 not_found)
+    NotFound,
+    /// それ以外の失敗(内部error)
+    Other(BackupError),
+}
+
+impl From<BackupError> for W2WriteError {
+    fn from(e: BackupError) -> W2WriteError {
+        W2WriteError::Other(e)
+    }
+}
+
+/// W2 table群(tags/collections/collection_items/audit_log)のscope値。
+/// API表示と同一の<bucket>:<prefix>形式(bucket名にコロンは使用できないため
+/// 一意。cache tableのscope_key区切り文字とも衝突しない)。
+fn w2_scope(bucket: &str, prefix: &str) -> String {
+    format!("{bucket}:{prefix}")
 }
 
 impl CatalogDb {
@@ -1048,6 +1127,535 @@ impl CatalogDb {
                 .map_err(|e| BackupError::Internal(format!("保存済みdiff結果のparseに失敗: {e}"))),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // TASK-17 W2(TASK-19): tag/collection(local語彙)・audit_logのCRUD。
+    // 4 tableとも永続class(replace_scopeの置換対象外)。呼出側はserveの書込API
+    // (single-flight直列化の下でspawn_blocking経由)。
+
+    /// 当該entityのtag一覧の置換(TASK-17設計3.2: 冪等・差し替え=削除+追加が
+    /// 単一transactionの同一操作。空配列は全tag削除)。tag名の規則検証・body内重複の
+    /// 正規化は呼出側。成功audit記録(action/detail_json)を置換と同一transactionで
+    /// 確定する(コードレビュー中4: 記録失敗時は置換もrollback)。
+    pub fn replace_entity_tags(
+        &mut self,
+        bucket: &str,
+        prefix: &str,
+        uuid: &str,
+        tags: &[String],
+        action: &str,
+        detail_json: &str,
+    ) -> Result<(), W2WriteError> {
+        let scope = w2_scope(bucket, prefix);
+        let now = now_jst();
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| BackupError::Internal(format!("transaction開始に失敗: {e}")))?;
+        tx.execute(
+            "DELETE FROM tags WHERE scope = ?1 AND uuid = ?2",
+            rusqlite::params![scope, uuid],
+        )
+        .map_err(|e| BackupError::Internal(format!("tags置換のdeleteに失敗: {e}")))?;
+        for tag in tags {
+            tx.execute(
+                "INSERT INTO tags (scope, uuid, tag, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![scope, uuid, tag, now],
+            )
+            .map_err(|e| BackupError::Internal(format!("tags挿入に失敗: {e}")))?;
+        }
+        Self::audit_ok_on_tx(&tx, &scope, action, detail_json)?;
+        tx.commit()
+            .map_err(|e| BackupError::Internal(format!("tags置換のcommitに失敗: {e}")))?;
+        Ok(())
+    }
+
+    /// 当該entityのtag一覧(昇順)。
+    pub fn entity_tags(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        uuid: &str,
+    ) -> BackupResult<Vec<String>> {
+        let scope = w2_scope(bucket, prefix);
+        let mut stmt = self
+            .conn
+            .prepare("SELECT tag FROM tags WHERE scope = ?1 AND uuid = ?2 ORDER BY tag")
+            .map_err(|e| BackupError::Internal(format!("tags準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![scope, uuid], |r| r.get::<_, String>(0))
+            .map_err(|e| BackupError::Internal(format!("tags読込に失敗: {e}")))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| BackupError::Internal(format!("tags行読取に失敗: {e}")))?);
+        }
+        Ok(out)
+    }
+
+    /// 当該scopeの(uuid, tag)全行(uuid・tag昇順)。一覧summary行のtags列組み立て用。
+    pub fn scope_tag_rows(&self, bucket: &str, prefix: &str) -> BackupResult<Vec<(String, String)>> {
+        let scope = w2_scope(bucket, prefix);
+        let mut stmt = self
+            .conn
+            .prepare("SELECT uuid, tag FROM tags WHERE scope = ?1 ORDER BY uuid, tag")
+            .map_err(|e| BackupError::Internal(format!("tags準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map([&scope], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| BackupError::Internal(format!("tags読込に失敗: {e}")))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(
+                row.map_err(|e| BackupError::Internal(format!("tags行読取に失敗: {e}")))?,
+            );
+        }
+        Ok(out)
+    }
+
+    /// tag一覧とentity数(タグ名昇順。entity_count=当該tagを持つ当該scope内の現存
+    /// entity数=tags行を同一scopeのentities cacheとJOINして集計(コードレビュー中11:
+    /// sync/rebuildでcacheから消えたentityのtag行は計上しない。tag行自体は永続class
+    /// のため保持され・entity復帰時に再び計上される)。全tag保有entityが消えたtagは
+    /// 一覧に出ない)。
+    pub fn tag_counts(&self, bucket: &str, prefix: &str) -> BackupResult<Vec<(String, i64)>> {
+        let scope = w2_scope(bucket, prefix);
+        let cache_scope = scope_key(bucket, prefix);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT t.tag, COUNT(DISTINCT t.uuid) FROM tags t \
+                 JOIN entities e ON e.scope = ?2 AND e.uuid = t.uuid \
+                 WHERE t.scope = ?1 GROUP BY t.tag ORDER BY t.tag",
+            )
+            .map_err(|e| BackupError::Internal(format!("tags集計準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![scope, cache_scope], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(|e| BackupError::Internal(format!("tags集計に失敗: {e}")))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(
+                row.map_err(|e| BackupError::Internal(format!("tags集計行読取に失敗: {e}")))?,
+            );
+        }
+        Ok(out)
+    }
+
+    /// 成功audit_log記録(W2書込操作と同一transaction内で呼ぶ=コードレビュー中4:
+    /// この挿入に失敗した場合は操作の書込もrollbackされ・成功応答した変更が履歴に
+    /// 残らない状況を作らない。失敗audit(422/409/404時)は操作が行われていないため
+    /// record_auditの別経路でよい)。
+    fn audit_ok_on_tx(
+        conn: &Connection,
+        scope: &str,
+        action: &str,
+        detail_json: &str,
+    ) -> BackupResult<()> {
+        conn.execute(
+            "INSERT INTO audit_log (scope, recorded_at, action, detail_json, outcome,\
+             error_code) VALUES (?1, ?2, ?3, ?4, 'ok', NULL)",
+            rusqlite::params![scope, now_jst(), action, detail_json],
+        )
+        .map_err(|e| BackupError::Internal(format!("audit_log記録に失敗: {e}")))?;
+        Ok(())
+    }
+
+    /// 当該tagを持つ当該scope内のuuid一覧(?tag=絞り込み用)。
+    pub fn uuids_with_tag(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        tag: &str,
+    ) -> BackupResult<Vec<String>> {
+        let scope = w2_scope(bucket, prefix);
+        let mut stmt = self
+            .conn
+            .prepare("SELECT uuid FROM tags WHERE scope = ?1 AND tag = ?2")
+            .map_err(|e| BackupError::Internal(format!("tags準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![scope, tag], |r| r.get::<_, String>(0))
+            .map_err(|e| BackupError::Internal(format!("tags読込に失敗: {e}")))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| BackupError::Internal(format!("tags行読取に失敗: {e}")))?);
+        }
+        Ok(out)
+    }
+
+    /// 当該uuidが所属するcollection名一覧(名前昇順=詳細の所属collection表示用)。
+    pub fn collections_of_uuid(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        uuid: &str,
+    ) -> BackupResult<Vec<String>> {
+        let scope = w2_scope(bucket, prefix);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT c.name FROM collections c JOIN collection_items i \
+                 ON i.collection_id = c.id AND i.scope = c.scope \
+                 WHERE c.scope = ?1 AND i.uuid = ?2 ORDER BY c.name",
+            )
+            .map_err(|e| BackupError::Internal(format!("所属collection準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![scope, uuid], |r| r.get::<_, String>(0))
+            .map_err(|e| BackupError::Internal(format!("所属collection読込に失敗: {e}")))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(
+                row.map_err(|e| BackupError::Internal(format!("所属collection行読取に失敗: {e}")))?,
+            );
+        }
+        Ok(out)
+    }
+
+    /// collection一覧(名前昇順。entity_count=構成entity数=構成行を同一scopeのentities
+    /// cacheとJOINして現存entityのみ計上(コードレビュー中11: sync/rebuildでcacheから
+    /// 消えたentityの構成行は計上しない。構成行自体は保持)。
+    pub fn collection_rows(&self, bucket: &str, prefix: &str) -> BackupResult<Vec<CollectionRow>> {
+        let scope = w2_scope(bucket, prefix);
+        let cache_scope = scope_key(bucket, prefix);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT c.id, c.name, COUNT(e.uuid) FROM collections c \
+                 LEFT JOIN collection_items i ON i.collection_id = c.id AND i.scope = c.scope \
+                 LEFT JOIN entities e ON e.scope = ?2 AND e.uuid = i.uuid \
+                 WHERE c.scope = ?1 GROUP BY c.id ORDER BY c.name",
+            )
+            .map_err(|e| BackupError::Internal(format!("collections準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![scope, cache_scope], |r| {
+                Ok(CollectionRow {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    entity_count: r.get(2)?,
+                })
+            })
+            .map_err(|e| BackupError::Internal(format!("collections読込に失敗: {e}")))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(
+                row.map_err(|e| BackupError::Internal(format!("collections行読取に失敗: {e}")))?,
+            );
+        }
+        Ok(out)
+    }
+
+    /// collection詳細(不在idはNone。uuidsは追加順=rowid順=挿入順。schema上に
+    /// ordinal列が無いため挿入順の保存はrowidが担る)。
+    pub fn collection_detail(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        collection_id: i64,
+    ) -> BackupResult<Option<CollectionDetail>> {
+        let scope = w2_scope(bucket, prefix);
+        let name = self
+            .conn
+            .query_row(
+                "SELECT name FROM collections WHERE scope = ?1 AND id = ?2",
+                rusqlite::params![scope, collection_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| BackupError::Internal(format!("collections読込に失敗: {e}")))?;
+        let Some(name) = name else {
+            return Ok(None);
+        };
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT uuid FROM collection_items WHERE scope = ?1 AND collection_id = ?2 \
+                 ORDER BY rowid",
+            )
+            .map_err(|e| BackupError::Internal(format!("collection_items準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![scope, collection_id], |r| r.get::<_, String>(0))
+            .map_err(|e| BackupError::Internal(format!("collection_items読込に失敗: {e}")))?;
+        let mut uuids = Vec::new();
+        for row in rows {
+            uuids.push(
+                row.map_err(|e| BackupError::Internal(format!("collection_items行読取に失敗: {e}")))?,
+            );
+        }
+        Ok(Some(CollectionDetail {
+            id: collection_id,
+            name,
+            uuids,
+        }))
+    }
+
+    /// collectionの作成(同名はDuplicate=UNIQUE(scope,name)由来。成功audit記録を
+    /// 作成と同一transactionで確定する=コードレビュー中4)。
+    pub fn create_collection(
+        &mut self,
+        bucket: &str,
+        prefix: &str,
+        name: &str,
+        action: &str,
+        detail_json: &str,
+    ) -> Result<CollectionDetail, W2WriteError> {
+        let scope = w2_scope(bucket, prefix);
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| BackupError::Internal(format!("transaction開始に失敗: {e}")))?;
+        let exists = tx
+            .query_row(
+                "SELECT 1 FROM collections WHERE scope = ?1 AND name = ?2",
+                rusqlite::params![scope, name],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|e| BackupError::Internal(format!("collections読込に失敗: {e}")))?;
+        if exists.is_some() {
+            return Err(W2WriteError::Duplicate);
+        }
+        tx.execute(
+            "INSERT INTO collections (scope, name, created_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![scope, name, now_jst()],
+        )
+        .map_err(|e| BackupError::Internal(format!("collections挿入に失敗: {e}")))?;
+        let id = tx.last_insert_rowid();
+        Self::audit_ok_on_tx(&tx, &scope, action, detail_json)?;
+        tx.commit()
+            .map_err(|e| BackupError::Internal(format!("collections挿入のcommitに失敗: {e}")))?;
+        Ok(CollectionDetail {
+            id,
+            name: name.to_string(),
+            uuids: Vec::new(),
+        })
+    }
+
+    /// collectionの改名(id不変。不在idはNotFound・改名先の同名はDuplicate。応答は
+    /// 操作後の対象状態として実際の構成uuid一覧を読み戻す=コードレビュー高2。
+    /// 成功audit記録を改名と同一transactionで確定する=中4)。
+    pub fn rename_collection(
+        &mut self,
+        bucket: &str,
+        prefix: &str,
+        collection_id: i64,
+        new_name: &str,
+        action: &str,
+        detail_json: &str,
+    ) -> Result<CollectionDetail, W2WriteError> {
+        let scope = w2_scope(bucket, prefix);
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| BackupError::Internal(format!("transaction開始に失敗: {e}")))?;
+        let current = tx
+            .query_row(
+                "SELECT name FROM collections WHERE scope = ?1 AND id = ?2",
+                rusqlite::params![scope, collection_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| BackupError::Internal(format!("collections読込に失敗: {e}")))?;
+        if current.is_none() {
+            return Err(W2WriteError::NotFound);
+        }
+        let clash = tx
+            .query_row(
+                "SELECT 1 FROM collections WHERE scope = ?1 AND name = ?2 AND id != ?3",
+                rusqlite::params![scope, new_name, collection_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|e| BackupError::Internal(format!("collections読込に失敗: {e}")))?;
+        if clash.is_some() {
+            return Err(W2WriteError::Duplicate);
+        }
+        tx.execute(
+            "UPDATE collections SET name = ?3 WHERE scope = ?1 AND id = ?2",
+            rusqlite::params![scope, collection_id, new_name],
+        )
+        .map_err(|e| BackupError::Internal(format!("collections更新に失敗: {e}")))?;
+        Self::audit_ok_on_tx(&tx, &scope, action, detail_json)?;
+        tx.commit()
+            .map_err(|e| BackupError::Internal(format!("collections更新のcommitに失敗: {e}")))?;
+        // 改名後の実際の構成uuid一覧(GET /api/collections/:idと同一内容=高2)
+        let detail = self.collection_detail(bucket, prefix, collection_id)?;
+        Ok(detail.unwrap_or(CollectionDetail {
+            id: collection_id,
+            name: new_name.to_string(),
+            uuids: Vec::new(),
+        }))
+    }
+
+    /// collectionの削除(構成参照の解除のみ=collection_itemsはFK CASCADEで消え・
+    /// entity側には影響しない)。不在idはNotFound。成功audit記録を削除と同一
+    /// transactionで確定する=コードレビュー中4。
+    pub fn delete_collection(
+        &mut self,
+        bucket: &str,
+        prefix: &str,
+        collection_id: i64,
+        action: &str,
+        detail_json: &str,
+    ) -> Result<(), W2WriteError> {
+        let scope = w2_scope(bucket, prefix);
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| BackupError::Internal(format!("transaction開始に失敗: {e}")))?;
+        let deleted = tx
+            .execute(
+                "DELETE FROM collections WHERE scope = ?1 AND id = ?2",
+                rusqlite::params![scope, collection_id],
+            )
+            .map_err(|e| BackupError::Internal(format!("collections削除に失敗: {e}")))?;
+        if deleted == 0 {
+            return Err(W2WriteError::NotFound);
+        }
+        Self::audit_ok_on_tx(&tx, &scope, action, detail_json)?;
+        tx.commit()
+            .map_err(|e| BackupError::Internal(format!("collections削除のcommitに失敗: {e}")))?;
+        Ok(())
+    }
+
+    /// 構成entityの一括追加(不在collection・catalogに無いuuidはNotFound。追加済み
+    /// uuidは正規のskip=冪等。検証・挿入・成功audit記録を単一transactionで行い
+    /// 部分反映を作らない=コードレビュー中4)。
+    pub fn add_collection_items(
+        &mut self,
+        bucket: &str,
+        prefix: &str,
+        collection_id: i64,
+        uuids: &[String],
+        action: &str,
+        detail_json: &str,
+    ) -> Result<CollectionDetail, W2WriteError> {
+        let scope = w2_scope(bucket, prefix);
+        let cache_scope = scope_key(bucket, prefix);
+        let now = now_jst();
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| BackupError::Internal(format!("transaction開始に失敗: {e}")))?;
+        let name = tx
+            .query_row(
+                "SELECT name FROM collections WHERE scope = ?1 AND id = ?2",
+                rusqlite::params![scope, collection_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| BackupError::Internal(format!("collections読込に失敗: {e}")))?;
+        let Some(name) = name else {
+            return Err(W2WriteError::NotFound);
+        };
+        // 追加uuidは当該scopeのcache(entities)に実在すること(不在はNotFound)
+        for uuid in uuids {
+            let found = tx
+                .query_row(
+                    "SELECT 1 FROM entities WHERE scope = ?1 AND uuid = ?2",
+                    rusqlite::params![cache_scope, uuid],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|e| BackupError::Internal(format!("entities読込に失敗: {e}")))?;
+            if found.is_none() {
+                return Err(W2WriteError::NotFound);
+            }
+        }
+        // 追加済みuuidの再追加は冪等に成功(UNIQUE PKとの衝突をerrorにしない)
+        for uuid in uuids {
+            tx.execute(
+                "INSERT INTO collection_items (collection_id, scope, uuid, added_at) \
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
+                rusqlite::params![collection_id, scope, uuid, now],
+            )
+            .map_err(|e| BackupError::Internal(format!("collection_items挿入に失敗: {e}")))?;
+        }
+        Self::audit_ok_on_tx(&tx, &scope, action, detail_json)?;
+        tx.commit().map_err(|e| {
+            BackupError::Internal(format!("collection_items追加のcommitに失敗: {e}"))
+        })?;
+        let detail = self.collection_detail(bucket, prefix, collection_id)?;
+        Ok(detail.unwrap_or(CollectionDetail {
+            id: collection_id,
+            name,
+            uuids: Vec::new(),
+        }))
+    }
+
+    /// 構成からの除去(不在collection・非構成uuidはNotFound。成功audit記録を除去と
+    /// 同一transactionで確定する=コードレビュー中4)。
+    pub fn remove_collection_item(
+        &mut self,
+        bucket: &str,
+        prefix: &str,
+        collection_id: i64,
+        uuid: &str,
+        action: &str,
+        detail_json: &str,
+    ) -> Result<CollectionDetail, W2WriteError> {
+        let scope = w2_scope(bucket, prefix);
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| BackupError::Internal(format!("transaction開始に失敗: {e}")))?;
+        let name = tx
+            .query_row(
+                "SELECT name FROM collections WHERE scope = ?1 AND id = ?2",
+                rusqlite::params![scope, collection_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| BackupError::Internal(format!("collections読込に失敗: {e}")))?;
+        let Some(name) = name else {
+            return Err(W2WriteError::NotFound);
+        };
+        let deleted = tx
+            .execute(
+                "DELETE FROM collection_items WHERE scope = ?1 AND collection_id = ?2 AND uuid = ?3",
+                rusqlite::params![scope, collection_id, uuid],
+            )
+            .map_err(|e| BackupError::Internal(format!("collection_items削除に失敗: {e}")))?;
+        if deleted == 0 {
+            return Err(W2WriteError::NotFound);
+        }
+        Self::audit_ok_on_tx(&tx, &scope, action, detail_json)?;
+        tx.commit().map_err(|e| {
+            BackupError::Internal(format!("collection_items削除のcommitに失敗: {e}"))
+        })?;
+        let detail = self.collection_detail(bucket, prefix, collection_id)?;
+        Ok(detail.unwrap_or(CollectionDetail {
+            id: collection_id,
+            name,
+            uuids: Vec::new(),
+        }))
+    }
+
+    /// UI書込操作のaudit_log記録(TASK-17設計4.1・6.2・D-W10: UI書込操作のみ。
+    /// 成功・失敗両方を記録し、失敗時はerror_codeを入れる)。
+    pub fn record_audit(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        action: &str,
+        detail_json: &str,
+        outcome: &str,
+        error_code: Option<&str>,
+    ) -> BackupResult<()> {
+        self.conn
+            .execute(
+                "INSERT INTO audit_log (scope, recorded_at, action, detail_json, outcome,\
+                 error_code) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    w2_scope(bucket, prefix),
+                    now_jst(),
+                    action,
+                    detail_json,
+                    outcome,
+                    error_code
+                ],
+            )
+            .map_err(|e| BackupError::Internal(format!("audit_log記録に失敗: {e}")))?;
+        Ok(())
+    }
 }
 
 /// pending_items 1行分(設計2章schema・§3のscan結果)。
@@ -1546,6 +2154,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// [covers:catalog.tags-collections-audit-log-tables]
+    /// TASK-17 W2(TASK-19)の新4 table(local語彙・UI書込操作の履歴=いずれも永続
+    /// class)をmigrationが構築する: tags(scope/uuid/tag/created_at・PK(scope,uuid,tag))・
+    /// collections(id/scope/name/created_at・UNIQUE(scope,name))・collection_items
+    /// (collection_id/scope/uuid/added_at・PK(collection_id,scope,uuid)・collections.id
+    /// へのFOREIGN KEY ON DELETE CASCADE)・audit_log(id/scope/recorded_at/action/
+    /// detail_json/outcome/error_code)。tags同PK行・collections同(scope,name)行の
+    /// 重複挿入は制約で拒否される(設計4.1のschemaどおり)。
+    #[test]
+    fn migration_builds_w2_local_vocabulary_tables() {
+        let (_tmp, db) = open_test_db("cat-w2-tables");
+        let columns = |table: &str| -> Vec<String> {
+            let mut stmt = db
+                .conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let tables = [
+            ("tags", vec!["scope", "uuid", "tag", "created_at"]),
+            ("collections", vec!["id", "scope", "name", "created_at"]),
+            (
+                "collection_items",
+                vec!["collection_id", "scope", "uuid", "added_at"],
+            ),
+            (
+                "audit_log",
+                vec![
+                    "id",
+                    "scope",
+                    "recorded_at",
+                    "action",
+                    "detail_json",
+                    "outcome",
+                    "error_code",
+                ],
+            ),
+        ];
+        for (table, expect_cols) in tables {
+            let cols = columns(table);
+            assert!(
+                !cols.is_empty(),
+                "{table}が存在する(実装前はtable不在でfailを許容)"
+            );
+            for c in expect_cols {
+                assert!(
+                    cols.contains(&c.to_string()),
+                    "{table}に{c}列がある: {cols:?}"
+                );
+            }
+        }
+        // PK制約: tagsの同(scope,uuid,tag)行は重複挿入不可
+        db.conn
+            .execute(
+                "INSERT INTO tags (scope, uuid, tag, created_at) VALUES ('s', 'u', 't', '2026-11-05T12:00:00+09:00')",
+                [],
+            )
+            .expect("tags行挿入");
+        let dup = db.conn.execute(
+            "INSERT INTO tags (scope, uuid, tag, created_at) VALUES ('s', 'u', 't', '2026-11-05T12:00:00+09:00')",
+            [],
+        );
+        assert!(dup.is_err(), "tags同PK行の重複挿入は制約違反: {dup:?}");
+        // UNIQUE制約: collectionsの同(scope,name)行は重複挿入不可
+        db.conn
+            .execute(
+                "INSERT INTO collections (scope, name, created_at) VALUES ('s', 'n', '2026-11-05T12:00:00+09:00')",
+                [],
+            )
+            .expect("collections行挿入");
+        let dup = db.conn.execute(
+            "INSERT INTO collections (scope, name, created_at) VALUES ('s', 'n', '2026-11-05T12:00:00+09:00')",
+            [],
+        );
+        assert!(dup.is_err(), "collections同(scope,name)行の重複挿入はUNIQUE制約違反: {dup:?}");
     }
 
     /// [covers:catalog.schema-migration]

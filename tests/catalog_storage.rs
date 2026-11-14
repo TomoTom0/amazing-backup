@@ -1498,3 +1498,77 @@ fn api_keys_table_survives_rebuild() {
         "rebuild後もapi_keys行は保持(永続class)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// TASK-17 W2(TASK-19: tag/collection・audit_log・2026-11-14テスト先行)。
+// 新4 tableの永続class契約(rebuildでdropしない)を結合観測する。table自体のschemaは
+// src/catalog.rs unit test(catalog.tags-collections-audit-log-tables)が担保。
+
+/// [covers:catalog.tags-collections-persistent-class]
+/// TASK-17 W2の新4 table(tags/collections/collection_items/audit_log)は永続class:
+/// manage catalog rebuildのcache class置換(replace_scope)でもdropされない
+/// (credentials/push_intents/api_keysと同一契約。tag・設定・履歴がrebuildで失われない
+/// =設計4.1のclass分類)。
+#[test]
+fn w2_local_vocabulary_tables_survive_rebuild() {
+    let Some(fx) = StorageFixture::new("cat-w2-persist", StorageOpts::default()) else {
+        return;
+    };
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(DB作成・事前): {stdout}{stderr}");
+
+    // 各tableへ1行ずつ挿入(rusqlite直接=実装後の書込APIと同一schema)
+    let conn = rusqlite::Connection::open(fx.catalog_db()).expect("catalog.db open");
+    conn.execute(
+        "INSERT INTO tags (scope, uuid, tag, created_at) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![
+            "api-bucket:amazing-backup/",
+            "11111111-1111-1111-1111-111111111111",
+            "docs",
+            "2026-11-05T12:00:00+09:00"
+        ],
+    )
+    .expect("tags行挿入(実装前はtable不在でfailを許容)");
+    conn.execute(
+        "INSERT INTO collections (scope, name, created_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params!["api-bucket:amazing-backup/", "grp", "2026-11-05T12:00:00+09:00"],
+    )
+    .expect("collections行挿入");
+    let collection_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO collection_items (collection_id, scope, uuid, added_at) \
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![
+            collection_id,
+            "api-bucket:amazing-backup/",
+            "11111111-1111-1111-1111-111111111111",
+            "2026-11-05T12:00:00+09:00"
+        ],
+    )
+    .expect("collection_items行挿入");
+    conn.execute(
+        "INSERT INTO audit_log (scope, recorded_at, action, detail_json, outcome) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            "api-bucket:amazing-backup/",
+            "2026-11-05T12:00:00+09:00",
+            "tags_replace",
+            "{\"uuid\":\"11111111-1111-1111-1111-111111111111\"}",
+            "ok"
+        ],
+    )
+    .expect("audit_log行挿入");
+    drop(conn);
+
+    let (code, stdout, stderr) = fx.manage("catalog", &["rebuild"]);
+    assert_eq!(code, 0, "rebuild: {stdout}{stderr}");
+
+    // rebuild後も各tableの行は保持される(永続class=cache置換の対象外)
+    let conn = rusqlite::Connection::open(fx.catalog_db()).expect("catalog.db open");
+    for table in ["tags", "collections", "collection_items", "audit_log"] {
+        let n: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap_or_else(|e| panic!("{table}行数読取(実装前はtable不在でfailを許容): {e}"));
+        assert_eq!(n, 1, "rebuild後も{table}行は保持(永続class)");
+    }
+}

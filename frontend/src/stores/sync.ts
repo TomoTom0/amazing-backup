@@ -7,6 +7,9 @@ import {
   type ApiError,
 } from '../api/client'
 import { useEntitiesStore } from './entities'
+import { useTagsStore } from './tags'
+import { useFoldersStore } from './folders'
+import { useCollectionsStore } from './collections'
 
 /** liveness(health)の表示状態 */
 export type HealthState = 'checking' | 'ok' | 'error'
@@ -90,6 +93,8 @@ export const useSyncStore = defineStore('sync', {
     /** 手動refresh(POST /api/sync。応答はGET /api/syncと同一形式のためPOST応答で
      * sync状態を更新する=改めてGET /api/syncを呼ばない)。成功後にentities一覧を
      * 再取得する(EntitiesViewの実描画がexcludedのためstore層で観測する解釈)。
+     * 取得済み(ok)のtag/folder/collection選択肢も再取得する(syncでremote索引が
+     * 置き換わるため。未取得(not_fetched)と失敗(error=再試行導線待ち)は対象外)。
      * 失敗はlastRefreshErrorへ別保持しentities再取得は行わない */
     async refresh(): Promise<void> {
       this.refreshing = true
@@ -103,6 +108,12 @@ export const useSyncStore = defineStore('sync', {
         this.syncEntryCount = result.data.entry_count
         this.lastRefreshError = null
         await useEntitiesStore().refetchEntities()
+        const tags = useTagsStore()
+        if (tags.fetchState === 'ok') await tags.fetchTags()
+        const folders = useFoldersStore()
+        if (folders.fetchState === 'ok') await folders.fetchFolders()
+        const collections = useCollectionsStore()
+        if (collections.fetchState === 'ok') await collections.fetchCollections()
       } else {
         this.lastRefreshError = result.error
       }

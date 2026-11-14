@@ -668,6 +668,15 @@ fn validation_failed(message: &'static str) -> ApiError {
     }
 }
 
+/// 重複(409・TASK-17 W2: collectionsのUNIQUE(scope,name)由来=同名作成・改名先同名)。
+fn duplicate(message: &'static str) -> ApiError {
+    ApiError {
+        status: axum::http::StatusCode::CONFLICT,
+        code: "duplicate",
+        message,
+    }
+}
+
 fn upstream(message: &'static str) -> ApiError {
     ApiError {
         status: axum::http::StatusCode::BAD_GATEWAY,
@@ -889,6 +898,30 @@ fn build_router(state: AppState) -> axum::Router {
             "/api/entities/{uuid}/versions",
             axum::routing::get(get_entity_versions),
         )
+        .route(
+            "/api/entities/{uuid}/tags",
+            axum::routing::put(put_entity_tags),
+        )
+        .route("/api/tags", axum::routing::get(get_tags))
+        .route("/api/folders", axum::routing::get(get_folders))
+        .route(
+            "/api/collections",
+            axum::routing::get(get_collections).post(post_collection),
+        )
+        .route(
+            "/api/collections/{id}",
+            axum::routing::get(get_collection_detail)
+                .put(put_collection)
+                .delete(delete_collection),
+        )
+        .route(
+            "/api/collections/{id}/items",
+            axum::routing::post(post_collection_items),
+        )
+        .route(
+            "/api/collections/{id}/items/{uuid}",
+            axum::routing::delete(delete_collection_item),
+        )
         .route("/api/pins", axum::routing::get(get_pins))
         .route("/api/locations", axum::routing::get(get_locations))
         .route("/api/pending", axum::routing::get(get_pending))
@@ -994,21 +1027,63 @@ async fn get_entities(
     let query = params.get("query").cloned();
     let category = params.get("category").cloned();
     let label = params.get("label").cloned();
+    // W2絞り込み: ?tag=<tag名>=当該tagを持つentityへ・?collection=<collections.id>=
+    // 当該collection構成のentityへ(folder絞り込み用の新paramは設けず既存label=で成立)
+    let tag = params.get("tag").cloned();
+    // ?untagged=1=tagを1つも持たないentityのみ(設計2.2「tag無しも選択可」=コード
+    // レビュー中9。tag=との同時指定・値1以外は400 invalid_request)
+    let untagged = match params.get("untagged") {
+        None => false,
+        Some(v) if v == "1" => true,
+        Some(_) => return Err(invalid_request("untaggedは1でのみ指定してください")),
+    };
+    if untagged && tag.is_some() {
+        return Err(invalid_request("untaggedとtagは同時に指定できません"));
+    }
+    let collection_id = match params.get("collection") {
+        None => None,
+        Some(raw) => Some(parse_collection_id(raw)?),
+    };
     let effective = state.scope.clone();
-    let entries = run_blocking(move || {
+    let (entries, tag_rows, collection_members) = run_blocking(move || {
         let (bucket, prefix) = resolve_scope(scope.as_deref(), &effective)?;
         let db = crate::catalog::CatalogDb::open()?;
         let (_header, entries) = db.load_entries(&bucket, &prefix)?;
-        Ok(entries)
+        let tag_rows = db.scope_tag_rows(&bucket, &prefix)?;
+        let collection_members = match collection_id {
+            // 不在collection idは空集合=空配列200(絞り込みの一種でありerrorにしない)
+            Some(id) => db
+                .collection_detail(&bucket, &prefix, id)?
+                .map(|c| c.uuids)
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        Ok((entries, tag_rows, collection_members))
     })
     .await?;
-    // 絞り込み(query=CLI queryと同一規則・category/label=location属性一致)
+    // uuid毎のtag一覧(scope_tag_rowsはuuid・tag昇順のため挿入順がそのまま昇順)
+    let mut tags_by_uuid: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (uuid, tag) in &tag_rows {
+        tags_by_uuid.entry(uuid.clone()).or_default().push(tag.clone());
+    }
+    let member_set: std::collections::HashSet<String> = collection_members.into_iter().collect();
+    // 絞り込み(query=CLI queryと同一規則・category/label=location属性一致(label=空文字は
+    // ラベルなし完全一致)・tag/collection=W2 local語彙=実効scope内の行のみ・untagged=
+    // tag行を持たないentityのみ)
     let matched: Vec<&crate::index::IndexFileEntry> = entries
         .iter()
         .filter(|e| {
             query_match(e, query.as_deref())
                 && crate::storage::query::category_matched(e, category.as_deref())
                 && label_match(e, label.as_deref())
+                && tag.as_deref().is_none_or(|want| {
+                    tags_by_uuid
+                        .get(&e.uuid)
+                        .is_some_and(|list| list.iter().any(|t| t == want))
+                })
+                && (!untagged || !tags_by_uuid.contains_key(&e.uuid))
+                && (collection_id.is_none() || member_set.contains(&e.uuid))
         })
         .collect();
     // paging(page=1始点・total_pagesは0件でも1)
@@ -1019,7 +1094,14 @@ async fn get_entities(
         .into_iter()
         .skip(skip)
         .take(ENTITIES_PER_PAGE)
-        .map(|e| crate::storage::query::entry_summary_json(e, false))
+        .map(|e| {
+            // W2: 各summary行へtags(昇順)を含める(行のtag列chip表示の基盤)
+            let mut summary = crate::storage::query::entry_summary_json(e, false);
+            summary["tags"] = serde_json::json!(
+                tags_by_uuid.get(&e.uuid).cloned().unwrap_or_default()
+            );
+            summary
+        })
         .collect();
     Ok(axum::Json(serde_json::json!({
         "entities": page_items,
@@ -1043,7 +1125,8 @@ fn find_entry_by_uuid(
 }
 
 /// GET /api/entities/:uuid(設計6章: 詳細=versions/pins/locations入り。
-/// version_list付きentry_summary_json互換。不在は404 not_found)。
+/// version_list付きentry_summary_json互換+TASK-17 W2のtags・collections(所属
+/// collection名一覧)。不在は404 not_found)。
 async fn get_entity_detail(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(uuid): axum::extract::Path<String>,
@@ -1053,7 +1136,7 @@ async fn get_entity_detail(
         let (bucket, prefix) = resolve_scope(None, &effective)?;
         let db = crate::catalog::CatalogDb::open()?;
         let e = find_entry_by_uuid(&db, &bucket, &prefix, &uuid)?;
-        Ok(crate::storage::query::entry_summary_json(&e, true))
+        entity_detail_with_vocabulary(&db, &bucket, &prefix, &e)
     })
     .await?;
     Ok(axum::Json(value))
@@ -1419,6 +1502,599 @@ async fn get_runs(
 /// 構造的に担う(job系APIも同一session gate=設計6章D-W11)。
 async fn get_jobs() -> impl axum::response::IntoResponse {
     axum::Json(serde_json::json!({"jobs": []}))
+}
+
+// ---------------------------------------------------------------------------
+// TASK-17 W2(TASK-19)読取API: tag/folder/collection(local語彙の語彙API)。
+// いずれもscopeは読取API共通(省略時=実効profile・?scope=明示優先)。
+
+/// GET /api/tags(tag一覧`{"tags":[{tag,entity_count}]}`。並びはtag名昇順・
+/// entity_countは当該tagを持つ実効scope内のentity数)。
+async fn get_tags(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let effective = state.scope.clone();
+    let value = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
+        let db = crate::catalog::CatalogDb::open()?;
+        let rows = db.tag_counts(&bucket, &prefix)?;
+        Ok(serde_json::json!({
+            "tags": rows.into_iter().map(|(tag, entity_count)| {
+                serde_json::json!({"tag": tag, "entity_count": entity_count})
+            }).collect::<Vec<_>>(),
+        }))
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
+/// GET /api/folders(folder=labelの階層集約`{"folders":[{label,path,entity_count}]}`。
+/// 各行=labelのdirectory区切り(`/`)で導出した階層node(中間nodeも1行)・path=当該
+/// nodeのrootからの完全path(既存label=絞り込みの値と一致=folder絞り込み用の新param
+/// を設けない=D-W4)・label=最終区切り要素・entity_count=当該node配下のentity数
+/// (子folder配下を含む合計)・並びはpath昇順。ラベルなし(location.label="")の
+/// locationを持つentityは先頭行{label:"",path:"",entity_count}(コードレビュー中10:
+/// 設計2.2「(ラベルなし)」nodeの基盤。行の選択は既存label=の空文字完全一致と対応)。
+async fn get_folders(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let effective = state.scope.clone();
+    let value = run_blocking(move || {
+        use std::collections::{BTreeMap, BTreeSet};
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
+        let db = crate::catalog::CatalogDb::open()?;
+        let (_header, entries) = db.load_entries(&bucket, &prefix)?;
+        // 階層集約: entity毎の(空を除く)label集合をancestor pathへ展開し、
+        // node pathごとにuuid集合(BTreeSet=同一entityの複数locationは1件と数える)
+        let mut nodes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for e in &entries {
+            let labels: BTreeSet<&str> = e
+                .locations
+                .iter()
+                .map(|l| l.label.as_str())
+                .filter(|l| !l.is_empty())
+                .collect();
+            for label in labels {
+                let segments: Vec<&str> = label.split('/').filter(|s| !s.is_empty()).collect();
+                if segments.is_empty() {
+                    continue;
+                }
+                for depth in 1..=segments.len() {
+                    let path = segments[..depth].join("/");
+                    nodes.entry(path).or_default().insert(e.uuid.clone());
+                }
+            }
+        }
+        // ラベルなしnode(コードレビュー中10): label=""のlocationを持つentity集合を
+        // path=""の行として加える(BTreeMapの並びで空文字は常に先頭=応答の先頭行。
+        // ラベルなしentityが0件時は他nodeと同一の「実在から導出」規則で出さない)
+        let unlabelled: BTreeSet<String> = entries
+            .iter()
+            .filter(|e| e.locations.iter().any(|l| l.label.is_empty()))
+            .map(|e| e.uuid.clone())
+            .collect();
+        if !unlabelled.is_empty() {
+            nodes.insert(String::new(), unlabelled);
+        }
+        // BTreeMapのkeys昇順=path昇順そのもの
+        let folders: Vec<serde_json::Value> = nodes
+            .into_iter()
+            .map(|(path, uuids)| {
+                serde_json::json!({
+                    "label": path.rsplit('/').next().unwrap_or(&path),
+                    "path": path,
+                    "entity_count": uuids.len(),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "folders": folders }))
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
+/// GET /api/collections(collection一覧`{"collections":[{id,name,entity_count}]}`。
+/// 並びはname昇順・entity_countは構成entity数。対照scopeのcollectionは混入しない)。
+async fn get_collections(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let effective = state.scope.clone();
+    let value = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
+        let db = crate::catalog::CatalogDb::open()?;
+        let rows = db.collection_rows(&bucket, &prefix)?;
+        Ok(serde_json::json!({
+            "collections": rows.into_iter().map(|c| {
+                serde_json::json!({"id": c.id, "name": c.name, "entity_count": c.entity_count})
+            }).collect::<Vec<_>>(),
+        }))
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
+/// collection詳細schema(`{"collection":{id,name,uuids}}`・uuidsは追加順)。
+fn collection_detail_json(c: &crate::catalog::CollectionDetail) -> serde_json::Value {
+    serde_json::json!({"collection": {"id": c.id, "name": c.name, "uuids": c.uuids}})
+}
+
+/// path/queryのcollection id parse(数値で無い場合はinvalid_request)。
+fn parse_collection_id(raw: &str) -> Result<i64, ApiError> {
+    raw.parse::<i64>()
+        .map_err(|_| invalid_request("collectionは数値idで指定してください"))
+}
+
+/// GET /api/collections/:id(詳細。不在idは404 not_found)。
+async fn get_collection_detail(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let id = parse_collection_id(&id)?;
+    let effective = state.scope.clone();
+    let value = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
+        let db = crate::catalog::CatalogDb::open()?;
+        let detail = db
+            .collection_detail(&bucket, &prefix, id)?
+            .ok_or_else(|| BackupError::Target("対象のcollectionが見つかりません".to_string()))?;
+        Ok(collection_detail_json(&detail))
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
+// ---------------------------------------------------------------------------
+// TASK-17 W2(TASK-19)書込API: tag/collection操作。書込はsync/scanと同一の
+// single-flight(semaphore 1)で直列化しspawn_blocking経由で実行(設計3.1)。
+// 全操作をaudit_logへ記録する(成功・失敗両方・D-W10: UI書込操作のみ)。
+
+/// W2 tag名の規則(設計3.2: `^[a-z0-9][a-z0-9-]{0,63}$`を流用)。
+fn valid_tag_name(tag: &str) -> bool {
+    let bytes = tag.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    let first_ok = bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit();
+    first_ok
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+/// entity詳細JSON(W2語彙拡張付き: entry_summary_json(要約+version_list)へtags・
+/// collectionsを加えた形式。GET /api/entities/:uuidとPUT tagsの応答に共用=
+/// 設計3.1「書込応答は読取系と同一schema」)。
+fn entity_detail_with_vocabulary(
+    db: &crate::catalog::CatalogDb,
+    bucket: &str,
+    prefix: &str,
+    e: &crate::index::IndexFileEntry,
+) -> BackupResult<serde_json::Value> {
+    let mut value = crate::storage::query::entry_summary_json(e, true);
+    value["tags"] = serde_json::json!(db.entity_tags(bucket, prefix, &e.uuid)?);
+    value["collections"] = serde_json::json!(db.collections_of_uuid(bucket, prefix, &e.uuid)?);
+    Ok(value)
+}
+
+/// audit_logへの失敗audit記録(失敗時のみこの経路を通る。成功auditは
+/// audit_ok_on_tx(catalog.rs)が操作tx内で記録するためここには来ない。
+/// 記録自体の失敗は操作結果に影響させない=logのみ。秘密情報は含まない
+/// 対象特定情報のみ)。
+fn audit_outcome(
+    db: &crate::catalog::CatalogDb,
+    bucket: &str,
+    prefix: &str,
+    action: &str,
+    detail: &serde_json::Value,
+    outcome: &str,
+    error_code: Option<&str>,
+) {
+    let detail_json = serde_json::to_string(detail).unwrap_or_default();
+    if let Err(e) = db.record_audit(bucket, prefix, action, &detail_json, outcome, error_code) {
+        eprintln!("serve: audit_log記録に失敗(logのみ): {e}");
+    }
+}
+
+/// W2書込flow(spawn_blocking内)の処理結果。成否のHTTP変換はhandler側で行い、
+/// audit_log記録は各flowが成否両方で済ませる(内部errorはBackupErrorとして
+/// run_blocking経由で500系へ変換されるためこの区分には含めない)。
+enum W2Outcome {
+    /// 成功(応答body)
+    Ok(serde_json::Value),
+    /// 同名等の重複(409 duplicate)
+    Duplicate,
+    /// 対象(entity・collection)不在(404 not_found)
+    NotFound,
+    /// 入力規則違反(422 validation_failed)
+    Validation,
+}
+
+impl W2Outcome {
+    /// HTTP応答への変換(messageは区分ごとの一般化文言)。
+    fn into_json_response(self) -> Result<axum::Json<serde_json::Value>, ApiError> {
+        match self {
+            W2Outcome::Ok(v) => Ok(axum::Json(v)),
+            W2Outcome::Duplicate => Err(duplicate("同名のcollectionが既に存在します")),
+            W2Outcome::NotFound => Err(not_found("対象が見つかりません")),
+            W2Outcome::Validation => Err(validation_failed("入力値の規則に違反しています")),
+        }
+    }
+}
+
+/// W2書込flow内でのstorage層W2WriteErrorの変換(audit記録付き)。
+fn w2_map_write_error(
+    db: &crate::catalog::CatalogDb,
+    bucket: &str,
+    prefix: &str,
+    action: &str,
+    detail: &serde_json::Value,
+    e: crate::catalog::W2WriteError,
+) -> Result<W2Outcome, BackupError> {
+    match e {
+        crate::catalog::W2WriteError::Duplicate => {
+            audit_outcome(db, bucket, prefix, action, detail, "failed", Some("duplicate"));
+            Ok(W2Outcome::Duplicate)
+        }
+        crate::catalog::W2WriteError::NotFound => {
+            audit_outcome(db, bucket, prefix, action, detail, "failed", Some("not_found"));
+            Ok(W2Outcome::NotFound)
+        }
+        crate::catalog::W2WriteError::Other(err) => {
+            audit_outcome(db, bucket, prefix, action, detail, "failed", Some("internal"));
+            Err(err)
+        }
+    }
+}
+
+/// 書込APIのsingle-flight(semaphore 1)acquire(sync/scan・他の書込APIと直列化)。
+async fn acquire_write_permit(
+    state: &AppState,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    state
+        .sync_permits
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|e| {
+            eprintln!("serve: 書込semaphoreのacquireに失敗(logのみ): {e}");
+            internal("内部エラーが発生しました")
+        })
+}
+
+/// W2書込flow内の読取・内部error(BackupError)の共通経路(コードレビュー中5:
+/// storage失敗も監査記録の共通経路へ通す=failed/internal記録後に500系へ変換)。
+fn w2_audit_internal(
+    db: &crate::catalog::CatalogDb,
+    bucket: &str,
+    prefix: &str,
+    action: &str,
+    detail: &serde_json::Value,
+    e: BackupError,
+) -> BackupError {
+    audit_outcome(db, bucket, prefix, action, detail, "failed", Some("internal"));
+    e
+}
+
+/// PUT /api/entities/:uuid/tags(tag一覧の置換。body {tags:[...]}・冪等・空配列は
+/// 全tag削除・body内重複は正規化(set化)して受理=コードレビュー中5。応答は
+/// EntityDetail形式(tags・collections付き)。tag名規則違反は422・不在uuidは404。
+/// 操作と成功audit記録は同一transactionで確定(コードレビュー中4)。
+async fn put_entity_tags(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| invalid_request("リクエストの形式が不正です"))?;
+    let Some(raw_tags) = parsed.get("tags").and_then(|t| t.as_array()) else {
+        return Err(invalid_request("tagsは文字列の配列で指定してください"));
+    };
+    let mut tags: Vec<String> = Vec::with_capacity(raw_tags.len());
+    for t in raw_tags {
+        let Some(tag) = t.as_str() else {
+            return Err(invalid_request("tagsは文字列の配列で指定してください"));
+        };
+        tags.push(tag.to_string());
+    }
+    // body内重複は「一覧の置換」semanticsで同一tagのため正規化して受理(中5)
+    let mut seen = std::collections::HashSet::new();
+    tags.retain(|t| seen.insert(t.clone()));
+    let _permit = acquire_write_permit(&state).await?;
+    let effective = state.scope.clone();
+    let outcome = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
+        let mut db = crate::catalog::CatalogDb::open()?;
+        let detail = serde_json::json!({"uuid": uuid, "tags": tags});
+        let detail_json = serde_json::to_string(&detail).unwrap_or_default();
+        let mut flow = || -> Result<W2Outcome, BackupError> {
+            // tag名規則(422)
+            if tags.iter().any(|t| !valid_tag_name(t)) {
+                audit_outcome(
+                    &db, &bucket, &prefix, "tags_replace", &detail, "failed",
+                    Some("validation_failed"),
+                );
+                return Ok(W2Outcome::Validation);
+            }
+            // 対象entityは実効scopeのcacheに実在すること(404)。読取失敗も監査経路へ
+            let (_header, entries) = match db.load_entries(&bucket, &prefix) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(w2_audit_internal(
+                        &db, &bucket, &prefix, "tags_replace", &detail, e,
+                    ));
+                }
+            };
+            let Some(e) = entries.iter().find(|e| e.uuid == uuid).cloned() else {
+                audit_outcome(
+                    &db, &bucket, &prefix, "tags_replace", &detail, "failed",
+                    Some("not_found"),
+                );
+                return Ok(W2Outcome::NotFound);
+            };
+            // 置換+成功auditは同一transaction(中4)・storage失敗も監査経路(中5)
+            match db.replace_entity_tags(
+                &bucket, &prefix, &uuid, &tags, "tags_replace", &detail_json,
+            ) {
+                Ok(()) => Ok(W2Outcome::Ok(entity_detail_with_vocabulary(
+                    &db, &bucket, &prefix, &e,
+                )?)),
+                Err(err) => w2_map_write_error(
+                    &db, &bucket, &prefix, "tags_replace", &detail, err,
+                ),
+            }
+        };
+        flow()
+    })
+    .await?;
+    outcome.into_json_response()
+}
+
+/// POST /api/collections(collection作成。body {name}・応答は詳細schema。空nameは
+/// 422・同(scope,name)は409 duplicate。action=collection_create)。
+async fn post_collection(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let name = parse_collection_name_body(&body)?;
+    let _permit = acquire_write_permit(&state).await?;
+    let effective = state.scope.clone();
+    let outcome = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
+        let mut db = crate::catalog::CatalogDb::open()?;
+        let detail = serde_json::json!({"name": name});
+        let detail_json = serde_json::to_string(&detail).unwrap_or_default();
+        let mut flow = || -> Result<W2Outcome, BackupError> {
+            if name.is_empty() {
+                audit_outcome(
+                    &db, &bucket, &prefix, "collection_create", &detail, "failed",
+                    Some("validation_failed"),
+                );
+                return Ok(W2Outcome::Validation);
+            }
+            // 作成+成功auditは同一transaction(コードレビュー中4)
+            match db.create_collection(&bucket, &prefix, &name, "collection_create", &detail_json)
+            {
+                Ok(created) => Ok(W2Outcome::Ok(collection_detail_json(&created))),
+                Err(e) => w2_map_write_error(
+                    &db, &bucket, &prefix, "collection_create", &detail, e,
+                ),
+            }
+        };
+        flow()
+    })
+    .await?;
+    outcome.into_json_response()
+}
+
+/// collection名request bodyのparse({name: string})。
+fn parse_collection_name_body(body: &axum::body::Bytes) -> Result<String, ApiError> {
+    let parsed: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| invalid_request("リクエストの形式が不正です"))?;
+    parsed
+        .get("name")
+        .and_then(|n| n.as_str())
+        .map(String::from)
+        .ok_or_else(|| invalid_request("nameは文字列で指定してください"))
+}
+
+/// PUT /api/collections/:id(改名。body {name}・応答は詳細schema・id不変。空nameは
+/// 422・改名先の同名は409・不在idは404。action=collection_rename)。
+async fn put_collection(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let id = parse_collection_id(&id)?;
+    let name = parse_collection_name_body(&body)?;
+    let _permit = acquire_write_permit(&state).await?;
+    let effective = state.scope.clone();
+    let outcome = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
+        let mut db = crate::catalog::CatalogDb::open()?;
+        let detail = serde_json::json!({"id": id, "name": name});
+        let detail_json = serde_json::to_string(&detail).unwrap_or_default();
+        let mut flow = || -> Result<W2Outcome, BackupError> {
+            if name.is_empty() {
+                audit_outcome(
+                    &db, &bucket, &prefix, "collection_rename", &detail, "failed",
+                    Some("validation_failed"),
+                );
+                return Ok(W2Outcome::Validation);
+            }
+            // 改名+成功auditは同一transaction(中4)・応答uuidsは操作後の実際の構成(高2)
+            match db.rename_collection(&bucket, &prefix, id, &name, "collection_rename", &detail_json)
+            {
+                Ok(renamed) => Ok(W2Outcome::Ok(collection_detail_json(&renamed))),
+                Err(e) => w2_map_write_error(
+                    &db, &bucket, &prefix, "collection_rename", &detail, e,
+                ),
+            }
+        };
+        flow()
+    })
+    .await?;
+    outcome.into_json_response()
+}
+
+/// DELETE /api/collections/:id(削除=構成参照の解除のみ。collection_itemsはFK
+/// CASCADEで消え・entity側には影響しない。応答は{"status":"ok"}。不在idは404。
+/// action=collection_delete)。
+async fn delete_collection(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let id = parse_collection_id(&id)?;
+    let _permit = acquire_write_permit(&state).await?;
+    let effective = state.scope.clone();
+    let outcome = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
+        let mut db = crate::catalog::CatalogDb::open()?;
+        let mut flow = || -> Result<W2Outcome, BackupError> {
+            // audit detail用の現name読取(読取失敗も監査経路=コードレビュー中5)
+            let existing = match db.collection_detail(&bucket, &prefix, id) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(w2_audit_internal(
+                        &db,
+                        &bucket,
+                        &prefix,
+                        "collection_delete",
+                        &serde_json::json!({"id": id}),
+                        e,
+                    ));
+                }
+            };
+            let detail = match &existing {
+                Some(c) => serde_json::json!({"id": id, "name": c.name}),
+                None => serde_json::json!({"id": id}),
+            };
+            let detail_json = serde_json::to_string(&detail).unwrap_or_default();
+            // 削除+成功auditは同一transaction(コードレビュー中4)
+            match db.delete_collection(&bucket, &prefix, id, "collection_delete", &detail_json) {
+                Ok(()) => Ok(W2Outcome::Ok(serde_json::json!({"status": "ok"}))),
+                Err(e) => w2_map_write_error(
+                    &db, &bucket, &prefix, "collection_delete", &detail, e,
+                ),
+            }
+        };
+        flow()
+    })
+    .await?;
+    outcome.into_json_response()
+}
+
+/// POST /api/collections/:id/items(構成entityの一括追加。body {uuids:[...]}・応答は
+/// 詳細schema・uuidsは追加順)。不在collection・catalogに無いuuidは404・追加済みuuid
+/// の再追加は冪等に成功。action=collection_items_add)。
+async fn post_collection_items(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let id = parse_collection_id(&id)?;
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| invalid_request("リクエストの形式が不正です"))?;
+    let Some(raw_uuids) = parsed.get("uuids").and_then(|u| u.as_array()) else {
+        return Err(invalid_request("uuidsは文字列の配列で指定してください"));
+    };
+    let mut uuids: Vec<String> = Vec::with_capacity(raw_uuids.len());
+    for u in raw_uuids {
+        let Some(uuid) = u.as_str() else {
+            return Err(invalid_request("uuidsは文字列の配列で指定してください"));
+        };
+        uuids.push(uuid.to_string());
+    }
+    let _permit = acquire_write_permit(&state).await?;
+    let effective = state.scope.clone();
+    let outcome = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
+        let mut db = crate::catalog::CatalogDb::open()?;
+        let detail_base = serde_json::json!({"id": id, "uuids": uuids});
+        let mut flow = || -> Result<W2Outcome, BackupError> {
+            // audit detail用の現name読取(不在時は後段のNotFoundに任せる・読取失敗も
+            // 監査経路=コードレビュー中5)
+            let name = match db.collection_detail(&bucket, &prefix, id) {
+                Ok(v) => v.map(|c| c.name),
+                Err(e) => {
+                    return Err(w2_audit_internal(
+                        &db,
+                        &bucket,
+                        &prefix,
+                        "collection_items_add",
+                        &detail_base,
+                        e,
+                    ));
+                }
+            };
+            let detail = match &name {
+                Some(n) => serde_json::json!({"id": id, "name": n, "uuids": uuids}),
+                None => detail_base.clone(),
+            };
+            let detail_json = serde_json::to_string(&detail).unwrap_or_default();
+            // 追加+成功auditは同一transaction(コードレビュー中4)
+            match db.add_collection_items(
+                &bucket, &prefix, id, &uuids, "collection_items_add", &detail_json,
+            ) {
+                Ok(added) => Ok(W2Outcome::Ok(collection_detail_json(&added))),
+                Err(e) => w2_map_write_error(
+                    &db, &bucket, &prefix, "collection_items_add", &detail, e,
+                ),
+            }
+        };
+        flow()
+    })
+    .await?;
+    outcome.into_json_response()
+}
+
+/// DELETE /api/collections/:id/items/:uuid(構成からの除去。応答は詳細schema。
+/// 非構成uuid・不在collectionは404。action=collection_items_remove)。
+async fn delete_collection_item(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path((id, uuid)): axum::extract::Path<(String, String)>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let id = parse_collection_id(&id)?;
+    let _permit = acquire_write_permit(&state).await?;
+    let effective = state.scope.clone();
+    let outcome = run_blocking(move || {
+        let (bucket, prefix) = resolve_scope(None, &effective)?;
+        let mut db = crate::catalog::CatalogDb::open()?;
+        let detail_base = serde_json::json!({"id": id, "uuid": uuid});
+        let mut flow = || -> Result<W2Outcome, BackupError> {
+            // audit detail用の現name読取(不在時は後段のNotFoundに任せる・読取失敗も
+            // 監査経路=コードレビュー中5)
+            let name = match db.collection_detail(&bucket, &prefix, id) {
+                Ok(v) => v.map(|c| c.name),
+                Err(e) => {
+                    return Err(w2_audit_internal(
+                        &db,
+                        &bucket,
+                        &prefix,
+                        "collection_items_remove",
+                        &detail_base,
+                        e,
+                    ));
+                }
+            };
+            let detail = match &name {
+                Some(n) => serde_json::json!({"id": id, "name": n, "uuid": uuid}),
+                None => detail_base.clone(),
+            };
+            let detail_json = serde_json::to_string(&detail).unwrap_or_default();
+            // 除去+成功auditは同一transaction(コードレビュー中4)
+            match db.remove_collection_item(
+                &bucket, &prefix, id, &uuid, "collection_items_remove", &detail_json,
+            ) {
+                Ok(removed) => Ok(W2Outcome::Ok(collection_detail_json(&removed))),
+                Err(e) => w2_map_write_error(
+                    &db, &bucket, &prefix, "collection_items_remove", &detail, e,
+                ),
+            }
+        };
+        flow()
+    })
+    .await?;
+    outcome.into_json_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -2225,6 +2901,11 @@ mod tests {
                 .is_some_and(|p| p.as_array().is_some_and(|a| !a.is_empty())),
             "pins配列: {first}"
         );
+        // W2契約統一: summary行はtags: string[](昇順)を含む(未tag付け時は空配列)
+        assert!(
+            first.get("tags").is_some_and(|t| t.as_array() == Some(&Vec::new())),
+            "summary行のtagsは空配列で常に存在: {first}"
+        );
 
         // query絞り込み(title部分一致)
         let (_, body) = api("GET", "/api/entities?query=beta");
@@ -2320,6 +3001,17 @@ mod tests {
                 "version_list[0]のkey {key}: {v0}"
             );
         }
+        // W2契約統一: 詳細はtags(昇順)・collections(所属collection名一覧)を含む
+        assert_eq!(
+            body.get("tags").and_then(|t| t.as_array()),
+            Some(&Vec::new()),
+            "詳細はtags(未tag付け時は空配列)を含む: {body}"
+        );
+        assert_eq!(
+            body.get("collections").and_then(|c| c.as_array()),
+            Some(&Vec::new()),
+            "詳細はcollections(未所属時は空配列)を含む: {body}"
+        );
 
         // 不在uuidは404 not_found
         let (status, body) = api("GET", "/api/entities/99999999-9999-9999-9999-999999999999");
@@ -4241,5 +4933,1038 @@ mod tests {
         let (status, body, _) = flow.call("GET", "/api/jobs", None, None);
         assert_eq!(status, 401, "未認証のGET /api/jobsは401: {body}");
         expect_error_body(&body, "unauthenticated");
+    }
+
+    // -----------------------------------------------------------------------
+    // TASK-17 W2(TASK-19: tag/collection・3ビュー・audit_log)のhandler単体test
+    // (テスト先行。実装前のためrouting不在のfallback 404・table不在のrusqlite操作で
+    // 実行failを許容、cargo test --no-runのcompileは通る)。設計3.2/4.1に詳細が
+    // 規定されない点は各条件本文(server.toml)の解釈に従う。
+
+    /// W2 testで使うentity uuid(固定値・api_seedしたentityと対応)。
+    const W2_ALPHA_UUID: &str = "11111111-1111-1111-1111-111111111111";
+    const W2_BETA_UUID: &str = "22222222-2222-2222-2222-222222222222";
+    const W2_GAMMA_UUID: &str = "33333333-3333-3333-3333-333333333333";
+    const W2_ABSENT_UUID: &str = "99999999-9999-9999-9999-999999999999";
+    /// 対照scopeのtag行混入観測で使うuuid(実効scopeに存在しない)。
+    const W2_DELTA_UUID: &str = "44444444-4444-4444-4444-444444444444";
+
+    /// api()のJSON body付き版(書込APIのoneshot=PUT tags・collections系のrequest body
+    /// を伴う呼び出し。応答はapi()と同一形式(status, JSON body))。
+    fn api_body(method: &str, uri: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
+        let router = build_router(api_test_state());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("oneshot runtime");
+        rt.block_on(async {
+            use tower::ServiceExt as _;
+            let req = axum::http::Request::builder()
+                .method(axum::http::Method::from_bytes(method.as_bytes()).expect("method"))
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .expect("request build");
+            let resp = router.oneshot(req).await.expect("oneshot");
+            let status = resp.status().as_u16();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body read");
+            let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            (status, value)
+        })
+    }
+
+    /// entities応答からuuid一覧を抽出(W2絞り込みtest用)。
+    fn uuids_of(body: &serde_json::Value) -> Vec<String> {
+        body.get("entities")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|e| {
+                        e.get("uuid")
+                            .and_then(|u| u.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// tags応答から(tag, entity_count)一覧を抽出(W2 tags-list test用)。
+    fn tags_of(body: &serde_json::Value) -> Vec<(String, i64)> {
+        body.get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|t| {
+                        (
+                            t.get("tag")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            t.get("entity_count").and_then(|v| v.as_i64()).unwrap_or(-1),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// folders応答から(path, label, entity_count)一覧を抽出(W2 folders test用)。
+    fn folders_of(body: &serde_json::Value) -> Vec<(String, String, i64)> {
+        body.get("folders")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|f| {
+                        (
+                            f.get("path")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            f.get("label")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            f.get("entity_count")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(-1),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// collectionを作成してidを返す(W2 testの事前準備。作成API自体は
+    /// server.collection-crudが担保するためここでは成功のみ使う)。
+    fn w2_create_collection(name: &str) -> i64 {
+        let (status, body) =
+            api_body("POST", "/api/collections", serde_json::json!({ "name": name }));
+        assert_eq!(status, 200, "collection作成(事前): {body}");
+        body.get("collection")
+            .and_then(|c| c.get("id"))
+            .and_then(|i| i.as_i64())
+            .unwrap_or_else(|| panic!("作成応答のcollection.id: {body}"))
+    }
+
+    /// tags tableへ行を直接注入(rusqlite。対照scopeのtagが実効scopeの絞り込み・
+    /// 集計に混入しないことの観測用)。
+    fn w2_insert_tag_row(env: &ApiEnv, scope: &str, uuid: &str, tag: &str) {
+        let conn = rusqlite::Connection::open(env.home.join("catalog.db"))
+            .expect("catalog.db open");
+        conn.execute(
+            "INSERT INTO tags (scope, uuid, tag, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![scope, uuid, tag, "2026-11-05T12:00:00+09:00"],
+        )
+        .expect("tags行挿入(実装前はtable不在でfailを許容)");
+    }
+
+    /// collections tableへ行を直接注入(rusqlite。対照scopeのcollection混入観測用)。
+    /// 戻り値は挿入した行のid。
+    fn w2_insert_collection_row(env: &ApiEnv, scope: &str, name: &str) -> i64 {
+        let conn = rusqlite::Connection::open(env.home.join("catalog.db"))
+            .expect("catalog.db open");
+        conn.execute(
+            "INSERT INTO collections (scope, name, created_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![scope, name, "2026-11-05T12:00:00+09:00"],
+        )
+        .expect("collections行挿入(実装前はtable不在でfailを許容)");
+        conn.last_insert_rowid()
+    }
+
+    /// audit_logの行(action, detail_json, outcome, error_code, scope, recorded_at)を
+    /// 全行(id昇順)で読む(W2 audit_log test用)。
+    fn w2_audit_log_rows(env: &ApiEnv) -> Vec<(String, String, String, Option<String>, String, String)> {
+        let conn = rusqlite::Connection::open(env.home.join("catalog.db"))
+            .expect("catalog.db open");
+        let mut stmt = conn
+            .prepare(
+                "SELECT action, detail_json, outcome, error_code, scope, recorded_at \
+                 FROM audit_log ORDER BY id",
+            )
+            .expect("audit_log読出(実装前はtable不在でfailを許容)");
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })
+            .expect("audit_log行読取");
+        rows.collect::<Result<Vec<_>, _>>().expect("audit_log行")
+    }
+
+    /// [covers:server.entities-tag-collection-filters]
+    /// GET /api/entitiesは?tag=<tag名>・?collection=<collection id>で絞り込む。
+    /// tag絞り込みは実効scope内のtag付きentityのみ(対照scopeのtag行は混入しない)。
+    /// folder絞り込み用の新paramは設けない(既存label=で成立=設計3.2)。
+    #[test]
+    fn api_entities_filter_by_tag_and_collection() {
+        let env = api_env("srv-api-w2-ent-filter");
+        let alpha = api_entry(W2_ALPHA_UUID, "alpha", "docs", "work");
+        let beta = api_entry(W2_BETA_UUID, "beta", "unfiled", "");
+        let gamma = api_entry(W2_GAMMA_UUID, "gamma", "docs", "work");
+        api_seed(&[alpha, beta, gamma], API_TEST_BUCKET, API_TEST_PREFIX);
+
+        // 事前: alpha/betaへtag付与・collectionへalphaを追加(各書込APIは個別条件が担保)
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/entities/{W2_ALPHA_UUID}/tags"),
+            serde_json::json!({ "tags": ["docs", "work"] }),
+        );
+        assert_eq!(status, 200, "alphaへtag付与(事前): {body}");
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/entities/{W2_BETA_UUID}/tags"),
+            serde_json::json!({ "tags": ["docs"] }),
+        );
+        assert_eq!(status, 200, "betaへtag付与(事前): {body}");
+        let id = w2_create_collection("grp");
+        let (status, body) = api_body(
+            "POST",
+            &format!("/api/collections/{id}/items"),
+            serde_json::json!({ "uuids": [W2_ALPHA_UUID] }),
+        );
+        assert_eq!(status, 200, "collectionへalpha追加(事前): {body}");
+        // 対照scopeのtag行(実効scope外=絞り込みに混入してはならない)
+        w2_insert_tag_row(&env, "other-bucket:amazing-backup/", W2_DELTA_UUID, "docs");
+
+        // tag絞り込み
+        let (status, body) = api("GET", "/api/entities?tag=docs");
+        assert_eq!(status, 200, "?tag=docsは200: {body}");
+        let mut uuids = uuids_of(&body);
+        uuids.sort();
+        assert_eq!(
+            uuids,
+            vec![W2_ALPHA_UUID.to_string(), W2_BETA_UUID.to_string()],
+            "tag=docsはalpha+beta(対照scopeのdeltaは混入しない): {body}"
+        );
+        let (status, body) = api("GET", "/api/entities?tag=work");
+        assert_eq!(status, 200, "?tag=workは200: {body}");
+        assert_eq!(uuids_of(&body), vec![W2_ALPHA_UUID.to_string()], "tag=workはalphaのみ: {body}");
+        let (status, body) = api("GET", "/api/entities?tag=nosuch");
+        assert_eq!(status, 200, "?tag=一致なしも200: {body}");
+        assert!(uuids_of(&body).is_empty(), "一致なしtagは空配列: {body}");
+
+        // collection絞り込み(collection id指定)
+        let (status, body) = api("GET", &format!("/api/entities?collection={id}"));
+        assert_eq!(status, 200, "?collection=<id>は200: {body}");
+        assert_eq!(
+            uuids_of(&body),
+            vec![W2_ALPHA_UUID.to_string()],
+            "collection絞り込みは構成のalphaのみ: {body}"
+        );
+
+        // 契約統一(TASK-19): 一覧の各summary行はtags: string[](昇順)を含む
+        // (設計2.2「行の列: 現行7列+tag列」・frontend EntitySummaryのtags必須と整合)
+        let (status, body) = api("GET", "/api/entities");
+        assert_eq!(status, 200, "GET /api/entitiesは200: {body}");
+        let tags_of_summary = |want_uuid: &str| -> Vec<String> {
+            body.get("entities")
+                .and_then(|v| v.as_array())
+                .expect("entities配列")
+                .iter()
+                .find(|e| e.get("uuid").and_then(|u| u.as_str()) == Some(want_uuid))
+                .and_then(|e| e.get("tags"))
+                .and_then(|t| t.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|t| t.as_str().unwrap_or_default().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            tags_of_summary(W2_ALPHA_UUID),
+            vec!["docs".to_string(), "work".to_string()],
+            "alphaのsummary行tagsは昇順: {body}"
+        );
+        assert_eq!(
+            tags_of_summary(W2_BETA_UUID),
+            vec!["docs".to_string()],
+            "betaのsummary行tags: {body}"
+        );
+        assert_eq!(
+            tags_of_summary(W2_GAMMA_UUID),
+            Vec::<String>::new(),
+            "tag無しentityのsummary行tagsは空配列: {body}"
+        );
+
+        // 契約統一(TASK-19): 詳細はcollections(所属collection名一覧)を含む
+        // (設計2.2詳細の「所属collection」表示)
+        let (status, body) = api("GET", &format!("/api/entities/{W2_ALPHA_UUID}"));
+        assert_eq!(status, 200, "GET /api/entities/:uuidは200: {body}");
+        assert_eq!(
+            body.get("collections")
+                .and_then(|c| c.as_array())
+                .map(|a| a.iter().map(|v| v.as_str().unwrap_or_default().to_string()).collect::<Vec<_>>()),
+            Some(vec!["grp".to_string()]),
+            "詳細の所属collectionはgrp: {body}"
+        );
+        drop(env);
+    }
+
+    /// [covers:server.tags-list]
+    /// GET /api/tagsは{tags:[{tag,entity_count}]}をtag名昇順で返す。
+    /// entity_countは当該tagを持つ実効scope内のentity数(対照scopeのtag行は計上しない)。
+    #[test]
+    fn api_tags_list_with_entity_counts() {
+        let env = api_env("srv-api-w2-tags-list");
+        let alpha = api_entry(W2_ALPHA_UUID, "alpha", "docs", "work");
+        let beta = api_entry(W2_BETA_UUID, "beta", "unfiled", "");
+        api_seed(&[alpha, beta], API_TEST_BUCKET, API_TEST_PREFIX);
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/entities/{W2_ALPHA_UUID}/tags"),
+            serde_json::json!({ "tags": ["docs", "work"] }),
+        );
+        assert_eq!(status, 200, "alphaへtag付与(事前): {body}");
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/entities/{W2_BETA_UUID}/tags"),
+            serde_json::json!({ "tags": ["docs"] }),
+        );
+        assert_eq!(status, 200, "betaへtag付与(事前): {body}");
+        // 対照scopeのtag行(集計に混入しない)
+        w2_insert_tag_row(&env, "other-bucket:amazing-backup/", W2_DELTA_UUID, "docs");
+
+        let (status, body) = api("GET", "/api/tags");
+        assert_eq!(status, 200, "GET /api/tagsは200: {body}");
+        assert_eq!(
+            tags_of(&body),
+            vec![
+                ("docs".to_string(), 2),
+                ("work".to_string(), 1),
+            ],
+            "tag昇順・entity_countはalpha+betaのdocs=2・work=1(対照scopeは計上しない): {body}"
+        );
+        drop(env);
+    }
+
+    /// [covers:server.folders-list]
+    /// GET /api/foldersはlabelのdirectory区切りで階層導出したfolder一覧を
+    /// {folders:[{label,path,entity_count}]}で返す(設計3.2の応答解釈: 各行=labelの
+    /// 階層nodeごと・path=nodeのrootからの完全path(既存label=絞り込みの値と一致)・
+    /// label=nodeの最終区切り要素・entity_count=当該node配下のentity数(子folder配下を
+    /// 含む合計)・並びはpath昇順。ラベルなし(location.label="")のlocationを持つ
+    /// entityは先頭行{label:"",path:"",entity_count}で応答する=設計2.2「(ラベルなし)」
+    /// nodeの基盤(コードレビュー中10。行の選択は既存label=の空文字完全一致と対応)。
+    /// folder絞り込みparamは新設せずlabel=path完全一致の既存label=で成立する。
+    #[test]
+    fn api_folders_list_hierarchy_from_labels() {
+        let env = api_env("srv-api-w2-folders");
+        // beta=work直下・alpha=work/report配下・delta=docs/2026/report配下・gamma=label無し
+        let beta = api_entry(W2_BETA_UUID, "beta", "unfiled", "work");
+        let alpha = api_entry(W2_ALPHA_UUID, "alpha", "docs", "work/report");
+        let delta = api_entry(W2_DELTA_UUID, "delta", "docs", "docs/2026/report");
+        let gamma = api_entry(W2_GAMMA_UUID, "gamma", "docs", "");
+        api_seed(&[alpha, beta, delta, gamma], API_TEST_BUCKET, API_TEST_PREFIX);
+
+        let (status, body) = api("GET", "/api/folders");
+        assert_eq!(status, 200, "GET /api/foldersは200: {body}");
+        assert_eq!(
+            folders_of(&body),
+            vec![
+                // ラベルなし行(gamma)は常に先頭(コードレビュー中10)
+                ("".to_string(), "".to_string(), 1),
+                ("docs".to_string(), "docs".to_string(), 1),
+                ("docs/2026".to_string(), "2026".to_string(), 1),
+                ("docs/2026/report".to_string(), "report".to_string(), 1),
+                // workは直下のbeta+配下のalphaの合計2(階層集約)
+                ("work".to_string(), "work".to_string(), 2),
+                ("work/report".to_string(), "report".to_string(), 1),
+            ],
+            "先頭はラベルなし行(1=gamma)・以降path昇順・entity_countは配下合計(work=2): {body}"
+        );
+        // 各要素はlabel/path/entity_countのみ(応答schemaの確定)
+        let elems = body.get("folders").and_then(|v| v.as_array()).expect("folders配列");
+        for f in elems {
+            assert_eq!(
+                f.as_object().map(|m| m.len()),
+                Some(3),
+                "folder要素はlabel/path/entity_countのみ: {f}"
+            );
+        }
+        drop(env);
+    }
+
+    /// [covers:server.collections-list-and-detail]
+    /// GET /api/collectionsは{collections:[{id,name,entity_count}]}をname昇順で返す
+    /// (対照scopeのcollectionは混入しない)。GET /api/collections/:idは詳細
+    /// {collection:{id,name,uuids}}(構成uuid一覧・追加順)を返し・不在idは404 not_found。
+    #[test]
+    fn api_collections_list_and_detail() {
+        let env = api_env("srv-api-w2-collections");
+        let alpha = api_entry(W2_ALPHA_UUID, "alpha", "docs", "work");
+        let beta = api_entry(W2_BETA_UUID, "beta", "unfiled", "");
+        api_seed(&[alpha, beta], API_TEST_BUCKET, API_TEST_PREFIX);
+        // zeta(alpha構成)・alpha-beta(beta構成)の2 collection(name昇順観測の対)
+        let zeta_id = w2_create_collection("zeta");
+        let (status, body) = api_body(
+            "POST",
+            &format!("/api/collections/{zeta_id}/items"),
+            serde_json::json!({ "uuids": [W2_ALPHA_UUID] }),
+        );
+        assert_eq!(status, 200, "zetaへalpha追加(事前): {body}");
+        let ab_id = w2_create_collection("alpha-beta");
+        let (status, body) = api_body(
+            "POST",
+            &format!("/api/collections/{ab_id}/items"),
+            serde_json::json!({ "uuids": [W2_BETA_UUID] }),
+        );
+        assert_eq!(status, 200, "alpha-betaへbeta追加(事前): {body}");
+        // 対照scopeのcollection(一覧に混入しない)
+        w2_insert_collection_row(&env, "other-bucket:amazing-backup/", "other");
+
+        let (status, body) = api("GET", "/api/collections");
+        assert_eq!(status, 200, "GET /api/collectionsは200: {body}");
+        let cols = body
+            .get("collections")
+            .and_then(|v| v.as_array())
+            .expect("collections配列");
+        assert_eq!(cols.len(), 2, "実効scopeの2collection(対照scopeは混入しない): {body}");
+        assert_eq!(
+            cols[0].get("name").and_then(|n| n.as_str()),
+            Some("alpha-beta"),
+            "name昇順の先頭: {body}"
+        );
+        assert_eq!(
+            cols[0].get("entity_count").and_then(|c| c.as_i64()),
+            Some(1),
+            "alpha-betaの構成数: {body}"
+        );
+        assert_eq!(
+            cols[1].get("name").and_then(|n| n.as_str()),
+            Some("zeta"),
+            "name昇順の2番目: {body}"
+        );
+
+        // 詳細(構成uuid一覧)
+        let (status, body) = api("GET", &format!("/api/collections/{zeta_id}"));
+        assert_eq!(status, 200, "GET /api/collections/:idは200: {body}");
+        let col = body.get("collection").expect("collection要素");
+        assert_eq!(col.get("id").and_then(|i| i.as_i64()), Some(zeta_id), "id: {body}");
+        assert_eq!(col.get("name").and_then(|n| n.as_str()), Some("zeta"), "name: {body}");
+        assert_eq!(
+            col.get("uuids").and_then(|u| u.as_array()).map(|a| a.len()),
+            Some(1),
+            "構成uuid一覧(追加順・alphaの1件): {body}"
+        );
+        // 不在id
+        let (status, body) = api("GET", "/api/collections/99999");
+        assert_eq!(status, 404, "不在collection idは404: {body}");
+        expect_error_body(&body, "not_found");
+        drop(env);
+    }
+
+    /// [covers:server.entity-tags-replace]
+    /// PUT /api/entities/:uuid/tagsはbody {tags:[...]}でtag一覧を丸ごと置換する
+    /// (冪等・応答はGET /api/entities/:uuidと同一のEntityDetail形式=tags・collections
+    /// 付き=契約統一(設計3.1「書込応答は読取系と同一schema・操作後に再GET不要」))。
+    /// tag名規則 ^[a-z0-9][a-z0-9-]{0,63}$違反は422 validation_failed・不在uuidは404 not_found。
+    #[test]
+    fn api_entity_tags_replace_idempotent_and_validated() {
+        let env = api_env("srv-api-w2-tags-replace");
+        let alpha = api_entry(W2_ALPHA_UUID, "alpha", "docs", "work");
+        api_seed(&[alpha], API_TEST_BUCKET, API_TEST_PREFIX);
+        let path = format!("/api/entities/{W2_ALPHA_UUID}/tags");
+
+        // 置換: 2tag付与(応答は契約統一によりGET /api/entities/:uuidと同一の
+        // EntityDetail形式=uuid/title/locations/versions/latest_date/latest_size/
+        // pins/version_list+tags+collections。設計3.1「書込応答は読取系と同一schema・
+        // 操作後に再GET不要」)
+        let (status, body) =
+            api_body("PUT", &path, serde_json::json!({ "tags": ["docs", "work"] }));
+        assert_eq!(status, 200, "tag置換は200: {body}");
+        assert_eq!(
+            body.get("tags").and_then(|t| t.as_array()).map(|a| a.len()),
+            Some(2),
+            "応答は操作後のtag一覧(2件): {body}"
+        );
+        assert_eq!(
+            body.get("uuid").and_then(|u| u.as_str()),
+            Some(W2_ALPHA_UUID),
+            "応答はEntityDetail形式(uuid入り): {body}"
+        );
+        assert_eq!(
+            body.get("title").and_then(|t| t.as_str()),
+            Some("alpha"),
+            "応答はEntityDetail形式(title入り): {body}"
+        );
+        assert_eq!(
+            body.get("collections").and_then(|c| c.as_array()).map(|a| a.len()),
+            Some(0),
+            "応答はEntityDetail形式(collections入り=未所属は空配列): {body}"
+        );
+        assert!(
+            body.get("version_list").and_then(|v| v.as_array()).is_some(),
+            "応答はEntityDetail形式(version_list入り): {body}"
+        );
+        // 置換(丸ごと差し替え=docsのみ残す)
+        let (status, body) =
+            api_body("PUT", &path, serde_json::json!({ "tags": ["docs"] }));
+        assert_eq!(status, 200, "再置換は200: {body}");
+        assert_eq!(
+            body.get("tags").and_then(|t| t.as_array()).map(|a| a.len()),
+            Some(1),
+            "置換後はdocsのみ(workは外れる): {body}"
+        );
+        // 冪等: 同body再送で同一状態
+        let (status, body2) =
+            api_body("PUT", &path, serde_json::json!({ "tags": ["docs"] }));
+        assert_eq!(status, 200, "冪等再送は200: {body2}");
+        assert_eq!(body.get("tags"), body2.get("tags"), "同body再送で同一応答(冪等): {body} {body2}");
+        // 空配列=全tag削除
+        let (status, body) = api_body("PUT", &path, serde_json::json!({ "tags": [] }));
+        assert_eq!(status, 200, "空配列は200: {body}");
+        assert_eq!(
+            body.get("tags").and_then(|t| t.as_array()).map(|a| a.len()),
+            Some(0),
+            "空配列で全tag削除: {body}"
+        );
+
+        // tag名規則違反は422 validation_failed(先頭大文字・先頭ハイフン・65文字)
+        for bad in ["Bad", "-x", &"a".repeat(65)] {
+            let (status, body) =
+                api_body("PUT", &path, serde_json::json!({ "tags": [bad] }));
+            assert_eq!(status, 422, "tag名規則違反({bad})は422: {body}");
+            expect_error_body(&body, "validation_failed");
+        }
+        // 規則内の長さ上限(64文字)は受理
+        let ok64 = "a".repeat(64);
+        let (status, body) =
+            api_body("PUT", &path, serde_json::json!({ "tags": [ok64] }));
+        assert_eq!(status, 200, "64文字tagは受理: {body}");
+
+        // 不在uuidは404
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/entities/{W2_ABSENT_UUID}/tags"),
+            serde_json::json!({ "tags": ["docs"] }),
+        );
+        assert_eq!(status, 404, "不在uuidのtag置換は404: {body}");
+        expect_error_body(&body, "not_found");
+        drop(env);
+    }
+
+    /// [covers:server.collection-crud]
+    /// POST /api/collectionsはcollectionを作成(応答は詳細schema)・同名は409 duplicate
+    /// (UNIQUE(scope,name))・空nameは422。PUT /api/collections/:idは改名(応答は詳細
+    /// schema)・改名先の同名は409・不在idは404。DELETE /api/collections/:idは削除
+    /// (構成参照の解除のみ=entityへ影響しない)・応答{status:"ok"}。
+    #[test]
+    fn api_collection_create_rename_delete() {
+        let env = api_env("srv-api-w2-collections-crud");
+        let alpha = api_entry(W2_ALPHA_UUID, "alpha", "docs", "work");
+        let beta = api_entry(W2_BETA_UUID, "beta", "unfiled", "");
+        api_seed(&[alpha, beta], API_TEST_BUCKET, API_TEST_PREFIX);
+
+        // 作成
+        let (status, body) =
+            api_body("POST", "/api/collections", serde_json::json!({ "name": "trip" }));
+        assert_eq!(status, 200, "collection作成は200: {body}");
+        let created = body.get("collection").expect("作成応答は詳細schema");
+        let id = created.get("id").and_then(|i| i.as_i64()).expect("collection id");
+        assert_eq!(
+            created.get("name").and_then(|n| n.as_str()),
+            Some("trip"),
+            "作成応答のname: {body}"
+        );
+        // 同名は409 duplicate
+        let (status, body) =
+            api_body("POST", "/api/collections", serde_json::json!({ "name": "trip" }));
+        assert_eq!(status, 409, "同名collectionは409: {body}");
+        expect_error_body(&body, "duplicate");
+        // 空nameは422
+        let (status, body) =
+            api_body("POST", "/api/collections", serde_json::json!({ "name": "" }));
+        assert_eq!(status, 422, "空nameは422: {body}");
+        expect_error_body(&body, "validation_failed");
+
+        // 改名
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/collections/{id}"),
+            serde_json::json!({ "name": "vacation" }),
+        );
+        assert_eq!(status, 200, "collection改名は200: {body}");
+        let renamed = body.get("collection").expect("改名応答は詳細schema");
+        assert_eq!(renamed.get("id").and_then(|i| i.as_i64()), Some(id), "id不変: {body}");
+        assert_eq!(
+            renamed.get("name").and_then(|n| n.as_str()),
+            Some("vacation"),
+            "改名後のname: {body}"
+        );
+        // 改名先が既存collectionと同名は409
+        w2_insert_collection_row(&env, "api-bucket:amazing-backup/", "occupied");
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/collections/{id}"),
+            serde_json::json!({ "name": "occupied" }),
+        );
+        assert_eq!(status, 409, "改名先の同名は409: {body}");
+        expect_error_body(&body, "duplicate");
+        // 不在idは404
+        let (status, body) = api_body(
+            "PUT",
+            "/api/collections/99999",
+            serde_json::json!({ "name": "x" }),
+        );
+        assert_eq!(status, 404, "不在idの改名は404: {body}");
+        expect_error_body(&body, "not_found");
+
+        // 構成を持つcollectionの削除(構成参照の解除のみ)
+        let (status, body) = api_body(
+            "POST",
+            &format!("/api/collections/{id}/items"),
+            serde_json::json!({ "uuids": [W2_ALPHA_UUID] }),
+        );
+        assert_eq!(status, 200, "削除対象へalpha追加(事前): {body}");
+        let (status, body) = api_body("DELETE", &format!("/api/collections/{id}"), serde_json::Value::Null);
+        assert_eq!(status, 200, "collection削除は200: {body}");
+        assert_eq!(
+            body.get("status").and_then(|s| s.as_str()),
+            Some("ok"),
+            "削除応答は{{\"status\":\"ok\"}}: {body}"
+        );
+        let (status, body) = api("GET", &format!("/api/collections/{id}"));
+        assert_eq!(status, 404, "削除後の詳細は404: {body}");
+        // entity側は影響しない(構成参照の解除のみ)
+        let (status, body) = api("GET", "/api/entities");
+        assert_eq!(status, 200, "entity一覧は200: {body}");
+        let mut uuids = uuids_of(&body);
+        uuids.sort();
+        assert_eq!(
+            uuids,
+            vec![W2_ALPHA_UUID.to_string(), W2_BETA_UUID.to_string()],
+            "削除はentityへ影響しない: {body}"
+        );
+        drop(env);
+    }
+
+    /// [covers:server.collection-items]
+    /// POST /api/collections/:id/itemsはbody {uuids:[...]}で構成を追加(応答は操作後の
+    /// 詳細schema・uuidsは追加順)・不在collectionは404・不在uuidは404。既に構成のuuidの
+    /// 再追加は冪等に成功(追加済みはskip)。DELETE /api/collections/:id/items/:uuidは
+    /// 構成から除去(応答は操作後の詳細schema)・非構成uuid・不在collectionは404。
+    #[test]
+    fn api_collection_items_add_and_remove() {
+        let env = api_env("srv-api-w2-collections-items");
+        let alpha = api_entry(W2_ALPHA_UUID, "alpha", "docs", "work");
+        let beta = api_entry(W2_BETA_UUID, "beta", "unfiled", "");
+        api_seed(&[alpha, beta], API_TEST_BUCKET, API_TEST_PREFIX);
+        let id = w2_create_collection("grp");
+
+        // 追加(複数一括・応答のuuidsは追加順)
+        let (status, body) = api_body(
+            "POST",
+            &format!("/api/collections/{id}/items"),
+            serde_json::json!({ "uuids": [W2_ALPHA_UUID, W2_BETA_UUID] }),
+        );
+        assert_eq!(status, 200, "構成追加は200: {body}");
+        let uuids: Vec<String> = body
+            .get("collection")
+            .and_then(|c| c.get("uuids"))
+            .and_then(|u| u.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().unwrap_or_default().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            uuids,
+            vec![W2_ALPHA_UUID.to_string(), W2_BETA_UUID.to_string()],
+            "操作後の構成uuid一覧(追加順): {body}"
+        );
+        // 既に構成のuuidの再追加は冪等に成功
+        let (status, body) = api_body(
+            "POST",
+            &format!("/api/collections/{id}/items"),
+            serde_json::json!({ "uuids": [W2_ALPHA_UUID] }),
+        );
+        assert_eq!(status, 200, "再追加は200(冪等): {body}");
+        assert_eq!(
+            body.get("collection")
+                .and_then(|c| c.get("uuids"))
+                .and_then(|u| u.as_array())
+                .map(|a| a.len()),
+            Some(2),
+            "再追加で構成は増えない(追加済みskip): {body}"
+        );
+        // 不在uuidは404
+        let (status, body) = api_body(
+            "POST",
+            &format!("/api/collections/{id}/items"),
+            serde_json::json!({ "uuids": [W2_ABSENT_UUID] }),
+        );
+        assert_eq!(status, 404, "不在uuidの追加は404: {body}");
+        expect_error_body(&body, "not_found");
+        // 不在collectionは404
+        let (status, body) = api_body(
+            "POST",
+            "/api/collections/99999/items",
+            serde_json::json!({ "uuids": [W2_ALPHA_UUID] }),
+        );
+        assert_eq!(status, 404, "不在collectionへの追加は404: {body}");
+        expect_error_body(&body, "not_found");
+
+        // 除去(応答は操作後の詳細schema)
+        let (status, body) =
+            api_body("DELETE", &format!("/api/collections/{id}/items/{W2_ALPHA_UUID}"), serde_json::Value::Null);
+        assert_eq!(status, 200, "構成除去は200: {body}");
+        let uuids: Vec<String> = body
+            .get("collection")
+            .and_then(|c| c.get("uuids"))
+            .and_then(|u| u.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().unwrap_or_default().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(uuids, vec![W2_BETA_UUID.to_string()], "除去後の構成はbetaのみ: {body}");
+        // 非構成uuidの除去は404
+        let (status, body) =
+            api_body("DELETE", &format!("/api/collections/{id}/items/{W2_ALPHA_UUID}"), serde_json::Value::Null);
+        assert_eq!(status, 404, "非構成uuidの除去は404: {body}");
+        expect_error_body(&body, "not_found");
+        // 不在collectionは404
+        let (status, body) =
+            api_body("DELETE", &format!("/api/collections/99999/items/{W2_BETA_UUID}"), serde_json::Value::Null);
+        assert_eq!(status, 404, "不在collectionからの除去は404: {body}");
+        expect_error_body(&body, "not_found");
+        drop(env);
+    }
+
+    /// [covers:server.write-api-audit-log-recorded]
+    /// W2の書込API(tags系・collections系)はUI書込操作としてaudit_logへ記録される
+    /// (action=操作種別・detail_json=対象特定情報のJSON文字列・outcome=ok|failed・
+    /// 失敗時はerror_code・scope=実効scope・recorded_at)。失敗操作(422)も記録される
+    /// (2.5操作履歴の成否表示の基盤)。action語彙はtags_replace/collection_create/
+    /// collection_rename/collection_delete/collection_items_add/collection_items_remove。
+    #[test]
+    fn api_write_operations_recorded_in_audit_log() {
+        let env = api_env("srv-api-w2-audit");
+        let alpha = api_entry(W2_ALPHA_UUID, "alpha", "docs", "work");
+        api_seed(&[alpha], API_TEST_BUCKET, API_TEST_PREFIX);
+        let tags_path = format!("/api/entities/{W2_ALPHA_UUID}/tags");
+
+        // 成功書込: tag置換
+        let (status, body) =
+            api_body("PUT", &tags_path, serde_json::json!({ "tags": ["docs"] }));
+        assert_eq!(status, 200, "tag置換(成功例・事前): {body}");
+        // 失敗書込: tag名規則違反(422)
+        let (status, body) =
+            api_body("PUT", &tags_path, serde_json::json!({ "tags": ["BAD"] }));
+        assert_eq!(status, 422, "tag名規則違反(失敗例・事前): {body}");
+        // 成功書込: collection作成→items追加→改名→削除
+        let id = w2_create_collection("grp");
+        let (status, body) = api_body(
+            "POST",
+            &format!("/api/collections/{id}/items"),
+            serde_json::json!({ "uuids": [W2_ALPHA_UUID] }),
+        );
+        assert_eq!(status, 200, "items追加(事前): {body}");
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/collections/{id}"),
+            serde_json::json!({ "name": "grp2" }),
+        );
+        assert_eq!(status, 200, "collection改名(事前): {body}");
+        let (status, body) =
+            api_body("DELETE", &format!("/api/collections/{id}"), serde_json::Value::Null);
+        assert_eq!(status, 200, "collection削除(事前): {body}");
+
+        // audit_logの行観測(id昇順=実行順)
+        let rows = w2_audit_log_rows(&env);
+        assert!(rows.len() >= 6, "書込操作6件が記録される: {rows:?}");
+        let (action, detail_json, outcome, _error_code, scope, recorded_at) = &rows[0];
+        assert_eq!(action, "tags_replace", "1件目はtag置換: {rows:?}");
+        assert_eq!(outcome, "ok", "成功操作はoutcome=ok: {rows:?}");
+        assert!(
+            detail_json.contains(W2_ALPHA_UUID),
+            "detail_jsonは対象(uuid)を含む: {rows:?}"
+        );
+        assert_eq!(
+            scope, "api-bucket:amazing-backup/",
+            "scopeは実効scope(<bucket>:<prefix>形式): {rows:?}"
+        );
+        assert!(!recorded_at.is_empty(), "recorded_atは非空: {rows:?}");
+        // 失敗操作(422)はoutcome=failed+error_code
+        let (action, _, outcome, error_code, _, _) = &rows[1];
+        assert_eq!(action, "tags_replace", "2件目もtag置換(失敗側): {rows:?}");
+        assert_eq!(outcome, "failed", "失敗操作はoutcome=failed: {rows:?}");
+        assert_eq!(
+            error_code.as_deref(),
+            Some("validation_failed"),
+            "失敗時はerror_code: {rows:?}"
+        );
+        // collections系の成功記録
+        let actions: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        for want in [
+            "collection_create",
+            "collection_items_add",
+            "collection_rename",
+            "collection_delete",
+        ] {
+            assert!(
+                actions.contains(&want),
+                "action={want}が記録される: {actions:?}"
+            );
+        }
+        // 全行でoutcome/scope/recorded_atは欠落しない
+        for row in &rows {
+            assert!(!row.2.is_empty(), "outcomeは非空: {row:?}");
+            assert!(!row.4.is_empty(), "scopeは非空: {row:?}");
+            assert!(!row.5.is_empty(), "recorded_atは非空: {row:?}");
+        }
+        drop(env);
+    }
+
+    /// [covers:server.write-api-auth-gate]
+    /// W2の書込API(tags系・collections系)も同一auth_gate(session検証)で保護され、
+    /// 未認証は401 unauthenticated(設計6章: 読取/書込の区別なし=同一gate)。
+    #[test]
+    fn api_write_endpoints_unauthenticated_401() {
+        let flow = AuthFlow::new("srv-api-w2-auth");
+        let cases: [(&str, String, serde_json::Value); 6] = [
+            ("PUT", format!("/api/entities/{W2_ALPHA_UUID}/tags"), serde_json::json!({ "tags": [] })),
+            ("POST", "/api/collections".into(), serde_json::json!({ "name": "x" })),
+            ("PUT", "/api/collections/1".into(), serde_json::json!({ "name": "x" })),
+            ("DELETE", "/api/collections/1".into(), serde_json::Value::Null),
+            ("POST", "/api/collections/1/items".into(), serde_json::json!({ "uuids": [] })),
+            ("DELETE", format!("/api/collections/1/items/{W2_ALPHA_UUID}"), serde_json::Value::Null),
+        ];
+        for (method, path, body) in cases {
+            let (status, resp, _) = flow.call(method, &path, Some(body), None);
+            assert_eq!(status, 401, "未認証の{method} {path}は401: {resp}");
+            expect_error_body(&resp, "unauthenticated");
+        }
+    }
+
+    /// [covers:server.entities-untagged-filter]
+    /// [covers:server.entities-list-endpoint]
+    /// GET /api/entitiesは?untagged=1でtagを1つも持たないentityのみへ絞り込む
+    /// (設計2.2「tag無しも選択可」=コードレビュー中9)。?tag=との同時指定・untagged
+    /// 値が1以外は400 invalid_request。?label=(空文字)はラベルなし(location.label="")
+    /// の完全一致として機能する(コードレビュー中10(b))。
+    #[test]
+    fn api_entities_untagged_filter_and_empty_label() {
+        let env = api_env("srv-api-w2-untagged");
+        let alpha = api_entry(W2_ALPHA_UUID, "alpha", "docs", "work");
+        let beta = api_entry(W2_BETA_UUID, "beta", "unfiled", "");
+        let gamma = api_entry(W2_GAMMA_UUID, "gamma", "docs", "");
+        api_seed(&[alpha, beta, gamma], API_TEST_BUCKET, API_TEST_PREFIX);
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/entities/{W2_ALPHA_UUID}/tags"),
+            serde_json::json!({ "tags": ["docs"] }),
+        );
+        assert_eq!(status, 200, "alphaへtag付与(事前): {body}");
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/entities/{W2_BETA_UUID}/tags"),
+            serde_json::json!({ "tags": ["docs"] }),
+        );
+        assert_eq!(status, 200, "betaへtag付与(事前): {body}");
+
+        // untagged=1はtag無しentity(gamma)のみ
+        let (status, body) = api("GET", "/api/entities?untagged=1");
+        assert_eq!(status, 200, "?untagged=1は200: {body}");
+        assert_eq!(
+            uuids_of(&body),
+            vec![W2_GAMMA_UUID.to_string()],
+            "tag無しentityはgammaのみ: {body}"
+        );
+        // tag=との同時指定は400 invalid_request
+        let (status, body) = api("GET", "/api/entities?tag=docs&untagged=1");
+        assert_eq!(status, 400, "tag+untagged同時指定は400: {body}");
+        expect_error_body(&body, "invalid_request");
+        // untaggedの値は1のみ(0等は400)
+        let (status, body) = api("GET", "/api/entities?untagged=0");
+        assert_eq!(status, 400, "untagged=0は400: {body}");
+        expect_error_body(&body, "invalid_request");
+        // 他絞り込み(label)との併用はAND(gammaはlabel無しのため空)
+        let (status, body) = api("GET", "/api/entities?untagged=1&label=work");
+        assert_eq!(status, 200, "untagged+label併用は200: {body}");
+        assert!(
+            uuids_of(&body).is_empty(),
+            "label=work×untaggedはgamma(label無し)が弾かれ空: {body}"
+        );
+
+        // ?label=(空文字)はラベルなしの完全一致(beta+gamma)
+        let (status, body) = api("GET", "/api/entities?label=");
+        assert_eq!(status, 200, "?label=空文字は200: {body}");
+        let mut uuids = uuids_of(&body);
+        uuids.sort();
+        assert_eq!(
+            uuids,
+            vec![W2_BETA_UUID.to_string(), W2_GAMMA_UUID.to_string()],
+            "label=空文字はラベルなしentity(beta+gamma): {body}"
+        );
+        drop(env);
+    }
+
+    /// [covers:server.tags-list]
+    /// [covers:server.collections-list-and-detail]
+    /// tag_counts・collections一覧のentity_countは同一scopeの現存entities(cache)との
+    /// JOINで集計する(コードレビュー中11: sync/rebuildでcacheから消えたentityのtag行・
+    /// 構成行は件数に計上しない。行自体は永続classのため保持される)。
+    #[test]
+    fn api_counts_join_with_existing_entities() {
+        let env = api_env("srv-api-w2-stale-join");
+        let alpha = api_entry(W2_ALPHA_UUID, "alpha", "docs", "work");
+        api_seed(&[alpha], API_TEST_BUCKET, API_TEST_PREFIX);
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/entities/{W2_ALPHA_UUID}/tags"),
+            serde_json::json!({ "tags": ["docs"] }),
+        );
+        assert_eq!(status, 200, "alphaへtag付与(事前): {body}");
+        // cacheに無いuuidのtag行・構成行(直接注入=sync/rebuildで消えたentity相当)
+        w2_insert_tag_row(&env, "api-bucket:amazing-backup/", W2_ABSENT_UUID, "docs");
+        w2_insert_tag_row(&env, "api-bucket:amazing-backup/", W2_ABSENT_UUID, "ghost");
+        let ghost_id = w2_insert_collection_row(&env, "api-bucket:amazing-backup/", "ghost");
+        {
+            let conn = rusqlite::Connection::open(env.home.join("catalog.db"))
+                .expect("catalog.db open");
+            conn.execute(
+                "INSERT INTO collection_items (collection_id, scope, uuid, added_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    ghost_id,
+                    "api-bucket:amazing-backup/",
+                    W2_ABSENT_UUID,
+                    "2026-11-05T12:00:00+09:00"
+                ],
+            )
+            .expect("collection_items行挿入");
+        }
+
+        // tags一覧: docsは現存alphaのみ計上(1)・ghostは現存entityが0のため一覧に出ない
+        let (status, body) = api("GET", "/api/tags");
+        assert_eq!(status, 200, "GET /api/tagsは200: {body}");
+        assert_eq!(
+            tags_of(&body),
+            vec![("docs".to_string(), 1)],
+            "cache外uuidのtag行は計上しない(ghostは一覧に出ない): {body}"
+        );
+        // collections一覧: ghostのentity_countは0(現存entityのみ計上)
+        let (status, body) = api("GET", "/api/collections");
+        assert_eq!(status, 200, "GET /api/collectionsは200: {body}");
+        let cols = body
+            .get("collections")
+            .and_then(|v| v.as_array())
+            .expect("collections配列");
+        assert_eq!(cols.len(), 1, "collectionはghostのみ: {body}");
+        assert_eq!(
+            cols[0].get("name").and_then(|n| n.as_str()),
+            Some("ghost"),
+            "ghost: {body}"
+        );
+        assert_eq!(
+            cols[0].get("entity_count").and_then(|c| c.as_i64()),
+            Some(0),
+            "cache外uuidの構成はentity_countに計上しない: {body}"
+        );
+        drop(env);
+    }
+
+    /// [covers:server.collection-crud]
+    /// [covers:server.entity-tags-replace]
+    /// 構成を持つcollectionの改名応答は操作後の実際の構成uuid一覧を含む(コード
+    /// レビュー高2=GET詳細・設計3.1「操作後の対象状態」と一致)。PUT tagsのbody内
+    /// 重複は正規化(set化)して受理(コードレビュー中5)。
+    #[test]
+    fn api_rename_response_includes_uuids_and_tags_deduped() {
+        let env = api_env("srv-api-w2-review-fix");
+        let alpha = api_entry(W2_ALPHA_UUID, "alpha", "docs", "work");
+        api_seed(&[alpha], API_TEST_BUCKET, API_TEST_PREFIX);
+        let id = w2_create_collection("grp");
+        let (status, body) = api_body(
+            "POST",
+            &format!("/api/collections/{id}/items"),
+            serde_json::json!({ "uuids": [W2_ALPHA_UUID] }),
+        );
+        assert_eq!(status, 200, "alpha追加(事前): {body}");
+
+        // 構成持ちcollectionの改名応答のuuidsは空でなく操作後の構成(高2)
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/collections/{id}"),
+            serde_json::json!({ "name": "grp2" }),
+        );
+        assert_eq!(status, 200, "構成持ち改名は200: {body}");
+        let renamed = body.get("collection").expect("改名応答は詳細schema");
+        assert_eq!(
+            renamed.get("uuids").and_then(|u| u.as_array()).map(|a| a.len()),
+            Some(1),
+            "改名応答のuuidsは操作後の構成(空でない): {body}"
+        );
+        // GET詳細と同一内容(3.1「書込応答は読取系と同一schema」)
+        let (status, detail) = api("GET", &format!("/api/collections/{id}"));
+        assert_eq!(status, 200, "詳細は200: {detail}");
+        assert_eq!(
+            renamed.get("uuids"),
+            detail.get("collection").and_then(|c| c.get("uuids")),
+            "改名応答のuuidsはGET詳細と同一: {body} {detail}"
+        );
+
+        // body内重複tagは正規化して受理(200・tagsは1件)
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/entities/{W2_ALPHA_UUID}/tags"),
+            serde_json::json!({ "tags": ["docs", "docs"] }),
+        );
+        assert_eq!(status, 200, "重複tag bodyは正規化して200: {body}");
+        assert_eq!(
+            body.get("tags").and_then(|t| t.as_array()).map(|a| a.len()),
+            Some(1),
+            "重複は正規化されdocsの1件: {body}"
+        );
+        drop(env);
+    }
+
+    /// [covers:server.write-api-audit-log-recorded]
+    /// 成功audit記録は書込操作と同一transactionで確定し・記録不能な場合は操作も
+    /// rollbackされて500 internalで応答する(コードレビュー中4: 成功応答した変更が
+    /// 履歴に残らない状況を作らない)。
+    #[test]
+    fn api_write_rolls_back_when_audit_recording_fails() {
+        let env = api_env("srv-api-w2-audit-atomic");
+        let alpha = api_entry(W2_ALPHA_UUID, "alpha", "docs", "work");
+        api_seed(&[alpha], API_TEST_BUCKET, API_TEST_PREFIX);
+        // audit_log表をDROP(記録不能状況の注入。migrationはuser_version済みのため
+        // handler内のopenでは再作成されない)
+        {
+            let conn = rusqlite::Connection::open(env.home.join("catalog.db"))
+                .expect("catalog.db open");
+            conn.execute("DROP TABLE audit_log", [])
+                .expect("audit_log表DROP");
+        }
+        let (status, body) = api_body(
+            "PUT",
+            &format!("/api/entities/{W2_ALPHA_UUID}/tags"),
+            serde_json::json!({ "tags": ["docs"] }),
+        );
+        assert_eq!(status, 500, "audit記録不能時の書込は500 internal: {body}");
+        expect_error_body(&body, "internal");
+        // 操作はrollbackされている(tagsは空のまま)
+        let (status, body) = api("GET", &format!("/api/entities/{W2_ALPHA_UUID}"));
+        assert_eq!(status, 200, "詳細は200: {body}");
+        assert_eq!(
+            body.get("tags").and_then(|t| t.as_array()).map(|a| a.len()),
+            Some(0),
+            "書込はrollbackされtagsは空のまま: {body}"
+        );
+        drop(env);
     }
 }

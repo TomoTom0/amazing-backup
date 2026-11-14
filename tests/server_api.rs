@@ -390,3 +390,80 @@ fn serve_pending_scan_unauthenticated_401() {
     let _ = child.send_sigterm();
     let _ = child.wait();
 }
+
+// ---------------------------------------------------------------------------
+// TASK-17 W2(TASK-19: tag/collection・audit_log・2026-11-14テスト先行)の結合test。
+// 書込API(tags系・collections系)も同一auth_gateで保護のserve経由観測
+// (=P4以降のgate配置漏れの回帰検出。実装前はrouting不在のfallback 404でfailを許容)。
+// 応答schema・error体系の詳細観測はsrc/server.rs内handler単体testが担う。
+
+/// 素朴HTTP request(任意method・body無し。書込endpointの未認証応答観測用。
+/// common::http_postの任意method版)。
+fn http_request_raw(addr: &str, method: &str, path: &str) -> Option<(u16, String)> {
+    use std::io::{Read as _, Write as _};
+    let mut stream = std::net::TcpStream::connect(addr).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok()?;
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let code = text.split_whitespace().nth(1)?.parse().ok()?;
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
+    Some((code, body))
+}
+
+/// [covers:server.write-api-auth-gate]
+/// 書込API群(tags系・collections系)は未認証401(session gate=設計6章: 読取/書込の
+/// 区別無く同一gate)。serve経由でrouter実装へのgate適用を回帰観測する。
+#[test]
+fn serve_write_api_unauthenticated_401() {
+    let Some(fx) = common::StorageFixture::new("srv-w2-write-auth", common::StorageOpts::default())
+    else {
+        return;
+    };
+    // データが存在する状態で観測(保護対象のデータが応答に漏れないことまで確認)
+    let a = fx.data_root.join("a.zip");
+    make_archive(&a, 1024);
+    let (code, stdout, stderr) = fx.push_from_list(&[], &[(&a, Some("alpha"))], &[]);
+    assert_eq!(code, 0, "push(事前): {stdout}{stderr}");
+
+    let (addr, mut child, _err) = start_serve(&fx, free_local_port(), "w2-write-auth");
+    for (method, path) in [
+        ("POST", "/api/collections"),
+        (
+            "PUT",
+            "/api/entities/11111111-1111-1111-1111-111111111111/tags",
+        ),
+        ("PUT", "/api/collections/1"),
+        ("DELETE", "/api/collections/1"),
+        ("POST", "/api/collections/1/items"),
+        (
+            "DELETE",
+            "/api/collections/1/items/11111111-1111-1111-1111-111111111111",
+        ),
+    ] {
+        let (code, body) = http_request_raw(&addr, method, path).expect("応答");
+        assert_eq!(
+            code, 401,
+            "未認証の{method} {path}は401(書込APIも同一session gate): status={code} body={body}"
+        );
+        assert!(
+            body.contains("\"unauthenticated\""),
+            "error bodyは既存error体系形式(unauthenticated): {body}"
+        );
+        assert!(
+            !body.contains("alpha"),
+            "{path}の応答に保護対象データは含まれない: {body}"
+        );
+    }
+    let _ = child.send_sigterm();
+    let _ = child.wait();
+}

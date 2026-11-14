@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useSyncStore } from './sync'
+import { useFoldersStore } from './folders'
+import { useTagsStore } from './tags'
 
 // sync storeのfetchHealth状態遷移(TASK-9設計7章・12章P2のliveness表示)と
 // 手動refresh(TASK-9設計4章D10・コードレビュー指摘高4)。refresh分は実装前の
@@ -122,5 +124,41 @@ describe('sync storeの手動refresh(refresh)', () => {
     expect(calls).toEqual(['POST /api/sync'])
     expect(sync.lastRefreshError?.code).toBe('upstream')
     expect(sync.refreshing).toBe(false)
+  })
+})
+
+// [covers:frontend.view-options-fetch-state]
+describe('手動refresh後の選択肢失効(W2レビュー指摘中8)', () => {
+  it('refresh成功時は取得済み(ok)のfolder選択肢を再取得し未取得のtag選択肢は再取得しない', async () => {
+    const calls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        calls.push(`${init?.method ?? 'GET'} ${url}`)
+        if (url === '/api/sync' && init?.method === 'POST') {
+          return Promise.resolve(responseOf(200, syncBodyOf('fresh', 2)))
+        }
+        if (url === '/api/entities') {
+          return Promise.resolve(responseOf(200, { entities: [], page: 1, total_pages: 1 }))
+        }
+        if (url === '/api/folders') {
+          return Promise.resolve(responseOf(200, { folders: [] }))
+        }
+        return Promise.reject(new TypeError(`unexpected fetch: ${url}`))
+      }),
+    )
+    const sync = useSyncStore()
+    const folders = useFoldersStore()
+    const tags = useTagsStore()
+    // folder選択肢のみ取得済み(ok)・tag選択肢は未取得(not_fetched)の状態にする
+    await folders.fetchFolders()
+    expect(folders.fetchState).toBe('ok')
+    expect(tags.fetchState).toBe('not_fetched')
+    calls.length = 0
+    await sync.refresh()
+    // syncでremote索引が置き換わるため取得済みの選択肢は再取得される
+    // (POST /api/sync→GET /api/entities→GET /api/folders。未取得の/api/tagsは呼ばれない)
+    expect(calls).toEqual(['POST /api/sync', 'GET /api/entities', 'GET /api/folders'])
   })
 })

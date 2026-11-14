@@ -384,6 +384,7 @@ s3://<bucket>/<prefix>/
 - labelは`.`/`..`要素の排除・正規化のみ適用(実source treeの要素名をそのまま用いる)
 - 生成keyがS3のobject key上限1024 byteを超える場合は対象エラー3(prefix長またはtitle長で対処)
 - category名規則は`^[a-z0-9][a-z0-9-]{0,63}$`・予約語`sys`(旧表記`_sys`も)拒否。pin名は`^[a-z0-9][a-z0-9-]{0,62}$`(63文字以内)で`default`は予約
+- **tag・collection(serve 5.14)はlocal語彙**: 分類(category/label)が索引・manifestに記録されるのに対し、tag(entityへの検索語彙・複数付け可)とcollection(名前付きグループ)はcatalog DBのlocal tableのみに保存され索引・manifestには入らない(索引はpush毎に再構築されるためlocal置きしないと消失する)。tag名規則はcategoryと同一の`^[a-z0-9][a-z0-9-]{0,63}$`。付与・編集はserveのUI/APIから行う(CLIからの付与手段は無い)
 
 ### 4.3 versioningと索引
 
@@ -585,7 +586,7 @@ amazing-backup manage auth api-key [--name NAME]
 | `jobs reissue` | 復元jobの再発行(tier変更可。Tierのallowlist外はusage 64)。対象はobject keyで指定 |
 | `reset` | dev bucketの初期化(S3全消去・registryはbucket限定・冪等)。**dry-runが既定**(消去対象version数=Versions・DeleteMarkers別・registry退避先path・registry再書込の除去/残行数を表示)。`--apply`で 1) ローカルregistryを`./tmp/<yyyymmdd>_<bucket>_registry_before_reset.jsonl`へ全体退避(証跡。不在ならskip。同日再実行は上書き) 2) root prefix配下の全object version(Versions・DeleteMarkers)をDeleteObjectVersionで削除(`{prefix}data/`配下に留まらず`sys/`索引・manifestも消去) 3) ローカルregistryから当該bucket由来行(対象bucket宛file_uploadはuuid共有(非対象bucketにもuploadされたuuid)に関わらず全て除去+S3実体削除後の記録残存はregistry-only skipとの不整合のため。他のupload系記録と対象bucketのみにuploadされたuuidのfile_write)のみ除去して再書込(temp+fsync+rename+親dir fsync。他bucket宛記録・共有uuidのfile_write・crash残存file_write・prune/sweep等は温存。torn write最終行は破棄。残0行ならfile削除。cache dirは対象外・手動掃除) 4) 再list_versionsで0件確認。安全弁(違反は設定エラー2+案内・S3 API呼び出しなし): 実効profileのpurpose=dev限定。`--config`必須 |
 | `catalog sync` | remote索引をlocal catalog DB(2.2)へ同期(遅延refresh)。HEAD 1回でvalidator(ETag+VersionId)を検証し、変化(初回含む)あればGET+復号でDBへ反映・変化なければGETを省略。書込実績の無いnamespaceは空cacheとして確定(S3問い合わせなし)。索引object不在は`index rebuild`案内の設定エラー2(未書込namespace例外は除く) |
-| `catalog rebuild` | ローカルregistry(JSONL)からcatalog DBのcache class(entities/versions/pins/locations/sync_state/pending_items)を置換再構築(冪等)。永続class(credential・実行記録)は保持・削除しない。cacheは常にregistry+S3から再構築可能な導出index(2.2) |
+| `catalog rebuild` | ローカルregistry(JSONL)からcatalog DBのcache class(entities/versions/pins/locations/sync_state/pending_items)を置換再構築(冪等)。永続class(credential・api-key・実行記録・tag/collections/audit_log=UI書込操作記録)は保持・削除しない(tag・collectionは索引から再構築できないlocal語彙のためrebuildで消失しない・4.2)。cacheは常にregistry+S3から再構築可能な導出index(2.2) |
 | `catalog scan` | アップロード前カタログscan。pipeline.toml `[profiles.<name>.catalog.scan]`(3.1)の登録root配下をlocal FS走査し(S3接続不要・symlink不追従)、各fileをcatalog DBの保存値とsize+mtime比較で4状態(unbacked=未backup・changed=変更あり・ok=backup済み・unknown=確認不能)へ分類してpending_itemsを全置換(再scanで前回結果は残らない)。`--sha256`指定時のみsha256を再計算しsha一致合流(registryのsha_uuid_lookup)でunknownをokへ確定する(既定はsize+mtime比較のみ)。serveの未対応一覧(pending絞り込み)(5.14)は同一scanをボタン実行できる |
 | `auth list` | 登録済みcredential一覧(passkey・api-keyの統合表示: credential_id・kind=passkey/api_key・name・created_at)。catalog DB(2.2)のcredentials tableとapi_keys table(永続class)を直接読むlocal操作でS3接続不要。0件案内(bootstrap案内)は両table合計0件時のみ(5.14) |
 | `auth remove <credential_id>` | credentialの失効(削除)。credential_id完全一致の1行をcredentials table→api_keys tableの順に検索して削除するlocal操作(S3接続不要。nameは一意性が無いため対象指定に使わない。passkey・api-keyいずれのcredential_idでも削除可)。両table合計削除0行(存在しないcredential_id)は対象エラー3。削除後に両table合計0件となった場合は再登録のための`serve --bootstrap`案内を表示する(合計0件ではlogin手段が無く・passkey登録はbootstrap token提示時のみ開く=fail-closed。api-key失効は既存sessionを破棄しない。5.14) |
@@ -660,10 +661,12 @@ Web frontend(埋め込み静的配信)と読取API(`/api/*`・axum)を起動す�
 - sync状態(`GET /api/sync`)と手動refresh(`POST /api/sync`)
 - diff実行(`POST /api/diff`)と最終diff結果参照(`GET /api/diff`)
 - backup実行run一覧(`GET /api/runs`・batch単位の集約)とjob一覧(`GET /api/jobs`・取得/uploadのjob発行は今後の版で追加)
+- tag一覧(`GET /api/tags`)・folder一覧(`GET /api/folders`=所在labelの階層集約)・collection一覧と詳細(`GET /api/collections`・`/api/collections/{id}`)
+- tag編集(`PUT /api/entities/{uuid}/tags`)とcollectionの作成・改名・削除・構成の追加・除去(`POST`/`PUT`/`DELETE /api/collections`・`POST /api/collections/{id}/items`・`DELETE /api/collections/{id}/items/{uuid}`)
 
-これらの閲覧はfrontendの各画面(5タブ構成: ホーム=sync状態・前回backup・未対応・diff・実行中jobのサマリ、バックアップ=検索・category絞込・paging・pending/diff絞り込み表示・entity詳細=所在・pins・版一覧、転送・設定・管理=今後の版で整備)から操作できる(CLIの`query`/`list`と同一の索引語彙で表示)。
+これらの閲覧・操作はfrontendの各画面(5タブ構成: ホーム=sync状態・前回backup・未対応・diff・実行中jobのサマリ、バックアップ=folder構造(tag付けされたlabel階層)/tag/collectionの3ビュー切替+検索box・pager(3ビュー共通)・pending/diff絞り込み表示・行のtag列(chip)・entity詳細=所在・pins・版一覧・tag編集・所属collection、転送・設定・管理=今後の版で整備)から操作できる(CLIの`query`/`list`と同一の索引語彙で表示)。
 
-未認証の閲覧系APIは401で拒否される(空dataを返さない)。操作系CLI(backup push/pull・get・pin・manage系のfile操作)のAPIは提供しない(操作はCLI既存のまま)。
+未認証の閲覧系APIは401で拒否される(空dataを返さない)。S3へ書き込む操作系CLI(backup push/pull・get・pin・manage系のfile操作)のAPIは提供しない(操作はCLI既存のまま)。UIから書き込めるのはcatalog DBのlocal語彙(4.2: tag・collection)のみで、これらの書込APIは成功・失敗双方をaudit_log tableへ記録する(UI書込操作のみが対象でCLI操作は記録しない。履歴のUI表示は今後の版)。
 
 **api-key認証(接続元LAN内限定)**: passkeyが使えない端末・browser向けに、api-keyでの認証をもう一つのlogin手段として提供する(passkey認証に追加する第二手段・接続元がLAN内の場合のみ有効):
 
@@ -677,9 +680,11 @@ Web frontend(埋め込み静的配信)と読取API(`/api/*`・axum)を起動す�
 
 **APIの実装確定値**:
 
-- `GET /api/entities`は`query`/`category`/`label`/`scope`絞り込み+`page`でpaging。**1page=50件・pageは1始点**(0・非数値は400)。応答は`{"entities":[...],"page":n,"total_pages":n}`(total_pagesは0件でも1)
-- error応答は`{"error":{"code","message"}}`形式(HTTP statusはerror code種別に対応: 400 invalid_request・401 unauthenticated・404 not_found・502 upstream・503 configuration等)
-- 書込操作(push/pin等)を行うAPIは無く、serve経由でS3へ書き込むのはsync取得系GET・scan走査のみ
+- `GET /api/entities`は`query`/`category`/`label`/`tag`/`collection`/`scope`絞り込み+`page`でpaging(tag絞り込み=当該tagを持つentity・collection絞り込み=当該collectionの構成entity。folder絞り込み用のparamは設けず既存`label=`で扱う)。**1page=50件・pageは1始点**(0・非数値は400)。応答は`{"entities":[...],"page":n,"total_pages":n}`(total_pagesは0件でも1)。一覧の各要素と詳細応答にはtag一覧(`tags`・昇順)が付き、詳細応答には所属collection名一覧(`collections`・name昇順)も付く
+- tag/folder/collection読取APIの応答: `GET /api/tags`は`{"tags":[{tag,entity_count}]}`(tag名昇順)・`GET /api/folders`はlabelのdirectory区切りで階層導出した`{"folders":[{label,path,entity_count}]}`(中間nodeも1行・path昇順・entity_countは子folder配下の合計)・`GET /api/collections`は`{"collections":[{id,name,entity_count}]}`(name昇順)・`GET /api/collections/{id}`は`{"collection":{id,name,uuids}}`(構成uuid一覧・追加順)
+- tag/collection系の書込API: `PUT /api/entities/{uuid}/tags`(body `{"tags":[...]}`でtag一覧を丸ごと置換・冪等・空配列は全削除。tag名規則はcategoryと同一の`^[a-z0-9][a-z0-9-]{0,63}$`で違反は422)・`POST`/`PUT`/`DELETE /api/collections`(作成・改名・削除。同(scope,name)重複は409。削除は構成参照の解除のみでentity・tagへ影響しない)・`POST /api/collections/{id}/items`(body `{"uuids":[...]}`で一括追加・追加済みuuidの再追加は冪等に成功)・`DELETE /api/collections/{id}/items/{uuid}`(除去)。書込応答は操作後の対象状態(読取系と同一schemaのため操作後に再GETは不要)
+- error応答は`{"error":{"code","message"}}`形式(HTTP statusはerror code種別に対応: 400 invalid_request・401 unauthenticated・404 not_found・409 duplicate・422 validation_failed・502 upstream・503 configuration等)
+- S3へ書き込む操作(push/pin等)のAPIは無く、serve経由でS3へ書き込むのはsync取得系GET・scan走査のみ。tag/collection系書込はcatalog DB(local語彙・4.2)への書込でS3・索引には書かない
 
 **pending scanの手順(serve画面)**: pipeline.tomlの`[profiles.<name>.catalog.scan]`(3.1)へ対象rootを登録した上で、pending画面(pending)のscanボタン(`POST /api/pending/scan`)で`manage catalog scan`と同一の走査・分類(unbacked/changed/ok/unknown)を実行できる。
 

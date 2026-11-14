@@ -314,7 +314,8 @@ export type EntityLocation = {
 /** entityのpin 1件分 */
 export type EntityPin = { pin: string; date: string; source_size: number }
 
-/** entity要約(GET /api/entitiesの要素=entry_summary語彙。versionsは版数) */
+/** entity要約(GET /api/entitiesの要素=entry_summary語彙。versionsは版数。
+ *  W2(TASK-17)でtags(行のtag列chip表示)を追加) */
 export type EntitySummary = {
   uuid: string
   title: string
@@ -323,6 +324,7 @@ export type EntitySummary = {
   latest_date: string
   latest_size: number
   pins: EntityPin[]
+  tags: string[]
 }
 
 /** GET /api/entities の応答形式({"entities":[...],"page":n,"total_pages":n}) */
@@ -357,7 +359,13 @@ function isEntitySummary(v: unknown): v is EntitySummary {
   if (typeof v['latest_date'] !== 'string' || typeof v['latest_size'] !== 'number') {
     return false
   }
-  return Array.isArray(v['pins']) && v['pins'].every(isEntityPin)
+  if (!Array.isArray(v['pins']) || !v['pins'].every(isEntityPin)) return false
+  return isStringArray(v['tags'])
+}
+
+/** string[]形式の判定(tags・collections等の配列field共通) */
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((item) => typeof item === 'string')
 }
 
 /** GET /api/entities応答の型ガード(wrap+要素schema一致のみtrue) */
@@ -378,8 +386,12 @@ export type EntityVersionEntry = {
   source_size: number
 }
 
-/** GET /api/entities/:uuid の応答(要約+version_list付き=entity-detail-endpoint) */
-export type EntityDetail = EntitySummary & { version_list: EntityVersionEntry[] }
+/** GET /api/entities/:uuid の応答(要約+version_list付き=entity-detail-endpoint。
+ *  W2(TASK-17)でcollections(所属collection名一覧・詳細の所属collection表示)を追加) */
+export type EntityDetail = EntitySummary & {
+  collections: string[]
+  version_list: EntityVersionEntry[]
+}
 
 function isEntityVersionEntry(v: unknown): v is EntityVersionEntry {
   if (!isRecord(v)) return false
@@ -387,10 +399,18 @@ function isEntityVersionEntry(v: unknown): v is EntityVersionEntry {
   return fields.every((f) => typeof v[f] === 'string') && typeof v['source_size'] === 'number'
 }
 
-/** GET /api/entities/:uuid応答の型ガード(要約+version_list配列の一致のみtrue) */
+/** GET /api/entities/:uuid応答の型ガード(要約+version_list+collections配列の一致のみtrue) */
 export function isEntityDetailResponse(v: unknown): v is EntityDetail {
   if (!isEntitySummary(v)) return false
-  return hasEntityVersionList(v)
+  return hasEntityCollections(v) && hasEntityVersionList(v)
+}
+
+/** collections配列のfield検証(引数をunknownで受けisRecord経由でaccessする=
+ *  isEntitySummary通過後のnarrow型(EntitySummary)にkeyが無いindex accessに
+ *  ならないようにする=hasEntityVersionListと同一pattern) */
+function hasEntityCollections(v: unknown): boolean {
+  if (!isRecord(v)) return false
+  return isStringArray(v['collections'])
 }
 
 function hasEntityVersionList(v: unknown): boolean {
@@ -435,22 +455,34 @@ export function isEntityVersionsResponse(v: unknown): v is EntityVersionsRespons
 }
 
 /** GET /api/entitiesの絞り込みparam(値のあるparamのみURL queryへ直列化する。
- * scopeは省略=server側実効profile) */
+ * scopeは省略=server側実効profile。W2(TASK-17)でtag/tag名・collection=collection id
+ * (文字列化)の絞り込みparamを追加。W2レビュー指摘対応(TASK-19)でuntagged(tag無し
+ * 絞り込み=true時untagged=1)を追加しlabelはラベルなし絞り込みのため空文字も直列化
+ * する(値のあるparamのみ規則のlabel限定例外)) */
 export type EntitiesQueryParams = {
   query?: string
   category?: string
   label?: string
+  tag?: string
+  collection?: string
+  untagged?: boolean
   page?: number
 }
 
-/** entity一覧の取得(保護API。query/category/label/pageは値のあるもののみ付与) */
+/** entity一覧の取得(保護API。query/category/tag/collection/pageは値のあるもののみ
+ * 付与。labelは空文字(ラベルなし完全一致)も送る・untagged=true時はuntagged=1を付与
+ * (tag=との同時指定はserver側400のため呼び出し側で排他する)。folder絞り込みは
+ * label=で成立するため専用paramは設けない) */
 export function fetchEntities(
   params: EntitiesQueryParams = {},
 ): Promise<ApiResult<EntitiesResponse>> {
   const search = new URLSearchParams()
   if (params.query) search.set('query', params.query)
   if (params.category) search.set('category', params.category)
-  if (params.label) search.set('label', params.label)
+  if (params.label !== undefined) search.set('label', params.label)
+  if (params.tag) search.set('tag', params.tag)
+  if (params.collection) search.set('collection', params.collection)
+  if (params.untagged) search.set('untagged', '1')
   if (params.page !== undefined) search.set('page', String(params.page))
   const qs = search.toString()
   return apiGet(qs === '' ? '/api/entities' : `/api/entities?${qs}`, isEntitiesResponse)
@@ -525,6 +557,151 @@ export function fetchJobs(): Promise<ApiResult<JobsResponse>> {
   return apiGet('/api/jobs', isJobsResponse)
 }
 
+// --- tags/folders/collections(TASK-17設計2.2(バックアップ一覧の3ビュー)・3.2
+//     (GET /api/tags・folders・collections(+/:id)・PUT /api/entities/:uuid/tags)・
+//     4.3(folder=location.labelの階層集約・tag/collectionはlocal語彙)・9章W2。
+//     一覧要素のentity_count(2026-11-14のAPI契約統一裁定: collections一覧の
+//     entity_count=構成entity数)を含む) ---
+
+/** GET /api/tags のtag schema(tag名と当該tagを持つentity数) */
+export type TagItem = { tag: string; entity_count: number }
+
+/** GET /api/tags の応答形式({"tags":[...]}・tag名昇順) */
+export type TagsResponse = { tags: TagItem[] }
+
+/** GET /api/tags応答の型ガード(tags配列+各要素のtag/entity_count一致のみtrue) */
+export function isTagsResponse(v: unknown): v is TagsResponse {
+  if (!isRecord(v) || !Array.isArray(v['tags'])) return false
+  return v['tags'].every(
+    (t) => isRecord(t) && typeof t['tag'] === 'string' && typeof t['entity_count'] === 'number',
+  )
+}
+
+/** tag一覧の取得(保護API。tagビューの選択肢表示基盤。失敗時はerror扱い) */
+export function fetchTags(): Promise<ApiResult<TagsResponse>> {
+  return apiGet('/api/tags', isTagsResponse)
+}
+
+/** GET /api/folders のfolder schema(label=location.label・path='/'区切りの
+ *  階層path・entity_count=当該folder直下のentity数) */
+export type FolderItem = { label: string; path: string; entity_count: number }
+
+/** GET /api/folders の応答形式({"folders":[...]}・階層集約済み) */
+export type FoldersResponse = { folders: FolderItem[] }
+
+/** GET /api/folders応答の型ガード(folders配列+各要素のlabel/path/entity_count
+ *  一致のみtrue) */
+export function isFoldersResponse(v: unknown): v is FoldersResponse {
+  if (!isRecord(v) || !Array.isArray(v['folders'])) return false
+  return v['folders'].every(
+    (f) =>
+      isRecord(f) &&
+      typeof f['label'] === 'string' &&
+      typeof f['path'] === 'string' &&
+      typeof f['entity_count'] === 'number',
+  )
+}
+
+/** folder一覧の取得(保護API。folder構造ビューのtree表示基盤。失敗時はerror扱い) */
+export function fetchFolders(): Promise<ApiResult<FoldersResponse>> {
+  return apiGet('/api/folders', isFoldersResponse)
+}
+
+/** GET /api/collections のcollection schema(id/name+構成entity数) */
+export type CollectionItem = { id: number; name: string; entity_count: number }
+
+/** GET /api/collections の応答形式({"collections":[...]}・name昇順) */
+export type CollectionsResponse = { collections: CollectionItem[] }
+
+/** GET /api/collections応答の型ガード(collections配列+各要素のid/name/entity_count
+ *  一致のみtrue) */
+export function isCollectionsResponse(v: unknown): v is CollectionsResponse {
+  if (!isRecord(v) || !Array.isArray(v['collections'])) return false
+  return v['collections'].every(
+    (c) =>
+      isRecord(c) &&
+      typeof c['id'] === 'number' &&
+      typeof c['name'] === 'string' &&
+      typeof c['entity_count'] === 'number',
+  )
+}
+
+/** GET /api/collections/:id のcollection詳細schema(id/name+構成uuid一覧) */
+export type CollectionDetail = { id: number; name: string; uuids: string[] }
+
+/** GET /api/collections/:id の応答形式(詳細schema。POST/PUT collections・items追加の
+ *  書込応答と同一形式=design doc 3.1「読取系と同一schema」原則) */
+export type CollectionDetailResponse = { collection: CollectionDetail }
+
+/** GET /api/collections/:id応答の型ガード(collection wrap+id/name/uuids配列一致
+ *  のみtrue) */
+export function isCollectionDetailResponse(v: unknown): v is CollectionDetailResponse {
+  if (!isRecord(v)) return false
+  const c = v['collection']
+  if (!isRecord(c)) return false
+  if (typeof c['id'] !== 'number' || typeof c['name'] !== 'string') return false
+  return isStringArray(c['uuids'])
+}
+
+/** collection一覧の取得(保護API。collectionビューの選択肢表示基盤) */
+export function fetchCollections(): Promise<ApiResult<CollectionsResponse>> {
+  return apiGet('/api/collections', isCollectionsResponse)
+}
+
+/** collection詳細(構成uuid一覧)の取得(保護API。不在idの404 not_foundはerror扱い) */
+export function fetchCollectionDetail(id: number): Promise<ApiResult<CollectionDetailResponse>> {
+  return apiGet(`/api/collections/${id}`, isCollectionDetailResponse)
+}
+
+/** entityのtag一覧置換(PUT /api/entities/:uuid/tags。body {tags:[...]}で丸ごと置換=
+ *  冪等。応答は操作後の対象状態(読取系と同一schema=design doc 3.1方針)のため
+ *  操作後の再GETは不要。tag名規則違反は422・不在uuidは404) */
+export function putEntityTags(uuid: string, tags: string[]): Promise<ApiResult<EntityDetail>> {
+  return apiPut(`/api/entities/${uuid}/tags`, { tags }, isEntityDetailResponse)
+}
+
+// --- collection書込(W2レビュー指摘高3=TASK-19。API契約は2026-11-14確定分に固定:
+//     POST /api/collections body{name}応答{collection:{id,name,uuids}}・
+//     PUT /api/collections/:id body{name}・DELETE /api/collections/:id応答
+//     {status:"ok"}・POST /api/collections/:id/items body{uuids}応答詳細schema・
+//     DELETE /api/collections/:id/items/:uuid応答詳細schema) ---
+
+/** collection作成(POST /api/collections。応答は詳細schema=作成後の対象状態) */
+export function createCollection(name: string): Promise<ApiResult<CollectionDetailResponse>> {
+  return apiPost('/api/collections', { name }, isCollectionDetailResponse)
+}
+
+/** collection改名(PUT /api/collections/:id。応答は詳細schema=操作後の対象状態) */
+export function renameCollection(
+  id: number,
+  name: string,
+): Promise<ApiResult<CollectionDetailResponse>> {
+  return apiPut(`/api/collections/${id}`, { name }, isCollectionDetailResponse)
+}
+
+/** collection削除(DELETE /api/collections/:id。応答は{"status":"ok"}形式) */
+export function deleteCollection(id: number): Promise<ApiResult<StatusOkResponse>> {
+  return apiDelete(`/api/collections/${id}`, isStatusOkResponse)
+}
+
+/** collection構成へのentity追加(POST /api/collections/:id/items。body {uuids}。
+ *  応答は詳細schema=操作後の構成uuid一覧) */
+export function addCollectionItems(
+  id: number,
+  uuids: string[],
+): Promise<ApiResult<CollectionDetailResponse>> {
+  return apiPost(`/api/collections/${id}/items`, { uuids }, isCollectionDetailResponse)
+}
+
+/** collection構成からのentity除去(DELETE /api/collections/:id/items/:uuid。
+ *  応答は詳細schema=操作後の構成uuid一覧) */
+export function removeCollectionItem(
+  id: number,
+  uuid: string,
+): Promise<ApiResult<CollectionDetailResponse>> {
+  return apiDelete(`/api/collections/${id}/items/${uuid}`, isCollectionDetailResponse)
+}
+
 // --- passkey登録・login(TASK-9設計8章・12章P4。LoginViewから使用) ---
 // server応答はbase64url文字列のWebAuthn options。ここでは文字列のまま受け取り
 // LoginViewでBufferSourceへ変換する(ArrayBufferとbase64urlの往来はUI層の責務)。
@@ -593,6 +770,88 @@ async function apiPost<T>(
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify(requestBody),
+    })
+  } catch {
+    return {
+      ok: false,
+      error: { code: 'network', message: 'serverに接続できません' },
+      httpStatus: 0,
+    }
+  }
+  const body: unknown = await resp.json().catch(() => null)
+  if (resp.ok) {
+    if (guard(body)) {
+      return { ok: true, data: body }
+    }
+    return {
+      ok: false,
+      error: { code: 'internal', message: '応答の形式が不正です' },
+      httpStatus: resp.status,
+    }
+  }
+  if (isApiErrorResponse(body)) {
+    return { ok: false, error: body.error, httpStatus: resp.status }
+  }
+  return {
+    ok: false,
+    error: { code: 'unexpected_status', message: `HTTP ${resp.status}` },
+    httpStatus: resp.status,
+  }
+}
+
+/** PUT共通(JSON body。応答は型ガードで検証し不一致はinternal扱い=apiPostと同型。
+ *  W2(TASK-17)のtag一覧置換(PUT /api/entities/:uuid/tags)で使用) */
+async function apiPut<T>(
+  path: string,
+  requestBody: unknown,
+  guard: (v: unknown) => v is T,
+): Promise<ApiResult<T>> {
+  let resp: Response
+  try {
+    resp = await fetch(path, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(requestBody),
+    })
+  } catch {
+    return {
+      ok: false,
+      error: { code: 'network', message: 'serverに接続できません' },
+      httpStatus: 0,
+    }
+  }
+  const body: unknown = await resp.json().catch(() => null)
+  if (resp.ok) {
+    if (guard(body)) {
+      return { ok: true, data: body }
+    }
+    return {
+      ok: false,
+      error: { code: 'internal', message: '応答の形式が不正です' },
+      httpStatus: resp.status,
+    }
+  }
+  if (isApiErrorResponse(body)) {
+    return { ok: false, error: body.error, httpStatus: resp.status }
+  }
+  return {
+    ok: false,
+    error: { code: 'unexpected_status', message: `HTTP ${resp.status}` },
+    httpStatus: resp.status,
+  }
+}
+
+/** DELETE共通(request body無し。応答は型ガードで検証し不一致はinternal扱い=
+ *  apiGetと同型。W2レビュー指摘対応(TASK-19)のcollection削除・構成除去で使用) */
+async function apiDelete<T>(
+  path: string,
+  guard: (v: unknown) => v is T,
+): Promise<ApiResult<T>> {
+  let resp: Response
+  try {
+    resp = await fetch(path, {
+      method: 'DELETE',
+      headers: { Accept: 'application/json' },
     })
   } catch {
     return {
