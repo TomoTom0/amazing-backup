@@ -58,11 +58,11 @@
 feature = "catalog"
 source_file = "src/catalog.rs"
 verified = true
-verified_at = "2026-11-15"
+verified_at = "2026-11-21"
 verified_by = "claude"
 test_command = "cargo test"
 source_hash = "eb82ef68c7394689bd1bf4b6992c83ac951ee6aa"
-note = "TASK-9設計2章(DB層)・4章(replica同期)・5章(CLI照会cache)・12章P1+3章(D6承認)・12章P5(pending catalog)の条件化。DB真正はJSONL registryのまま・DBは導出index+S3索引replica(平文view・D11承認)。テストはbin subprocess+fake seam(StorageFixture)で観測しsrc/catalog.rs直接参照のunit testは実装時に追加。P5分6条件はテスト先行(2026-11-05)のためverified=falseへ(P5実装後に復帰)。2026-11-05 TASK-13(api_keys table)実装後にcargo test --lib catalog::全緑(5 tests・schema 9 table観測含む)・cargo test --test catalog_storage全緑(29 tests・api_keys永続class観測含む)を確認してverified=trueへ復帰・source_hashを更新。2026-11-14 TASK-17 W2(TASK-19)条件追加(tags/collections/collection_items/audit_log 4 table 2条件+schema-migration 13 tables化の文言改訂+unit test 1件+結合test 1件)でテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。2026-11-15 全件verify(cargo test全binary緑・vitest 126tests緑・build成功・verify-conditions PASS 364条件)を確認してverified=trueへ復帰・source_hashを更新(W2分: tags/collections/collection_items/audit_log 4 table追加・schema 13 tables化)。2026-11-15 レビュー指摘対応(tags/collections件数の現存entities JOIN化・audit_ok_on_tx導入)によるsrc/catalog.rs変更でsource_hashを更新"
+note = "TASK-9設計2章(DB層)・4章(replica同期)・5章(CLI照会cache)・12章P1+3章(D6承認)・12章P5(pending catalog)の条件化。DB真正はJSONL registryのまま・DBは導出index+S3索引replica(平文view・D11承認)。テストはbin subprocess+fake seam(StorageFixture)で観測しsrc/catalog.rs直接参照のunit testは実装時に追加。P5分6条件はテスト先行(2026-11-05)のためverified=falseへ(P5実装後に復帰)。2026-11-05 TASK-13(api_keys table)実装後にcargo test --lib catalog::全緑(5 tests・schema 9 table観測含む)・cargo test --test catalog_storage全緑(29 tests・api_keys永続class観測含む)を確認してverified=trueへ復帰・source_hashを更新。2026-11-14 TASK-17 W2(TASK-19)条件追加(tags/collections/collection_items/audit_log 4 table 2条件+schema-migration 13 tables化の文言改訂+unit test 1件+結合test 1件)でテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。2026-11-15 全件verify(cargo test全binary緑・vitest 126tests緑・build成功・verify-conditions PASS 364条件)を確認してverified=trueへ復帰・source_hashを更新(W2分: tags/collections/collection_items/audit_log 4 table追加・schema 13 tables化)。2026-11-15 レビュー指摘対応(tags/collections件数の現存entities JOIN化・audit_ok_on_tx導入)によるsrc/catalog.rs変更でsource_hashを更新。2026-11-21 TASK-17 W3(TASK-22)条件追加(rebuild保持 1条件)でテスト先行のためverified=falseへ(W3実装後に全件verifyでtrueへ復帰)。2026-11-21 TASK-22(TASK-17 W3)実装後に全件verifyでverified=trueへ復帰(W3分: rebuild保持条件1件・src/catalog.rsは不変のためhash不変)"
 
 [[condition]]
 id = "catalog.db-path-and-file-permissions"
@@ -323,3 +323,14 @@ description = "W2の新4 table(tags/collections/collection_items/audit_log)は�
 given = "sync済みDBの4 tableへ1行ずつ挿入(rusqlite直接=実装後の書込APIと同一schema)した状態での manage catalog rebuild 実行(rusqlite直接で行数観測)"
 expect_return_shape = "rebuildはexit 0で4 tableとも行は保持される(cache class置換の対象外)(実装前はtable不在によりfailを許容)"
 source_lines = "tests/catalog_storage.rs:1507"
+
+# --- TASK-17 W3(TASK-22: 書き込み系registry event・2026-11-21テスト先行) ---
+
+[[condition]]
+id = "catalog.rebuild-preserves-rename-and-location-update"
+target_function = "manage catalog rebuild(build_entries経由のW3 event適用)"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.2(manage catalog rebuildのreduce処理にも両eventを適用=再構築でtitle/label変更が失われないようにする)・9章W3行受入条件(manage catalog rebuild後も変更が保持される)・11章(catalog.toml: Rename/LocationUpdate eventのreduce反映)"
+description = "manage catalog rebuild(ローカルregistryからcache classを再構築)はrename/location_update eventを反映したentriesを構築する(build_entries経由=W3受入条件「manage catalog rebuild後も変更が保持される」)。rebuild後のlist files/query照会にも新title・新category/labelが現れる(CLI照会の索引反映) (integration, fake seam)"
+given = "1entity(title=alpha・category/label既定値)をpush済みのregistryへrename(alpha→renamed)とlocation_update(category/label変更)を追記し、sync後の状態から manage catalog rebuild → list files → query(新title) を実行"
+expect_return_shape = "rebuildはexit 0・list filesの表示に新title(renamed)と新category/labelが現れ・query ren(新title部分一致)で当該entityが1件hitする(rebuild前の照会は旧title)"
+source_lines = "tests/catalog_storage.rs:1576"

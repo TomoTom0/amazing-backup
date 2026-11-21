@@ -4,6 +4,8 @@ import {
   fetchEntityDetail,
   fetchEntityVersions,
   putEntityTags,
+  renameEntity as renameEntityRequest,
+  updateEntityLocation,
   type ApiError,
   type ApiResult,
   type EntitiesResponse,
@@ -68,6 +70,16 @@ export const useEntitiesStore = defineStore('entities', {
     /** tag編集(PUT tags)の実行中状態(保存応答待ち中の後続PUTが同じ旧配列から
      *  作られて先行編集を消すのを防ぐ=Viewは本値でtag編集UIを無効化) */
     tagEditSaving: false,
+    /** title編集(POST rename)のerror(編集formの失敗表示用・W3=TASK-22) */
+    lastRenameError: null as ApiError | null,
+    /** title編集(POST rename)の実行中状態( Viewは本値でtitle編集UIを無効化) */
+    renameSaving: false,
+    /** title編集の重複警告(rename応答のwarning。重複無し成功でnullへ戻す) */
+    lastRenameWarning: null as string | null,
+    /** 所在編集(POST location)のerror(編集formの失敗表示用・W3=TASK-22) */
+    lastLocationError: null as ApiError | null,
+    /** 所在編集(POST location)の実行中状態(Viewは本値で所在編集UIを無効化) */
+    locationSaving: false,
     /** 一覧取得の要求世代(fetchEntities/refetchEntitiesの開始時に増加)。旧要求の
      *  応答の後着は不採用とする(連続選択で並行GETの旧応答が採用され選択状態と
      *  一覧が食い違うのを防ぐ=詳細系detailEpochと同一構成) */
@@ -261,6 +273,57 @@ export const useEntitiesStore = defineStore('entities', {
       }
       this.lastTagEditError = result.error
       this.tagEditSaving = false
+    },
+    /** title編集(POST /api/entities/:uuid/rename。W3=TASK-22)。応答は操作後の
+     *  対象状態(+title重複時のみwarning=許容の警告)のため対象詳細の再GETは行わず
+     *  応答でdetailを更新する。失敗(422等)はlastRenameErrorで示しdetailは旧状態の
+     *  まま(成功でクリア)。実行中はrenameSaving=true(Viewはtitle編集UIを無効化)。
+     *  成功時はtitle変更が一覧表示に影響するため取得済みなら現在の絞り込みで
+     *  一覧を再取得する=旧titleが一覧へ残らない */
+    async renameEntity(uuid: string, title: string): Promise<void> {
+      this.renameSaving = true
+      const result = await renameEntityRequest(uuid, title)
+      if (result.ok) {
+        if (this.selectedUuid === uuid) {
+          this.detail = result.data
+        }
+        this.lastRenameError = null
+        this.lastRenameWarning = result.data.warning ?? null
+        this.renameSaving = false
+        if (this.fetched) {
+          await this.fetchEntities()
+        }
+        return
+      }
+      this.lastRenameError = result.error
+      this.renameSaving = false
+    },
+    /** 所在の分類編集(POST /api/entities/:uuid/location。W3=TASK-22)。応答は操作後の
+     *  対象状態のため対象詳細の再GETは行わず応答でdetailを更新する。失敗(404/422)は
+     *  lastLocationErrorで示しdetailは旧状態のまま(成功でクリア)。実行中は
+     *  locationSaving=true。成功時はfolder一覧ビューに影響するため取得済みなら
+     *  一覧を再取得する */
+    async updateLocation(
+      uuid: string,
+      sourcePath: string,
+      category: string,
+      label: string,
+    ): Promise<void> {
+      this.locationSaving = true
+      const result = await updateEntityLocation(uuid, sourcePath, category, label)
+      if (result.ok) {
+        if (this.selectedUuid === uuid) {
+          this.detail = result.data
+        }
+        this.lastLocationError = null
+        this.locationSaving = false
+        if (this.fetched) {
+          await this.fetchEntities()
+        }
+        return
+      }
+      this.lastLocationError = result.error
+      this.locationSaving = false
     },
   },
 })

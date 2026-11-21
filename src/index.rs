@@ -152,22 +152,37 @@ pub fn build_entries(
         .map(|uuid| {
             let writes = by_uuid.get(uuid).cloned().unwrap_or_default();
             // title: recorded_at最大(同値ならVec後方=後勝ち)。所在が全て除去された
-            // entityはlocation_remove適用外のfile_write群から導出する
-            let title = writes
+            // entityはlocation_remove適用外のfile_write群から導出する。
+            // W3(TASK-22): rename群を通したrecorded_at最大(renameが最新ならnew_title。
+            // より新しいfile_write=再push時のtitle確定が優先)
+            let title = match writes
                 .iter()
                 .max_by(|a, b| a.recorded_at.cmp(&b.recorded_at))
-                .map(|w| w.title.clone())
-                .or_else(|| registry::entity_title(reduced, uuid))
-                .unwrap_or_default();
-            // locations: source_path辞書順
+            {
+                Some(latest_write) => match registry::latest_rename(reduced, uuid) {
+                    Some((at, new_title)) if at >= latest_write.recorded_at.as_str() => {
+                        new_title.to_string()
+                    }
+                    _ => latest_write.title.clone(),
+                },
+                None => registry::entity_title(reduced, uuid).unwrap_or_default(),
+            };
+            // locations: source_path辞書順。W3(TASK-22): (uuid, source_path)一致の
+            // location_updateでfile_write記録時刻以降の最新updateのcategory/labelへ上書き
             let mut locations: Vec<IndexLocation> = writes
                 .iter()
-                .map(|w| IndexLocation {
-                    source_path: w.source_path.clone(),
-                    category: w.category.clone(),
-                    label: w.label.clone(),
-                    identity_hash: w.identity_hash.clone(),
-                    last_backup: w.recorded_at.get(..10).unwrap_or("").to_string(),
+                .map(|w| {
+                    let (category, label) =
+                        registry::location_update_for(reduced, &w.uuid, &w.source_path, &w.recorded_at)
+                            .map(|(c, l)| (c.to_string(), l.to_string()))
+                            .unwrap_or_else(|| (w.category.clone(), w.label.clone()));
+                    IndexLocation {
+                        source_path: w.source_path.clone(),
+                        category,
+                        label,
+                        identity_hash: w.identity_hash.clone(),
+                        last_backup: w.recorded_at.get(..10).unwrap_or("").to_string(),
+                    }
                 })
                 .collect();
             locations.sort_by(|a, b| a.source_path.cmp(&b.source_path));
@@ -763,6 +778,139 @@ mod tests {
             .map(|v| v.version_id.as_str())
             .collect();
         assert_eq!(vids, vec!["v2"], "sweep済み版は除外");
+    }
+
+    /// [covers:index.rename-applied-to-title]
+    /// W3(TASK-22): rename eventのtitle反映。renameがfile_write群より後ならnew_title・
+    /// より新しいfile_write(再push)はfile_write側titleのまま・rename無しは従来どおり。
+    /// 所在が全てlocation_removeで除去されたentityのfallback経由でもrename適用。
+    #[test]
+    fn rename_event_applied_to_entry_title() {
+        let uuid = "0192a4f0-3c1b-7a2e-9f10-112233445566";
+        let w = file_write(uuid, "alpha", "/data/a.zip", "docs", "work");
+        let key = w.s3_key.clone();
+        let rename = |old: &str, new: &str, at: &str| {
+            registry::Record::Rename(registry::RenameRecord {
+                schema: 1,
+                record_type: "rename".into(),
+                recorded_at: at.into(),
+                scope: "b:b/".into(),
+                uuid: uuid.into(),
+                old_title: old.into(),
+                new_title: new.into(),
+            })
+        };
+        // (1) renameが最新: title=renamed
+        let records = vec![
+            registry::Record::FileWrite(w.clone()),
+            registry::Record::FileUpload(file_upload(uuid, &key, "v1", "2026-11-21T10:00:00")),
+            rename("alpha", "renamed", "2026-11-21T11:00:00+09:00"),
+        ];
+        let entries = build_entries(&registry::reduce_records(&records), "b", "b");
+        assert_eq!(entries[0].title, "renamed", "rename後のtitle");
+
+        // (2) rename後に再push(新file_write): file_write側titleが勝つ
+        let mut records2 = records.clone();
+        let mut w2 = w.clone();
+        w2.recorded_at = "2026-11-21T12:00:00+09:00".into();
+        w2.title = "renamed".into();
+        records2.push(registry::Record::FileWrite(w2));
+        records2.push(registry::Record::FileUpload(file_upload(
+            uuid,
+            &key,
+            "v2",
+            "2026-11-21T12:00:00",
+        )));
+        let entries = build_entries(&registry::reduce_records(&records2), "b", "b");
+        assert_eq!(entries[0].title, "renamed");
+        // (2b) 再pushのfile_writeが旧titleのまま記録された場合はfile_writeが勝つ
+        let mut records3 = records.clone();
+        let mut w3 = w.clone();
+        w3.recorded_at = "2026-11-21T12:00:00+09:00".into();
+        records3.push(registry::Record::FileWrite(w3));
+        let entries = build_entries(&registry::reduce_records(&records3), "b", "b");
+        assert_eq!(entries[0].title, "alpha", "新file_writeのtitleが優先");
+
+        // (3) rename無し: 従来規則(file_writeのtitle)
+        let entries = build_entries(
+            &reduced_with(vec![w.clone()], vec![file_upload(uuid, &key, "v1", "2026-11-21T10:00:00")]),
+            "b",
+            "b",
+        );
+        assert_eq!(entries[0].title, "alpha");
+
+        // (4) 所在全除去entityのfallback(entity_title経由)でもrename適用
+        let mut records4 = records;
+        records4.push(registry::Record::LocationRemove(registry::LocationRemoveRecord {
+            schema: 1,
+            record_type: "location_remove".into(),
+            recorded_at: "2026-11-21T13:00:00+09:00".into(),
+            uuid: uuid.into(),
+            identity_hash: w.identity_hash.clone(),
+            source_path: "/data/a.zip".into(),
+        }));
+        let entries = build_entries(&registry::reduce_records(&records4), "b", "b");
+        assert_eq!(entries[0].title, "renamed", "fallback経由でもrename反映");
+        assert!(entries[0].locations.is_empty(), "所在は除去済み");
+    }
+
+    /// [covers:index.location-update-applied]
+    /// W3(TASK-22): location_update eventの所在分類反映。(uuid, source_path)一致で
+    /// file_write記録時刻以降の最新updateがcategory/labelを上書き・新file_write
+    /// (再push)はfile_write記録値へ戻る・別path・別uuidは対象外。
+    #[test]
+    fn location_update_event_applied_to_entry_locations() {
+        let uuid = "0192a4f0-3c1b-7a2e-9f10-112233445566";
+        let other = "0192a4f0-3c1b-7a2e-9f10-112233445577";
+        let w = file_write(uuid, "a.zip", "/data/a.zip", "docs", "work");
+        let w_other = file_write(other, "b.zip", "/data/b.zip", "docs", "work");
+        let key = w.s3_key.clone();
+        let key_other = w_other.s3_key.clone();
+        let lu = |uuid: &str, path: &str, new_cat: &str, new_label: &str, at: &str| {
+            registry::Record::LocationUpdate(registry::LocationUpdateRecord {
+                schema: 1,
+                record_type: "location_update".into(),
+                recorded_at: at.into(),
+                scope: "b:b/".into(),
+                uuid: uuid.into(),
+                source_path: path.into(),
+                old_category: "docs".into(),
+                old_label: "work".into(),
+                new_category: new_cat.into(),
+                new_label: new_label.into(),
+            })
+        };
+        // (1) 対象pathへのupdate: category/labelが新値へ
+        let records = vec![
+            registry::Record::FileWrite(w.clone()),
+            registry::Record::FileWrite(w_other.clone()),
+            registry::Record::FileUpload(file_upload(uuid, &key, "v1", "2026-11-21T10:00:00")),
+            registry::Record::FileUpload(file_upload(other, &key_other, "v1", "2026-11-21T10:00:00")),
+            lu(uuid, "/data/a.zip", "photos", "sub", "2026-11-21T11:00:00+09:00"),
+            // (3) 別path・別uuid向けのupdate: 影響しない
+            lu(uuid, "/data/elsewhere.zip", "x", "y", "2026-11-21T11:30:00+09:00"),
+            lu(other, "/data/b.zip", "keep-me", "", "2026-10-01T09:00:00+09:00"), // file_writeより前
+        ];
+        let entries = build_entries(&registry::reduce_records(&records), "b", "b");
+        let a = entries.iter().find(|e| e.uuid == uuid).unwrap();
+        assert_eq!(a.locations.len(), 1);
+        assert_eq!(a.locations[0].category, "photos", "category上書き");
+        assert_eq!(a.locations[0].label, "sub", "label上書き");
+        let b = entries.iter().find(|e| e.uuid == other).unwrap();
+        assert_eq!(b.locations[0].category, "docs", "時刻前のupdateは不適用");
+        assert_eq!(b.locations[0].label, "work");
+
+        // (2) update後に再push(新file_write・分類規則の記録値): file_write側が勝つ
+        let mut records2 = records;
+        let mut w2 = w.clone();
+        w2.recorded_at = "2026-11-21T12:00:00+09:00".into();
+        records2.push(registry::Record::FileWrite(w2));
+        let entries = build_entries(&registry::reduce_records(&records2), "b", "b");
+        let a = entries.iter().find(|e| e.uuid == uuid).unwrap();
+        // 同一source_path(=同一identity_hash)のfile_writeは新記録が後勝ちで1所在になる
+        assert_eq!(a.locations.len(), 1);
+        assert_eq!(a.locations[0].category, "docs", "新file_writeの記録値へ戻る");
+        assert_eq!(a.locations[0].label, "work");
     }
 
     /// [covers:index.location-remove-excludes-and-revives]

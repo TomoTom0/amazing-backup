@@ -38,6 +38,7 @@
 - `manage auth list` / `manage auth remove <credential_id>`: passkey credentialの一覧・失効(local catalog DB操作・S3接続不要。全削除時は`serve --bootstrap`の再bootstrap案内を表示)
 - api-key認証(TASK-13): passkeyが使えない端末・browser向けの第二login手段。`manage auth api-key [--name NAME]`でkeyを生成(`abk_`前置・stdout表示は1回限り・SHA-256 hashのみ保存)し、LoginViewのapi-key欄へ入力(接続元LAN内限定で受理・sessionはpasskey loginと同一の24時間)
 - serve Web UIの構成とAPI拡張(TASK-16/18/19): 5タブ構成(ホーム/バックアップ/転送/設定/管理)・ホームサマリ(sync状態・前回backup・未対応・diff・実行中job)・`GET /api/runs`(backup実行batchの集約)・`GET /api/jobs`(現版は空応答)・一覧3ビュー(folder/tag/collection切替)+検索+pager・tag/collection編集API(catalog DBのlocal語彙で索引には入らない。書込は成功・失敗双方をaudit_log tableへ記録)・frontend visual design(cold slate+teal・WCAG AA contrast)
+- 名前変更・所在変更API(TASK-22/TASK-17 W3): `POST /api/entities/{uuid}/rename`(body {title}。規則違反422・重複titleは許容+警告応答)・`POST /api/entities/{uuid}/location`(body {source_path,category,label}。所在は完全一致特定・不在404)。書込の真正はregistry.jsonlへの新event(`rename`・`location_update`・schema=1)追記で、索引全体再構築+PUT・catalog DB反映・metadata配置替え(rename時=新titleキーPUT+旧キー掃除)までを1実行で行う(変更後にCLI `list files`/`query`でも新titleが見える。`manage catalog rebuild`・`manage index rebuild`の再構築でも変更は保持)。再push時の合流はrename後のtitleを継続(旧titleへ退行しない)。詳細画面の文脈操作UI(title編集form・所在行ごとのcategory/label編集form・2段階確認部品=「変更」→「確認して実行」。dialog不使用)
 
 # 0.1.0
 - 初版(v0.1.0として公開)

@@ -274,6 +274,41 @@ pub struct LocationRemoveRecord {
     pub source_path: String,
 }
 
+/// `record_type: "rename"`のレコード(TASK-17 W3新設・title変更の真正記録)。
+/// serveのrename APIが追記し、索引再構築(build_entries)とmetadataの現行title導出に
+/// 適用される(設計4.2)。old_titleは監査記録(導出はuuid照合のみ)。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameRecord {
+    pub schema: i64,
+    pub record_type: String,
+    pub recorded_at: String,
+    /// 操作発生元のscope(`<bucket>:<prefix>`。監査記録・reduceの分岐には使わない)
+    pub scope: String,
+    pub uuid: String,
+    pub old_title: String,
+    pub new_title: String,
+}
+
+/// `record_type: "location_update"`のレコード(TASK-17 W3新設・所在の分類変更の
+/// 真正記録)。serveのlocation APIが追記し、索引locationsのcategory/label導出に
+/// 適用される(設計4.2)。(uuid, source_path)で対象所在を特定する。old_*は監査記録。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocationUpdateRecord {
+    pub schema: i64,
+    pub record_type: String,
+    pub recorded_at: String,
+    /// 操作発生元のscope(`<bucket>:<prefix>`。監査記録・reduceの分岐には使わない)
+    pub scope: String,
+    pub uuid: String,
+    pub source_path: String,
+    pub old_category: String,
+    pub old_label: String,
+    pub new_category: String,
+    pub new_label: String,
+}
+
 /// 読込後の既知レコード(未知`record_type`は警告のうえ無視される)。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Record {
@@ -289,6 +324,8 @@ pub enum Record {
     Prune(PruneRecord),
     Sweep(SweepRecord),
     LocationRemove(LocationRemoveRecord),
+    Rename(RenameRecord),
+    LocationUpdate(LocationUpdateRecord),
 }
 
 /// reduce後のregistry状態。
@@ -327,6 +364,10 @@ pub struct Reduced {
     pub sweeps: Vec<SweepRecord>,
     /// location_remove実行記録(全件・manage location rm)
     pub location_removes: Vec<LocationRemoveRecord>,
+    /// rename実行記録(全件・TASK-17 W3のtitle変更。title導出はrecorded_at最大の後勝ち)
+    pub renames: Vec<RenameRecord>,
+    /// location_update実行記録(全件・TASK-17 W3の所在分類変更)
+    pub location_updates: Vec<LocationUpdateRecord>,
 }
 
 /// 1行JSON + `\n`を単一write、flush、fsync(親dirも初回作成)。
@@ -522,6 +563,24 @@ pub fn load_registry(path: &Path) -> BackupResult<Vec<Record>> {
                 })?;
                 records.push(Record::LocationRemove(rec));
             }
+            "rename" => {
+                let rec: RenameRecord = serde_json::from_value(value).map_err(|e| {
+                    BackupError::Process(format!(
+                        "registryの{lineno}行目のrename記録がschema違反 ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                records.push(Record::Rename(rec));
+            }
+            "location_update" => {
+                let rec: LocationUpdateRecord = serde_json::from_value(value).map_err(|e| {
+                    BackupError::Process(format!(
+                        "registryの{lineno}行目のlocation_update記録がschema違反 ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                records.push(Record::LocationUpdate(rec));
+            }
             other => {
                 eprintln!(
                     "WARNING: registryの{lineno}行目は未知のrecord_type({other})のため無視します ({})",
@@ -682,6 +741,16 @@ pub(crate) fn partition_reset_removal(
             "location_remove" => {
                 let _: LocationRemoveRecord = parse_known(value, lineno, "location_remove")?;
             }
+            // TASK-17 W3(TASK-22): rename/location_updateはbucket欄を持たない実体単位の
+            // 状態変更記録のため温存する(prune/sweep/location_removeと同一扱い)。
+            // 対象bucket由来のuuid行が全て除去された後の孤立eventは照合uuidの
+            // file_writeが無くなるため不活性(title/所在導出に影響しない)
+            "rename" => {
+                let _: RenameRecord = parse_known(value, lineno, "rename")?;
+            }
+            "location_update" => {
+                let _: LocationUpdateRecord = parse_known(value, lineno, "location_update")?;
+            }
             _ => {} // 未知record_typeは温存(行のまま)
         }
     }
@@ -785,6 +854,12 @@ pub fn reduce_records(records: &[Record]) -> Reduced {
             Record::LocationRemove(l) => {
                 reduced.location_removes.push(l.clone());
             }
+            Record::Rename(r) => {
+                reduced.renames.push(r.clone());
+            }
+            Record::LocationUpdate(lu) => {
+                reduced.location_updates.push(lu.clone());
+            }
         }
     }
     reduced
@@ -839,15 +914,109 @@ pub fn sha_uuid_lookup(
     candidates.first().map(|s| s.to_string())
 }
 
-/// entityの現行title導出(TASK-18 4.2): uuid一致するfile_write群のうち
-/// recorded_at最大(ISO8601同形式の文字列比較。同値ならVec後方=後勝ち)のtitle。
+/// entityの現行title導出(TASK-18 4.2 + TASK-17 W3拡張): uuid一致するfile_write群と
+/// rename群を通したrecorded_at最大(ISO8601同形式の文字列比較。同値ならVec後方=
+/// 後勝ち。file_writeとrenameが同時刻ならrenameを新側扱いとする=後の確定操作)。
+/// renameを含まないregistryではfile_write群のみの従来規則(後方互換)。
 pub fn entity_title(reduced: &Reduced, uuid: &str) -> Option<String> {
-    reduced
+    let write = reduced
         .file_writes
         .iter()
         .filter(|w| w.uuid == uuid)
+        .max_by(|a, b| a.recorded_at.cmp(&b.recorded_at));
+    match (write, latest_rename(reduced, uuid)) {
+        // file_writeを欠くuuidの単独renameはentity不成立としてNone(entity_titlesと
+        // 同一規則。title導出の源はfile_write群の存在)
+        (None, _) => None,
+        // renameの同時刻比較は>=とする(rename後勝ち)。file_writeが厳密に後なら
+        // file_write側のtitle(再push時のfile_writeがtitle確定操作)
+        (Some(w), Some((at, new_title))) => {
+            if w.recorded_at.as_str() > at {
+                Some(w.title.clone())
+            } else {
+                Some(new_title.to_string())
+            }
+        }
+        (Some(w), None) => Some(w.title.clone()),
+    }
+}
+
+/// uuidのrename群からrecorded_at最大の(recorded_at, new_title)。
+/// 同値ならVec後方=後勝ち(max_byの仕様)。
+pub fn latest_rename<'a>(reduced: &'a Reduced, uuid: &str) -> Option<(&'a str, &'a str)> {
+    reduced
+        .renames
+        .iter()
+        .filter(|r| r.uuid == uuid)
         .max_by(|a, b| a.recorded_at.cmp(&b.recorded_at))
-        .map(|w| w.title.clone())
+        .map(|r| (r.recorded_at.as_str(), r.new_title.as_str()))
+}
+
+/// uuid毎の現行title一括導出(TASK-17 W3): file_write群とrename群を通した
+/// recorded_at最大のtitle(uuid毎。各走査1回ずつ=entity_titleの逐次呼出と同一規則)。
+/// backup pushのrun状態初期化(合流時のtitle継続)と索引再構築のfallbackで使う。
+pub fn entity_titles(reduced: &Reduced) -> HashMap<String, String> {
+    /// uuid毎の(recorded_at, title)後勝ち更新(同時刻は後のVec要素=後勝ち)。
+    fn keep_latest<'a, K, V>(map: &mut HashMap<K, (String, V)>, key: K, at: &str, value: V)
+    where
+        K: std::hash::Hash + Eq + Clone,
+        V: Clone,
+    {
+        match map.get(&key) {
+            Some((current_at, _)) if at < current_at.as_str() => {}
+            _ => {
+                map.insert(key, (at.to_string(), value));
+            }
+        }
+    }
+    let mut latest: HashMap<&str, (String, String)> = HashMap::new();
+    for w in &reduced.file_writes {
+        keep_latest(&mut latest, w.uuid.as_str(), &w.recorded_at, w.title.clone());
+    }
+    // renameはfile_writeと同時刻なら新側(>=)として扱う=entity_titleと同一規則
+    let mut titles: HashMap<String, String> = HashMap::new();
+    let mut rename_latest: HashMap<&str, (String, String)> = HashMap::new();
+    for r in &reduced.renames {
+        keep_latest(
+            &mut rename_latest,
+            r.uuid.as_str(),
+            &r.recorded_at,
+            r.new_title.clone(),
+        );
+    }
+    for (uuid, (write_at, write_title)) in latest {
+        match rename_latest.get(uuid) {
+            Some((rename_at, new_title)) if rename_at.as_str() >= write_at.as_str() => {
+                titles.insert(uuid.to_string(), new_title.clone());
+            }
+            _ => {
+                titles.insert(uuid.to_string(), write_title);
+            }
+        }
+    }
+    // file_writeを欠くuuidの単独renameはentity存在しないため計上しない
+    // (entity_titleの(3)ケースと同一)
+    titles
+}
+
+/// (uuid, source_path)の所在に適用する最新location_update(TASK-17 W3)。
+/// `write_recorded_at`は対象file_writeの記録時刻で、それ以降(>=)のupdateのみ
+/// 適用対象(索引build_entriesとmanifest由来rebuildの共用。再pushの新file_writeは
+/// 分類規則の解決結果が記録されるため記録順序どおり後勝ち=last event wins)。
+/// 戻り値は(new_category, new_label)。
+pub fn location_update_for<'a>(
+    reduced: &'a Reduced,
+    uuid: &str,
+    source_path: &str,
+    write_recorded_at: &str,
+) -> Option<(&'a str, &'a str)> {
+    reduced
+        .location_updates
+        .iter()
+        .filter(|lu| lu.uuid == uuid && lu.source_path == source_path)
+        .filter(|lu| lu.recorded_at.as_str() >= write_recorded_at)
+        .max_by(|a, b| a.recorded_at.cmp(&b.recorded_at))
+        .map(|lu| (lu.new_category.as_str(), lu.new_label.as_str()))
 }
 
 #[cfg(test)]
@@ -1102,6 +1271,152 @@ mod tests {
             "欠損はdefault空文字(正本bucket相当として解釈)"
         );
         assert_eq!(u.s3_region, "");
+    }
+
+    /// [covers:registry.rename-location-update-records]
+    /// W3新record(rename・location_update)のappend→load→reduce往復と
+    /// reset行分離(partition_reset_removal)での温存。
+    #[test]
+    fn rename_and_location_update_parse_reduce_roundtrip() {
+        let tmp = TempDir::new("reg-w3");
+        let reg = tmp.path().join("registry.jsonl");
+        let rename = RenameRecord {
+            schema: 1,
+            record_type: "rename".into(),
+            recorded_at: "2026-11-21T10:00:00+09:00".into(),
+            scope: "api-bucket:amazing-backup/".into(),
+            uuid: "0192a4f0-3c1b-7a2e-9f10-112233445566".into(),
+            old_title: "alpha".into(),
+            new_title: "renamed".into(),
+        };
+        let location_update = LocationUpdateRecord {
+            schema: 1,
+            record_type: "location_update".into(),
+            recorded_at: "2026-11-21T11:00:00+09:00".into(),
+            scope: "api-bucket:amazing-backup/".into(),
+            uuid: "0192a4f0-3c1b-7a2e-9f10-112233445566".into(),
+            source_path: "/data/sub/alpha.zip".into(),
+            old_category: "docs".into(),
+            old_label: "work".into(),
+            new_category: "photos".into(),
+            new_label: "sub".into(),
+        };
+        append_record(&reg, &rename).expect("rename append");
+        append_record(&reg, &location_update).expect("location_update append");
+        let records = load_registry(&reg).expect("既知種として読み込める");
+        assert_eq!(records.len(), 2, "未知record_type警告なしで2件");
+        assert_eq!(records[0], Record::Rename(rename.clone()), "全fieldが復元される");
+        assert_eq!(
+            records[1],
+            Record::LocationUpdate(location_update.clone()),
+            "全fieldが復元される"
+        );
+        let reduced = reduce_records(&records);
+        assert_eq!(reduced.renames, vec![rename.clone()], "renamesへ全件");
+        assert_eq!(
+            reduced.location_updates,
+            vec![location_update.clone()],
+            "location_updatesへ全件"
+        );
+
+        // reset行分離: 両行はbucket欄を持たないため温存(検証のみ行われる)
+        let lines: Vec<String> = std::fs::read_to_string(&reg)
+            .expect("registry読取")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let p = partition_reset_removal(lines, "b", "b").expect("行分離");
+        assert!(p.remove.is_empty(), "除去対象なし");
+        assert_eq!(p.keep.len(), 2, "rename/location_updateは温存");
+    }
+
+    /// [covers:registry.entity-title-rename-latest-wins]
+    /// entity_title/entity_titlesのrename考慮: rename後勝ち・新file_write復帰・
+    /// 単独renameはNone・rename無しは従来規則。
+    #[test]
+    fn entity_title_with_rename_latest_wins() {
+        let fw = |uuid: &str, title: &str, at: &str| {
+            Record::FileWrite(FileWriteRecord {
+                schema: 3,
+                record_type: "file_write".into(),
+                recorded_at: at.into(),
+                batch_id: "b".into(),
+                batch_date: "2026-11-21".into(),
+                uuid: uuid.into(),
+                title: title.into(),
+                source_path: "/p/a.zip".into(),
+                source_name: "a.zip".into(),
+                source_size: 1,
+                source_mtime: "m".into(),
+                source_sha256: "s".into(),
+                age_path: "a".into(),
+                age_size: 1,
+                age_sha256: "x".into(),
+                recipients: vec![],
+                category: "docs".into(),
+                label: "".into(),
+                identity_hash: format!("i{uuid}{at}").into(),
+                s3_key: format!("amazing-backup/data/{uuid}/default.age"),
+            })
+        };
+        let rn = |uuid: &str, old: &str, new: &str, at: &str| {
+            Record::Rename(RenameRecord {
+                schema: 1,
+                record_type: "rename".into(),
+                recorded_at: at.into(),
+                scope: "b:p".into(),
+                uuid: uuid.into(),
+                old_title: old.into(),
+                new_title: new.into(),
+            })
+        };
+        let u1 = "0192a4f0-3c1b-7a2e-9f10-112233445566";
+        let u2 = "0192a4f0-3c1b-7a2e-9f10-112233445577";
+
+        // (1) file_write(A・古い) → rename(A→B): title=B
+        let records = vec![fw(u1, "A", "2026-11-21T10:00:00+09:00"), rn(u1, "A", "B", "2026-11-21T11:00:00+09:00")];
+        let reduced = reduce_records(&records);
+        assert_eq!(entity_title(&reduced, u1).as_deref(), Some("B"), "rename後勝ち");
+        assert_eq!(
+            entity_titles(&reduced).get(u1).map(String::as_str),
+            Some("B"),
+            "一括導出も同一規則"
+        );
+
+        // (2) さらに新時刻のfile_write(C)追記: title=C(file_writeの新記録が勝つ)
+        let records = vec![
+            fw(u1, "A", "2026-11-21T10:00:00+09:00"),
+            rn(u1, "A", "B", "2026-11-21T11:00:00+09:00"),
+            fw(u1, "C", "2026-11-21T12:00:00+09:00"),
+        ];
+        let reduced = reduce_records(&records);
+        assert_eq!(entity_title(&reduced, u1).as_deref(), Some("C"));
+        assert_eq!(entity_titles(&reduced).get(u1).map(String::as_str), Some("C"));
+
+        // (2b) 同時刻のrenameはfile_writeより新側(file_writeと同時刻ならrename後勝ち)
+        let records = vec![
+            fw(u1, "A", "2026-11-21T10:00:00+09:00"),
+            rn(u1, "A", "B", "2026-11-21T10:00:00+09:00"),
+        ];
+        let reduced = reduce_records(&records);
+        assert_eq!(entity_title(&reduced, u1).as_deref(), Some("B"));
+
+        // (3) 単独rename(file_write無し): title導出なし(entity不成立)
+        let records = vec![rn(u2, "X", "Y", "2026-11-21T10:00:00+09:00")];
+        let reduced = reduce_records(&records);
+        assert_eq!(entity_title(&reduced, u2), None);
+        assert!(
+            !entity_titles(&reduced).contains_key(u2),
+            "file_writeを欠くuuidの単独renameは計上しない"
+        );
+
+        // (4) rename無し: 従来規則(recorded_at最大・同値はVec後方)
+        let records = vec![
+            fw(u1, "A", "2026-11-21T10:00:00+09:00"),
+            fw(u1, "B", "2026-11-21T10:00:00+09:00"),
+        ];
+        let reduced = reduce_records(&records);
+        assert_eq!(entity_title(&reduced, u1).as_deref(), Some("B"));
     }
 
     /// [covers:registry.sweep-location-remove-records]

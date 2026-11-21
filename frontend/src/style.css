@@ -555,6 +555,20 @@ a.tag-chip:hover {
   flex: 1;
 }
 
+/* W3(TASK-22): 詳細画面の文脈操作form(名前変更。所在編集の入力はtable cell内のため
+ * labelの並びは紧凑に=tag-add-formと同一構成) */
+.inline-edit-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: end;
+  max-width: 26rem;
+}
+
+.inline-edit-form label {
+  margin-bottom: 0;
+  flex: 1;
+}
+
 .tag-add-form input {
   max-width: none;
 }
