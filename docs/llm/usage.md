@@ -51,7 +51,7 @@ amazing-backup serve [--bootstrap] [--config PATH] [--aws-config PATH] [--profil
 `<PATH>`は対象アーカイブ(`.zip`/`.7z`。1個以上必須)。titleは実体の人間用ラベル(64文字以内・UTF-8可。新規発行時必須)。uuidはUUIDv7発行キー(hyphenated lowercase 36字)。
 
 - **`manage auth`系はlocal catalog DB(`catalog.db`)の操作**(S3接続不要)。`api-key`はapi-keyを生成してstdoutへ1回だけ表示(SHA-256 hashをapi_keys tableへ保存。再表示不可)。`list`はpasskey credential(credentials table)とapi-key(api_keys table)の統合一覧。`remove`はcredential_id完全一致で両tableから削除し、存在しないcredential_idは対象エラー3(既存終了コード体系の対象エラー3のまま・新しい終了コードは追加しない)
-- **`serve`は常駐command**(server.tomlのlisten先・既定`127.0.0.1:40510`で起動。SIGTERM/SIGINTでgraceful shutdown=正常終了)。設定読込失敗は設定エラー2で起動しない。`--bootstrap`はpasskey登録用のone-time token(期限10分・1回消費)をstdoutへ表示する。認証はpasskey(WebAuthn)とapi-key(POST /api/auth/api-key・接続元LAN内限定)の両方式。APIは閲覧系(entities/pins/locations/pending/sync/diff)とscan/sync/diff実行のみで、backup push/pull・get・pin・manage系の書込操作APIは無い(操作はCLI既存のまま)
+- **`serve`は常駐command**(server.tomlのlisten先・既定`127.0.0.1:40510`で起動。SIGTERM/SIGINTでgraceful shutdown=正常終了)。設定読込失敗は設定エラー2で起動しない。`--bootstrap`はpasskey登録用のone-time token(期限10分・1回消費)をstdoutへ表示する。認証はpasskey(WebAuthn)とapi-key(POST /api/auth/api-key・接続元LAN内限定)の両方式。APIは閲覧系(entities/versions/pins/locations/pending/sync/diff/runs/jobs/tags/folders/collections)とscan/sync/diff実行・tag/collection編集(catalog DBのlocal語彙のみ。書込はaudit_logへ記録)で、backup push/pull・get・pin・manage系などS3へ書き込む操作APIは無い(操作はCLI既存のまま)
 
 - **`--profile NAME`はaws.tomlとpipeline.tomlの両方のprofileを選択する**(実効pipeline profileは常に実効aws profile名と同一。pipeline.tomlは`[profiles.<name>]`配下のprofile構成で、`<name>`はaws.tomlの`[aws.profiles.<name>]`と同名対応)
 - **backup verifyはaws.toml必須**(実効profile名の解決のため。credentialファイルの実在は不要・S3接続はしない)。検査対象は実効profileのbucketへ帰属するrunのみ(帰属不明記録・他bucket帰属runは対象外+batch id特定の警告表示)
