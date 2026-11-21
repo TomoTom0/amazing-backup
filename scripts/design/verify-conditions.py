@@ -6,6 +6,9 @@
   - tests/**/test_*.py  (Pythonテスト。混在余地のため残す。現状はRustテストのみ)
   - tests/**/*.rs       (cargo結合テスト tests/ 直下。tests/design/ は除外)
   - src/**/*.rs         (cargo単体テスト src 内 #[cfg(test)]。設計8章)
+  - frontend/src/**/*.ts, frontend/src/**/*.vue  (frontendのvitest。TASK-9設計11章・
+    指摘#12のscanner拡張。`// [covers:<id>]`・`<!-- [covers:<id>] -->`形式。
+    *.spec.tsも走査対象)
   Rustテストではテスト関数のdoc commentとしてタグを付ける(設計8章):
       /// [covers:<stable-id>]
       #[test]
@@ -41,6 +44,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DESIGN_DIR = ROOT / "tests" / "design"
 TESTS_DIR = ROOT / "tests"
 SRC_DIR = ROOT / "src"
+FRONTEND_SRC_DIR = ROOT / "frontend" / "src"
 
 COVER_TAG_RE = re.compile(r"\[covers:([A-Za-z0-9._-]+)\]")
 CONDITION_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*\.[a-z0-9]+(-[a-z0-9]+)*$")
@@ -58,10 +62,12 @@ STRICT_SOURCE_MARKERS = ("tmp/tasks/", "docs/", "TASK-")
 def collect_test_tags(errors: list[str]) -> tuple[list[Path], dict[str, list[str]]]:
     """テストファイルから [covers:<id>] タグを走査する(同期の正本)。
 
-    走査対象(設計8章):
+    走査対象(設計8章・TASK-9設計11章のTS/Vue走査拡張):
       - tests/**/test_*.py  (Python混在余地。現状はRustテストのみ)
       - tests/**/*.rs       (cargo結合テスト。tests/design/ は対象外)
       - src/**/*.rs         (cargo単体テスト #[cfg(test)]。doc commentのタグを含む)
+      - frontend/src/**/*.ts, frontend/src/**/*.vue  (vitest。行comment・
+        HTML comment形式のタグを含む。*.spec.tsも対象)
     """
     found: set[Path] = set()
     if TESTS_DIR.is_dir():
@@ -71,6 +77,9 @@ def collect_test_tags(errors: list[str]) -> tuple[list[Path], dict[str, list[str
                     found.add(p)
     if SRC_DIR.is_dir():
         found.update(SRC_DIR.rglob("*.rs"))
+    if FRONTEND_SRC_DIR.is_dir():
+        for pat in ("*.ts", "*.vue"):
+            found.update(FRONTEND_SRC_DIR.rglob(pat))
     test_files = sorted(found)
     covers: dict[str, list[str]] = {}
     for tf in test_files:
@@ -316,7 +325,8 @@ def main(argv: list[str] | None = None) -> int:
     if not test_files:
         if uncovered:
             warnings.append(
-                "(b) テストファイル(tests/**/test_*.py・tests/**/*.rs・src/**/*.rs)が"
+                "(b) テストファイル(tests/**/test_*.py・tests/**/*.rs・src/**/*.rs・"
+                "frontend/src/**/*.{ts,vue})が"
                 "1つも無いため網羅検査は警告扱い: "
                 f"{len(uncovered)}/{len(seen_ids)} 条件が未cover(テストコード作成後はfailする)"
             )

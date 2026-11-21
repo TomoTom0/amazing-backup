@@ -109,16 +109,54 @@
 #   disaster-recovery-reads(D-6影響なしの明確化)。
 #   実装前のため新規・改訂条件のテストは実行fail・StorageFixture新schema化により
 #   cli系結合test全体が赤になる([meta]はverified=falseへ戻し実装後に記録)。
+# 2026-11-05: TASK-13(serve認証へのapi-key認証追加)対応でテスト先行の条件追加(4条件)・
+#   文言改訂(2条件=cli.manage-auth-list-and-remove・cli.manage-auth-remove-all-guides-
+#   rebootstrap。統合表示・両table合計判定へ。id不変)。出典:
+#   tmp/tasks/tm-13/design_api-key-auth.md D12・2.2(manage auth api-key)・2.5(list/remove
+#   統合仕様=レビューM-5)・4章。
+#   設計2.5に詳細が規定される行形式・判定は以下の解釈で条件化(実装はこれに従う):
+#   - list行形式は credential_id kind name created_at の4列(kind=passkey/api_key)
+#   - 0件案内(bootstrap案内)・削除後の再bootstrap案内はcredentials+api_keysの
+#     両table合計0件時のみ(api_keys残存時は案内しない=api-key login可能のため)
+#   - removeはcredentials→api_keysの順に完全一致削除(合計削除0行で対象エラー3)
+#   実装前のため新規条件のテストは実行failを許容(api_keys table不在のrusqlite
+#   挿入失敗・manage auth api-key未知subcommandのexit 64。cargo test --no-runの
+#   compileは通る)。改訂2条件の既存テストはpasskey行のみの観測のため現行緑を維持。
+# 2026-11-06: TASK-13コードレビュー指摘対応(低重要度)で条件追加(1条件)・実装追随。
+#   - cli.manage-auth-api-key-rejects-empty-name: manage auth api-key --name ""(空文字)は
+#     usage error(exit 64)でapi_keysへ保存しない(レビュー指摘: 空文字nameの無検査保存)。
+#   - src/storage/manage.rsのapi-key乱数読取を共通helper(storage::random_bytes)へ切替
+#     (挙動不変。src/cli.rsは不変のためsource_hash更新なし)。全件verify後にtrueへ復帰。
+# 2026-11-05: TASK-9 Phase P6(manage auth remove)対応でテスト先行の条件追加(2条件)。
+#   webauthn.toml excluded「manage auth remove(CLI)によるcredential失効」を解消。
+#   area判断: webauthn.toml側のexcluded理由が「後続waveでcli areaへ条件化する」と
+#   宣言しており、manage系CLIコマンドの振る舞い条件(manage jobs reissue等)は本area
+#   の前例どおりcli.tomlが管理場所のため(認証契約の詳細はwebauthn.toml・CLI面は
+#   cli.tomlが担う)。実装前のため新条件のテストは実行failを許容
+#   (cargo test --no-runのcompileは通る)。
+#   設計8章にコマンド詳細が規定されない点は以下の解釈で条件化(実装はこれに従う):
+#   - manage authはnested subcommand構成(manage auth list / manage auth remove)。
+#     失効は設計8章のとおりmanage auth remove(CLI)。一覧表示は削除対象特定のための
+#     credential_id確認手段として同じ階層に置く
+#   - manage auth remove <credential_id>: credential_id完全一致で1件削除(nameは
+#     一意性が無いため削除対象指定に使わない)。S3接続不要(credentials table=
+#     ABH配下catalog.db・local操作)
+#   - 存在しないcredential_idは対象エラー3(BackupError::Target)
+#   - 削除後にcredentials 0件(全credential紛失時と同一状態)となった場合は再bootstrap
+#     案内(serve --bootstrap)を表示する。credential 0での認証閉鎖(登録閉鎖・login
+#     不可)はserver側契約のためwebauthn.register-closed-without-valid-token・
+#     webauthn.register-login-flow-server-to-serverが担保し、本areaはCLI面
+#     (一覧・削除・案内表示・credentials 0遷移)のみ条件化する
 
 [meta]
 feature = "cli"
 source_file = "src/cli.rs"
 verified = true
-verified_at = "2026-11-03"
+verified_at = "2026-11-06"
 verified_by = "claude"
 test_command = "cargo test"
 source_hash = "328e20f3263795ece1bb3e58645def0cb3ea9a52"
-note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(--profile両file選択・backup verifyのaws.toml必須化・検査対象の実効bucket帰属絞り込み・recipients指紋表示はsrc/storage/backup.rs経由)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新。2026-11-03 REVIEW-1(code review)指摘対応を反映しsource_hashを再更新。2026-11-03 TASK-23(--from-list単独許容化のrebase統合。paths-required-usage-error条件をrequired_unless_present版へ)を反映しsource_hashを更新"
+note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(--profile両file選択・backup verifyのaws.toml必須化・検査対象の実効bucket帰属絞り込み・recipients指紋表示はsrc/storage/backup.rs経由)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新。2026-11-03 REVIEW-1(code review)指摘対応を反映しsource_hashを再更新。2026-11-03 TASK-23(--from-list単独許容化のrebase統合。paths-required-usage-error条件をrequired_unless_present版へ)を反映しsource_hashを更新。2026-11-05 TASK-9 P6(manage auth)のテスト先行更新でverified=falseへ戻した(manage auth list/remove実装はsrc/storage/manage.rs・src/catalog.rsでsrc/cli.rsは不変のためsource_hash更新なし)。2026-11-05 P6実装後にcargo test全件pass(370 tests)・verify-conditions.py PASSを確認してverified=trueへ復帰。2026-11-05 TASK-13(api-key認証のmanage auth拡張)のテスト先行更新でverified=falseへ戻す(実装はsrc/storage/manage.rs・src/catalog.rsのためsource_hash更新なし)。2026-11-05 TASK-13実装後にcargo test --test catalog_storage全緑(29 tests・manage auth api-key/list統合/remove両table/0件案内合計判定の各test含む)を確認してverified=trueへ復帰(source_hashはsrc/cli.rs不変のため更新なし)。2026-11-06 TASK-13レビュー指摘対応(空文字name usage error化+乱数読取helper共通化=src/storage/manage.rs変更。src/cli.rsは不変)でverified=falseへ戻す(全件verify後にtrueへ復帰)。2026-11-06 全件verify(catalog_storage 30tests緑・manage_auth_api_key_empty_name_is_usage_error含む・cargo test全binary緑・verify-conditions PASS 342条件)を確認してverified=trueへ復帰(src/cli.rs不変のためsource_hash更新なし)"
 
 [[condition]]
 id = "cli.usage-error-exit-64"
@@ -127,7 +165,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-001(5章cli.rs・7.1
 description = "使用法誤り(引数誤り)は exit 64(clapのusage error既定 exit 2 を BackupError::Usage へremapし、設定エラー2と区別する) (unit)"
 given = "不明オプション・サブコマンド不足等のusage誤り実行"
 expect_return = "exit code 64"
-source_lines = "src/cli.rs:693"
+source_lines = "src/cli.rs:698"
 
 [[condition]]
 id = "cli.version-flag"
@@ -145,7 +183,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-003(終了コード�
 description = "終了コード区分(0/2/3/4/5)が7.1の仕様表どおりに出る(各サブコマンドの代表case) (unit)"
 given = "成功(対象なし・全skip含む)・設定エラー・対象エラー・処理エラー・転送エラーの各区画の代表ケース"
 expect_return_shape = "0(成功)・2(設定・環境)・3(対象)・4(処理)・5(転送)が各区画の代表ケースで出る"
-source_lines = "src/cli.rs:707; src/errors.rs:56"
+source_lines = "src/cli.rs:712; src/errors.rs:56"
 
 [[condition]]
 id = "cli.module-entrypoint-parity"
@@ -163,7 +201,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-005(2026-10-08レビ
 description = "backup push は<PATH>と--from-listのいずれかを要する: 両方0個(オプションのみ)は usage error 64。--from-list単独・PATH単独・併用はusage errorとならない(required_unless_present化。旧: PATH 1個以上必須) (unit)"
 given = "backup push をオプションのみ・--from-listのみ・PATH 1個(+--from-list併用)で実行する各ケース"
 expect_return = "オプションのみは exit 64。--from-listのみ・PATH 1個(+併用)はusage errorとならない"
-source_lines = "src/cli.rs:1107"
+source_lines = "src/cli.rs:1112"
 
 [[condition]]
 id = "cli.fake-s3-seam"
@@ -172,7 +210,7 @@ source = "TASK-9 SDK移行設計 4.3案1・10.3・12.4(tmp/tasks/tm-9/design_sdk
 description = "fake seam: env AMAZING_BACKUP_FAKE_S3_STATE=<dir>指定時はS3 backendをfakeへ差し替える(gateは#[cfg(debug_assertions)]でrelease build・debug_assertions無効にはseam・FakeS3ともcompileされず実S3経路になる)。fakeはstate dir配下へobjects/<key>とcalls.log相当のAPI呼び出し記録(op名・bucket・key・storage_class・checksum・days・tier等のfield)を書く。fake選択時はstderr冒頭へ「WARNING: FAKE S3 MODE」を必ず表示する(誤用防御)。fakeはcredential値が不正(検出用ダミー値)でも成功する=実network不使用 (integration, fake seam)"
 given = "AMAZING_BACKUP_FAKE_S3_STATEを設定したbackup push実行(state dirを用意・credentialファイルはダミー値)"
 expect_return_shape = "exit 0でstate dirへobjects/<key>と呼び出し記録が書かれ、stderr冒頭にWARNING: FAKE S3 MODE表示。credential値・検出用ダミーは出力に現れない"
-source_lines = "src/s3.rs:2011; src/s3.rs:2075; tests/s3_backend.rs:38"
+source_lines = "src/s3.rs:2046; src/s3.rs:2110; tests/s3_backend.rs:38"
 
 [[condition]]
 id = "cli.query-partial-match"
@@ -504,7 +542,7 @@ source = "TASK-7(tmp/tasks/tm-7/design_pipeline_profile.md D-3・D-6・§5)"
 description = "--profile <name>はaws.tomlとpipeline.tomlの両方を選択する(実効pipeline profileは常に実効aws profile名と同一=単一解決源。pipeline.toml独自の既定は置かないため「aws=dev・pipeline=family」のような交叉が構造的に起こらない)。--profile省略時はaws.toml active_profile側のpipeline profileが使われる。decrypt_keyの既定も実効profileの[profiles.<name>.verify].decrypt_keyへ変わる(解決規則 --key > 実効profileのdecrypt_key は不変) (integration, fake seam)"
 given = "dev(active_profile)とfamilyが独立した鍵pair・別bucketの[profiles.dev]/[profiles.family]構成での、(1)--profile family指定の backup push(索引objectの暗号化recipientの観察) (2)--key省略での get --profile family(復元) (3)--profile省略の backup push(dev側・索引の再暗号化観察)"
 expect_return_shape = "(1)索引objectはfamily側recipient(family秘密鍵)で復号できdev秘密鍵では復号できない (2)実効profile(family)のdecrypt_keyが既定で使われ索引・objectの復号までexit 0で完結する (3)索引はdev側recipient(dev秘密鍵)で復号できる"
-source_lines = "tests/phase_b_options.rs:909"
+source_lines = "tests/phase_b_options.rs:914"
 
 [[condition]]
 id = "cli.profile-unknown-config-error"
@@ -549,7 +587,7 @@ source = "TASK-11 body(Phase B: manage jobs reissue・tier変更可・最小実�
 description = "manage jobs reissue <対象>: 対象objectの復元jobを再発行する(tier変更可。--tier指定時は当該tier・省略時は既定Standard)。tierはStandard/Bulkのallowlist検査(allowlist外はusage error 64)。復元済み・進行中の対象にも再発行できる(保持期間延長・tier切替用途) (integration, fake seam)"
 given = "復元済みobjectと進行中objectがある状態での manage jobs reissue <対象> --tier Bulk 実行と、--tier Expedited(不可値)指定・--tier省略の各実行"
 expect_return_shape = "--tier BulkはRestoreObjectが当該対象へtier=Bulkで再発行され呼び出し記録に残る。--tier Expeditedは exit 64でRestoreObject発行なし。--tier省略はtier=Standardで発行"
-source_lines = "tests/phase_b_options.rs:375"
+source_lines = "tests/phase_b_options.rs:380"
 
 [[condition]]
 id = "cli.profile-namespace-isolated-by-bucket"
@@ -558,7 +596,7 @@ source = "TASK-11(Phase B)コードレビュー指摘H-1+tmp/tasks/tm-10/design_
 description = "registry記録のs3_bucketと当該実行の実効bucketの一致によりnamespaceはbucket単位で分離される(同一prefix・別bucketの複数profile構成でprefix一致のみなら全経路が他方bucketの実績に惑わされるのを防ぐ)。対象は(a) backup pushのskip判定(他方bucket実績ではskipしない=bucket横断で1byteもuploadされないrunを作らない) (b) 索引versions構築(他方bucketのfile_upload記録をversionsへ混入させない) (c) 索引不在時の未書込namespace例外(他方bucketの書込実績では救済せず0件exit 0とする)。bucket一致規則はregistry::record_bucket_matchedと同一(記録s3_bucket欠損の旧記録は正本bucket=aws.toml active_profile相当として扱い、実効bucketが正本と一致する実行でのみ一致扱い) (integration, fake seam)"
 given = "dev(active_profile)とprodが同一prefix・別bucketのaws.toml構成での、(1)devでのbackup push後に同一内容を--profile prodでbackup pushする実行 (2)prod実行後の索引versionsのversion_id確認(registryのbucket別file_upload記録と突合) (3)索引objectを削除した状態での list files --profile prod(他方bucket実績のみ)と list files(正本bucket実績あり)の各実行 (4)file_upload記録のs3_bucketを空文字へ書き換えた旧形式記録での再push(dev=正本と一致する実効bucket・prod=一致しない実効bucket)の各実行"
 expect_return_shape = "(1)prod側pushはskipされずにfile uploadが行われexit 0(ok表示あり・skip表示なし) (2)索引versionsにはprod側bucketのfile_upload記録のversionのみが載る(dev側のversion_idは混入しない) (3)prod照会は未書込namespaceとして0件+exit 0(索引不在でも設定エラー2にならない)。正本bucket(書込実績あり)の照会は設定エラー2+rebuild案内 (4)dev側の再pushはskipされる(旧記録は正本bucket扱い・file keyへのPUTなし)。prod側(--profile)のpushはskipされずuploadされる"
-source_lines = "tests/phase_b_options.rs:297; tests/phase_b_options.rs:471"
+source_lines = "tests/phase_b_options.rs:302; tests/phase_b_options.rs:476"
 
 [[condition]]
 id = "cli.fake-s3-restore-validates-key-and-state"
@@ -576,7 +614,7 @@ source = "TASK-11 body(ユーザー指示2026-10-15: prodはyour-family-bucket/y
 description = "3つ以上のbucketを含む複数profile構成(dev + prod系の同一prefix・別bucket)でもnamespace分離はbucket単位で機能する(cli.profile-namespace-isolated-by-bucketのbucket一致規則はprofile数に依存しない=一致/不一致の2値判定のため)。prod系profile相互(family/baked等)でも、(a) backup pushのskip判定は他bucket実績ではskipしない(bucket横断で1byteもuploadされないrunを作らない) (b) 索引versions構築には当該bucketのfile_upload記録のみが載る(3bucket分の実績が同一registryに混在していても混入しない) (c) 索引不在時の未書込namespace例外もbucket単位で判定する (integration, fake seam)"
 given = "dev(active_profile)とprod系2profile(同一prefix・別bucket)を含むaws.toml構成での、(1)family profileでのbackup push後に同一内容をbaked profileでbackup pushする実行 (2)3bucketそれぞれへのfile_upload記録(registryのbucket別version_id)と、baked実行後に再構築された索引versionsの突合"
 expect_return_shape = "(1)baked側pushはskipされずにfile uploadが行われexit 0(ok表示あり) (2)索引versionsにはbaked bucketのfile_upload記録のversionのみが載る(dev・family bucketのversion_idは混入しない)"
-source_lines = "tests/phase_b_options.rs:735"
+source_lines = "tests/phase_b_options.rs:740"
 
 [[condition]]
 id = "cli.backup-push-connection-dest-shown"
@@ -585,7 +623,7 @@ source = "TASK-11 body(ユーザー指示2026-10-15: 3prod bucket構成の混同
 description = "backup push(通常実行・--dry-run)は実行開始時に接続先を表示する: 実効profile名・bucket・prefix(3prod bucket構成で誤profile・誤bucketへの書き込みに気づかせるため)。表示は対象解決・S3 API呼び出しに先行して出るため、--dry-run(S3 API呼び出しなし)でも表示される (integration, fake seam)"
 given = "複数profileのaws.tomlでの、(1)--profile prod系指定の backup push --dry-run 実行 (2)--profile prod系指定の通常 backup push 実行 (3)既定(active_profile=dev)での backup push 実行"
 expect_return_shape = "いずれの実行でも接続先行(profile=・bucket=・prefix=を含む)が表示され、表示値は当該実行の実効profile(--profile指定時は指定profile・省略時はactive_profile)の値。(1)ではS3 API呼び出しは行われない"
-source_lines = "tests/phase_b_options.rs:805"
+source_lines = "tests/phase_b_options.rs:810"
 
 [[condition]]
 id = "cli.backup-push-recipient-fingerprints-shown"
@@ -788,4 +826,74 @@ item = "zsh実対話環境でのTAB補完効作確認(README手順の実施・_a
 source = "TASK-2 body(zshは実動作確認・ユーザーshellはzsh)"
 reason = "対話shellのcompletion駆動はcargo testのtest構造では表現できない。実装段階の検証手順としてREADME手順をuser環境(zsh 5.9)で実施し上記3点を目視確認する。条件書の対象は生成内容の構造マーカー・語彙・引数error・可視性(cli.completions-generates-shells等)で担保"
 decided_at = "2026-10-28"
+decided_by = "claude"
+
+[[condition]]
+id = "cli.manage-auth-list-and-remove"
+target_function = "manage auth list / manage auth remove <credential_id>"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(追加登録・失効・復旧=指摘#8: 失効はmanage auth remove(CLI))・12章P6 + TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.5(list統合表示・removeはcredentials→api_keys順=レビューM-5)・4章"
+description = "manage auth listは登録credential一覧(credential_id・kind・name・created_at=TASK-13統合表示。kind=passkey/api_key)を表示し、manage auth remove <credential_id>はcredential_id完全一致の1件をcredentials table→api_keys tableの順に検索して削除する(永続class・ABH配下catalog.db。S3接続不要のlocal操作)。存在しないcredential_id指定(両table合計削除0行)は対象エラー3 (integration)"
+given = "catalog.db credentials tableへ2行挿入(rusqlite直接)後の manage auth list・manage auth remove <一方のid>・manage auth remove <存在しないid> の各実行(rusqlite直接で行数観測)"
+expect_return_shape = "listはexit 0で両credentialの行(id・name)を表示。removeはexit 0で当該1行のみ削除(残1行・他行は不変)。存在しないidはexit 3(TASK-13改訂分の統合表示・両table削除の観測はcli.manage-auth-list-integrates-api-keys・cli.manage-auth-remove-both-tablesが追加担保)"
+source_lines = "tests/catalog_storage.rs:1207; tests/catalog_storage.rs:1406"
+
+[[condition]]
+id = "cli.manage-auth-remove-all-guides-rebootstrap"
+target_function = "manage auth remove(全削除時の再bootstrap案内)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(追加登録・失効・復旧=指摘#8: 全credential紛失時はcredentials table削除+再bootstrap)・12章P6 + TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.5(再bootstrap案内は両table合計0件時のみ)・4章"
+description = "manage auth removeでcredentials+api_keys合計0件(全認証手段紛失時と同一状態)となった場合は再bootstrap案内(serve --bootstrapの再発行)を表示して未登録状態へ戻る(合計0件ではpasskey login・api-key loginのいずれの手段も無く・passkey登録はbootstrap token提示時のみ開く=認証閉鎖fail-closed。閉鎖・登録のserver側契約はwebauthn.register-closed-without-valid-token等が担保し本条件はCLI表示と合計0件遷移を観測する) (integration)"
+given = "catalog.db credentials tableへ1行挿入(rusqlite直接)後の manage auth remove <id> 実行(rusqlite直接で行数観測)"
+expect_return_shape = "exit 0でcredentials tableは0行・stdoutに再bootstrap案内(--bootstrapを含む語)が表示される(合計0件時のみ表示の観測はcli.manage-auth-zero-guides-total-countが追加担保)"
+source_lines = "tests/catalog_storage.rs:1244; tests/catalog_storage.rs:1444"
+
+[[condition]]
+id = "cli.manage-auth-api-key-generates"
+target_function = "manage auth api-key [--name <name>](api-key生成・1回表示)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) D12・2.2(manage auth api-key: 32byte乱数を`abk_`+base64url(43文字)で生成し1回だけ表示。生成乱数はbootstrap token生成と同じgetrandom経路)・4章"
+description = "manage auth api-keyは32byte乱数から`abk_`前置+base64url(43文字)のapi-keyを生成しstdoutへ1回だけ表示する(再表示不可・hashから復元不可)。SHA-256(api-key全文)のhexをcredential_id(\"ak-\"+16hex乱数)・name(既定\"api-key\"・--nameで指定可)・created_atとともにapi_keys table(永続class・ABH配下catalog.db)へ保存する(S3接続不要のlocal操作=既存auth系と同一)。直後のmanage auth listに当該api-keyのcredential_idが表示される (integration)"
+given = "manage catalog sync済みDBでの manage auth api-key --name laptop 実行と、続く manage auth list 実行(rusqlite直接でapi_keys行観測)"
+expect_return_shape = "exit 0でstdoutに`abk_`で始まるkeyを含む行が1回だけ表示される(当該key文字列の出現は1回=再表示しない)。api_keys tableは1行(credential_idはak-前置・key_hash=表示keyのSHA-256 hex・name=laptop・created_at非空)。list表示に当該credential_idが含まれる(実装前は未知subcommandのexit 64でfailを許容)"
+source_lines = "tests/catalog_storage.rs:1316"
+
+[[condition]]
+id = "cli.manage-auth-api-key-rejects-empty-name"
+target_function = "manage auth api-key [--name <name>](空文字nameの検査)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.2(nameは--nameで指定可・未指定の既定は\"api-key\")・4章 + TASK-13コードレビュー指摘(空文字nameの無検査保存)対応"
+description = "manage auth api-key --name \"\"(空文字指定)はusage error(exit 64)としてapi_keysへの保存を行わない(name未指定時の既定\"api-key\"での生成は従来どおり) (integration)"
+given = "manage catalog sync済みDBでの manage auth api-key --name \"\" 実行(rusqlite直接でapi_keys行数観測)"
+expect_return_shape = "exit 64でstderrに--nameのusage error文言。api_keys tableは0行(保存しない)"
+source_lines = "tests/catalog_storage.rs:1357"
+
+[[condition]]
+id = "cli.manage-auth-list-integrates-api-keys"
+target_function = "manage auth list(passkey+api-key統合表示)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.5(list: credentials(passkey)とapi_keysを統合表示。行形式 credential_id kind name created_at(kind=passkey/api_key)。フッタは「N件(credential_id・kind・name・created_at)」=レビューM-5)・4章"
+description = "manage auth listはcredentials(passkey)とapi_keys(api-key)を統合表示する: 行形式はcredential_id kind name created_atでkind=passkey/api_keyの区別付き・フッタは合計件数(credential_id・kind・name・created_at)。どちらか一方のtableのみに行があってももう一方のtableの行を表示から落とさない (integration)"
+given = "credentials 1行(passkey)・api_keys 1行(rusqlite直接挿入)の状態での manage auth list"
+expect_return_shape = "exit 0で両方の行がkind区別付きで表示される(passkey行とapi_key行・フッタは2件)(実装前はapi_keys table不在・行が表示されずfailを許容)"
+source_lines = "tests/catalog_storage.rs:1377"
+
+[[condition]]
+id = "cli.manage-auth-remove-both-tables"
+target_function = "manage auth remove <credential_id>(credentials→api_keys順の完全一致削除)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.5(remove <credential_id>: credentials→api_keysの順に完全一致削除。合計削除0行で対象エラー3)・4章"
+description = "manage auth remove <credential_id>はcredentials table→api_keys tableの順にcredential_id完全一致で削除する(両tableを検索する=api-keyのcredential_idでも削除できる)。合計削除0行(どちらのtableにも存在しない)は対象エラー3・失敗時はどちらのtableも削除しない (integration)"
+given = "credentials 1行+api_keys 1行(rusqlite直接挿入)の状態での manage auth remove <api-keyのid>・manage auth remove <passkeyのid>・manage auth remove <存在しないid> の各実行(rusqlite直接で両table行数観測)"
+expect_return_shape = "api-key id指定はapi_keysのみ1行削除(credentialsは不変)・passkey id指定はcredentialsのみ1行削除(api_keysは不変)・存在しないidはexit 3で両tableとも削除なし(実装前はapi_keys table不在によりfailを許容)"
+source_lines = "tests/catalog_storage.rs:1405"
+
+[[condition]]
+id = "cli.manage-auth-zero-guides-total-count"
+target_function = "manage auth list/remove(0件案内の両table合計判定)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.5(0件案内(bootstrap案内)は両table合計0件時のみ。削除後の再bootstrap案内も両table合計0件時のみ=api_keysが残っていればlogin可能のため)・4章"
+description = "0件案内(bootstrap案内)と削除後の再bootstrap案内はcredentials+api_keysの両table合計0件時のみ表示する(api_keysが1件でも残っていればapi-key login可能のため案内しない=全手段紛失と異なる状態を区別する) (integration)"
+given = "api_keys 1行のみ(credentials 0行)の状態での manage auth list(案内なし観測)・manage auth remove <id>(削除後の案内なし観測)と、両table0件での manage auth list(案内あり観測)・およびapi_keys 1行を削除して合計0件となった直後のstdout(案内あり観測)"
+expect_return_shape = "api_keys残存時のlist・removeはいずれも--bootstrapを含む案内文言を表示しない。合計0件ではlist・removeとも再bootstrap案内(serve --bootstrap)を表示する(実装前はapi_keys table不在によりfailを許容)"
+source_lines = "tests/catalog_storage.rs:1443"
+
+[[excluded]]
+item = "api-key生成の乱数経路詳細(既存bootstrap token生成と同じgetrandom経路であること・32byte乱数の乱雑性)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.2(生成乱数は既存のbootstrap token生成と同じ経路(getrandom))"
+reason = "内部実装の経路共有であり外部観測可能な振る舞い分岐でない(test-structure §8『書かない』: 挙動に差を生まない内部処理)。生成結果の観測可能面(abk_前置・1回表示・hash保存)はcli.manage-auth-api-key-generatesが担保"
+decided_at = "2026-11-05"
 decided_by = "claude"

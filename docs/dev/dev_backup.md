@@ -111,6 +111,8 @@ repo内運用(configs/secret/)に鍵・credentialを置いている場合の、u
 - config init設計書: `tmp/tasks/tm-1/design_config_init.md`(TASK-1紐付き)
 - completions設計書: `tmp/tasks/tm-2/design_completions.md`(TASK-2紐付き)
 - docsサブコマンド設計書: `tmp/tasks/tm-4/design_docs_command.md`(TASK-4紐付き)
+- frontend visual design設計書: `tmp/tasks/tm-16/design_frontend-visual.md`(TASK-16紐付き。Web UIのdesign token・部品仕様・light/dark両modeのWCAG contrast基準)
+- Web UI全体設計書: `tmp/tasks/tm-17/design_webui-overall.md`(TASK-17紐付き・ユーザー承認済み。5タブ構成(ホーム/バックアップ/転送/設定/管理)・書き込み系/job系API・catalog DB拡張(tag/collection/jobs等)・長時間job機構・W1〜W7段階実装)
 - テスト構成: `tests/README.md`(条件書tests/design/・cargo test階層・verify script。実装挙動の正本は`tests/design/`の条件書)
 - 開発ルール: `../../CLAUDE.md`(repo直下)
 

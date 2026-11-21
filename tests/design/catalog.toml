@@ -1,0 +1,325 @@
+# amazing-backup テスト設計条件書(catalog エリア)
+# 出典: tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(DB設計・D1/D11)・4章(同期・D10)・
+#   5章(CLI照会cache・D7)・12章 Phase P1(DB層)。D1〜D11は2026-11-05ユーザー承認済み。
+# 2026-11-04: TASK-9 Phase P1(DB層)対応でテスト先行の条件書(新設feature)。
+#   src/catalog.rs は設計12章P1で新設されるmodule(local catalog DB=rusqlite)。
+#   実装前のため新条件のテストは実行failを許容(bin subprocess観測: manage catalog系
+#   subcommand未実装=exit 64・catalog.db実体の不在等。cargo test --no-runのcompileは通る)。
+#   src/catalog.rs内のunit test(schema各tableの詳細構造・WAL mode・migration直接呼出・
+#   同一process内無条件fresh等)は実装時に追加する方針(TASK-10段階5・TASK-18と同一構成)。
+#   P3以降(serve・API・認証・frontend)の条件は後続waveでserver.toml等へ書く(本ファイル対象外)。
+# 2026-11-05: TASK-9 Phase P5(pending catalog)対応でテスト先行の条件追加(6条件)。
+#   excluded「pending_items(scan対象明示登録・未backup分類(b')・push dry-run/from-list
+#   実行記録(a)の併合・manage catalog scan)」を解消し設計3章(D6承認済み)・12章P5を
+#   条件化。実装前のため新条件のテストは実行failを許容(cargo test --no-runのcompileは
+#   通る)。設計3章に詳細が規定されない点は以下の解釈で条件化(実装はこれに従う):
+#   - scan対象の登録先はpipeline.toml [profiles.<n>.catalog.scan](server.tomlでない)。
+#     根拠: scanはCLI(manage catalog scan)・serve(POST /api/pending/scan)の両方から
+#     使うbackup対象の定義であり、server.tomlはserver共通設定のみ(設計8章・指摘#13の
+#     分離原則=listen_addr/port/rp_id/rp_originのみ)。backup対象はprofile毎に異なる
+#     (profile=pipeline/aws.tomlがbackup対象の定義場所)ため[profiles.<n>]配下が対象を
+#     profile単位で表現できる唯一の位置。pending_itemsもscope(=profileのbucket+prefix)
+#     単位で保持する
+#   - section key: roots(必須・絶対path列挙)・extensions(省略可=全regular file対象。
+#     ".zip"形式で拡張子比較)・exclude(省略可=除外なし。走査対象の相対pathへの部分一致
+#     で除外)。symlinkは既定で辿らない(directory symlinkのtraverse・file symlinkの
+#     対象化とも行わない)
+#   - 分類の算法: 対象fileをcatalog DB(実効scope)のlocations/versions記録と比較し
+#     (1) source_path完全一致の記録がありsize+mtime不一致=changed (2) path一致が無く
+#     basename一致の記録のみでsize+mtime不一致=unknown(移動+変更か別内容かをsize+mtime
+#     では判定不能。「確認不能」をchanged/unbackedへ偽装しない=設計3章) (3) size+mtime
+#     一致(path一致・basename一致のいずれか)=ok (4) path・basenameとも一致する記録が
+#     無い=unbacked。mtime比較はfile_write由来のsource_mtime保存値(mtime_jst_precise
+#     と同一形式)との文字列比較
+#   - CLIのscan集計表示は "scan: <全走査件数>件 unbacked=<n> changed=<n> ok=<n>
+#     unknown=<n>"(dry-runのplan行と同一形式)
+#   - pending_itemsの置換を行うのは再scanのみ(manage catalog rebuild/syncのcache置換
+#     =replace_scopeはpending_itemsに触れない。P1実装の契約「pending_itemsはscan領域の
+#     ため対象外」と同一・索引由来でないため)
+#   - sha256再計算optionはCLI(manage catalog scan --sha256)のみ。API(POST
+#     /api/pending/scan)は既定のsize+mtime比較のみ
+# 2026-11-05: TASK-13(serve認証へのapi-key認証追加)対応でテスト先行の条件追加(1条件)・
+#   文言改訂(1条件=catalog.schema-migrationの9 tables化。id不変)。出典:
+#   tmp/tasks/tm-13/design_api-key-auth.md 2.1(api_keys table・永続class・migration
+#   M::up list追加で既存DBへ適用=レビューL-1)・4章。
+#   api_keys tableは実装前のためrusqlite直接の行挿入・行数観測は失敗(fail=赤を許容)。
+# 2026-11-14: TASK-17 9章W2(TASK-19: tag/collection・audit_log)対応でテスト先行の
+#   条件追加(2条件)・文言改訂(1条件=catalog.schema-migrationの13 tables化。id不変)。
+#   出典: tmp/tasks/tm-17/design_webui-overall.md 4.1(新table tags/collections/
+#   collection_items/audit_log=いずれも永続class)・4.3(tag/collectionはlocal語彙・
+#   索引に入れない)・9章W2行・11章(jobs/settingsはW4/W7で本更新の対象外)。
+#   テストはsrc/catalog.rs内#[cfg(test)](schema・制約観測)とtests/catalog_storage.rs
+#   (rebuildでの永続class保持観測=api_keysと同形式のrusqlite直接読書)で観測。
+#   実装前のため新条件のテストは実行failを許容(table不在のrusqlite操作。
+#   cargo test --no-runのcompileは通る)。
+#   [meta]はテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。
+
+[meta]
+feature = "catalog"
+source_file = "src/catalog.rs"
+verified = true
+verified_at = "2026-11-15"
+verified_by = "claude"
+test_command = "cargo test"
+source_hash = "eb82ef68c7394689bd1bf4b6992c83ac951ee6aa"
+note = "TASK-9設計2章(DB層)・4章(replica同期)・5章(CLI照会cache)・12章P1+3章(D6承認)・12章P5(pending catalog)の条件化。DB真正はJSONL registryのまま・DBは導出index+S3索引replica(平文view・D11承認)。テストはbin subprocess+fake seam(StorageFixture)で観測しsrc/catalog.rs直接参照のunit testは実装時に追加。P5分6条件はテスト先行(2026-11-05)のためverified=falseへ(P5実装後に復帰)。2026-11-05 TASK-13(api_keys table)実装後にcargo test --lib catalog::全緑(5 tests・schema 9 table観測含む)・cargo test --test catalog_storage全緑(29 tests・api_keys永続class観測含む)を確認してverified=trueへ復帰・source_hashを更新。2026-11-14 TASK-17 W2(TASK-19)条件追加(tags/collections/collection_items/audit_log 4 table 2条件+schema-migration 13 tables化の文言改訂+unit test 1件+結合test 1件)でテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。2026-11-15 全件verify(cargo test全binary緑・vitest 126tests緑・build成功・verify-conditions PASS 364条件)を確認してverified=trueへ復帰・source_hashを更新(W2分: tags/collections/collection_items/audit_log 4 table追加・schema 13 tables化)。2026-11-15 レビュー指摘対応(tags/collections件数の現存entities JOIN化・audit_ok_on_tx導入)によるsrc/catalog.rs変更でsource_hashを更新"
+
+[[condition]]
+id = "catalog.db-path-and-file-permissions"
+target_function = "catalog::db_path解決 / DB open(作成時権限)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(D1/D11・格納先と権限)"
+description = "catalog DBの格納先は$XDG_STATE_HOME/amazing-backup/catalog.db(AMAZING_BACKUP_HOME指定時は$ABH/catalog.db=ABH統合則。resolve_app_pathsのregistryと同一規則)。DBは平文replicaを含むため(D11承認)専用directoryは0700・DB本体・WAL/SHM・一時fileは0600で作成する(group/other読取不可の権限境界) (integration, fake seam)"
+given = "AMAZING_BACKUP_HOME=<dir>指定での manage catalog sync 実行と、XDG_STATE_HOME=<dir>指定(ABH未指定・fake S3 stateへ事前push済み索引=初回syncもremoteのHEAD確認から行う)での manage catalog sync 実行"
+expect_return_shape = "ABH指定時は$ABH/catalog.db・XDG_STATE_HOME指定時は<dir>/amazing-backup/catalog.dbが作成され、DB fileのpermissionはmode & 0o077 == 0。XDG_STATE_HOME側の専用directory(<dir>/amazing-backup/)もmode & 0o077 == 0で作成される"
+source_lines = "tests/catalog_storage.rs:33"
+
+[[condition]]
+id = "catalog.db-permissions-remediate-existing"
+target_function = "catalog::open(既存dir・既存DB fileの権限是正)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(D1/D11・権限境界。TASK-9レビュー指摘#1: 既存環境の0755 dir・0644 DBを放置しない)"
+description = "既存環境の権限不備をopen前に是正する: 親directoryが0700で無ければ0700へchmodし・既存DB fileはmigrationより前に0600へchmodする(0644のまま接続して平文を露出しない)。WAL/SHMもopen後に同一境界(0600)へ置く。chmod失敗は無視せず設定エラーとして起動拒否する(他user所有等で直せない配置は安全側に失敗) (integration, fake seam)"
+given = "sync済みの$ABH dir(0755へ)・catalog.db(0644へ)を事前に緩めた状態での manage catalog sync 再実行"
+expect_return_shape = "exit 0でsyncは成功し、実行後の$ABH dirは0700・catalog.dbは0600へ是正されている(mode & 0o077 == 0)"
+source_lines = "tests/catalog_storage.rs:93"
+
+[[condition]]
+id = "catalog.schema-migration"
+target_function = "catalog::migrations(rusqlite_migration)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(schema要約・table契約)・12章P1(schema/migration) + TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.1(api_keys table追加・migration M::up listへの追加で既存DBへ適用=レビューL-1) + TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.1(tags/collections/collection_items/audit_log table追加=いずれも永続class)・9章W2行"
+description = "DB新規作成はmigrationによりschemaを構築する: cache class 6 table(entities/versions/pins/locations/sync_state/pending_items)+永続class 7 table(credentials/push_intents/api_keys/tags/collections/collection_items/audit_log)(TASK-13でapi_keysを・TASK-17 W2(TASK-19)でtags/collections/collection_items/audit_logを追加=計13 table。api_keysはcredential_id PK・key_hash(SHA-256 hex)・name・created_atで平文keyは保存しない。新4 tableのschema・制約詳細はcatalog.tags-collections-audit-log-tablesが担保。jobs/settings tableはW4/W7で追加=本条件時点では対象外)。versions/locationsはfile_write由来のsource_mtimeを保存する(3章の比較基準供給源)。migrationは冪等(既存DBへの再適用で内容を壊さない)。WAL modeで運用する (unit; integrationではDB file生成を観測)"
+given = "存在しないpathへの初回DB作成(manage catalog sync実行)と、同一DBへの再実行"
+expect_return_shape = "初回実行でSQLite database file(magic header \"SQLite format 3\")が作成され後続の照会が動作。再実行はexit 0で既存内容を壊さない(TASK-13改訂分=api_keys table・TASK-17 W2改訂分=新4 tableの13 table化観測はsrc/catalog.rs unit test。実装前は当該table不在でfailを許容)"
+source_lines = "src/catalog.rs:2036; src/catalog.rs:2239; tests/catalog_storage.rs:147"
+
+[[condition]]
+id = "catalog.sync-fetches-replica-on-change"
+target_function = "manage catalog sync(replica取得)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(D10遅延refresh・validator取得・freshness整合規則)・12章P1"
+description = "manage catalog syncはHEAD 1回で索引objectのvalidator(ETag+VersionId。S3Backend/FakeS3へのvalidator取得追加)を取得しsync_stateのvalidatorと比較する: 変化(初回含む)あればGET+復号し当該scopeのcache行を置換、fetched_at・validatorを取得内容としてsync_stateへ確定する。変化なければGETを行わない(毎回の索引GETを廃止=要件1)。転送・復号失敗時はsync_state.status=error(staleness明示)。初回(=local registry・sync_stateともに無い状態)でもremoteのHEAD確認を省略しない(local履歴の不在はremote索引の不在の証拠にならない=別端末・復旧環境ではS3の索引を取得する)。HEAD失敗もstatus=errorへの失効経路へ集約する(正常DBのまま旧freshを残さない) (integration, fake seam)"
+given = "索引objectが無い状態での初回 manage catalog sync・2回目sync(変化なし)・索引objectを書換えた後の3回目sync。およびlocalのregistry・catalog DBを削除した状態(別端末相当・remoteには索引が存在)での初回sync"
+expect_return_shape = "初回は索引keyへのHeadObject+GetObjectが呼ばれexit 0(同期時にDB file生成)。2回目はHeadObjectのみでGetObjectは呼ばれない。書換え後は再度GetObjectが呼ばれexit 0。別端末相当の初回syncはremote索引をHEAD確認のうえ取得し内容が同期される(空をfresh確定しない)"
+source_lines = "tests/catalog_storage.rs:175; tests/catalog_storage.rs:225; tests/catalog_storage.rs:434"
+
+[[condition]]
+id = "catalog.sync-invalidation-on-replace-failure-and-missing-index"
+target_function = "manage catalog sync(置換失敗・索引object不在時の失効)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(D10遅延refresh・freshness整合規則: 失効時に旧freshを持ち越さない)・TASK-9レビュー再指摘#6(syncのreplace_scope失敗・書込履歴ありnamespaceの索引object不在が失効処理を通らない)"
+description = "manage catalog syncはremote索引のGETに成功してもcache置換(replace_scope)が失敗した場合はstatus=errorへ失効してからエラー終了し、書込履歴があるnamespaceでremote索引objectが不在(HEADで不在確認)の場合はstatus=staleへ失効してから案内エラー終了する(いずれも正常DBのままで置換失敗・rollback後・不在確認後に旧freshを残さない。失効は一時的で再実行成功でfresh復帰) (integration, fake seam)"
+given = "push+sync済み(fresh)の正常DBでの、versions挿入のみ失敗させるtrigger注入+索引object書換え(validator変化)後の manage catalog sync・trigger解除後の再sync・および索引objectを削除した状態(書込履歴あり・HEAD不在)での manage catalog sync"
+expect_return_shape = "置換失敗注入時はexit 1(内部エラー)でsync_state.status=error。trigger解除後の再syncはexit 0でfresh復帰。索引object不在時はexit 2(案内エラー)でstatus=stale・復旧案内(manage index rebuild)をstderrへ表示"
+source_lines = "tests/catalog_storage.rs:492"
+
+[[condition]]
+id = "catalog.sync-registry-judgment-failure-error"
+target_function = "manage catalog sync(索引不在時の未書込判定失敗=error化)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(D10遅延refresh・freshness整合規則: 失効時に旧freshを持ち越さない)・TASK-9レビュー再々指摘#1(索引不在確認後にnamespace_never_writtenのregistry読取失敗が早期returnし失効処理を通らず旧状態が残る)"
+description = "manage catalog syncはremote索引object不在(HEADで不在確認)時の未書込判定(registry読取・parse)に失敗した場合もstatus=errorへ失効してから処理エラー終了する(判定失敗で早期returnし旧fresh/staleを持ち越さない。registry復旧後の再実行で通常経路へ戻る) (integration, fake seam)"
+given = "push+sync済みで索引objectを削除済み(書込履歴あり・HEAD不在)の状態での、registry JSONLへ不正JSON行を追記した状態での manage catalog sync・およびregistry復旧後の再sync"
+expect_return_shape = "registry破損時はexit 4(処理エラー)でsync_state.status=error。registry復旧後は索引不在の案内エラー経路へ戻る(exit 2・status=stale)"
+source_lines = "tests/catalog_storage.rs:493"
+
+[[condition]]
+id = "catalog.list-cache-hit-after-head-check"
+target_function = "照会系CLI(list files/versions/pins/runs・query)のcache利用"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(freshness整合規則=別process起動時HEAD 1回 validator確認必須)・5章(D7承認: 検証済みfresh時DB利用)・12章P1(cache hit/miss両経路)"
+description = "list files/versions/pins/runs・queryは別process起動時にHEAD 1回のvalidator一致確認を行い、検証済みfreshならS3 GETを行わずDBから回答する(cache hit。HEADとGETの毎回取得を廃止)。HEAD validator一致確認は毎process起動時に必須(検証なしfreshの持ち越し期限は設けない) (integration, fake seam)"
+given = "manage catalog sync済み(fresh)状態での list files と query の実行(いずれもsyncとは別process)"
+expect_return_shape = "索引objectへのHeadObject 1回のみでGetObjectは呼ばれず、表示結果はS3索引の内容と一致する"
+source_lines = "src/catalog.rs:2324; src/catalog.rs:2366; tests/catalog_storage.rs:263"
+
+[[condition]]
+id = "catalog.cache-miss-refreshes-db"
+target_function = "照会系CLI(stale時の従来経路+DB更新)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 5章(D7: staleなら従来経路のS3 GET+復号→DB更新)・4章(取得失敗時のstaleness扱い)"
+description = "validator不一致(stale)時は従来経路(S3 GET+復号)で回答し、取得内容をDBへ反映する(次回起動はcache hit)。取得失敗(転送・復号)時は旧cacheをstaleness明示付きで扱い、sync_state.status=errorとする(旧fresh状態を残さない) (integration, fake seam)"
+given = "sync後に索引objectを書換えた(validator変化)状態での list files 実行と、転送失敗注入(FAKE_S3_FAIL_CP_FOR=索引key)での list files 実行"
+expect_return_shape = "書換え後のlistは索引keyへGetObject 1回を行いexit 0でDBが更新される(続く再実行はcache hit=GetObject無し)。失敗注入時は転送エラー(exit 5)で、DBはfreshとして持ち越されない"
+source_lines = "tests/catalog_storage.rs:310"
+
+[[condition]]
+id = "catalog.append-then-reflect-with-stale-on-failure"
+target_function = "backup push(書込系のDB反映) / catalog::reflect"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(書込時序: JSONL append成功→同一process内でDB反映・反映失敗時のstale化)"
+description = "backup push等の書込系はJSONL registry append成功後、同一process内で当該scopeのDBへ反映する(反映済み=自端末書込snapshot。次の照会はcache hit)。DB反映失敗(DB file破損等)時は当該scopeをstale化して警告表示する(旧fresh状態を残さない。JSONLが正本のためpush自体は成功継続) (integration, fake seam)"
+given = "通常のbackup push実行後のlist files(cache hit観測)と、catalog.dbを不正bytesで事前配置した状態でのbackup push実行"
+expect_return_shape = "通常時はpush後のlistがcache hit(索引objectへのHeadObject 1回・GetObject無し)。破損DB配置時はpushはexit 0でDB反映失敗の警告がstderrへ表示され、続くlistはS3経路(GetObjectあり)で回答する"
+source_lines = "tests/catalog_storage.rs:369; tests/catalog_storage.rs:435"
+
+[[condition]]
+id = "catalog.rebuild-scoped-to-cache-class"
+target_function = "manage catalog rebuild"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(table契約: rebuildはcache classのみ置換・永続classはdropしない)・11章(rebuild冪等)・12章P1"
+description = "manage catalog rebuildはローカルregistry(JSONL)からcache class(entities/versions/pins/locations/sync_state/pending_items)のみを置換再構築し、永続class(credentials/push_intents)はdropしない。再実行で同一内容(冪等)。cacheは常にJSONL+S3から再構築可能 (integration, fake seam; 永続class保持の直接観測はsrc/catalog.rs実装時のunit test)"
+given = "sync済みDBへの manage catalog rebuild 2回実行と、rebuild後のlist files実行"
+expect_return_shape = "rebuildはexit 0でS3索引由来と同一の照会結果をDBから回答し、2回のrebuild後のlist結果は同一(冪等)"
+source_lines = "src/catalog.rs:2262; tests/catalog_storage.rs:586"
+
+[[condition]]
+id = "catalog.scope-isolation-multi-profile"
+target_function = "catalog(cache tableのscope列)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(指摘#3: 全cache tableにscope(bucket+prefix)を持ち混在時の衝突・上書き防止)"
+description = "全cache tableはscope(bucket+prefix)をPK/検索条件に持つ: 複数profile=複数scopeの混在時に対象scope外のcache行への衝突・上書きが起きない(一方のscopeの同期・書込反映が他方のscopeのcacheを消さない。profile切替での照会は各scopeの内容のみ) (integration, fake seam)"
+given = "別prefixの2 profile(dev・prod。pipeline.toml側にも同名profile)でそれぞれpush+manage catalog syncした構成での、各profileでのlist files実行"
+expect_return_shape = "各profileのlistは当該scopeの索引内容のみを表示し他scopeのentityは混入せず、両scopeのcacheは併存する(後からsyncした側が先の側を上書きしない)"
+source_lines = "tests/catalog_storage.rs:612"
+
+[[condition]]
+id = "catalog.cli-refresh-flag"
+target_function = "照会系CLI(--refresh)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 5章(D7承認: --refreshフラグ追加)・12章P1"
+description = "list files/versions/pins/runs・queryへ--refresh flagを追加する: 指定時はHEAD validatorの一致に関係なくS3 GET+復号で索引を再取得しDBを更新する(強制refresh) (integration, fake seam)"
+given = "sync済み(fresh・索引変化なし)状態での list files --refresh 実行"
+expect_return_shape = "exit 0で索引objectへのGetObjectが行われ、表示結果はS3索引の内容と一致する(実装前の未知flagはusage 64)"
+source_lines = "tests/catalog_storage.rs:671"
+
+[[condition]]
+id = "catalog.json-format-compat"
+target_function = "照会系CLI(--format json出力)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 5章(D7: --format json出力schemaは完全互換・entry_summary_json単一source化)"
+description = "--format json出力schemaはcache/S3両経路で完全互換(cache hit経路で項目・語彙・構造が変化しない。entry_summary_jsonを単一source化)。S3取得経路の戻りにもDB保存側(replace_scope)と同一のscope分離filterを適用する=同一bucket複数prefixの記録が混在する索引でも--refresh時と次回cache hit時のentity・version・pinの集合が変わらない (integration, fake seam)"
+given = "sync済み状態での list files --format json(cache hit経路)と list files --refresh --format json(S3再取得経路)の実行。および同一bucket・別prefix2 profileでpushした混在索引での同比較"
+expect_return_shape = "2つの出力がJSONとして等価である(混在索引でも他prefixの記録は両経路とも混入せず等価)"
+source_lines = "tests/catalog_storage.rs:702; tests/catalog_storage.rs:736"
+
+[[condition]]
+id = "catalog.s3-direct-commands-unchanged"
+target_function = "diff / get / list jobs(従来S3直接)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 5章(D7: diff・get・list jobsは従来S3直接)・12章P1(既存commandの挙動はD7承認分を除き不変=1章影響)"
+description = "diff・get・list jobsはcache化対象外・従来どおりS3直接で動作する(diffは実態突合が目的・list jobsはper-object headが必要なため) (integration, fake seam)"
+given = "sync済み(fresh)状態でのdiff・get・list jobs実行"
+expect_return_shape = "いずれもS3 API呼び出しを行い(ListObjectVersions・HeadObject・GetObject等)従来経路の結果を返す(cache skipされた空応答にならない)"
+source_lines = "tests/catalog_storage.rs:790"
+
+[[condition]]
+id = "catalog.scan-targets-in-pipeline-profile"
+target_function = "config: [profiles.<n>.catalog.scan]読込 / manage catalog scan(走査対象解決)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(D6承認: (b')scan対象の明示登録=scan対象root・対象種別・除外規則・symlink規則の明示登録。auto_path_roots転用不採用=指摘#6)・8章(server.tomlはserver共通設定のみ=指摘#13)・12章P5"
+description = "scan対象はpipeline.toml [profiles.<n>.catalog.scan](roots=絶対path列挙・1つ以上必須)へ登録しserver.tomlには置かない(scanはCLI(manage catalog scan)・serve(POST /api/pending/scan)両方から使うbackup対象の定義でありserver.tomlはserver共通設定のみ=指摘#13の分離原則。backup対象はprofile毎に異なる)。auto_path_rootsはscan対象へ転用しない(auto_path_rootsは明示投入fileの分類・相対化用=指摘#6。[catalog.scan]未登録のroot配下は走査しない)。未登録(section無し)では0件走査でexit 0。scanはlocal FS走査+catalog DB比較のみでS3 APIを呼ばない(設計3章「scanはlocal FS走査のみでS3不要」) (integration, fake seam)"
+given = "push済みfixture(auto_path_roots=[data_root]・[catalog.scan]未登録)での manage catalog scan と、roots=[data_root]追記後(roots外のelsewhere配下にもfileを置いた構成)の再実行"
+expect_return_shape = "未登録時はexit 0で集計0件(scan: 0件)。roots登録後はroots配下のfileのみ走査されroots外(elsewhere)のfileは計上されない。いずれのscan実行もcalls.logへS3 API呼び出しを追加しない"
+source_lines = "tests/catalog_storage.rs:912"
+
+[[condition]]
+id = "catalog.scan-file-selection"
+target_function = "manage catalog scan(対象種別・除外・symlink規則)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章((b')対象種別(file拡張子/pattern)・除外規則・symlink規則(既定で辿らない))・12章P5"
+description = "scanの対象選択: extensions指定時は拡張子一致fileのみ(省略・空は全regular fileが対象)。excludeは走査対象の相対pathへの部分一致で除外(一致file・一致dir配下とも対象外)。symlinkは既定で辿らない(directory symlinkをtraverseせずfile symlinkも対象にしない=範囲拡大事故防止=指摘#6) (integration, fake seam)"
+given = "scan root配下に x.zip(対象拡張子)・y.txt(対象外拡張子)・skip/z.zip(exclude=\"skip\"一致)・elsehere配下へのdirectory symlink(link先に対象拡張子file)を置いたextensions=[\".zip\"]・exclude=[\"skip\"]構成での manage catalog scan"
+expect_return_shape = "走査結果はx.zipの1件のみ(y.txt=拡張子対象外・skip/z.zip=除外・symlink先=不追従で計上されない)"
+source_lines = "tests/catalog_storage.rs:953"
+
+[[condition]]
+id = "catalog.scan-classification-statuses"
+target_function = "manage catalog scan(分類判定: versions/locations保存値とのpath+basename+size+mtime比較)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(D6承認: 分類判定=path+basename+size+mtime比較(source_mtime基準=versions/locations保存値)・比較基準が無い場合はunknown/changedを区別し「確認不能」を「済」と偽装しない)・2章※(source_mtime供給源=file_write由来)・12章P5"
+description = "scanは対象fileをcatalog DB(実効scope)のlocations/versions記録とpath+basename+size+mtimeで比較し4状態へ分類する: (1)path一致の記録がありsize/mtime不一致=changed (2)path一致が無くbasename一致の記録のみでsize/mtime不一致=unknown(移動+変更か別内容かをsize+mtimeでは判定不能。changed/unbackedへ偽装しない) (3)size+mtime一致(path一致・basename一致のいずれか)=ok (4)path・basenameとも一致する記録なし=unbacked。mtimeはfile_write由来のsource_mtime保存値(mtime_jst_preciseと同一形式)との比較 (integration, fake seam)"
+given = "a.zip(backup済み・不変)・b.zip(backup済み・内容変更)・c.zip(未backup)・d.zip(backup済みをmoved/配下へ移動=basename一致+size/mtime一致)・e.zip(backup済み・不変)+other/e.zip(同名・異内容=basename一致+size/mtime不一致)をpush+rebuild後に manage catalog scan"
+expect_return_shape = "集計はunbacked=1(c.zip)・changed=1(b.zip)・ok=3(a.zip・moved/d.zip・e.zip)・unknown=1(other/e.zip)(実装前はmanage catalog scan未知subcommandのexit 64でfailを許容)"
+source_lines = "tests/catalog_storage.rs:979"
+
+[[condition]]
+id = "catalog.scan-sha-merge-option"
+target_function = "manage catalog scan --sha256(sha256再計算の明示option)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(sha256再計算は明示option指定時のみ・その時のみ既存合流判定sha_uuid_lookupを利用)・12章P5"
+description = "sha256再計算は明示option(manage catalog scan --sha256)指定時のみ行う: 対象fileのsha256を計算しregistry由来の合流正本sha_uuid_lookup(file_uploadsの同sha・bucket一致記録)で問い合わせ、合流先が存在すれば当該内容はbackup済みとしてokへ確定する(未指定時はsize+mtime比較のみ=unknown等の判定をshaで確定しない) (integration, fake seam)"
+given = "f.zipをpush済みの状態でcopy/f.zip(同一内容=sha一致・mtimeのみ相違=未指定scanではbasename一致+mtime不一致のunknown)を作り、manage catalog scan(既定)と manage catalog scan --sha256 を実行"
+expect_return_shape = "既定scanはcopy/f.zipをunknownに分類する。--sha256指定時はcopy/f.zipがokへ確定する(unknown=0・sha一致のbackup済み内容との合流判定。sha256計算は--sha256指定時のみ行う)"
+source_lines = "tests/catalog_storage.rs:1035"
+
+[[condition]]
+id = "catalog.scan-replaces-pending-items"
+target_function = "manage catalog scan(pending_items全置換) / catalog::pending書込"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(scan結果(pending_items)はcache class=再scanで全置換)・2章(table契約)・12章P5"
+description = "scan結果は当該scopeのpending_itemsを全置換する(前回scan結果を残さない=再実行で二重計上されず対象外fileの行が消える・冪等)。pending_itemsの置換を行うのは再scanのみでありmanage catalog rebuild/syncのcache置換(replace_scope)はpending_itemsに触れない(索引由来でないため=P1実装の契約と同一) (integration, fake seam)"
+given = "push+scan済み(a.zip=ok・c.zip=unbacked)状態でのscan再実行・c.zip削除後の再scan・その後の manage catalog rebuild(catalog.dbのpending_items行を直接読取)"
+expect_return_shape = "scan再実行は行数不変(冪等)。file削除後の再scanは削除fileの行が消える。rebuild後もpending_items行は保持される(rebuildでは置換されない)"
+source_lines = "tests/catalog_storage.rs:1082"
+
+[[condition]]
+id = "catalog.push-intents-recorded"
+target_function = "backup push --dry-run/--from-list(push_intents記録)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 3章(D6承認: (a)push dry-run/from-list実行記録の併合)・2章(push_intents=永続class・rebuildでもdropしない)・12章P5"
+description = "backup pushは--dry-run指定時kind=dry_run・--from-list指定(非dry-run)時kind=from_listで実行記録をpush_intents(永続class)へ記録する(payload_jsonに投入予定対象のpath情報を含む)。通常push(positionalのみ・非dry-run・from-list無し)は記録しない。push_intentsはmanage catalog rebuildでも消えない(永続class=cache class置換の対象外) (integration, fake seam)"
+given = "manage catalog sync済みDBへの from-list実push・同一fileのpositional再push(skip)・--dry-run push の順の実行後と manage catalog rebuild 後のcatalog.db push_intents表直接読取"
+expect_return_shape = "from-list実pushはkind=from_listの行1件(payloadに投入対象file名を含む)・positional再pushは行を追加しない・dry-runはkind=dry_runの行1件を追加。rebuild後も行数・内容は不変(実装前は記録が無く0行でfailを許容)"
+source_lines = "tests/catalog_storage.rs:1133"
+
+[[excluded]]
+item = "credentials tableのpasskey登録・bootstrap one-time token(128bit・in-memory・期限10分・原子的消費・再起動失効)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(D3・指摘#8)・12章Phase P4"
+reason = "P4(passkey認証)の実装phaseでありP1+P2の対象外。後続waveでwebauthn系areaへ条件化する(credentials table自体のschemaはcatalog.schema-migrationの構成に含む)"
+decided_at = "2026-11-04"
+decided_by = "claude"
+
+[[excluded]]
+item = "同一process内の自端末書込直後のみ無条件fresh(CLI再検証省略範囲)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(freshness整合規則)"
+reason = "CLIは1実行1コマンドのため別processからの観測が構成上できず、integrationでの検証手段が無い(=unit領域)。別process起動時のHEAD検証必須の観測面はcatalog.list-cache-hit-after-head-checkが担保し、同一process内省略はsrc/catalog.rs実装時のunit testで担保する"
+decided_at = "2026-11-04"
+decided_by = "claude"
+
+[[excluded]]
+item = "serve内sync・CLI sync・書込即時反映のsingle-flight(semaphore 1)直列化と複数process同時実行のSQLite書込lock直列化"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 1章(実行境界)・4章(sync競合)"
+reason = "並行processの競合時刻を決定的に制御した観測が統合testで困難な内部設計制約(test-structure §8: 観測可能な振る舞い分岐を定められない)。競合時に壊れた状態を作らないことの表出面は、冪等性(catalog.rebuild-scoped-to-cache-class)・stale化(catalog.cache-miss-refreshes-db)が担保"
+decided_at = "2026-11-04"
+decided_by = "claude"
+
+[[excluded]]
+item = "索引snapshot反映の単一transaction化(delete+insert置換)のtransaction内部構造"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(scope単位の原子的置換)"
+reason = "transactionの内部構造であり統合testでの直接観測面が無い(途中状態は外部から不可視)。観測可能な帰結(反映後の内容がsnapshot全体と一致=部分混在なし)はcatalog.sync-fetches-replica-on-change・cache miss反映系の各条件が担保"
+decided_at = "2026-11-04"
+decided_by = "claude"
+
+[[excluded]]
+item = "catalog.dbのbackupは利用者責任である旨のdocs記載(平文のため取扱注意)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(D11影響)"
+reason = "docs更新でありコードの振る舞い条件ではない(既存docs運用系除外と同一扱い。権限境界の振る舞い自体はcatalog.db-path-and-file-permissionsが担保)"
+decided_at = "2026-11-04"
+decided_by = "claude"
+
+[[excluded]]
+item = "SQLCipher等の暗号化DBの不採用(D11で平文replica保存を受容したため)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(代替案・D11)"
+reason = "不採用の決定事項であり検証対象コードの振る舞い条件が存在しない(test-structure §8)。平文保存の緩和措置(権限0600/0700)はcatalog.db-path-and-file-permissionsが担保"
+decided_at = "2026-11-04"
+decided_by = "claude"
+
+# --- TASK-13(api_keys table・2026-11-05テスト先行) ---
+
+[[condition]]
+id = "catalog.api-keys-table-persistent-class"
+target_function = "catalog::migration(api_keys追加) / manage catalog rebuild(永続class保持)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.1(api_keys table(永続class)・rebuildでもdropしない・migration M::up listへの追加で既存DBへ適用)・4章"
+description = "api_keys table(credential_id TEXT PRIMARY KEY・key_hash TEXT NOT NULL(SHA-256(api-key全文)のhex=平文keyは保存しない)・name TEXT NOT NULL・created_at TEXT NOT NULL)は永続classとして作成され(migration M::up listへの追加で既存DBへも適用)、manage catalog rebuildのcache class置換(replace_scope)でもdropされない(credentials/push_intentsと同一契約) (integration, fake seam)"
+given = "sync済みDBのapi_keysへ1行挿入(rusqlite直接=insert_api_key APIと同一schema)後の manage catalog rebuild 実行(rusqlite直接で行数観測)"
+expect_return_shape = "rebuildはexit 0でapi_keys行は保持される(永続class=cache class置換の対象外)(実装前はapi_keys table不在によりfailを許容)"
+source_lines = "tests/catalog_storage.rs:1481"
+
+[[excluded]]
+item = "api_keyをcredentials tableへkind列追加で統合する移行(同一table化)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.1(passkey(credentials table)と別table(schemaが異なるため。同一tableへkind列を足す移行は不採用)"
+reason = "不採用の決定事項であり検証される振る舞いが存在しない(test-structure §8)。採用された別table構成の契約はcatalog.schema-migration(13 tables・TASK-17 W2後)・catalog.api-keys-table-persistent-classが担保"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+# --- TASK-17 W2(TASK-19: tag/collection・audit_log・2026-11-14テスト先行) ---
+
+[[condition]]
+id = "catalog.tags-collections-audit-log-tables"
+target_function = "catalog::migrations(W2新4 table追加)"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.1(新table: tags(scope,uuid,tag,created_at・PK(scope,uuid,tag))・collections(id,scope,name,created_at・UNIQUE(scope,name))・collection_items(collection_id,scope,uuid,added_at・PK(collection_id,scope,uuid)・collections.idへのFK ON DELETE CASCADE)・audit_log(id,scope,recorded_at,action,detail_json,outcome,error_code))・4.3(tag/collectionはlocal語彙=索引に入れない)・9章W2行・11章"
+description = "W2の新4 table(tags/collections/collection_items/audit_log)をmigrationが構築する(設計4.1のSQLどおり。全て永続class)。tagsの同(scope,uuid,tag)行・collectionsの同(scope,name)行の重複挿入は制約(PK/UNIQUE)で拒否される(POST /api/collectionsの同名409・items再追加の冪等skipのtable側契約) (unit)"
+given = "存在しないpathへの初回DB作成(open_test_db)後のPRAGMA table_info観測と、tags・collectionsへの重複行挿入"
+expect_return_shape = "4 tableが存在し各主要columnが観測される(tags: scope/uuid/tag/created_at・collections: id/scope/name/created_at・collection_items: collection_id/scope/uuid/added_at・audit_log: id/scope/recorded_at/action/detail_json/outcome/error_code)。tags同PK行・collections同(scope,name)行の重複挿入はerror(実装前はtable不在でfailを許容)"
+source_lines = "src/catalog.rs:2159"
+
+[[condition]]
+id = "catalog.tags-collections-persistent-class"
+target_function = "catalog::replace_scope(永続class対象外) / manage catalog rebuild"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.1(class分類: 新規6 tableは全て永続class。cache側に置くとmanage catalog rebuildでtag・設定・履歴が失われる。manage catalog rebuildは引き続きcache classのみ置換)・9章W2行・11章"
+description = "W2の新4 table(tags/collections/collection_items/audit_log)は永続classとして作成され、manage catalog rebuildのcache class置換(replace_scope)でもdropされない(credentials/push_intents/api_keysと同一契約=rebuildでtag・collection・UI操作履歴が失われない) (integration, fake seam)"
+given = "sync済みDBの4 tableへ1行ずつ挿入(rusqlite直接=実装後の書込APIと同一schema)した状態での manage catalog rebuild 実行(rusqlite直接で行数観測)"
+expect_return_shape = "rebuildはexit 0で4 tableとも行は保持される(cache class置換の対象外)(実装前はtable不在によりfailを許容)"
+source_lines = "tests/catalog_storage.rs:1507"

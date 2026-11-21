@@ -9,7 +9,33 @@ permissions:
   contents: write
 
 jobs:
+  # TASK-9設計10章(release CI先行job): frontend buildを1回実行しdistをartifact共有。
+  # matrix build jobはdownloadしたdistを埋め込む(rust-embed)。repoにはdistをcommitしない
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: build frontend dist
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+
   build:
+    needs: frontend
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -34,6 +60,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      # frontend先行jobのbuild済みdist(rust-embedがfrontend/distを埋め込む)
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
       - name: build
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
@@ -59,10 +90,13 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # downloadは配布物artifact(amazing-backup-*)に限定する(frontend-dist等の
+      # build中間artifactをrelease資産へ混入させない)
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+          pattern: amazing-backup-*
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

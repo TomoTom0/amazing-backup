@@ -1,0 +1,640 @@
+# amazing-backup テスト設計条件書(frontend エリア)
+# 出典: tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(frontend構成)・
+#   6章(API設計・error体系=指摘#14)・4章(D10 staleness表示)・11章(frontend.toml・
+#   scanner拡張=指摘#12)・12章Phase P2(frontend最小build)・P3(読取API・vitest緑)。
+#   D1〜D11は2026-11-05ユーザー承認済み。
+# 2026-11-05: TASK-9 Phase P3(読取API)waveで新設(テスト先行)。設計11章・12章P3の
+#   「verify-conditions.pyのTS走査拡張」と合わせ、frontend/src配下の期待動作を
+#   条件化する(P2のexcluded(server.toml側)からfrontend/src配下のvitest対象分を移管)。
+#   P3時点で観測可能な条件のみ。P4(LoginView・passkey)・P5(PendingView・scan)分は
+#   excludedへ(後続waveで条件化)。テストはvitest(frontend/src/**/*.spec.ts)で
+#   `// [covers:<id>]`形式で紐付け(verify-conditions.pyのTS/Vue走査)。
+#   実装前のためfrontend.sync-state-endpoint-client分のテストは実行failを許容
+#   (pnpm vitest runは実行可能・client.tsへのGET /api/sync対応はP3実装で追加)。
+# 2026-11-05: TASK-9 Phase P4(passkey認証)対応でテスト先行の条件追加(4条件)。
+#   excluded「LoginView・passkey認証UI」分を解消しauth store(src/stores/auth.ts)・
+#   client(src/api/client.tsのauth系)層を条件化。実装前のため新条件のテストは
+#   実行failを許容(pnpm vitest runは実行可能)。実browserのWebAuthn API
+#   (navigator.credentials.create/get)観測はexcluded維持(vitestはnode環境のため
+#   store/client層のみ条件化し、LoginViewのUI誘導状態はauth storeのgetterで担保)。
+#   GET /api/auth/status応答形式はserver.tomlの解釈({authenticated,credentials})に整合。
+# 2026-11-05: TASK-9 Phase P5(pending catalog)対応でテスト先行の条件追加(2条件)。
+#   excluded「PendingView(未backup/changed/unknown一覧+scanボタン)・pending周りのUI」を
+#   解消しpending store(src/stores/pending.ts)・client(src/api/client.tsのpending系)層を
+#   条件化。実装前のため新条件のテストは実行failを許容(pnpm vitest runは実行可能)。
+#   PendingView componentの実描画はvitest(node環境)で観測できないためexcluded維持
+#   (P4のLoginViewと同一扱い)。一覧のUI状態はstoreのstatus別集計getter(counts)で担保し
+#   scan実行はrunScan action(POST後に一覧再取得)で担保する。
+#   GET /api/pending応答・POST /api/pending/scan応答の形式はserver.toml P5条件の解釈
+#   ({"pending":[...]}・item schema共通)に整合。
+# 2026-11-05: TASK-9 Phase P6(diff UI)対応でテスト先行の条件追加(3条件)。
+#   server.toml excluded「diff UI(P6: diff結果のfrontend画面表示)」を解消しdiff
+#   client(src/api/client.tsのdiff系)・diff store(src/stores/diff.ts)層を条件化。
+#   実装前のため新条件のテストは実行failを許容(pnpm vitest runは実行可能)。
+#   設計7章の画面一覧にdiff結果画面は列挙されていないため、12章P6のdiff UIは
+#   DiffView(view)として実装する(component実描画はvitest=node環境で観測できない
+#   ためexcludedへ=P4 LoginView・P5 PendingViewと同一扱い。UI誘導状態はstoreの
+#   diffView getter・結果集計はsummary getterで担保する)。
+#   POST /api/diffの応答はdiff結果そのもののためP5 runScanのような実行後の再GETは
+#   行わない。GET /api/diffは未実行時404 not_found(server.diff-endpointsの解釈)を
+#   error扱いで返し、diffView getterは未実行(not_run)へ接続する(未実行と未認証401
+#   などの失敗をUI状態として区別)。
+# 2026-11-05: TASK-9コードレビュー指摘高4(承認済みの主要frontend機能が未実装=
+#   HomeViewのentity一覧・検索・絞込・詳細画面が「後続phase」表示のまま・手動syncの
+#   client/store/UIも無い)対応でテスト先行の条件追加(5条件)・excluded 1件追加。
+#   設計7章(EntitiesView=一覧・検索・絞込・sync状態+refresh・EntityDetailView)・
+#   4章(D10: 手動refresh=POST /api/sync+staleness表示)・6章(GET /api/entitiesの
+#   query/category/label/page/scope絞込・:uuid・:uuid/versions)のD8承認(閲覧)分。
+#   実装前のため新条件のテストは実行failを許容(pnpm vitest runは実行可能)。
+#   解釈の確定(設計に詳細が規定されない点):
+#   - GET /api/entities応答のwrap・要素schemaはserver.entities-list-endpointの解釈に
+#     整合({entities:[entry_summary語彙], page, total_pages}・page=1始点)。詳細・
+#     versions応答もserver.entity-detail-endpoint・entity-versions-endpointに整合
+#   - fetchEntitiesの絞り込みparamは値のあるparamのみURL queryへ直列化する
+#     (scope省略時はserver側実効profile=server.read-api-uses-serve-profile)
+#   - POST /api/sync応答はGET /api/syncと同一形式(server.sync-refresh-endpoint)。
+#     手動refresh後のentities一覧再取得はsync storeのrefresh action内で行う
+#     (EntitiesViewの実描画はexcludedのためstore層で観測する解釈)
+#   - routes配列はvitest(node環境)からimport可能なfrontend/src/router/routes.tsと
+#     してrouter/index.tsから切出す=createWebHistoryがnodeで動かないための観測seam
+#   - EntitiesView・EntityDetailView componentの実描画・HomeViewのnav link実描画・
+#     router guardの実navigationはP4 LoginView〜P6 DiffViewと同一扱いでexcludedへ
+# 2026-11-05: TASK-9レビュー再指摘①〜④(category絞込がsubmitで適用されない・sync後の
+#   詳細失効・詳細/versionsのerror状態分離・旧result無しのdiff実行失敗が隠れる)対応で
+#   条件追加(4条件)。①のsubmit統合はapplyFilters action・②はrefetchEntitiesでの
+#   詳細系resetとしてstore層で観測する(実描画はexcluded維持)。
+# 2026-11-05: TASK-13(serve認証へのapi-key認証追加)対応でテスト先行の条件追加(3条件)・
+#   文言改訂(2条件=frontend.login-view-auth-ui-state・frontend.unauthenticated-401-handling。
+#   id不変)。出典: tmp/tasks/tm-13/design_api-key-auth.md D13・2.4章(LoginView api-key欄・
+#   postApiKeyAuth・専用失敗表示=レビューM-3/M-4・L-2反映済み)・4章。
+#   実装前のため新規条件のテストは実行failを許容(未実装参照は新規spec file
+#   api/api-key-auth.spec.ts・stores/api-key-auth.spec.ts内に閉じる=既存spec・buildを
+#   壊さない)。
+#   設計2.4に詳細が規定されない点は以下の解釈で条件化(実装はこれに従う):
+#   - api-key欄の表示基盤はauth storeのgetter(認証状態取得済み(fetchState=ok)かつ
+#     未認証時にtrue。未取得・認証済みはfalse)で提供する。authUi(register/login)に
+#     依存しない=passkey 0件+api-keyのみのuserがlogin画面へ到達できない状態を作らない
+#   - api-key認証実行はauth storeのaction(postApiKeyAuth呼出・成功時は認証状態を
+#     再取得してauthenticatedへ=passkey loginと同一遷移)
+#   - 失敗表示はpasskey/bootstrap欄の失敗(lastError)とは分離した専用状態(apiKeyError)。
+#     messageはcodeをそのまま表示し401をbootstrap再発行案内へ誤変換しない(=M-4)
+# 2026-11-06: TASK-13コードレビュー指摘対応(低重要度)で文言改訂(1条件=
+#   frontend.api-key-failure-dedicated-state。id不変)。apiKeyErrorの寿命をlastErrorと
+#   同一へ: fetchAuthStatus成功・logoutでもクリア(未認証状態へ失敗表示を持ち越さない)。
+#   stores/auth.ts変更のためverified=falseへ戻す(全件verify後にtrueへ復帰)。
+# 2026-11-14: TASK-17(Web UI全体設計)9章W1(TASK-18)対応でテスト先行の条件追加
+#   (3条件)・文言改訂(1条件=frontend.entities-routes-navの5タブ化。id不変=設計
+#   11章の指定)・excluded 1件追加。出典: tmp/tasks/tm-17/design_webui-overall.md
+#   (2026-11-13ユーザー承認済み) 2.0(nav 5タブ)・2.1(ホームサマリ)・2.2(filter
+#   view)・3.2(runs/jobs API)・5.3(pollingはW4)・9章W1行・11章。
+#   - frontend.entities-routes-nav(文言改訂・id不変): 5タブ(/・/backups・/transfer・
+#     /settings・/admin)+既存4画面の再配置(一覧/詳細→/backups配下・pending/diff→
+#     /backupsのfilter view=独立routeなし。旧path /entities・/pending・/diffは
+#     routesへ登録しない)
+#   - frontend.runs-client-and-store: GET /api/runs型ガード+fetchRuns+runs store
+#     (直近run getter=ホームbackup概况の基盤)
+#   - frontend.jobs-client-and-store: GET /api/jobs型ガード+fetchJobs+jobs store
+#     (W1は空一覧・pollingなし=手動表示のみ。pollingはW4の転送タブ実装で追加=
+#     設計5.3・9章W4行)
+#   - frontend.ui-refresh-interval-localstorage: 自動更新間隔設定のlocalStorage
+#     保存(既定10秒・無効可・server設定でない=設計2.4)
+#   実装前のため新規・改訂条件のテスト(router spec改訂1件+新規spec 5file)は実行
+#   failを許容(未実装参照は新規spec file内に閉じる=既存specはrouter改訂分を除き
+#   緑維持)。HomeViewサマリ区画・filter view・navの実描画はcomponent実描画のため
+#   excluded(excluded entryへW1分を追加)。
+#   [meta]はテスト先行のためverified=falseへ(W1実装後に全件verifyでtrueへ復帰)。
+# 2026-11-14: TASK-17 9章W2(TASK-19)対応でテスト先行の条件追加(6条件)・文言改訂
+#   (1条件=frontend.entities-client。id不変=設計11章の指定)・excluded 1件追加。
+#   出典: tmp/tasks/tm-17/design_webui-overall.md 2.2(一覧ビュー切替(3+1)・tag列
+#   chip・検索box/pagerの3ビュー共通動作・詳細のtag編集・所属collection)・3.2
+#   (GET /api/tags・folders・collections(+/:id)・entitiesのtag/collection絞り込み・
+#   PUT /api/entities/:uuid/tags)・8章(新規部品=tag chip・ビュー切替tab・folder
+#   tree)・9章W2行・11章。
+#   - frontend.tags-client-and-store: GET /api/tags型ガード+fetchTags+tags store
+#   - frontend.folders-client-and-store: GET /api/folders型ガード+fetchFolders+
+#     folders store(path階層のtree組立getter=folder tree部品のdata基盤)
+#   - frontend.collections-client-and-store: GET /api/collections(+/:id)型ガード+
+#     collections store(一覧と構成uuid一覧)
+#   - frontend.entities-tag-collection-filter: fetchEntitiesのtag/collection絞り
+#     込みparam+entities storeのtagFilter/collectionFilter状態(検索語・pagerとの共存)
+#   - frontend.entities-view-switch-state: ビュー切替状態(flat/folder/tag/collection
+#     の4値・setViewの選択系絞り込みクリア+page=1戻し・検索語/category維持=3ビュー
+#     共通動作)
+#   - frontend.entity-tags-edit-client-and-store: PUT /api/entities/:uuid/tags
+#     (putEntityTags)+entities storeのupdateTags(PUT応答=操作後の対象状態でdetail
+#     を更新し再GETしない・失敗はlastTagEditErrorで分離)
+#   - frontend.entities-client(文言改訂・id不変): EntitySummaryへtags: string[]・
+#     EntityDetailへcollections: string[]を追加(行のtag列chip・詳細の所属collection
+#     表示の基盤)+fetchEntitiesのtag/collection絞り込みparam
+#   解釈の確定(設計に詳細が規定されない点・実装はこれに従う):
+#   - GET /api/collections応答は{collections:[{id:number,name:string}]}(4.1
+#     collections tableのid/nameが語彙源)・GET /api/collections/:id応答は
+#     {uuids:[...]}(構成uuid一覧)とする
+#   - PUT /api/entities/:uuid/tags応答=操作後の対象状態はGET /api/entities/:uuid
+#     と同一のEntityDetail形式(tags/collections付き)で型ガード検証する(3.1の
+#     読取系と同一schema原則)
+#   - folderビューの選択folder絞り込みは既存label=paramで表現し新paramは設けない
+#     (設計2.2)。folder treeの入れ子組立はfolders storeのtree getterが担う
+#   - setViewは選択系絞り込み(tag/collection/label)のみクリアしpageを1へ戻す。
+#     検索語query・categoryは3ビュー共通で動くため維持する
+#   実装前のため新規・改訂条件のテスト(新規spec 7file+api/entities.spec.ts・
+#   stores/entities.spec.ts拡張)は実行failを許容(未実装参照は新規spec file内に
+#   閉じる。既存specはfixtureへtags/collectionsを追記し型ガード改訂後も通る
+#   よう更新=緑維持)。3ビュー切替UI・tag chip・folder tree部品・詳細のtag編集
+#   formの実描画はcomponent実描画のためexcluded(excluded entryへW2分を追加)。
+#   [meta]はテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。
+# 2026-11-14: TASK-19(W2)コードレビュー指摘(tmp/tasks/tm-19/review_codex_w2.log)の
+#   frontend側対応で条件追加(7条件)・文言改訂(5条件。id不変)。
+#   - frontend.entity-tags-edit-saving-state: 指摘高1(tag追加・削除を保存応答待ち中に
+#     も実行でき同じ旧配列から作った後続PUTが先行編集を消す)へtagEditSaving状態
+#   - frontend.entity-tags-edit-refreshes-list-and-tags: 指摘中6(tag更新成功時に
+#     detailしか更新されず一覧へ戻っても旧tags・旧絞り込み結果が残る)へ失効再取得
+#   - frontend.entities-list-request-generation: 指摘中7(連続選択で並行GETの旧応答が
+#     後着採用され選択状態と一覧が食い違う)へ一覧取得の要求世代
+#   - frontend.view-options-fetch-state: 指摘中8(選択肢取得が一度失敗すると再試行
+#     できずsync後も古いまま)へ取得状態明示+再試行+sync(refresh)後の選択肢再取得
+#   - frontend.entities-untagged-filter: 指摘中9frontend側(tag無しentityのみの選択)
+#     へuntagged=1 param(2026-11-14API契約)+untaggedOnly状態
+#   - frontend.folders-labelless-node: 指摘中10frontend側(folder treeの
+#     「(ラベルなし)」node)へfolders応答先頭行(2026-11-14API契約)+label=空文字絞り込み
+#   - frontend.collections-write-client-and-store: 指摘高3(collection作成・構成編集の
+#     導線が無い=W2受入条件「collection作成がUIから可能」未充足)へ書込client・store
+#     actions(書込API契約は2026-11-14確定分に固定)
+#   文言改訂(id不変・実態へ合わせる追記): frontend.entities-client(label空文字直列化・
+#   untagged param)・frontend.folders-client-and-store(tree getterのラベルなし行)・
+#   frontend.entities-view-switch-state(setViewのuntaggedOnlyクリア)・
+#   frontend.entity-tags-edit-client-and-store(再GETを行わない範囲の明示)・
+#   frontend.sync-refresh-trigger(refresh成功時の取得済み選択肢の再取得)。
+#   [meta]はverified=falseへ(指揮役の全件verify後にtrueへ復帰)。
+
+[meta]
+feature = "frontend"
+source_file = "frontend/src/"
+verified = true
+verified_at = "2026-11-15"
+verified_by = "claude"
+test_command = "pnpm --dir frontend test"
+source_hash = "0ace1d7e18661658e7cbe38c9cd1ceec81bf21c3"
+note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3〜P6時点+コードレビュー指摘高4(EntitiesView・EntityDetailView・手動sync)分+レビュー再指摘①〜④分のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff・entities)のvitestで担保。P3分5条件・P4分4条件・P5分2条件・P6分3条件+レビュー分2条件は2026-11-05実装後に全件pass(44 tests)で検証記録を復帰済み。レビュー高4分5条件(entities-client・entities-store・sync-refresh-trigger・entities-view-state・entities-routes-nav)も2026-11-05実装後に全件pass(61 tests)で検証記録を復帰。レビュー再指摘①〜④分4条件(entities-filter-apply・sync-refresh-invalidates-detail-state・entities-detail-versions-error-separation・diff-run-error-visible-without-result)も2026-11-05実装後に全件pass(66 tests)で検証記録を更新。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)。2026-11-05 TASK-13(api-key認証UI)実装後にfrontend vitest全緑(80 tests・api-key系14test+文言改訂分含む)・frontend build成功を確認してverified=trueへ復帰・source_hashを更新。2026-11-06 TASK-13レビュー指摘対応(apiKeyErrorの寿命をlastErrorと同一へ=stores/auth.ts変更)でverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-06 全件verify(vitest 82tests緑・apiKeyErrorクリア分2test含む・frontend build成功・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新。2026-11-11 TASK-16(visual design)実装のためverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-11 全件verify(vitest 82tests緑・frontend build成功・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新(TASK-16分: style.css全面書換・View属性追加・nav追加・IBM Plex latin同梠。条件本文の追加・削除なし=visual designはexcluded領域のため。test_commandをpnpm --dir frontend testへ修正=直接的vitest run形式はpnpm v10でERR_PNPM_RECURSIVE_EXEC_FIRST_FAILとなるため・package.json test script=vitest runと同一)2026-11-11 レビュー指摘#5対応でsource_hashをfrontend/src tree自身のhashへ方式統一(旧方式は上位tree hashでnote説明と不一致。TASK-13時旧値8b33d71はrepo root tree相当だった)。2026-11-14 TASK-17 W1(TASK-18)条件追加3件+entities-routes-nav改訂(id不変)+spec改訂1件/新規5fileでテスト先行のためverified=falseへ(W1実装後に全件verifyでtrueへ復帰)。2026-11-14 全件verify(vitest 19file/98tests緑・frontend build成功・verify-conditions PASS 347条件・cargo test 392 passedは同一revisionで実装委任先が確認)を経てverified=trueへ復帰・source_hashを更新(W1分: routes 5タブ化・client runs/jobs・stores 3新規・HomeView/EntitiesView再編・TransferView/SettingsView/AdminView枠新規・PendingView/DiffView削除)。2026-11-14 コードレビュー指摘対応(diff filterのentity一覧をmissing対象のみへ絞り込み・空job時ホーム区画非表示・store失敗testを非空保持からの消去検証へ強化)後にvitest 98tests緑・build成功・cargo test全緑・verify-conditions PASSを確認してsource_hashを更新。2026-11-14 TASK-17 W2(TASK-19)条件追加6件+entities-client改訂(id不変)+spec新規7file・拡張2file(api/entities.spec.ts・stores/entities.spec.ts)でテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。2026-11-15 全件verify(cargo test全binary緑・vitest 126tests緑・build成功・verify-conditions PASS 364条件)を確認してverified=trueへ復帰・source_hashを更新(W2分: 一覧3ビュー切替(folder/tag/collection)+検索・pager共存・行tag列chip・詳細tag編集・所属collection表示)。2026-11-14 TASK-19 W2レビュー指摘frontend側対応(条件追加7件+文言改訂5件=id不変: tag編集保存中状態・一覧/tags失効再取得・一覧要求世代・選択肢fetchState+sync後再取得・untagged絞り込み・ラベルなしnode・collection書込client/store)でverified=falseへ(指揮役の全件verify後にtrueへ復帰・source_hash更新)。2026-11-15 レビュー指摘対応(条件7新規+5改訂: collection書込client/store・untagged・ラベルなしnode・request世代・fetchState・tag編集保存中無効化・一覧失効再取得)後に全件verify(vitest 26file/152tests緑・build成功・cargo test全binary緑・verify-conditions PASS)を確認してverified=trueへ復帰・source_hashを更新"
+
+[[condition]]
+id = "frontend.api-error-body-guard"
+target_function = "frontend api/client.ts isApiErrorResponse"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(指摘#14: error bodyは{\"error\":{\"code\",\"message\"}}形式・一般化messageのみ)・7章(api/client)・11章(frontend test=vitest)"
+description = "API clientはerror body形式({\"error\":{\"code\",\"message\"}}・code/messageともstring)を型ガードで判定し、不一致(形式違い・null・code非string等)を検出する (vitest)"
+given = "isApiErrorResponseへの合成入力(形式一致・code非string・message欠落・空object・null)"
+expect_return_shape = "形式一致のみtrue・他はfalse"
+source_lines = "frontend/src/api/client.spec.ts:6"
+
+[[condition]]
+id = "frontend.api-get-result-mapping"
+target_function = "frontend api/client.ts apiGet"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(指摘#14: 非2xxはerror code+HTTP status)・7章(api/client・型ガードで検証し不一致はinternal扱い)・11章(vitest)"
+description = "apiGetは成功(2xx+型ガード通過)は{ok:true,data}・非2xxでerror body形式なら{ok:false,error:{code,message},httpStatus}・network失敗は{ok:false,error:{code:\"network\"},httpStatus:0}・2xxでも型ガード不一致は{ok:false,error:{code:\"internal\"}}へ結果をmappingする (vitest)"
+given = "fetchのmock(200+ガード通過body・503+{\"error\":{\"code\":\"configuration\",...}}・network reject・200+形式不一致body)でのapiGet呼び出し"
+expect_return_shape = "各入力を上記のok/error/httpStatusへ一方にmapping(guard通過data・error code・httpStatus=503/0)"
+source_lines = "frontend/src/api/client.spec.ts:30"
+
+[[condition]]
+id = "frontend.health-state-store"
+target_function = "frontend stores/sync.ts fetchHealth"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(Pinia stores・sync)・12章P2(liveness表示)・11章(vitest)"
+description = "sync storeのfetchHealthはhealth状態(checking→ok/error)とmessageを遷移させ、失敗時はlastError(ApiError)を保持する(P2のliveness表示。P3以降のstaleness表示の基盤) (vitest)"
+given = "setActivePinia後のsync storeへのfetch mock(200+{status:\"ok\"}とnetwork reject)"
+expect_return_shape = "成功時health=ok・message=ok・lastError=null。失敗時health=error・lastError={code:\"network\",...}"
+source_lines = "frontend/src/stores/sync.spec.ts:37"
+
+[[condition]]
+id = "frontend.sync-state-endpoint-client"
+target_function = "frontend api/client.ts GET /api/sync応答型ガード・stores/sync.ts sync状態取得"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GET /api/sync=sync状態fetched_at/validator/staleness)・4章(D10: frontendにstaleness表示+手動refresh)・7章(stores/sync)・12章P3"
+description = "GET /api/sync応答(status=fresh|stale|error|unknown・scope・index_etag/index_version_id・fetched_at/last_write_at/last_verified_at・entry_count)の型ガードを持ち、sync storeはsync状態を取得して保持する(手動refreshのUI表示基盤。P3時点では保護APIのためAPI未構成状態からの応答は503 error扱い) (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(503+{\"error\":{\"code\":\"configuration\",...}}・200+sync状態body)でのstoreのsync状態取得"
+expect_return_shape = "型ガードは形式一致のみtrue。storeは200時にsync状態(status等)を保持し、503ではlastError(configuration)を保持する(実装前のため本条件のテストは実行failを許容)"
+source_lines = "frontend/src/api/sync-state.spec.ts:19"
+
+[[condition]]
+id = "frontend.fail-closed-protected-api-handling"
+target_function = "frontend api/client.ts・stores/sync.ts(保護API 503の扱い)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 12章P2〜P3(保護APIはP4までfail-closed=503 configuration)・指摘#11・6章(error code体系)・7章(HomeViewの閉鎖表示)"
+description = "保護API(読取系)が未認証で503(configuration)を返すP2〜P3段階では、frontendはapiGetのerror扱い(code=configuration+httpStatus=503)としてdataの表示を行わず、閉鎖されている状態をlastError・UI文案で示す(認証未構成時に空dataを表示しない) (vitest)"
+given = "fetch mock(503+{\"error\":{\"code\":\"configuration\",\"message\":...}})でのapiGet経由の保護API呼び出しとsync storeのerror状態"
+expect_return_shape = "ok=false・error.code=configuration・httpStatus=503としてstoreのlastErrorに保持されdataは返らない"
+source_lines = "frontend/src/api/client.spec.ts:31"
+
+[[condition]]
+id = "frontend.auth-status-client-and-store"
+target_function = "frontend api/client.ts GET /api/auth/status応答型ガード・stores/auth.ts認証状態取得"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GET /api/auth/status=認証状態・登録credential数)・7章(Pinia stores: auth)・8章(D9 single user)・12章P4(LoginView)"
+description = "GET /api/auth/status応答({\"authenticated\": boolean, \"credentials\": number})の型ガードを持ち、auth storeは認証状態・credential数を取得して保持する(LoginViewのUI誘導・passkey登録済み状態表示の基盤。応答形式はserver.auth-status-endpointの解釈に整合) (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(200+{authenticated:false,credentials:1})でのauth storeの取得"
+expect_return_shape = "型ガードは形式一致のみtrue。storeはauthenticated=false・credentialCount=1を保持する(失敗時はlastError)"
+source_lines = "frontend/src/api/auth.spec.ts:12; frontend/src/stores/auth.spec.ts:18"
+
+[[condition]]
+id = "frontend.auth-logout-store"
+target_function = "frontend stores/auth.ts logout(logout状態管理)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: POST /api/auth/logout=認証要・session破棄)・7章(Pinia stores: auth)・12章P4"
+description = "auth storeのlogoutはPOST /api/auth/logoutを呼び、成功で認証状態を未認証へ戻す(logout状態管理。未認証401応答でもUI状態は未認証へ揃う) (vitest)"
+given = "fetch mock(200+{}と401+{\"error\":{\"code\":\"unauthenticated\",...}})でのauth storeのlogout呼び出し"
+expect_return_shape = "いずれもauthenticated=falseへ遷移する(logout後は未認証状態)"
+source_lines = "frontend/src/stores/auth.spec.ts:49"
+
+[[condition]]
+id = "frontend.unauthenticated-401-handling"
+target_function = "frontend api/client.ts・stores/auth.ts(保護API 401の扱い)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(error体系: unauthenticated=401)・12章P4(保護API開放=未認証401)・7章(未認証時のUI誘導) + TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.4(api-key認証の401もcodeをそのまま専用失敗表示へ=401をbootstrap再発行案内へ誤変換しない=レビューM-4)"
+description = "保護APIの401(unauthenticated)はapiGetのerror扱い({ok:false, error:{code:\"unauthenticated\"}, httpStatus:401})となり、P2〜P3の503(configuration=閉鎖)とは区別されて未認証時のUI誘導(login案内)へ接続する(空dataを表示しない点はfail-closed扱いと共通)。api-key認証(POST /api/auth/api-key)の401も同一code体系(unauthenticated)だがpasskey/bootstrap欄の失敗表示へは接続せず専用失敗状態へ返す(詳細はfrontend.api-key-failure-dedicated-state) (vitest)"
+given = "fetch mock(401+{\"error\":{\"code\":\"unauthenticated\",\"message\":...}})での保護API呼び出し(apiGet/fetchSyncState)"
+expect_return_shape = "ok=false・error.code=unauthenticated・httpStatus=401(503 configurationとはcodeで区別可能)"
+source_lines = "frontend/src/api/auth.spec.ts:57"
+
+[[condition]]
+id = "frontend.login-view-auth-ui-state"
+target_function = "frontend stores/auth.ts authUi getter(LoginView UI誘導状態)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: LoginView・bootstrap token入力・login/register UI)・8章(登録UIはtoken提示時のみ=credential数0+token案内)・12章P4(LoginView) + TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.4(api-key欄はauthUi状態(register/login)に依存せず未認証時に常時表示)"
+description = "auth storeはLoginViewのUI誘導状態をgetterで提供する: 未取得=unknown・未認証かつcredentials=0はregister(bootstrap token入力による登録案内)・未認証かつcredentials>0はlogin・認証済みはauthenticated。api-key欄の表示はこのauthUi状態に依存しない(未認証時に常時表示=frontend.login-view-api-key-field。passkey 0件+api-keyのみのuserがlogin画面へ到達できない状態を作らない)。component実描画は実browser観測のため本条件はstore層の状態で担保する (vitest)"
+given = "fetchAuthStatus成功後の各状態(未登録・登録済み未認証・認証済み)でのauthUi getter参照"
+expect_return_shape = "状態に応じてunknown/register/login/authenticatedを返す"
+source_lines = "frontend/src/stores/auth.spec.ts:100"
+
+[[excluded]]
+item = "LoginView componentの実描画・WebAuthn API(navigator.credentials.create/get)の実browser呼出・認証後の本格画面(EntitiesView・EntityDetailViewのdata表示・router guard)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: LoginView・EntitiesView・EntityDetailView・vite dev proxy)・8章(D3 passkey)・12章P4(passkey認証・LoginView) + TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.4(LoginViewのapi-key入力欄(type=password+autocomplete=off)・認証ボタンの実描画)"
+reason = "実browserのWebAuthn API・component描画はvitest(node環境)で観測できない(store/client層のみ条件化しUI誘導状態はauthUi getterで担保)。実機login確認は設計12章P4の手動verify項目・認証後の本格画面は後続wave(実装時に条件化)。TASK-13のapi-key欄実描画・ボタン実操作も本entryに包含(表示基盤はfrontend.login-view-api-key-fieldのstore層・入力属性はbootstrap token欄と同一=設計L-2のため新規除外entryを立てない)"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+[[condition]]
+id = "frontend.pending-client-and-store"
+target_function = "frontend api/client.ts GET /api/pending応答型ガード・stores/pending.ts一覧取得"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GET /api/pending=アップロード前カタログ・item schema)・7章(Pinia stores: pending・PendingView)・12章P5"
+description = "GET /api/pending応答({\"pending\": [{source_root, path, size, mtime, status, last_scan_at}]}・statusはunbacked|changed|ok|unknown)の型ガード(isPendingResponse)を持ち、pending storeは一覧(items)を取得して保持しstatus別件数の集計getter(counts: unbacked/changed/ok/unknown)を提供する(PendingViewの未backup/changed/unknown一覧の基盤。取得失敗時はlastErrorを保持し一覧を空へ戻す=空dataを表示しない) (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(200+pending一覧body・network reject)でのpending store(fetchPending)の取得"
+expect_return_shape = "型ガードは形式一致のみtrue(size非number・pending欠落・nullはfalse)。storeは200時にitemsとcountsを保持しlastError=null・失敗時はlastErrorを保持しitemsは空(実装前のためsrc/stores/pending.ts・client未実装で実行failを許容)"
+source_lines = "frontend/src/api/pending.spec.ts:13; frontend/src/stores/pending.spec.ts:27"
+
+[[condition]]
+id = "frontend.pending-scan-trigger"
+target_function = "frontend api/client.ts POST /api/pending/scan・stores/pending.ts runScan(scan実行)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: POST /api/pending/scan=scanトリガ)・7章(PendingViewのscanボタン)・12章P5"
+description = "POST /api/pending/scan呼出(postPendingScan・応答はGET /api/pendingと同一形式)とpending storeのscan実行action(runScan)を持ち、実行中状態(scanning)へ遷移し実行後に一覧を再取得してitemsを更新する(scanボタン=手動トリガのUI基盤) (vitest)"
+given = "fetch mock(POST /api/pending/scan 200・続くGET /api/pending 200+更新後一覧)でのpending storeのrunScan実行と、fetch呼出のmethod/URL観測"
+expect_return_shape = "1回目のfetchはPOST /api/pending/scanへ向かい2回目はGET /api/pendingで再取得される。itemsは再取得結果へ更新されscanningは実行中trueから完了falseへ遷移する(実装前のため実行failを許容)"
+source_lines = "frontend/src/api/pending.spec.ts:90; frontend/src/stores/pending.spec.ts:71"
+
+[[excluded]]
+item = "PendingView componentの実描画(scanボタン実操作・未backup/changed/unknown一覧の実browser描画)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: PendingView)・12章P5(pending catalog・PendingView)"
+reason = "component実描画はvitest(node環境)で観測できない(store/client層のみ条件化し一覧・scanのUI状態はstoreのcounts getterとrunScan actionで担保=P4 LoginViewと同一扱い)。実機画面確認は設計12章P5の手動verify項目"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+[[excluded]]
+item = "Vite dev proxy(40512)経由の実browser接続・dist埋め込み配信の実機確認・testing libraryによるcomponent描画test"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(vite.config.ts dev proxy)・10章(dist二階建て)・11章(vitest+testing library)・12章P2/P3"
+reason = "実browser・release build産物を要する観測は単体testで観測できない(dev proxy・dist配信)。testing libraryは未導入のためcomponent描画testは本waveでは書かずstore・clientのunit testで担保する(導入はP4+の画面実装waveで判断)"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+[[condition]]
+id = "frontend.diff-client-and-store"
+target_function = "frontend api/client.ts GET /api/diff応答型ガード・stores/diff.ts結果取得"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GET /api/diff=最終diff結果参照)・7章(Pinia stores)・12章P6(diff UI)"
+description = "GET /api/diff応答(cmd_diffのJSON語彙={performed_at: string, entries: number, files: [{uuid,title}], missing: string[], unexpected: string[]})の型ガード(isDiffResponse)を持ち、diff storeはdiff結果(result)を取得して保持する(DiffViewの結果表示の基盤。未実行diffの404 not_foundはerror扱いで返しUI状態の未実行(not_run)へ接続する。取得失敗時はlastErrorを保持しresultをnullへ戻す=空dataを表示しない) (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(200+diff結果body・404+{\"error\":{\"code\":\"not_found\",...}}・network reject)でのdiff store(fetchDiff)の取得"
+expect_return_shape = "型ガードは形式一致のみtrue(entries非number・files要素のtitle欠落・missing非配列・nullはfalse)。storeは200時にresult(performed_at等)を保持しlastError=null・404/network失敗時はlastError(not_found/network)を保持しresultはnull(実装前のためsrc/stores/diff.ts・clientのdiff系未実装で実行failを許容)"
+source_lines = "frontend/src/api/diff.spec.ts:26; frontend/src/stores/diff.spec.ts:38"
+
+[[condition]]
+id = "frontend.diff-run-trigger"
+target_function = "frontend api/client.ts POST /api/diff・stores/diff.ts runDiff(diff実行)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: POST /api/diff=diff実行・結果をDB保存)・7章(diff実行UI)・12章P6(diff UI)"
+description = "POST /api/diff呼出(postDiffRun・request body無し)とdiff storeのdiff実行action(runDiff)を持ち、実行中状態(running)へ遷移し実行後に結果を保持する(diff実行ボタン=手動トリガのUI基盤。POSTの応答はdiff結果そのもののためP5 runScanのような実行後の一覧再GETは行わずPOST応答をresultへ保持する) (vitest)"
+given = "fetch mock(POST /api/diff 200+diff結果body)でのdiff storeのrunDiff実行と、fetch呼出のmethod/URL観測"
+expect_return_shape = "fetchはPOST /api/diffの1回のみ(実行後のGET /api/diffを呼ばない)。resultはPOST応答へ更新されrunningは実行中trueから完了falseへ遷移する(実装前のため実行failを許容)"
+source_lines = "frontend/src/api/diff.spec.ts:112; frontend/src/stores/diff.spec.ts:84"
+
+[[condition]]
+id = "frontend.diff-view-state"
+target_function = "frontend stores/diff.ts diffView getter(DiffView UI誘導状態)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(frontend構成・画面)・12章P6(diff UI)"
+description = "diff storeはDiffViewのUI誘導状態をgetter(diffView)で提供する: 実行中=running・結果保持済み=result・未実行(結果未取得・または未実行diffの404 not_found)=not_run・その他の失敗(未認証401等)=error。結果の集計getter(summary: entries数・missing/unexpected件数)も提供する(diff結果表示の枠。component実描画は実browser観測のため本条件はstore層の状態で担保) (vitest)"
+given = "各状態(running中・fetchDiff成功後・未取得・fetchDiff 404後・fetchDiff 401後)でのdiffView getter参照と、missing 2件・unexpected 1件の結果でのsummary参照"
+expect_return_shape = "状態に応じてrunning/result/not_run/errorを返し(404 not_foundはnot_run=未実行扱い・401はerror扱い)、summaryは{entries, missing, unexpected}の計数を返す(実装前のため実行failを許容)"
+source_lines = "frontend/src/stores/diff.spec.ts:116"
+
+[[condition]]
+id = "frontend.pending-rerun-error-visible"
+target_function = "frontend stores/pending.ts lastScanError(再実行失敗の別状態保持)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(Pinia stores: pending・PendingView)・12章P5・TASK-9レビュー指摘#12(scan再実行失敗が画面で隠れない)"
+description = "scan実行(POST /api/pending/scan)の失敗は取得(fetchPending)のerrorとは別状態(lastScanError)で保持する: POST失敗直後の一覧再取得が成功しても直前のscan失敗が表示から隠されない(PendingViewはlastScanErrorを明示行で案内する)。scan成功でlastScanErrorはクリアされる (vitest)"
+given = "POST /api/pending/scan 500+続くGET /api/pending 200のfetch mockでのrunScan実行と、POST成功後の再実行"
+expect_return_shape = "失敗時はitems(再取得成功分)とlastError=nullを保持したままlastScanError={code:...}が残る。成功時はlastScanError=nullへクリアされる"
+source_lines = "frontend/src/stores/pending.spec.ts:106"
+
+[[condition]]
+id = "frontend.diff-rerun-error-visible"
+target_function = "frontend stores/diff.ts lastRunError・showingStaleResult(再実行失敗と旧結果の併示)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(Pinia stores・diff UI)・12章P6・TASK-9レビュー指摘#12(再実行失敗後も旧結果だけを表示しない)"
+description = "diff実行(POST /api/diff)の失敗は取得系errorとは別状態(lastRunError)で保持し旧resultは破棄しない: 再実行失敗後もdiffViewはresult(旧結果)を示すが、showingStaleResult getterがtrueとなりViewは「直前の実行失敗+保存済みの旧結果」を明示できる(旧結果だけで実行失敗を隠さない)。再実行成功でlastRunErrorはクリアされる (vitest)"
+given = "fetchDiff成功(result保持)後のPOST /api/diff 500でのrunDiff実行と、続くPOST成功での再実行"
+expect_return_shape = "失敗時はresult(旧結果)保持+lastRunError={code:...}+diffView=result+showingStaleResult=true・lastError(fetch系)はnullのまま。成功時はlastRunError=null+showingStaleResult=false"
+source_lines = "frontend/src/stores/diff.spec.ts:169"
+
+[[excluded]]
+item = "DiffView componentの実描画(diff実行ボタン実操作・performed_at/entries/missing/unexpected一覧の実browser描画・routerへのdiff route登録)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面構成)・12章P6(diff UI)"
+reason = "component実描画はvitest(node環境)で観測できない(store/client層のみ条件化しUI誘導状態はdiffView getter・結果集計はsummary getterで担保=P4 LoginView・P5 PendingViewと同一扱い)。実機画面確認は設計12章P6の手動verify項目"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+[[condition]]
+id = "frontend.entities-client"
+target_function = "frontend api/client.ts GET /api/entities応答型ガード・fetchEntities/detail/versions取得"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GET /api/entities?query=&category=&label=&page=&scope=・:uuid・:uuid/versions)・7章(api/client・EntitiesView・EntityDetailView)・TASK-9レビュー指摘高4 + TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(行のtag列chip・詳細の所属collection)・3.2(GET /api/entities?tag=&collection=絞り込み追加)・11章(frontend.entities-clientのid不変文言改訂指定)"
+description = "GET /api/entities応答({\"entities\": [entry_summary語彙{uuid,title,locations[],versions=件数,latest_date,latest_size,pins[],tags[]}], \"page\": n, \"total_pages\": n})の型ガード(isEntitiesResponse。W2で要素へtags: string[]を追加=行のtag列chip表示の基盤)と、絞り込みparam付き一覧取得fetchEntities({query?,category?,label?,tag?,collection?,page?}。W2でtag/collection絞り込みparamを追加)・詳細取得fetchEntityDetail(uuid)(version_list+collections付き応答。W2でEntityDetailへcollections: string[]を追加=詳細の所属collection表示の基盤)・versions一覧取得fetchEntityVersions(uuid)を持つ(EntitiesView/EntityDetailViewのclient基盤。絞り込みparamは値のあるparamのみURL queryへ直列化・collectionはidを文字列化。2026-11-14レビュー指摘対応でlabelはラベルなし絞り込みのため空文字も直列化しuntagged=true時はuntagged=1を直列化する(詳細はfrontend.folders-labelless-node・frontend.entities-untagged-filter)。不在uuidの404 not_foundはerror扱い。応答wrap・要素schemaはserver.entities-list-endpoint・entity-detail-endpoint・entity-versions-endpointの解釈に整合) (vitest)"
+given = "合成入力への型ガード呼び出し(一覧・詳細ともW2のtags/collections否定caseを含む)と、fetch mock(200+一覧body・200+詳細body・200+versions body・404+{\"error\":{\"code\":\"not_found\",...}})でのfetchEntities/fetchEntityDetail/fetchEntityVersions呼び出しのmethod/URL観測"
+expect_return_shape = "型ガードは形式一致のみtrue(page非number・要素のtitle欠落・versions(件数)非number・entities欠落・nullはfalse。W2: 要素のtags非配列・詳細応答のcollections非配列(要素非string含む)もfalse)。fetchEntitiesは/api/entitiesへ値のあるparamのみ(tag/collectionを含む)付与したURLで呼ばれ・fetchEntityDetailは/api/entities/<uuid>へ(tags/collections付きのdataを返す)・404は{ok:false,error:{code:\"not_found\"}}・fetchEntityVersionsは/api/entities/<uuid>/versionsへ向かう(W2のtags/collections必須化・tag/collection param直列化は実装前のため該当testは実行failを許容)"
+source_lines = "frontend/src/api/entities.spec.ts:124; frontend/src/api/entities.spec.ts:138; frontend/src/api/entities.spec.ts:92"
+
+[[condition]]
+id = "frontend.entities-store"
+target_function = "frontend stores/entities.ts 一覧・絞り込み状態・fetchEntities"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesView=一覧・検索・絞込・Pinia stores: entities)・6章(GET /api/entities絞込)・TASK-9レビュー指摘高4"
+description = "entities storeは一覧(items)・検索語(query)・絞り込み(category)・page/total_pages・loading・lastErrorを保持し、fetchEntitiesは現在の絞り込み状態をURL queryへ反映して一覧を取得する(検索・絞込状態の変更(setQuery/setCategory)はpageを1へ戻す=絞り込み変更後は先頭pageから表示。setPageは指定pageで取得)。取得失敗時はitemsを空へ戻しlastErrorを保持する(空dataを表示しない=fail-closedと共通) (vitest)"
+given = "fetch mock(200+一覧body・401+{\"error\":{\"code\":\"unauthenticated\",...}})でのfetchEntities呼び出しと、setQuery/setCategory/setPage後の再取得のURL観測・取得中のloading観測"
+expect_return_shape = "成功時はitems・page・totalPagesを保持しloadingはtrueからfalseへ戻りlastError=null。失敗時はitems=[]・lastError={code:\"unauthenticated\"}。setQuery(\"beta\")はpageを1へ戻し続くfetchEntitiesはquery=beta&page=1のURLへ向かう(実装前のためsrc/stores/entities.ts未実装で実行failを許容)"
+source_lines = "frontend/src/stores/entities.spec.ts:87"
+
+[[condition]]
+id = "frontend.sync-refresh-trigger"
+target_function = "frontend api/client.ts POST /api/sync・stores/sync.ts refresh(手動sync)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(D10: frontendにstaleness表示+手動refresh=POST /api/sync)・6章(endpoint一覧: POST /api/sync=手動refresh)・7章(EntitiesView=sync状態+refresh)・TASK-9レビュー指摘高4"
+description = "POST /api/sync呼出(postSyncRefresh・request body無し・応答はGET /api/syncと同一のsync状態形式)とsync storeの手動refresh action(refresh)を持ち、実行中状態(refreshing)へ遷移し完了後にsync状態(status/fetched_at等=staleness表示)をPOST応答で更新したうえでentities一覧を再取得する(手動refreshボタンのUI基盤。entities再取得はrefresh action内で行う=EntitiesViewの実描画がexcludedのためstore層で観測する解釈。2026-11-14レビュー指摘対応で成功時は取得済み(ok)のtag/folder/collection選択肢も再取得する=frontend.view-options-fetch-state。refresh失敗は取得系lastErrorとは別状態lastRefreshErrorで保持しentities再取得は行わない=P5 lastScanError・P6 lastRunErrorと同一構成) (vitest)"
+given = "fetch mock(POST /api/sync 200+sync状態body・続くGET /api/entities 200・POST /api/sync 502+{\"error\":{\"code\":\"upstream\",...}})でのrefresh実行とfetch呼出のmethod/URL観測・実行中のrefreshing観測"
+expect_return_shape = "成功時はPOST /api/sync→GET /api/entitiesの順で呼ばれsyncStatus/syncFetchedAt等がPOST応答へ更新されrefreshingはtrueからfalseへ・lastRefreshError=null。失敗時はPOST /api/syncのみでlastRefreshError={code:\"upstream\"}・entities再取得なし・refreshing=false(実装前のためpostSyncRefresh・refresh未実装で実行failを許容)"
+source_lines = "frontend/src/api/sync-state.spec.ts:104; frontend/src/stores/sync.spec.ts:72"
+
+[[condition]]
+id = "frontend.entities-view-state"
+target_function = "frontend stores/entities.ts entitiesView getter・detail/versions状態(EntityDetailView基盤)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesView・EntityDetailView)・6章(:uuid・:uuid/versions)・TASK-9レビュー指摘高4"
+description = "entities storeはEntitiesViewのUI誘導状態をgetter(entitiesView)で提供する: 取得中=loading・一覧保持済み=result(0件の成功も含む)・取得失敗=error・未取得=not_fetched。EntityDetailView基盤として詳細(version_list付き)とversions一覧の状態(selectedUuid・detail・versions・detailError)をfetchEntityDetail(uuid)/fetchEntityVersions(uuid)で保持し、不在uuidの404 not_foundはdetailErrorで示す(空dataを表示しない)。component実描画は実browser観測のため本条件はstore層の状態で担保する (vitest)"
+given = "各状態(未取得・fetchEntities成功後・fetchEntities失敗後・取得中)でのentitiesView getter参照と、fetch mock(200+詳細body・200+versions body・404+{\"error\":{\"code\":\"not_found\",...}})でのfetchEntityDetail/fetchEntityVersions呼び出し"
+expect_return_shape = "状態に応じてloading/result/error/not_fetchedを返す。fetchEntityDetail(uuid)はdetail(version_list含む)を保持しselectedUuid=uuid・404はdetailError={code:\"not_found\"}でdetailは保持しない・fetchEntityVersions(uuid)はversions(state=現行/noncurrent付き)を保持する(実装前のため実行failを許容)"
+source_lines = "frontend/src/stores/entities.spec.ts:181; frontend/src/stores/entities.spec.ts:222"
+
+[[condition]]
+id = "frontend.entities-routes-nav"
+target_function = "frontend/src/router/routes.ts routes配列(5タブ+既存4画面の再配置)"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.0(navは5タブ(ホーム/・バックアップ/backups・転送/transfer・設定/settings・管理/admin)へ拡張=既存4linkの再編。未認証時はLoginViewへ)・2.2(一覧/詳細→/backups配下・pending/diff→/backupsのfilter view)・9章W1行・11章(frontend.entities-routes-navのid不変文言改訂) + TASK-9設計7章(router・routes.ts観測seam)"
+description = "routerのroutes配列は5タブ構成(ホーム`/`・バックアップ`/backups`・転送`/transfer`・設定`/settings`・管理`/admin`)へ再編する: 既存4画面は再配置(一覧/詳細→`/backups`と`/backups/:uuid`・pending/diff→`/backups`のfilter view(`?filter=pending:<status>`・`?filter=diff`のquery paramのため独立routeを持たない))され、旧path(/entities・/entities/:uuid・/pending・/diff)はroutesへ登録しない。`/login`は未認証時誘導のため維持。W1の/transfer・/settings・/adminはroute登録の枠(中身はW4〜W7)。routes配列はvitest(node環境)からimport可能な単独module(frontend/src/router/routes.ts)の観測seamを維持。nav link実描画・filter viewの実表示・router guardの実navigationはcomponent実描画のためexcluded (vitest)"
+given = "frontend/src/router/routes.tsのroutes配列参照"
+expect_return_shape = "routesのpathに`/`・`/login`・`/backups`・`/backups/:uuid`・`/transfer`・`/settings`・`/admin`が含まれ、`/entities`・`/entities/:uuid`・`/pending`・`/diff`は含まれない(実装前のためW1再編前の現行routes(旧path登録)でfailを許容)"
+source_lines = "frontend/src/router/index.spec.ts:13"
+
+[[condition]]
+id = "frontend.entities-filter-apply"
+target_function = "frontend stores/entities.ts applyFilters(検索語+categoryの同時適用)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesView=一覧・検索・絞込)・TASK-9レビュー再指摘①(filter formのsubmitがqueryのみ適用しcategory絞込がAPIへ送信されない)"
+description = "entities storeのapplyFilters(query, category)は検索語とcategory絞り込みを1回の適用でstoreへ反映し再取得も1回にまとめる: EntitiesViewのfilter form submitは両入力をこのactionへ渡す=1つのsubmit処理でquery・category両方がURL queryへ乗る(片方だけが適用される経路を作らない。絞り込み変更でpageは1へ戻る。category=nullはcategory paramを付けない) (vitest)"
+given = "2page閲覧中の状態からのapplyFilters(\"beta\", \"docs\")呼び出しと、applyFilters(\"\", null)呼び出しでのfetch mock URL観測"
+expect_return_shape = "前者は1回のfetchで/api/entities?query=beta&category=docs&page=1へ向かいquery=\"beta\"・category=\"docs\"・page=1を保持。後者は/api/entities?page=1(category paramなし)"
+source_lines = "frontend/src/stores/entities.spec.ts:276"
+
+[[condition]]
+id = "frontend.sync-refresh-invalidates-detail-state"
+target_function = "frontend stores/entities.ts refetchEntities(sync後再取得での詳細失効)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesView・EntityDetailView)・4章(D10手動refresh)・TASK-9レビュー再指摘②(sync後もselectedUuid一致で詳細取得を省略し旧locations/pinsと新versions一覧が混在する)"
+description = "手動sync成功後のentities一覧再取得(refetchEntities)は詳細・versionsの保持状態(selectedUuid・detail・detailError・versions・versionsError)を失効させる: syncはremote索引の置き換えのため旧詳細の内容保証が無く、失効により詳細を開く際の再取得を強制する(旧locations/pinsと新versions一覧の混在を構造的に排除) (vitest)"
+given = "fetchEntityDetail/fetchEntityVersions成功後(detail・versions保持状態)でのrefetchEntities呼び出し"
+expect_return_shape = "一覧(items)は再取得結果へ更新され、selectedUuid=null・detail=null・detailError=null・versions=null・versionsError=nullへ失効する"
+source_lines = "frontend/src/stores/entities.spec.ts:304"
+
+[[condition]]
+id = "frontend.entities-stale-detail-response-rejected"
+target_function = "frontend stores/entities.ts detailEpoch(詳細・versions失効をまたいだ応答の不採用)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(EntityDetailView)・TASK-9レビュー再々指摘②(sync中に詳細へ移動すると失効後に再取得されず読み込み中で止まる・失効前に開始した詳細リクエストの応答が後から完了すると旧内容を再格納する)"
+description = "refetchEntities(sync後再取得)による詳細・versionsの失効(detailEpoch増加)をまたいで完了した取得応答は採用しない(失効後の状態へ旧locations/pins・旧versionsを再格納しない)。EntityDetailViewはdetailEpochの変化をwatchして表示中の詳細・versionsを再取得する(表示中失効に対するwatchの実行は実browser観測=excluded) (vitest)"
+given = "fetchEntityDetail/fetchEntityVersionsの応答が未完了のままrefetchEntitiesで失効した後に旧応答が完了する場合・および失効後の新規fetchEntityDetail/fetchEntityVersions"
+expect_return_shape = "旧応答の完了後もdetail=null・versions=nullのまま(旧内容を再格納しない)。失効後の新規取得応答は採用されdetail/versionsへ保持される"
+source_lines = "frontend/src/stores/entities.spec.ts:390"
+
+[[condition]]
+id = "frontend.entities-detail-versions-error-separation"
+target_function = "frontend stores/entities.ts detailError/versionsError(詳細・versionsのerror状態分離)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntityDetailView=詳細+版一覧)・TASK-9レビュー再指摘③(詳細とversionsが同一detailErrorを共有し片方の失敗がもう片方の成功で消える)"
+description = "詳細取得のerror(detailError)とversions取得のerror(versionsError)は別状態として保持する: 並行取得で詳細が失敗した後にversionsが成功してもdetailErrorは残り(詳細部分は失敗表示のまま)・逆にversionsが失敗してもversionsErrorは詳細の成功で消えない(EntityDetailViewは両errorを別々に表示) (vitest)"
+given = "fetch mock(詳細404 not_found+versions 200・versions 500 internal+詳細200)でのfetchEntityDetail/fetchEntityVersions順次呼び出し"
+expect_return_shape = "前者はdetail=null+detailError={code:\"not_found\"}が残りversionsは保持・versionsError=null。後者はdetailは保持+detailError=nullでversions=null+versionsError={code:\"internal\"}が残る"
+source_lines = "frontend/src/stores/entities.spec.ts:339"
+
+[[condition]]
+id = "frontend.diff-run-error-visible-without-result"
+target_function = "frontend stores/diff.ts hasRunError(旧result無しの実行失敗も表示対象)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(diff UI)・12章P6・TASK-9レビュー再指摘④(POST失敗の表示条件がresult非nullのため保存済み結果が無い初回実行失敗が「未実行」表示だけになり隠れる)"
+description = "diff実行(POST /api/diff)の失敗は旧resultの有無に関係なく表示対象とする: hasRunError getter(lastRunError非null)をViewの案内行条件とし、旧resultがある場合はshowingStaleResultで「保存済みの旧結果」であることを添え・無い場合は「保存済みの結果はありません」へ接続する(実行失敗が未実行表示に隠れない)。実行成功でlastRunErrorはクリアされる (vitest)"
+given = "保存済みresultが無い状態(result=null)でのPOST /api/diff 500でのrunDiff実行と、続くPOST成功での再実行"
+expect_return_shape = "失敗時はresult=nullのままlastRunError={code:...}を保持しhasRunError=true・showingStaleResult=false。成功時はlastRunError=null+hasRunError=false"
+source_lines = "frontend/src/stores/diff.spec.ts:213"
+
+# --- TASK-13(api-key認証UI・2026-11-05テスト先行) ---
+
+[[condition]]
+id = "frontend.api-key-auth-client"
+target_function = "frontend api/client.ts postApiKeyAuth"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) D13・2.3(POST /api/auth/api-key body {\"api_key\": \"<key>\"})・2.4(postApiKeyAuth(apiKey)=apiPost共通経路。fetchは同一origin cookie既定のためsession cookieは既存と同一扱い)・4章"
+description = "api-key認証のclient(postApiKeyAuth(apiKey))はPOST /api/auth/api-keyへ{\"api_key\": apiKey}のJSON bodyを送る(apiPost共通経路)。応答はlogin finishと同一の{\"status\":\"ok\"}形式の型ガードで検証し、401 unauthenticated・403 forbidden_sourceはerror扱い({ok:false, error:{code,message}, httpStatus})として専用失敗表示へ接続する(LAN外403とkey不一致401のcodeでUI表示を区別できる) (vitest)"
+given = "fetch mock(200+{\"status\":\"ok\"}・401+{\"error\":{\"code\":\"unauthenticated\",...}}・403+{\"error\":{\"code\":\"forbidden_source\",...}}・network reject)でのpostApiKeyAuth呼び出しのmethod/URL/body観測"
+expect_return_shape = "POST /api/auth/api-keyへ{\"api_key\"}bodyで呼ばれ、200はok:true・401は{code:\"unauthenticated\",httpStatus:401}・403は{code:\"forbidden_source\",httpStatus:403}・networkは{code:\"network\",httpStatus:0}(実装前のためclient.tsのpostApiKeyAuth未実装で実行failを許容)"
+source_lines = "frontend/src/api/api-key-auth.spec.ts:12"
+
+[[condition]]
+id = "frontend.login-view-api-key-field"
+target_function = "frontend stores/auth.ts api-key欄表示getter・authenticateWithApiKey(LoginView UI基盤)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.4(LoginViewにapi-key入力欄+認証ボタンを追加。api-key欄はauthUi状態(register/login)に依存せず未認証時に常時表示=passkey 0件+api-keyのみのuserがlogin画面へ到達できない状態を作らない。成功時はpasskey loginと同一遷移)・4章"
+description = "api-key欄の表示基盤をauth storeのgetterで提供する: 認証状態取得済み(fetchState=ok)かつ未認証時にtrue・未取得・認証済みはfalse(authUiのregister/loginいずれの状態でも未認証なら表示=常時表示)。api-key認証実行はauthenticateWithApiKey(apiKey) action(postApiKeyAuth呼出。成功時は認証状態を再取得してauthenticatedへ=passkey loginと同一遷移。component実描画は実browser観測のためstore層の状態で担保する) (vitest)"
+given = "fetchAuthStatus成功後の各状態(未登録=register・登録済み未認証=login・認証済み)でのapi-key欄getter参照と、fetch mock(POST /api/auth/api-key 200・続くGET /api/auth/status 200+authenticated:true)でのauthenticateWithApiKey実行"
+expect_return_shape = "register・loginのいずれでもapi-key欄getterはtrue・未取得・認証済みはfalse。authenticateWithApiKey成功後はauthenticated=true(実装前のためsrc/stores/auth.tsのapi-key系未実装で実行failを許容)"
+source_lines = "frontend/src/stores/api-key-auth.spec.ts:31; frontend/src/stores/api-key-auth.spec.ts:73"
+
+[[condition]]
+id = "frontend.api-key-failure-dedicated-state"
+target_function = "frontend stores/auth.ts apiKeyError(api-key認証の専用失敗状態)"
+source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.4(失敗表示はpasskey/bootstrap欄のfail()変換と分離した専用message。codeをそのまま表示・401をbootstrap再発行案内へ誤変換しない=レビューM-4)・4章"
+description = "api-key認証(401 unauthenticated・403 forbidden_source・network失敗)の失敗はpasskey/bootstrap欄の失敗(lastError)とは分離した専用状態(apiKeyError)で保持する(messageはerror codeをそのまま表示する=Viewで401 unauthenticatedをbootstrap token再発行案内へ誤変換しない。passkey側のfail()変換と分離)。apiKeyErrorの寿命はlastErrorと同一で認証成功・fetchAuthStatus成功・logoutでクリアされる(TASK-13レビュー指摘対応: 未認証状態へ失敗表示を持ち越さない) (vitest)"
+given = "fetch mock(POST /api/auth/api-key 401+{\"error\":{\"code\":\"unauthenticated\",...}}・403+{\"error\":{\"code\":\"forbidden_source\",...}}・network reject)でのauthenticateWithApiKey実行と、続くPOST成功での再実行・fetchAuthStatus成功・logout"
+expect_return_shape = "401はapiKeyError={code:\"unauthenticated\"}(codeは変換されない・passkey側lastErrorはnullのまま分離)・403はapiKeyError={code:\"forbidden_source\"}・networkは{code:\"network\"}。認証成功・fetchAuthStatus成功・logout後はapiKeyError=null(実装前のため実行failを許容)"
+source_lines = "frontend/src/stores/api-key-auth.spec.ts:100"
+
+[[excluded]]
+item = "EntitiesView・EntityDetailView componentの実描画(entity一覧table・検索box・category絞込・詳細・versions一覧の実browser描画)・HomeViewの「後続phase」文言解消後のnav link実描画・sync refreshボタン実操作・router guardの実navigation(未認証時login誘導の実挙動)"
+source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesView=一覧・検索・絞込・sync状態+refresh・EntityDetailView・HomeView)・4章(D10 staleness表示)・TASK-9レビュー指摘高4"
+reason = "component実描画はvitest(node環境)で観測できない(store/client層+routes配列で担保=P4 LoginView・P5 PendingView・P6 DiffViewと同一扱い。UI誘導状態はentitiesView getter・絞込はquery/category状態+applyFilters・stalenessはsync状態+refresh action・navはroutes登録で担保)。createWebHistoryはwindow依存のためguard実navigationのnode観測も不能。実機画面確認は実装waveの手動verify項目"
+decided_at = "2026-11-05"
+decided_by = "claude"
+
+# --- TASK-17 W1(5タブrouter・runs/jobs・UI更新挙動・2026-11-14テスト先行) ---
+
+[[condition]]
+id = "frontend.runs-client-and-store"
+target_function = "frontend api/client.ts GET /api/runs応答型ガード・fetchRuns / stores/runs.ts run一覧取得"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.1(ホームbackup概况=前回backup(直近runの日時・対象数)・データ源GET /api/runs)・3.2(GET /api/runsの応答{runs:[{batch_id,date,entity_count}]})・9章W1行"
+description = "GET /api/runs応答({\"runs\": [{batch_id: string, date: string, entity_count: number}]})の型ガード(isRunsResponse)とrun一覧取得fetchRunsを持ち、runs storeは一覧(items)を取得して保持し直近run getter(latestRun=降順応答の先頭要素・一覧空時null)を提供する(ホームbackup概况の前回backup表示基盤)。取得失敗時はlastErrorを保持しitemsは空へ戻しlatestRun=null(空dataを表示しない=fail-closedと共通)。応答schema・降順はserver.runs-listの解釈に整合 (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(200+runs一覧body(降順2run)・401+{\"error\":{\"code\":\"unauthenticated\",...}})でのfetchRuns呼び出しのmethod/URL観測・runs store(fetchRuns)の取得"
+expect_return_shape = "型ガードは形式一致のみtrue(runs欠落・runs非配列・要素のentity_count非number・batch_id欠落・nullはfalse)。fetchRunsはGET /api/runsへ向かい200はruns一覧をdataへ・401は{code:\"unauthenticated\",httpStatus:401}。storeは成功時items=2run+latestRun=先頭runを保持しlastError=null・失敗時はitems空+lastError={code:...}+latestRun=null(実装前のためclient.tsのruns系・src/stores/runs.ts未実装で実行failを許容)"
+source_lines = "frontend/src/api/runs.spec.ts:26; frontend/src/api/runs.spec.ts:42; frontend/src/stores/runs.spec.ts:31"
+
+[[condition]]
+id = "frontend.jobs-client-and-store"
+target_function = "frontend api/client.ts GET /api/jobs応答型ガード・fetchJobs / stores/jobs.ts job一覧取得"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.1(ホーム実行中job区画・空時は表示なし)・2.3(job一覧の表示語彙)・3.2(GET /api/jobs?status=&kind=)・5.3(進行報告pollingは転送タブ実装(W4)で追加)・9章W1行(GET /api/jobs空応答・polling制御なし=W1は手動表示のみ)"
+description = "GET /api/jobs応答({\"jobs\": [...]})の型ガード(isJobsResponse。要素は{id: number, kind: string, status: string, created_at: string, updated_at: string}の最小schemaで検証し進行(params/progress/result/error)の詳細fieldはW4のjob実装時に拡張)とjob一覧取得fetchJobsを持ち、jobs storeは一覧(items)を取得して保持する(ホーム実行中job区画・転送タブのW1基盤。W1のserver応答は常に空配列=server.jobs-list)。W1ではpolling(setInterval等の自動更新)を行わずfetchJobsは手動呼出のみとする(設計5.3のpollingはW4の転送タブ実装で追加。自動更新間隔設定の保持はfrontend.ui-refresh-interval-localstorage)。取得失敗時はlastErrorを保持しitemsは空へ戻す(空dataを表示しない) (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(200+{\"jobs\":[]}・401+{\"error\":{\"code\":\"unauthenticated\",...}})でのfetchJobs呼び出しのmethod/URL観測・jobs store(fetchJobs)の取得とfetch後のfake timer進行(vi.useFakeTimers)"
+expect_return_shape = "型ガードは形式一致のみtrue(jobs欠落・jobs非配列・要素のkind欠落・status非string・id非number・nullはfalse。{\"jobs\":[]}はtrue)。fetchJobsはGET /api/jobsへ向かう。storeは成功時items(空)を保持しlastError=null・失敗時はitems空+lastError={code:...}。fetch後にtimerを進めてもfetch呼出は増えない(W1はpolling無し=手動表示のみ)(実装前のためclient.tsのjobs系・src/stores/jobs.ts未実装で実行failを許容)"
+source_lines = "frontend/src/api/jobs.spec.ts:28; frontend/src/api/jobs.spec.ts:64; frontend/src/stores/jobs.spec.ts:25"
+
+[[condition]]
+id = "frontend.ui-refresh-interval-localstorage"
+target_function = "frontend stores/ui-refresh.ts 自動更新間隔設定の保存・読込"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.4(UI更新挙動=一覧・job一覧の自動更新間隔。既定10秒・無効可。保存はfrontend側(localStorage)・server設定でない)・5.3(polling間隔は設定で調整可)・9章W1行(UI更新挙動(localStorage))"
+description = "UI更新挙動(自動更新間隔)の設定はfrontend側で保持する: ui-refresh storeは間隔(intervalMs・未保存時の既定10000ms=10秒)と無効(null)を扱い、設定値の保存・読込はlocalStorage(key=amazing-backup.ui-refresh-interval・数値は10進文字列・無効は\"null\")のみで行いserver側設定へは含めない(設計2.4「server設定でない」。GET/PUT /api/settings自体はW7実装)。localStorageに不正な保存値(非数値文字列)がある場合は既定10000msへ戻す。localStorageはbrowser APIのためvitest(node環境)ではvi.stubGlobalでStorage相当を注入して観測する(seam)。本設定の使用側(polling実行)はW4の転送タブ実装のためW1では保持のみ (vitest)"
+given = "vi.stubGlobalで注入したStorage相当への保存値の有無(未保存・\"5000\"・\"null\"・非数値)でのui-refresh storeのload呼び出しとsetIntervalMs(30000/null)呼び出し後のstate・localStorage内容・fetch呼出観測"
+expect_return_shape = "未保存・非数値保存値のloadはintervalMs=10000(既定)・\"5000\"のloadは5000・\"null\"のloadはnull。setIntervalMs(30000)はstateとlocalStorage(\"30000\")へ・setIntervalMs(null)はnullとlocalStorage(\"null\")へ反映。load/setIntervalMsはfetchを呼ばない(server設定非依存)(実装前のためsrc/stores/ui-refresh.ts未実装で実行failを許容)"
+source_lines = "frontend/src/stores/ui-refresh.spec.ts:61"
+
+[[excluded]]
+item = "W1のcomponent実描画面: HomeViewサマリ区画(sync状態・backup概况・未対応サマリ・実行中job)とサマリ行のlink遷移(/backups?filter=pending:<status>・/backups?filter=diff・/transfer)・/backupsのfilter view(pending一覧・diffのmissing対象entity一覧+unexpected object key一覧の両表示)・/transfer・/settings・/adminのW1枠画面・5タブnavの実描画・router guardの実navigation"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.0(nav 5タブ)・2.1(ホーム)・2.2(filter view)・9章W1行(受入条件: 5タブ遷移・現行機能の新配置での動作・ホームサマリ表示・diff viewの両一覧表示)"
+reason = "component実描画・実navigationはvitest(node環境)で観測できない(既有excludedと同一扱い。5タブと再配置はroutes配列=frontend.entities-routes-nav・backup概况dataはfrontend.runs-client-and-store・実行中job区画dataはfrontend.jobs-client-and-store・sync/pending/diffサマリdataは既有frontend.sync-state-endpoint-client/pending-client-and-store/diff-client-and-storeが担保)。diff viewのmissing/unexpected両一覧はdiff storeのresult(missing/unexpected配列)とsummary getter(frontend.diff-view-state)で表示dataを担保済みのため重複条件化しない。実機画面確認はW1実装waveの手動verify項目"
+decided_at = "2026-11-14"
+decided_by = "claude"
+
+# --- TASK-17 W2(tag/collection・3ビュー・2026-11-14テスト先行) ---
+
+[[condition]]
+id = "frontend.tags-client-and-store"
+target_function = "frontend api/client.ts GET /api/tags応答型ガード・fetchTags / stores/tags.ts tag一覧取得"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(一覧のtagビュー=/tag=でtag選択+tag付きentity一覧・tag無しも選択可)・3.2(GET /api/tagsの応答{tags:[{tag,entity_count}]})・9章W2行・11章"
+description = "GET /api/tags応答({\"tags\": [{tag: string, entity_count: number}]})の型ガード(isTagsResponse)とtag一覧取得fetchTagsを持ち、tags storeは一覧(items)を取得して保持する(tagビューのtag選択肢表示の基盤。tag無し選択は選択状態側=frontend.entities-view-switch-stateの扱い)。取得失敗時はlastErrorを保持しitemsは空へ戻す(空dataを表示しない=fail-closedと共通)。応答schemaはserver条件書(server.toml)のGET /api/tags解釈に整合 (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(200+tag一覧body・401+{\"error\":{\"code\":\"unauthenticated\",...}})でのfetchTags呼び出しのmethod/URL観測・tags store(fetchTags)の取得(非空保持後の再取得失敗を含む)"
+expect_return_shape = "型ガードは形式一致のみtrue(tags欠落・tags非配列・要素のtag欠落・entity_count非number・nullはfalse)。fetchTagsはGET /api/tagsへ向かい200はtag一覧をdataへ・401は{code:\"unauthenticated\",httpStatus:401}。storeは成功時itemsを保持しlastError=null・失敗時はitems空+lastError={code:...}(実装前のためclient.tsのtags系・src/stores/tags.ts未実装で実行failを許容)"
+source_lines = "frontend/src/api/tags.spec.ts:26; frontend/src/api/tags.spec.ts:41; frontend/src/stores/tags.spec.ts:30"
+
+[[condition]]
+id = "frontend.folders-client-and-store"
+target_function = "frontend api/client.ts GET /api/folders応答型ガード・fetchFolders / stores/folders.ts folder一覧取得とtree組立getter"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(一覧のfolder構造ビュー=location.labelのdirectory階層tree・左にtree・右に選択folder配下のentity一覧)・3.2(GET /api/foldersの応答{folders:[{label,path,entity_count}]}・labelのdirectory区切りで階層導出)・8章(folder tree部品=ul入れ子・details open・JS不要)・9章W2行・11章"
+description = "GET /api/folders応答({\"folders\": [{label: string, path: string, entity_count: number}]}・階層集約済み)の型ガード(isFoldersResponse)とfolder一覧取得fetchFoldersを持ち、folders storeは一覧(items)を取得して保持しtree getterでpathのdirectory区切りから入れ子node配列({label=その階層の表示名(path最終segment)・path・entity_count・children}・兄弟はpath辞書順)を組む(folder tree部品のdata基盤=部品の実描画はexcluded。folderビューの選択folder絞り込みは既存label=paramで成立し新paramを設けない。2026-11-14レビュー指摘対応で応答先頭行のラベルなし行(path=\"\")は「(ラベルなし)」root nodeとして扱う=frontend.folders-labelless-node)。取得失敗時はlastErrorを保持しitemsは空へ戻す(空dataを表示しない) (vitest)"
+given = "合成入力への型ガード呼び出しと、fetch mock(200+folder一覧body(docs・docs/2026・photos)・401+{\"error\":{\"code\":\"unauthenticated\",...}})でのfetchFolders呼び出しのmethod/URL観測・folders store(fetchFolders)の取得とtree getter参照(非空保持後の再取得失敗を含む)"
+expect_return_shape = "型ガードは形式一致のみtrue(folders欠落・folders非配列・要素のlabel/path欠落・entity_count非number・nullはfalse)。fetchFoldersはGET /api/foldersへ向かう。storeは成功時itemsを保持しtree getterはdocs配下にdocs/2026が入れ子になったnode配列(兄弟はpath辞書順・nodeはentity_countを保持・photosは子なし)を返しlastError=null・失敗時はitems空+lastError={code:...}(実装前のためclient.tsのfolders系・src/stores/folders.ts未実装で実行failを許容)"
+source_lines = "frontend/src/api/folders.spec.ts:28; frontend/src/api/folders.spec.ts:47; frontend/src/stores/folders.spec.ts:33"
+
+[[condition]]
+id = "frontend.collections-client-and-store"
+target_function = "frontend api/client.ts GET /api/collections・GET /api/collections/:id応答型ガード / stores/collections.ts collection一覧・構成取得"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(一覧のcollectionビュー=collection選択+その構成entity一覧)・3.2(GET /api/collections=collection一覧・GET /api/collections/:id=構成uuid一覧)・4.1(collections tableのid/name)・9章W2行・11章。2026-11-14のAPI契約統一裁定(design doc 3.1原則)で一覧要素のentity_count(構成entity数・name昇順)を必須へ修正"
+description = "GET /api/collections応答({\"collections\": [{id: number, name: string, entity_count: number}]}=4.1 collections tableのid/name+構成entity数entity_countが語彙源)の型ガード(isCollectionsResponse)とcollection一覧取得fetchCollections・GET /api/collections/:id応答({\"collection\": {id: number, name: string, uuids: string[]}}=詳細schema・POST/PUT collections・items追加の書込応答と同一形式=design doc 3.1「読取系と同一schema」原則。2026-11-14のAPI契約統一裁定)の型ガード(isCollectionDetailResponse)と詳細取得fetchCollectionDetail(id)を持ち、collections storeは一覧(items)と選択collectionの構成uuid一覧(detailId・detailUuids・uuidsは応答のcollection wrapから取り出す)を取得して保持する(collectionビューの選択肢・構成表示の基盤)。取得失敗時はlastErrorを保持しitems・detailUuidsは空へ戻す(空dataを表示しない) (vitest)"
+given = "合成入力への型ガード呼び出し(一覧・詳細schema)と、fetch mock(200+collection一覧body・200+詳細body・404+{\"error\":{\"code\":\"not_found\",...}})でのfetchCollections/fetchCollectionDetail呼び出しのmethod/URL観測・collections storeの取得(非空保持後の再取得失敗を一覧・詳細のそれぞれで含む)"
+expect_return_shape = "型ガードは形式一致のみtrue(collections欠落・要素のid非number/name欠落/entity_count欠落・非number・collection欠落・非object・uuidsのみの旧形式・詳細のfield欠落・id非number・uuids非配列・uuids要素非string・nullはfalse)。fetchCollectionsはGET /api/collectionsへ・fetchCollectionDetail(id)はGET /api/collections/<id>へ向かい404は{code:\"not_found\"}。storeは成功時itemsまたはdetailId/detailUuidsを保持しlastError=null・失敗時は対象stateを空へ戻しlastError={code:...}(実装前のためclient.tsのcollections系・src/stores/collections.ts未実装で実行failを許容)"
+source_lines = "frontend/src/api/collections.spec.ts:46; frontend/src/api/collections.spec.ts:67; frontend/src/api/collections.spec.ts:91; frontend/src/stores/collections.spec.ts:44"
+
+[[condition]]
+id = "frontend.entities-tag-collection-filter"
+target_function = "frontend api/client.ts fetchEntitiesのtag/collection絞り込みparam / stores/entities.ts tagFilter・collectionFilter状態"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(検索=queryに加えtagでの絞り込み追加・検索box・pagerの3ビュー共通動作)・3.2(GET /api/entities?tag=&collection=絞り込みparam追加)・9章W2行・11章"
+description = "fetchEntitiesの絞り込みparamへtag・collection(値のあるparamのみURL queryへ直列化=既存query/category/label/pageと同一規則。collectionはcollection idを文字列化)を追加し、entities storeはtagFilter(string|null)・collectionFilter(number|null)状態とsetTagFilter/setCollectionFilter(null=解除。絞り込み変更でpageを1へ戻す=setQuery/setCategoryと同一規則)を持ちfetchEntitiesが現在の絞り込み状態をURL queryへ反映する。tag/collection絞り込みは検索語(query)・page(pager)と共存する(検索box・pagerが3ビュー共通で動く=2.2) (vitest)"
+given = "2page閲覧中の状態からのsetTagFilter(\"work\")・setCollectionFilter(3)呼び出し後のfetch mock URL観測(query併存・pager page指定・null解除を含む)と、fetchEntitiesのtag/collection param直列化(fetch mock URL観測)"
+expect_return_shape = "setTagFilter(\"work\")はpageを1へ戻し続くfetchEntitiesはtag=work&page=1(&query併存時はqueryも乗る)のURLへ向かう。setCollectionFilter(3)はcollection=3&page=1へ向かう。setPage(2)後の再取得はtag=work&page=2(絞り込みとpagerの共存)。null解除はtag/collection paramを付けない。fetchEntitiesは値のあるtag/collectionのみURL queryへ直列化する(空文字tag・undefined collectionは付けない)(実装前のため該当testは実行failを許容)"
+source_lines = "frontend/src/api/entities.spec.ts:164; frontend/src/stores/entities.spec.ts:443"
+
+[[condition]]
+id = "frontend.entities-view-switch-state"
+target_function = "frontend stores/entities.ts view状態・setView(一覧のビュー切替)"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(ビュー切替(3+1)=folder構造/tag/collection+flatでない一覧の共存・検索box・pagerは3ビュー共通で動く)・8章(ビュー切替tab部品=横並びlink・現位置はnavと同一active表現)・9章W2行・11章"
+description = "entities storeは一覧のビュー切替状態(view: 'flat'|'folder'|'tag'|'collection'・初期値flat)を保持し、setViewはビュー切替時に選択系絞り込み(tagFilter・untaggedOnly・collectionFilter・labelFilter)をクリアしてpageを1へ戻す(検索語query・categoryは3ビュー共通で動くため維持=ビュー切替をまたいだ検索boxの共存。untaggedOnlyのクリアは2026-11-14レビュー指摘対応=frontend.entities-untagged-filter)。folderビューの選択folderはlabelFilter(label=param=既存・folder絞り込みの新paramは設けない)で・tagビューの選択tagはtagFilter(tag=param)で・collectionビューの選択collectionはcollectionFilter(collection=param)でそれぞれ一覧取得へ接続する(3ビュー+flat共存のdata面。ビュー切替tabの実描画はcomponent実描画のためexcluded) (vitest)"
+given = "初期stateでのview参照と、tag/collection/label選択済み・page=3の状態からのsetView呼び出し後のstate・fetch mock URL観測(tag/collection/folder各ビューでの選択と絞り込みparamの接続)"
+expect_return_shape = "初期viewはflat。setViewはviewを切替えtagFilter/collectionFilter/labelFilter=null・untaggedOnly=false・page=1へ戻しquery/categoryは維持する(続くfetchEntitiesはquery/category/page=1のみのURL)。tagビューはtag=work&page=1・collectionビューはcollection=3(tagFilterは切替でクリア済み)・folderビューはlabel=<選択folder>&page=1(ラベルpathはURL encode)へ向かう(実装前のためsrc/stores/entities.tsのview系未実装で実行failを許容)"
+source_lines = "frontend/src/stores/entities.spec.ts:495"
+
+[[condition]]
+id = "frontend.entity-tags-edit-client-and-store"
+target_function = "frontend api/client.ts PUT /api/entities/:uuid/tags(putEntityTags) / stores/entities.ts updateTags(詳細のtag編集)"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(詳細のtag編集=tag追加/削除(chipのx)→PUT /api/entities/:uuid/tags)・3.2(PUT body {tags:[...]}・冪等・tag名規則違反は422。応答は操作後の対象状態=読取系と同一schema)・9章W2行・11章"
+description = "PUT /api/entities/:uuid/tags呼出(putEntityTags(uuid, tags)は{\"tags\":[...]}のJSON bodyで一覧置換を送り、応答はEntityDetail形式(tags/collections付き=操作後の対象状態)の型ガードで検証)とentities storeのtag編集action(updateTags(uuid, tags))を持ち、成功時はPUT応答でdetailを更新する(操作後に対象詳細の再GETを行わない=3.1の読取系と同一schema原則。一覧・tags選択肢の失効再取得は2026-11-14レビュー指摘対応のfrontend.entity-tags-edit-refreshes-list-and-tags。422 validation_failed・404 not_foundはerror扱い)。失敗は取得系errorとは別状態lastTagEditErrorで保持しdetailは旧状態のまま(P5 lastScanError・P6 lastRunError・sync lastRefreshErrorと同一構成)。成功でlastTagEditErrorはクリアされる (vitest)"
+given = "fetch mock(GET /api/entities/:uuid 200+詳細body(tags:['work'])・PUT /api/entities/:uuid/tags 200+操作後詳細body(tags:['work','nas'])・PUT 422+{\"error\":{\"code\":\"validation_failed\",...}})でのputEntityTags呼び出しのmethod/URL/body観測・fetchEntityDetail後のupdateTags実行(失敗後の成功再実行を含む)"
+expect_return_shape = "putEntityTagsはPUT /api/entities/<uuid>/tagsへ{\"tags\":[...]}bodyで呼ばれ200は操作後の対象状態(tags/collections付き)をdataへ・422は{code:\"validation_failed\",httpStatus:422}・404は{code:\"not_found\"}。updateTags成功後はdetail.tagsが応答値へ更新され再GETは行われず(fetch呼出はGET 1回+PUT 1回のみ)lastTagEditError=null・失敗時はlastTagEditError={code:\"validation_failed\"}でdetailは旧状態のまま(成功再実行でクリア)(実装前のためputEntityTags・updateTags未実装で実行failを許容)"
+source_lines = "frontend/src/api/entity-tags.spec.ts:52; frontend/src/stores/entities.spec.ts:563"
+
+[[excluded]]
+item = "W2のcomponent実描画面: /backups一覧のビュー切替tab(folder/tag/collection・現位置のnavと同一active表現)・folder tree部品(ul入れ子・details open)・tag chip部品(inline-block・1px --border・radius 4px・13px・選択中のみ--accent-soft背景)・行のtag列chip表示(最大3件+他N件)・検索box・pagerの実描画・詳細画面のtag編集form(chipのx実操作)・所属collection表示の実描画"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 8章(新規部品=tag chip・ビュー切替tab・folder tree)・2.2(一覧3ビュー+flat・tag列・詳細のtag編集・所属collection)・9章W2行"
+reason = "component実描画はvitest(node環境)で観測できない(既有excludedと同一扱い。ビュー切替状態はfrontend.entities-view-switch-state・tag/collection絞り込みはfrontend.entities-tag-collection-filter・tag/folder/collectionのdataは各client-and-store条件・tag編集はfrontend.entity-tags-edit-client-and-storeでstore/client層で担保)。8章の視覚仕様(color token・radius・13px等)はTASK-16と同一のvisual design領域のため条件書対象外。実機画面確認はW2実装waveの手動verify項目"
+decided_at = "2026-11-14"
+decided_by = "claude"
+
+# --- TASK-19 W2レビュー指摘frontend側対応(2026-11-14) ---
+
+[[condition]]
+id = "frontend.entity-tags-edit-saving-state"
+target_function = "frontend stores/entities.ts tagEditSaving(tag編集実行中状態)"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(詳細のtag編集=tag追加/削除→PUT /api/entities/:uuid/tags)・9章W2行 + TASK-19コードレビュー指摘高1(tag追加・削除を保存応答待ち中にも実行でき同じ旧配列から作った後続PUTが先行編集を消すため保存中stateでtag編集UIを無効化する)"
+description = "entities storeはtag編集の実行中状態(tagEditSaving)を持ち、updateTags実行中はtrue・完了(成功・失敗とも)でfalseへ戻る。EntityDetailViewは本値でtag編集UI(追加form・chipのx)を無効化する(保存応答待ち中に同じ旧配列から作った後続PUTが先行編集を消すのを防ぐ。UIの無効化はcomponent実描画のためexcluded=本条件はstore層の状態で担保) (vitest)"
+given = "PUT /api/entities/:uuid/tagsのfetch mock実行中(応答前)のtagEditSaving参照と、成功応答・422失敗応答完了後の参照"
+expect_return_shape = "未実行=false・PUT実行中(応答前)=true・成功完了後=false・失敗完了後もfalse(trueのまま残らない)"
+source_lines = "frontend/src/stores/entities.spec.ts:635"
+
+[[condition]]
+id = "frontend.entity-tags-edit-refreshes-list-and-tags"
+target_function = "frontend stores/entities.ts updateTags(tag編集成功後の一覧・tags選択肢の失効再取得)"
+source = "TASK-19コードレビュー指摘中6(tag更新成功時にdetailしか更新されず一覧へ戻っても旧tags・旧絞り込み結果が残り取得済みtag選択肢も更新されないため一覧を失効させ現在の絞り込みで再取得+tags storeの選択肢を再取得する)"
+description = "updateTags成功時はdetail更新(PUT応答)に加えて一覧を現在の絞り込み状態(query・tag絞り込み等)で再取得し、tags選択肢を取得済み(tags storeのfetchState=ok)なら再取得する(tag編集は行のtags・tag選択肢の両方に影響するため。一覧未取得=fetchedでない時・tags未取得(not_fetched)の時は再取得しない=表示されていないdataのために取得しない。PUT失敗時は一覧・tags選択肢の再取得を行わない) (vitest)"
+given = "一覧取得済み(query+tag=work絞り込み)・tags選択肢取得済み(fetchState=ok)・詳細取得済みの状態でのupdateTags成功と、一覧・tags未取得の状態でのupdateTags成功・PUT 422失敗でのfetch呼出のURL観測"
+expect_return_shape = "取得済み状態での成功時はPUT /api/entities/:uuid/tags後にGET /api/entities(現在の絞り込みparam付き)とGET /api/tagsが呼ばれる。一覧・tags未取得ではPUTのみ(追加のGET無し)。失敗時もPUTのみで一覧・tagsの再取得は行われない"
+source_lines = "frontend/src/stores/entities.spec.ts:682"
+
+[[condition]]
+id = "frontend.entities-list-request-generation"
+target_function = "frontend stores/entities.ts fetchEntities/refetchEntities(一覧取得の要求世代)"
+source = "TASK-17設計2.2(3ビュー共通の一覧・検索box・pager) + TASK-19コードレビュー指摘中7(tag/folder/collectionを連続選択すると並行GETの旧応答が後着して採用され選択状態と一覧が食い違うため一覧取得にrequest世代を付け最新要求だけがitems・page・loadingを更新する)"
+description = "entities storeの一覧取得は要求世代(番号)を持ち、fetchEntities/refetchEntitiesの開始時に世代を進め、完了応答が最新世代と一致する時のみitems・page・totalPages・fetched・lastError・loadingを更新する(並行取得の旧応答の後着は不採用=選択状態と一覧の食い違い防止。旧応答が後から完了してもstateは最新要求の結果のまま。詳細系のdetailEpochと同一構成) (vitest)"
+given = "1回目のfetchEntities(tag=work)の応答を保留したまま2回目(tag=nas)を開始し2回目のみ完了させた後で1回目の応答(500失敗)を完了させるfetch mock(gate)"
+expect_return_shape = "2回目完了時点でitems・page・totalPagesは2回目の応答値・loading=false。1回目の応答が後着してもitems・page・totalPages・lastError・loadingは2回目の結果のまま(旧応答の500でlastErrorは設定されない)"
+source_lines = "frontend/src/stores/entities.spec.ts:764"
+
+[[condition]]
+id = "frontend.view-options-fetch-state"
+target_function = "frontend stores/tags.ts・folders.ts・collections.ts fetchState(選択肢取得状態)・stores/sync.ts refresh(sync後の選択肢再取得)"
+source = "TASK-17設計2.2(3ビューの選択肢=tag/folder/collection一覧)・4章(D10手動sync=remote索引の置き換え) + TASK-19コードレビュー指摘中8(選択肢取得が一度失敗するとlastError===null条件に阻まれビュー再選択でも再試行できずsync後も非空のfolder一覧が古いままのため取得状態と失効状態を明示し再試行導線とsync後の失効処理を追加する)"
+description = "tags/folders/collections各storeは選択肢の取得状態fetchState(未取得=not_fetched・成功=ok・失敗=error)を持ち、失敗後もfetchTags/fetchFolders/fetchCollectionsの再呼出で再取得できる(Viewの再試行button基盤。選択肢の取得判定はitems空+lastError===nullでなくfetchState=not_fetchedで行う)。手動sync(refresh)成功時は取得済み(ok)の選択肢を再取得する(syncでremote索引が置き換わるため。not_fetched=未取得とerror=再試行導線待ちは再取得しない) (vitest)"
+given = "fetch mock(失敗→成功)でのtags/folders storeの再取得でのfetchState遷移と、folders選択肢取得済み(ok)・tags/collections未取得(not_fetched)の状態でのsync storeのrefresh実行のfetch呼出のURL観測"
+expect_return_shape = "未取得=not_fetched・失敗時fetchState=error・再取得成功でok(items保持・lastError=null)。refresh成功時はPOST /api/sync→GET /api/entities→GET /api/folders(取得済みのため)が呼ばれ未取得の/api/tags・/api/collectionsは呼ばれない"
+source_lines = "frontend/src/stores/collections.spec.ts:113; frontend/src/stores/folders.spec.ts:91; frontend/src/stores/sync.spec.ts:130; frontend/src/stores/tags.spec.ts:67"
+
+[[condition]]
+id = "frontend.entities-untagged-filter"
+target_function = "frontend api/client.ts fetchEntities untagged param・stores/entities.ts untaggedOnly状態"
+source = "TASK-17設計2.2(tagビュー=tag選択+tag付きentity一覧・tag無しも選択可)・3.2(GET /api/entitiesへuntagged=1 param=tag無しentityのみの絞り込み。tag=との同時指定は400=2026-11-14API契約) + TASK-19コードレビュー指摘中9frontend側(null選択は「すべて」であり設計2.2が要求するtag無しのentityだけを選択できないため未tag専用の絞り込み値をAPI・store・UIに追加する)"
+description = "fetchEntitiesへuntagged絞り込みparam(true時URL queryへuntagged=1を直列化・false・未指定は付けない)を追加し、entities storeはuntaggedOnly状態とsetUntaggedFilter(tagFilterをクリアしpageを1へ戻す)を持ち、setTagFilterはuntaggedOnlyをクリアする(tag=とuntagged=の相互排他=同時指定はserver側400のためclientは同時に送らない)。setView・sync後再取得(refetchEntities)はuntaggedOnlyもクリアする(他の選択系絞り込みと同一)。Viewのtagビューは「(tag無し)」chip(他tag選択と同一chip様式)で本絞り込みへ接続する(実描画はexcluded) (vitest)"
+given = "setUntaggedFilter後のfetch mock URL観測(tagFilter併存の排除を含む)とsetTagFilter・setView・refetchEntitiesでのuntaggedOnlyクリア観測・fetchEntitiesのuntagged直列化観測"
+expect_return_shape = "setUntaggedFilterはuntaggedOnly=true・tagFilter=null・page=1とし続くfetchEntitiesはuntagged=1&page=1(tag=は付かない)へ向かう。setTagFilter(\"work\")はuntaggedOnly=falseとしtag=work(untagged=無し)へ向かう。setView・refetchEntities後はuntaggedOnly=false(再取得URLにuntagged=が無い)。fetchEntitiesはuntagged=trueのみuntagged=1を直列化する(false・未指定は付けない)"
+source_lines = "frontend/src/api/entities.spec.ts:239; frontend/src/stores/entities.spec.ts:814"
+
+[[condition]]
+id = "frontend.folders-labelless-node"
+target_function = "frontend stores/folders.ts tree getter(ラベルなし行)・api/client.ts fetchEntities label空文字直列化"
+source = "TASK-17設計2.2(folder構造ビュー・label無しは「(ラベルなし)」)・3.2(GET /api/folders応答の先頭行{label:\"\",path:\"\",entity_count:N}=ラベルなし行・GET /api/entities?label=空文字=ラベルなし完全一致絞り込み=2026-11-14API契約) + TASK-19コードレビュー指摘中10frontend側(folder treeに「(ラベルなし)」がなくfolder選択後に未分類entityへ切り替えられないためラベルなしnodeを追加し空labelの完全一致をclientでも省略せず送れるようにする)"
+description = "folders storeのtree getterはGET /api/folders応答先頭行(path=\"\")を「(ラベルなし)」node(path=\"\"・子無し・他folderの親とはしない=root扱い)としてtreeの先頭へ組む(label無しlocationを持つentity群の選択導線。表示labelは「(ラベルなし)」=他nodeと同様にtree部品でそのまま表示)。選択時の絞り込みはlabel=空文字完全一致のためfetchEntitiesのlabel paramは空文字もURL queryへ直列化する(値のあるparamのみ規則のlabel限定例外。query/category/tag/collectionは従来どおり値のあるもののみ) (vitest)"
+given = "先頭行{label:\"\",path:\"\",entity_count:2}を含むfolders応答でのtree getter参照と、fetchEntities({label:\"\",page:1})・setLabelFilter(\"\")後のfetchEntitiesのfetch mock URL観測"
+expect_return_shape = "treeの先頭は{label:\"(ラベルなし)\",path:\"\",entity_count:2,children:[]}で通常folder(docs等)はその子とならない(tree長=ラベルなしnode+通常rootの数)。fetchEntities({label:\"\",page:1})はlabel=&page=1へ直列化されsetLabelFilter(\"\")後のfetchEntitiesもlabel=を送る"
+source_lines = "frontend/src/api/entities.spec.ts:257; frontend/src/stores/folders.spec.ts:115"
+
+[[condition]]
+id = "frontend.collections-write-client-and-store"
+target_function = "frontend api/client.ts collection書込client・stores/collections.ts 書込actions"
+source = "TASK-17設計2.2(collectionビュー=collection選択+その構成entity一覧)・4.1(collections table)・9章W2行(受入条件: collection作成がUIから可能)・design doc 3.1(書込応答は読取系と同一schema) + TASK-19コードレビュー指摘高3(collectionが選択表示のみで作成・構成編集の導線が無いため書込client・store action・UIを実装する)。書込API契約は2026-11-14確定分(POST /api/collections body{name}応答{collection:{id,name,uuids}}・PUT /api/collections/:id body{name}・DELETE /api/collections/:id応答{status:\"ok\"}・POST /api/collections/:id/items body{uuids}応答詳細schema・DELETE /api/collections/:id/items/:uuid応答詳細schema)に固定"
+description = "collection書込のclient(createCollection(name)=POST /api/collections・renameCollection(id,name)=PUT /api/collections/:id・deleteCollection(id)=DELETE /api/collections/:id・addCollectionItems(id,uuids)=POST /api/collections/:id/items・removeCollectionItem(id,uuid)=DELETE /api/collections/:id/items/:uuid。POST/PUT/items書込の応答は詳細schema{collection:{id,name,uuids}}の型ガードで検証しdeleteは{\"status\":\"ok\"}形式で検証)とcollections storeの書込actionsを持つ。書込actionは成功時一覧(fetchCollections)を再取得し構成stateを操作後の応答で更新する(createは作成されたcollectionを選択=entities.collectionFilter設定+一覧再取得。作成直後に構成編集へ着手できる導線。deleteは選択中collectionの削除時にcollectionFilterを解除し一覧を再取得)。失敗(409 duplicate・422 validation_failed等)はlastWriteErrorで保持し実行中状態(writing)は成功・失敗ともfalseへ戻る(Viewはwritingで書込UIを無効化。削除・除去はdesign doc 6章の2段階確認対象外=1段階) (vitest)"
+given = "fetch mock(各書込の200応答・409+{\"error\":{\"code\":\"duplicate\",...}}失敗)でのclient呼出のmethod/URL/body観測と、collections storeの書込action実行後のitems・detailId・detailUuids・entities.collectionFilter・fetch呼出観測"
+expect_return_shape = "clientはPOST /api/collections({name}body)・PUT /api/collections/<id>({name}body)・DELETE /api/collections/<id>・POST /api/collections/<id>/items({uuids}body)・DELETE /api/collections/<id>/items/<uuid>へ向かい200は詳細schema(deleteは{status:\"ok\"})をdataへ・409は{code:\"duplicate\"}。storeはcreate成功時detailId=新id・detailUuids=応答値・一覧再取得・entities.collectionFilter=新id+一覧再取得・rename成功時一覧再取得+選択中なら構成state更新・delete成功時(選択中なら)collectionFilter=null+一覧再取得・items追加/除去成功時detailUuids=応答値+一覧再取得。失敗時lastWriteError={code:...}でwriting=false(一覧・構成stateは失敗前のまま)"
+source_lines = "frontend/src/api/collections.spec.ts:143; frontend/src/stores/collections.spec.ts:137"

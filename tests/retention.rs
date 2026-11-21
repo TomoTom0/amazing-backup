@@ -302,7 +302,6 @@ fn prune_deleted_versions_stay_excluded_after_rebuild() {
     };
     let a = fx.data_root.join("a.zip");
     let ids = push_versions(&fx, 3);
-    let key = fx.data_key(&uuid_of_path(&fx, &a));
     assert_eq!(ids.len(), 3);
     // keep_versions=1で最古版を削除(v3=現行・noncurrentはv2,v1 → i>=1のv1を削除)
     assert_eq!(fx.manage("prune", &["--apply"]).0, 0);

@@ -1,0 +1,18 @@
+# server.toml(amazing-backup serve の設定・TASK-9設計8章)。
+# server共通設定のみを持ち、backup profile(pipeline.toml・aws.toml)とは分離している。
+# serveは既存のprofile解決chain(--profile > env > purpose > active_profile > default)で
+# 単一の実効profileを解決する(復号鍵・API対象scopeは実効profileに従う)。
+# このfileは config init が規定pathへそのまま生成する(binary埋め込みtemplate正本)。
+# 各キーは省略可(省略時はこの雛形の値が既定値になる)。
+[server]
+# listen address(v1はlocalhost既定・TASK-9 D4。LAN IP直結はWebAuthnのsecure context
+# 違反のため不可。外部公開はcf-tunnel経由で後続phase対応)
+listen_addr = "127.0.0.1"
+# listen port(TASK-9 D5: 40510=本番serve・40511=stg serve・40512=Vite dev server・
+# 40513-40514=予備)
+port = 40510
+# WebAuthn RP ID(既定localhost。cf-tunnel(domain)公開時は当該domainへ変更。
+# passkey認証は後続phase(TASK-9 P4)で使用)
+rp_id = "localhost"
+# WebAuthn RP origin(portを変更した場合は合わせて変更。P4で使用)
+rp_origin = "http://localhost:40510"

@@ -5,7 +5,7 @@ NASバックアップアーカイブ(zip/7z)をageで暗号化し、S3(versionin
 - 対象読者: バックアップの書き込み・照会・復元を行う運用者(災害時の復旧担当を含む)。amazing-backupを**install済み(repoのcloneは不要)**の環境を前提とする。repoでの開発・検証やrepo内運用の手順は `docs/dev/dev_backup.md` を参照
 - 正本参照: 本書の正本はGitHub repo(https://github.com/TomoTom0/amazing-backup)のdocs/。実装挙動の正本は同repoの`tests/design/`の条件書。設計書などdocs外の正本の参照一覧は `docs/dev/dev_backup.md`
 - 実装バージョン: 0.1.0
-- 最終確認: 2026-10-29(install後前提の構成へ再構成後。TASK-4 docsコマンド追加を含む実装に基づく)
+- 最終確認: 2026-11-05(TASK-9: local catalog DB・serve(Web frontend+API)・passkey認証・pending catalog・diff UI・manage catalog/auth系を含む実装に基づく)
 
 ## 1. 概要
 
@@ -24,6 +24,9 @@ NASバックアップアーカイブ(zip/7z)をageで暗号化し、S3(versionin
 | 検査 | `backup verify` | ローカル成果物の整合検査 |
 | 管理 | `pin add/rm` | 世代管理対象外のピン留め版の付与・解除 |
 | 管理 | `manage prune/lifecycle/index/location/jobs/reset` | 世代削除・bucket保持設定・索引再構築・旧所在除去・復元job再発行・dev bucket初期化 |
+| 管理 | `manage catalog sync/rebuild/scan` | local catalog DB(2.2)の同期・再構築・アップロード前カタログscan(5.10) |
+| 管理 | `manage auth list/remove/api-key` | passkey credential・api-keyの一覧・失効・生成(5.10・serveの認証管理) |
+| 閲覧 | `serve` | Web frontend+APIの起動(passkey認証・5.14) |
 | 設定 | `config init` | 設定file群(pipeline.toml・aws.toml・credential雛形)の初期生成 |
 | 設定 | `edit metadata/files/layout/policy` | 設定sectionの確認 |
 | 補完 | `completions <shell>` | shell補完script(bash/zsh/fish)のstdout出力(5.12) |
@@ -72,7 +75,9 @@ repoのclone・buildは不要。設定templateはbinary埋め込みのため、i
 | pipeline.toml | `$XDG_CONFIG_HOME/amazing-backup/pipeline.toml`(未設定なら`~/.config/amazing-backup/pipeline.toml`) | `configs/pipeline.example.toml`(binary埋め込み・そのまま生成) |
 | aws.toml | `$XDG_CONFIG_HOME/amazing-backup/aws.toml`(同上) | `configs/aws.example.toml`(binary埋め込み。`credentials_file`は生成したcredential雛形の絶対pathへ置換) |
 | aws-credentials.toml | `$XDG_CONFIG_HOME/amazing-backup/aws-credentials.toml`(同上) | -(空値のcredential雛形・permission 600。2.3) |
+| server.toml | `$XDG_CONFIG_HOME/amazing-backup/server.toml`(同上) | `configs/server.example.toml`(binary埋め込み・そのまま生成。serveのserver共通設定・3.4) |
 | registry.jsonl | `$XDG_STATE_HOME/amazing-backup/registry.jsonl`(未設定なら`~/.local/state/amazing-backup/registry.jsonl`。dirは自動作成) | -(自動生成) |
+| catalog.db | `$XDG_STATE_HOME/amazing-backup/catalog.db`(未設定なら`~/.local/state/amazing-backup/catalog.db`。dir 0700・file 0600で作成) | -(自動生成・local catalog DB) |
 | cache dir | `$XDG_CACHE_HOME/amazing-backup/`(未設定なら`~/.cache/amazing-backup/`) | -(run毎の暗号化一時物) |
 
 ```console
@@ -80,6 +85,7 @@ $ amazing-backup config init
 生成: ~/.config/amazing-backup/pipeline.toml
 生成: ~/.config/amazing-backup/aws.toml
 生成: ~/.config/amazing-backup/aws-credentials.toml (permission 600)
+生成: ~/.config/amazing-backup/server.toml (serve設定)
 次ステップ:
   1. aws-credentials.toml に access_key_id / secret_access_key を記述
   2. aws.toml の bucket を実際の値へ記述
@@ -92,7 +98,9 @@ $ amazing-backup config init
 - 規定pathに設定fileが無い状態でコマンドを実行すると設定エラー2+`config init`による生成案内が表示される
 - 初回の鍵準備: 暗号鍵(SSH ed25519鍵pair)をまだ持っていない場合は、8.3の手順1で鍵pairを生成する。生成したらpipeline.toml(規定path)の`[profiles.<name>.recipients].public_keys`を**生成した公開鍵(.pub)のpathへ置換**する(生成直後の雛形は存在しないpathのdummyのため、置換しないままでは設定エラー2)。あわせて`[profiles.<name>.verify].decrypt_key`へ生成した秘密鍵のpathを記述する(照会・復元の`--key`省略時の既定。`<name>`は実効aws profile名と同名)
 - `--config PATH` / `--aws-config PATH` で明示指定した場合はcwd基準の相対pathも可(規定pathより優先)
-- `AMAZING_BACKUP_HOME`環境変数(テスト/CI用)を指定すると規定pathをすべて`$ABH/`配下へ統合できる(`$ABH/pipeline.toml`・`$ABH/aws.toml`・`$ABH/registry.jsonl`・`$ABH/cache/`)
+- `AMAZING_BACKUP_HOME`環境変数(テスト/CI用)を指定すると規定pathをすべて`$ABH/`配下へ統合できる(`$ABH/pipeline.toml`・`$ABH/aws.toml`・`$ABH/server.toml`・`$ABH/registry.jsonl`・`$ABH/catalog.db`・`$ABH/cache/`)
+
+local catalog DB(`catalog.db`)はremote索引のlocal複製(復号後の平文view)とローカル書込の導出indexを保持するSQLite DB(照会系のS3 HEAD/GET削減・5.2)。真正はregistry.jsonl(JSONL)とS3索引のままで、DBは`manage catalog rebuild`(5.10)で常に再構築可能。**平文を含む**ため権限0600・専用dir 0700で作成され、DB fileのbackupは利用者の責任(取扱注意)。
 - pipeline.toml内の相対path(public_keys・decrypt_key)とaws.tomlの`credentials_file`の相対pathは**実行時のcwd基準**で解決される(XDG配置後も維持。生成直後の設定はcwd非依存の絶対pathで書かれる)
 
 ### 2.3 AWS credential(API keyファイル)の作成
@@ -169,6 +177,13 @@ unfiled_category = "unfiled"
 # source_path相対化のroot列挙(順序優先・絶対path。省略可)
 auto_path_roots = ["/home/yourname/data"]
 
+# [profiles.dev.catalog.scan](省略可=アップロード前カタログscan対象の明示登録。
+# manage catalog scan・serveの未対応一覧(pending絞り込み)がこのroot配下をlocal FS走査する):
+# [profiles.dev.catalog.scan]
+# roots = ["/home/yourname/data"]      # 走査root(絶対path・1つ以上必須)。symlinkは辿らない
+# extensions = [".zip"]                # 対象拡張子(省略・空=全regular file)
+# exclude = ["tmp"]                    # 除外(root基準相対path部分一致。省略可)
+
 # [profiles.dev.files."travel.zip"]  # 手動写像(省略可)
 # category = "photos"                 # category名規則を満たす任意の文字列(記録値として自由化)
 # label = "2020-2023/travel"           # label(""でlabelなし)
@@ -206,6 +221,7 @@ auto_path_roots = ["/mnt/nas/family"]
 | `[profiles.<name>.layout].unfiled_category` | 分類解決のfallback先category(既定`unfiled`) |
 | `[profiles.<name>.layout].auto_path_roots` | source_pathを相対化するroot列挙(最初に一致したrootを採用) |
 | `[profiles.<name>.files."<basename>"]` | 手動写像。`category`(必須・category名規則の文字列検査のみ)と`label`(所在label・空文字列=なし) |
+| `[profiles.<name>.catalog.scan]` | アップロード前カタログscan(5.10 `manage catalog scan`・serveの未対応一覧(pending絞り込み))の対象登録。省略可。`roots`(必須: 走査rootの絶対path列挙。この配下のみ走査しsymlinkは辿らない)・`extensions`(対象拡張子`.zip`形式の列挙。省略・空=全regular file)・`exclude`(走査root基準の相対path部分一致による除外。一致dir配下も対象外。省略可)。**`auto_path_roots`は転用しない**(分類・相対化用の設定でありbackup対象の登録ではないため。誤った範囲拡大防止) |
 
 省略時の既定: `[layout]`全体省略時はunfiled_category="unfiled"+auto_path_roots=[]・`[metadata]`省略時はlatest_source_path="plain"・`keep_artifacts`省略時は"run"。`[recipients]`のみ必須(選択profileに対して)。`[categories]`・`[output]`セクションの存在は(top-level・profile内のいずれでも)未知キーとして設定エラー2(静的に廃止を確定。registry・cache dirのpathはXDG規定path固定)。
 
@@ -219,7 +235,7 @@ auto_path_roots = ["/mnt/nas/family"]
 
 - 第1層(全profile一括・deserialize時): ファイル不在・TOML parseエラー・未知キー・型不一致・profile名規則(未選択profileの違反でも弾く)
 - 第2層(選択profileのみ): `[recipients]`必須・`public_keys`空配列・鍵ファイル不在・`ssh-ed25519`以外の形式・指紋の重複(検査範囲は選択profile内限定。未選択profileの鍵pathの実在性は検証しない=dummy鍵pathを置ける)
-- 値検査(選択profileのみ): category名規則違反(`^[a-z0-9][a-z0-9-]{0,63}$`。予約領域`sys`・旧表記`_sys`は拒否。files写像とunfiled_categoryに適用)・auto_path_rootsが絶対pathでない・keep_artifacts列挙値外・latest_source_path列挙値外
+- 値検査(選択profileのみ): category名規則違反(`^[a-z0-9][a-z0-9-]{0,63}$`。予約領域`sys`・旧表記`_sys`は拒否。files写像とunfiled_categoryに適用)・auto_path_rootsが絶対pathでない・keep_artifacts列挙値外・latest_source_path列挙値外・`[catalog.scan]`の値検査(roots空配列・rootsが絶対pathでない・extensionsが拡張子形式(`.zip`等・先頭ドット)でない・extensions/excludeの空文字列は設定エラー2)
 - 実効aws profile名に対応する`[profiles.<name>]`が無い場合は設定エラー2(利用可能なpipeline profile一覧がerror文に表示される。pipeline.tomlが単一profileでも名前一致は必須。aws.toml側に存在しない余分なprofileは選択されない限り無視)
 
 ### 3.2 `aws.toml`(規定path: `~/.config/amazing-backup/aws.toml`)
@@ -311,6 +327,28 @@ path = "/mnt/nas/backup/2025/docs.7z"   # title省略可(合流時・5.6)
 - 位置引数との併用可(和集合)。単独指定可(PATH 0個+--from-listのみでも実行)。[[targets]]0件の空リストは警告+終了0。未知キー・`path`欠損は設定エラー
 - 旧仕様の`name`(出力名override)は**廃止**(指定は拒否)。basenameは常に元ファイル名(拡張子付き)
 
+### 3.4 `server.toml`(規定path: `~/.config/amazing-backup/server.toml`)
+
+serve(5.14)のserver共通設定(秘密を含まない)。backup profile(pipeline.toml・aws.toml)とは分離しており、serveは既存のprofile解決chain(`--profile` > env > purpose > active_profile > default)で単一の実効profileを解決する(API対象scope・復号鍵は実効profileに従う)。初回は`config init`で生成され(2.2)、各キー省略時・file自体が無い場合も既定値で起動する(file不在時はstderrへnotice表示。server.tomlは秘密値を持たないため既定値起動が安全側):
+
+```toml
+[server]
+listen_addr = "127.0.0.1"           # listen address(v1はlocalhost既定。LAN IP直結は不可=3.4注記)
+port = 40510                        # listen port(40510=本番serve・40512=Vite dev server)
+rp_id = "localhost"                 # WebAuthn RP ID(外部公開時は当該domainへ変更)
+rp_origin = "http://localhost:40510" # WebAuthn RP origin(port変更時は合わせて変更)
+```
+
+| キー | 既定 | 意味 |
+|---|---|---|
+| `listen_addr` | `127.0.0.1` | listen address。v1はlocalhost既定(公開範囲は5.14) |
+| `port` | `40510` | listen port |
+| `rp_id` | `localhost` | passkey認証のWebAuthn RP ID |
+| `rp_origin` | `http://localhost:40510` | passkey認証のRP origin |
+
+- LAN IP直結はWebAuthnのsecure context違反のため不可(localhostはhttp可。外部公開はcf-tunnel等のdomain+https経由・5.14)。同一passkeyはRP ID違いで別credentialになる(localhostとdomainの両用には各originで登録)
+- `[server]`内の未知キーはtypo検出のため設定エラー2
+
 ## 4. データ配置と保持
 
 ### 4.1 S3側の配置
@@ -346,6 +384,7 @@ s3://<bucket>/<prefix>/
 - labelは`.`/`..`要素の排除・正規化のみ適用(実source treeの要素名をそのまま用いる)
 - 生成keyがS3のobject key上限1024 byteを超える場合は対象エラー3(prefix長またはtitle長で対処)
 - category名規則は`^[a-z0-9][a-z0-9-]{0,63}$`・予約語`sys`(旧表記`_sys`も)拒否。pin名は`^[a-z0-9][a-z0-9-]{0,62}$`(63文字以内)で`default`は予約
+- **tag・collection(serve 5.14)はlocal語彙**: 分類(category/label)が索引・manifestに記録されるのに対し、tag(entityへの検索語彙・複数付け可)とcollection(名前付きグループ)はcatalog DBのlocal tableのみに保存され索引・manifestには入らない(索引はpush毎に再構築されるためlocal置きしないと消失する)。tag名規則はcategoryと同一の`^[a-z0-9][a-z0-9-]{0,63}$`。付与・編集はserveのUI/APIから行う(CLIからの付与手段は無い)
 
 ### 4.3 versioningと索引
 
@@ -373,6 +412,7 @@ s3://<bucket>/<prefix>/
 | `--key PATH` | 実効profileの`[profiles.<name>.verify].decrypt_key` | 復号用SSH ed25519秘密鍵。索引の復号に使うためlist/query/get/diff・pull・pinのすべてで使用(pipeline.tomlが規定pathに無い場合・実効profileのentryが読めない場合は必須・9.1)。どちらにも無ければ設定エラー2 |
 | `--profile NAME` | aws.toml `[aws].active_profile` | 当該実行限りprofileを上書き(aws.tomlへの書戻しはしない)。**aws.tomlとpipeline.tomlの両方のprofileを選択する**(実効pipeline profileは常に実効aws profile名と同一のため「aws=dev・pipeline=family」のような交叉は構造的に起きない・3.1) |
 | `--format human|json` | `human` | 照会系8コマンド(list 5種・query・get・diff)の出力形式。`json`はstdout全体が単一JSON(人間向け通知はstderr) |
+| `--refresh` | なし | 索引cacheを検証せずS3から再取得してDBを更新(`list files/versions/pins/runs`・`query`が対応・5.2) |
 | `--dry-run` | なし | 実行予定のみ表示(backup push/pullが対応。manage系は`--apply`方式でdry-runが既定・5.10) |
 
 backup verifyのみ旧形式の`--config`/`--key`/`--checksum`/`--roundtrip`を扱う(5.8。`--aws-config`/`--profile`も受理する)。
@@ -395,6 +435,8 @@ amazing-backup list jobs
 | `runs` | run(batch_id)毎の対象実体数(索引由来) |
 | `jobs` | 復元job状況(現行/非現行版ごと・pin含む。headのRestore headerをparse) |
 
+索引cache(2.2のcatalog.db): `files`/`versions`/`pins`/`runs`と`query`(5.3)は、起動時に索引objectのHEAD 1回でvalidator(ETag+VersionId)を確認し、検証済みfreshならS3 GET・復号を行わずlocal catalog DBから回答する(書込系実行直後の同一process内は無条件fresh)。validator不一致時は従来どおりS3 GET+復号で回答しDBを更新する。`--refresh`でvalidatorに関係なく再取得を強制できる。`get`・`diff`・`jobs`は実態突合・per-object headが必要なため従来どおりS3直接(cache不使用)。
+
 旧`list files --tree`・`list categories`は廃止。0件は警告表示+終了コード0。
 
 ### 5.3 query — 探索
@@ -403,7 +445,7 @@ amazing-backup list jobs
 amazing-backup query <手がかり> [--category C] [--versions]
 ```
 
-title部分一致・uuid前方一致・所在(source_path)部分一致で索引を検索。既定は実体単位要約、`--versions`で版一覧も表示。title重複で候補が複数ある場合は候補一覧(uuid・所在source_path)を表示し`get <title> --source-path <source_path>`での特定を案内する。0件は警告+終了コード0。
+title部分一致・uuid前方一致・所在(source_path)部分一致で索引を検索。既定は実体単位要約、`--versions`で版一覧も表示。title重複で候補が複数ある場合は候補一覧(uuid・所在source_path)を表示し`get <title> --source-path <source_path>`での特定を案内する。0件は警告+終了コード0。索引cacheの挙動はlist系と同一(5.2。`--refresh`対応)。
 
 ### 5.4 get — 単一実体の取得
 
@@ -527,6 +569,10 @@ amazing-backup manage index reconcile [--apply]
 amazing-backup manage location rm <source_path> [--uuid <uuid>]
 amazing-backup manage jobs reissue <object_key> [--tier T]
 amazing-backup manage reset [--apply]
+amazing-backup manage catalog sync|rebuild|scan [--sha256]
+amazing-backup manage auth list
+amazing-backup manage auth remove <credential_id>
+amazing-backup manage auth api-key [--name NAME]
 ```
 
 | subcommand | 動作 |
@@ -539,8 +585,14 @@ amazing-backup manage reset [--apply]
 | `location rm` | 旧所在の明示除去(`--uuid`でentity絞込可。不在・複数hitは対象エラー3)。location_remove記録+索引再構築+metadata sync。S3・実体には触れない(再backupで所在は復活) |
 | `jobs reissue` | 復元jobの再発行(tier変更可。Tierのallowlist外はusage 64)。対象はobject keyで指定 |
 | `reset` | dev bucketの初期化(S3全消去・registryはbucket限定・冪等)。**dry-runが既定**(消去対象version数=Versions・DeleteMarkers別・registry退避先path・registry再書込の除去/残行数を表示)。`--apply`で 1) ローカルregistryを`./tmp/<yyyymmdd>_<bucket>_registry_before_reset.jsonl`へ全体退避(証跡。不在ならskip。同日再実行は上書き) 2) root prefix配下の全object version(Versions・DeleteMarkers)をDeleteObjectVersionで削除(`{prefix}data/`配下に留まらず`sys/`索引・manifestも消去) 3) ローカルregistryから当該bucket由来行(対象bucket宛file_uploadはuuid共有(非対象bucketにもuploadされたuuid)に関わらず全て除去+S3実体削除後の記録残存はregistry-only skipとの不整合のため。他のupload系記録と対象bucketのみにuploadされたuuidのfile_write)のみ除去して再書込(temp+fsync+rename+親dir fsync。他bucket宛記録・共有uuidのfile_write・crash残存file_write・prune/sweep等は温存。torn write最終行は破棄。残0行ならfile削除。cache dirは対象外・手動掃除) 4) 再list_versionsで0件確認。安全弁(違反は設定エラー2+案内・S3 API呼び出しなし): 実効profileのpurpose=dev限定。`--config`必須 |
+| `catalog sync` | remote索引をlocal catalog DB(2.2)へ同期(遅延refresh)。HEAD 1回でvalidator(ETag+VersionId)を検証し、変化(初回含む)あればGET+復号でDBへ反映・変化なければGETを省略。書込実績の無いnamespaceは空cacheとして確定(S3問い合わせなし)。索引object不在は`index rebuild`案内の設定エラー2(未書込namespace例外は除く) |
+| `catalog rebuild` | ローカルregistry(JSONL)からcatalog DBのcache class(entities/versions/pins/locations/sync_state/pending_items)を置換再構築(冪等)。永続class(credential・api-key・実行記録・tag/collections/audit_log=UI書込操作記録)は保持・削除しない(tag・collectionは索引から再構築できないlocal語彙のためrebuildで消失しない・4.2)。cacheは常にregistry+S3から再構築可能な導出index(2.2) |
+| `catalog scan` | アップロード前カタログscan。pipeline.toml `[profiles.<name>.catalog.scan]`(3.1)の登録root配下をlocal FS走査し(S3接続不要・symlink不追従)、各fileをcatalog DBの保存値とsize+mtime比較で4状態(unbacked=未backup・changed=変更あり・ok=backup済み・unknown=確認不能)へ分類してpending_itemsを全置換(再scanで前回結果は残らない)。`--sha256`指定時のみsha256を再計算しsha一致合流(registryのsha_uuid_lookup)でunknownをokへ確定する(既定はsize+mtime比較のみ)。serveの未対応一覧(pending絞り込み)(5.14)は同一scanをボタン実行できる |
+| `auth list` | 登録済みcredential一覧(passkey・api-keyの統合表示: credential_id・kind=passkey/api_key・name・created_at)。catalog DB(2.2)のcredentials tableとapi_keys table(永続class)を直接読むlocal操作でS3接続不要。0件案内(bootstrap案内)は両table合計0件時のみ(5.14) |
+| `auth remove <credential_id>` | credentialの失効(削除)。credential_id完全一致の1行をcredentials table→api_keys tableの順に検索して削除するlocal操作(S3接続不要。nameは一意性が無いため対象指定に使わない。passkey・api-keyいずれのcredential_idでも削除可)。両table合計削除0行(存在しないcredential_id)は対象エラー3。削除後に両table合計0件となった場合は再登録のための`serve --bootstrap`案内を表示する(合計0件ではlogin手段が無く・passkey登録はbootstrap token提示時のみ開く=fail-closed。api-key失効は既存sessionを破棄しない。5.14) |
+| `auth api-key [--name NAME]` | serve用api-keyの生成。32byte乱数から`abk_`前置+base64url(43文字)のkeyを生成し**1回だけstdoutへ表示**する(再表示不可・hashから復元不可。SHA-256 hexのみapi_keys tableへ保存し平文keyは保存しない)。`--name`はlist表示での確認用表示名(既定`api-key`・空文字指定はusage error)。S3接続不要のlocal操作。受け渡し・有効条件は5.14 |
 
-`prune`/`index`/`location rm`/`reset`は`--config`必須。`lifecycle`/`jobs reissue`はconfig不要。
+`prune`/`index`/`location rm`/`reset`/`catalog`は`--config`必須。`lifecycle`/`jobs reissue`/`auth`はconfig不要。
 
 ### 5.11 edit — 設定の確認
 
@@ -580,7 +632,71 @@ amazing-backup docs [usage|config|llm <usage|skill|snippet>]
 - 引数なし(`docs`・`docs llm`)はページ一覧をstdoutへ表示して終了0
 - `| head`等の先読み終了(BrokenPipe)は正常終了0、その他の出力失敗は処理エラー4(completionsと同一契約)。未知ページ・余計な引数はusage 64
 
-### 5.14 終了コード一覧
+### 5.14 serve — Web frontend+API起動
+
+```
+amazing-backup serve [--bootstrap] [--config PATH] [--aws-config PATH] [--profile NAME]
+```
+
+Web frontend(埋め込み静的配信)と読取API(`/api/*`・axum)を起動する常駐command。passkey認証(passkey/WebAuthn対応browserが必要)でloginすると閲覧系APIが開放される。
+
+**起動と設定**:
+
+- listen先はserver.toml(3.4・規定path)。server.tomlが無い場合も既定値(`127.0.0.1:40510`)で起動し、stderrへnotice表示をする(初期serve構成はP2で確定)
+- 起動時にremote索引の遅延sync(HEAD 1回のvalidator検証・`manage catalog sync`と同一処理)をbackground実行する
+- 設定読込失敗は設定エラー2で起動しない。SIGTERM/SIGINTでgraceful shutdown(起動時syncの完了待ちをしてから停止)
+- frontend静的配信はrelease buildでbinary埋め込み(rust-embed)。**dist欠落build(cargo install等のcrates.io/git package由来を含む)ではAPIのみで起動し**、warning+frontend build手順を表示する(静的配信なしでもAPI・認証は動作)
+
+**passkey登録(初回・`--bootstrap`)**:
+
+1. `amazing-backup serve --bootstrap` を実行する。stdoutに**1回限りのbootstrap token**(128bit乱数のbase64)が表示される(tokenはin-memory保持・**期限10分**・1回消費・serve再起動で失効。失効・期限切れ時は再度`--bootstrap`で再発行)
+2. browserで `http://localhost:40510` を開き、LoginViewのbootstrap token欄へ表示されたtokenを入力してpasskeyを登録する(登録UIはtoken提示時のみ開く。credential 0かつtoken不一致なら登録は閉鎖=fail-closed)
+3. 登録済み状態での追加登録もlogin済み+bootstrap tokenが必要。credentialの一覧・失効は `manage auth list` / `manage auth remove`(5.10)
+
+**passkey login**: LoginViewからpasskey認証でloginする(challengeは発行時のsessionと結合・session期限24時間)。login済みのsessionで次の閲覧が開放される:
+
+- entity一覧・詳細・版一覧(`GET /api/entities`・`/api/entities/{uuid}`・`/api/entities/{uuid}/versions`)
+- pin一覧(`GET /api/pins`)・location一覧(`GET /api/locations`)
+- アップロード前カタログ(`GET /api/pending`)とscan実行(`POST /api/pending/scan`)
+- sync状態(`GET /api/sync`)と手動refresh(`POST /api/sync`)
+- diff実行(`POST /api/diff`)と最終diff結果参照(`GET /api/diff`)
+- backup実行run一覧(`GET /api/runs`・batch単位の集約)とjob一覧(`GET /api/jobs`・取得/uploadのjob発行は今後の版で追加)
+- tag一覧(`GET /api/tags`)・folder一覧(`GET /api/folders`=所在labelの階層集約)・collection一覧と詳細(`GET /api/collections`・`/api/collections/{id}`)
+- tag編集(`PUT /api/entities/{uuid}/tags`)とcollectionの作成・改名・削除・構成の追加・除去(`POST`/`PUT`/`DELETE /api/collections`・`POST /api/collections/{id}/items`・`DELETE /api/collections/{id}/items/{uuid}`)
+
+これらの閲覧・操作はfrontendの各画面(5タブ構成: ホーム=sync状態・前回backup・未対応・diff・実行中jobのサマリ、バックアップ=folder構造(tag付けされたlabel階層)/tag/collectionの3ビュー切替+検索box・pager(3ビュー共通)・pending/diff絞り込み表示・行のtag列(chip)・entity詳細=所在・pins・版一覧・tag編集・所属collection、転送・設定・管理=今後の版で整備)から操作できる(CLIの`query`/`list`と同一の索引語彙で表示)。
+
+未認証の閲覧系APIは401で拒否される(空dataを返さない)。S3へ書き込む操作系CLI(backup push/pull・get・pin・manage系のfile操作)のAPIは提供しない(操作はCLI既存のまま)。UIから書き込めるのはcatalog DBのlocal語彙(4.2: tag・collection)のみで、これらの書込APIは成功・失敗双方をaudit_log tableへ記録する(UI書込操作のみが対象でCLI操作は記録しない。履歴のUI表示は今後の版)。
+
+**api-key認証(接続元LAN内限定)**: passkeyが使えない端末・browser向けに、api-keyでの認証をもう一つのlogin手段として提供する(passkey認証に追加する第二手段・接続元がLAN内の場合のみ有効):
+
+1. `amazing-backup manage auth api-key [--name NAME]`(5.10)でapi-keyを生成する。**keyはこの時のstdout表示に1回限り**で現れる(再表示不可・SHA-256 hashのみcatalog DBへ保存のため紛失時は再生成)
+2. browserのLoginView(api-key欄は未認証時に常時表示)へkeyを入力して認証する(`POST /api/auth/api-key`)。成功するとpasskey loginと同一のsession(24時間)へ合流し、以降は同じ閲覧APIが開放される
+3. **有効条件は接続元address**: 接続元がLAN内(loopback・RFC1918 private・link-local。IPv6はloopback・ULA・link-local。`::ffff:a.b.c.d`のv4-mappedはIPv4へ正規化して判定)の場合のみ受理し、LAN外はkey検証の前に403で受理自体を拒否する。**passkey認証にはこの条件を掛けない**(passkeyは接続元を問わず従来どおり)
+4. 失効は `manage auth remove <credential_id>`(5.10・listで確認したapi-keyのcredential_id=`ak-`前置)。失効後の新規loginは同一keyでも401になる。**失効は既存sessionを破棄しない**(in-memory 24hで自然失効・passkey失効と同一挙動)
+
+- LAN内の他端末から使うには、server.toml(3.4)の`listen_addr`を`0.0.0.0`等へ変更してserveを起動する。**LAN IP直結ではWebAuthnのsecure context違反のためpasskeyの登録・loginはできない**(localhostはhttp可)ため、この構成ではapi-keyが主認証手段になる(passkeyの初回登録はlocalhost接続のbrowserで行えば併用可)
+- **既知の帰結(cf-tunnel等でのdomain公開時)**: tunnel接続はcloudflaredからlocalhostへの接続として現れるためremote addressがloopback(=LAN内)と判定され、api-key認証がinternet経由でも有効になる。これは「接続元address判定」による有効条件の帰結であり、tunnel運用時の無効化機構は設けない。**tunnelでdomain公開して運用する場合はapi-keyの失効(remove)を推奨する**(passkey認証は影響なし)
+
+**APIの実装確定値**:
+
+- `GET /api/entities`は`query`/`category`/`label`/`tag`/`collection`/`scope`絞り込み+`page`でpaging(tag絞り込み=当該tagを持つentity・collection絞り込み=当該collectionの構成entity。folder絞り込み用のparamは設けず既存`label=`で扱う)。**1page=50件・pageは1始点**(0・非数値は400)。応答は`{"entities":[...],"page":n,"total_pages":n}`(total_pagesは0件でも1)。一覧の各要素と詳細応答にはtag一覧(`tags`・昇順)が付き、詳細応答には所属collection名一覧(`collections`・name昇順)も付く
+- tag/folder/collection読取APIの応答: `GET /api/tags`は`{"tags":[{tag,entity_count}]}`(tag名昇順)・`GET /api/folders`はlabelのdirectory区切りで階層導出した`{"folders":[{label,path,entity_count}]}`(中間nodeも1行・path昇順・entity_countは子folder配下の合計)・`GET /api/collections`は`{"collections":[{id,name,entity_count}]}`(name昇順)・`GET /api/collections/{id}`は`{"collection":{id,name,uuids}}`(構成uuid一覧・追加順)
+- tag/collection系の書込API: `PUT /api/entities/{uuid}/tags`(body `{"tags":[...]}`でtag一覧を丸ごと置換・冪等・空配列は全削除。tag名規則はcategoryと同一の`^[a-z0-9][a-z0-9-]{0,63}$`で違反は422)・`POST`/`PUT`/`DELETE /api/collections`(作成・改名・削除。同(scope,name)重複は409。削除は構成参照の解除のみでentity・tagへ影響しない)・`POST /api/collections/{id}/items`(body `{"uuids":[...]}`で一括追加・追加済みuuidの再追加は冪等に成功)・`DELETE /api/collections/{id}/items/{uuid}`(除去)。書込応答は操作後の対象状態(読取系と同一schemaのため操作後に再GETは不要)
+- error応答は`{"error":{"code","message"}}`形式(HTTP statusはerror code種別に対応: 400 invalid_request・401 unauthenticated・404 not_found・409 duplicate・422 validation_failed・502 upstream・503 configuration等)
+- S3へ書き込む操作(push/pin等)のAPIは無く、serve経由でS3へ書き込むのはsync取得系GET・scan走査のみ。tag/collection系書込はcatalog DB(local語彙・4.2)への書込でS3・索引には書かない
+
+**pending scanの手順(serve画面)**: pipeline.tomlの`[profiles.<name>.catalog.scan]`(3.1)へ対象rootを登録した上で、pending画面(pending)のscanボタン(`POST /api/pending/scan`)で`manage catalog scan`と同一の走査・分類(unbacked/changed/ok/unknown)を実行できる。
+
+**開発時(dev・Vite dev server)**: frontendの開発確認はVite dev serverを直接見る(release buildの埋め込み配信は使わない):
+
+```sh
+pnpm --dir frontend dev    # Vite dev server(port 40512)が/apiをserve(40510)へproxy
+```
+
+**外部公開(公開範囲)**: v1はlocalhost(127.0.0.1)listenが既定。LAN IP直結はWebAuthnのsecure context違反のため不可。外部公開はcf-tunnel(Cloudflare Tunnel)等のdomain+https終端を前提とし、server.tomlの`rp_id`/`rp_origin`を当該domainへ切り替える(3.4。localhost用に登録したpasskeyはRP ID違いで別credentialになるため、公開originでも登録し直す)。
+
+### 5.15 終了コード一覧
 
 | code | 区分 | 主な発生条件 |
 |---|---|---|

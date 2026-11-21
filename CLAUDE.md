@@ -13,3 +13,8 @@
 - agentはaws CLI(`aws s3api`等)を実行しない。`aws login`/`aws configure`等の認証構築の案内もしない
 - agentがS3に触るのはamazing-backupのコマンド経由のみ(SDK+`configs/aws.toml`のcredentials_file明示API key。TASK-9構成・credential chain非依存)
 - 経緯: 2026-10-13のSDK移行指摘(TASK-9)後も、2026-10-22にagentがaws CLIを実行し`aws login`案内までしたことで再指摘を受け、記載に至った
+
+## パス・ファイル配置
+
+- home直下(~/)へ新規dir・fileを作らない。既存scriptの既定pathがhome直下(例: `scripts/amazing-backup-dev`のABH既定 `~/.amazing-backup-dev`)でも無批判に案内・使用せず、`~/.local`配下等の既存集約dirを明示して使う。必要なら既定変更の提案を添える
+- 経緯: 「home直下に置くな」は過去にも繰り返し指示があるのに、2026-11-07にABH既定をそのまま案内し再指摘を受けた。記録されていないことが再発の原因だったため本項を置く

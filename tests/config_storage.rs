@@ -412,9 +412,6 @@ fn pipeline_profiles_schema_accepted() {
 /// 違反は設定エラー2(第1層=全profile一括検証。未選択profileの違反でも弾く)。
 #[test]
 fn pipeline_profile_name_validated() {
-    let Some(fx) = StorageFixture::new("cfg-prof-name", StorageOpts::default()) else {
-        return;
-    };
     // (profile名, 期待exit code)
     let over64 = "x".repeat(65);
     let max63 = "x".repeat(63);

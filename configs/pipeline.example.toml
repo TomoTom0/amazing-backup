@@ -40,6 +40,17 @@ unfiled_category = "unfiled"
 # source_path相対化のroot列挙(順序優先・絶対path。省略可)
 auto_path_roots = ["/home/yourname/data"]
 
+# [profiles.dev.catalog.scan](省略可=TASK-9のアップロード前カタログscan対象の
+# 明示登録。auto_path_rootsは転用しない=backup対象の登録は別物。manage catalog
+# scan・POST /api/pending/scanがこのroot配下をlocal FS走査する):
+# [profiles.dev.catalog.scan]
+# # scan対象root(絶対path・1つ以上必須)。この配下のみ走査(symlinkは辿らない)
+# roots = ["/home/yourname/data"]
+# # 対象拡張子(".zip"形式。省略・空=全regular file)
+# extensions = [".zip"]
+# # 除外(走査対象のroot基準相対pathへの部分一致。一致dir配下も対象外。省略可)
+# exclude = ["tmp"]
+
 # [profiles.dev.files."travel.zip"]   # 手動写像(省略可)
 # category = "photos"                 # category名規則を満たす任意の文字列(記録値として自由化)
 # label = "2020-2023/travel"           # label(""でlabelなし)
