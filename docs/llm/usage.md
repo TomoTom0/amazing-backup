@@ -16,13 +16,15 @@
 | 復元 | `backup pull` | category/run/全対象の一括復元(確認付き) |
 | 検査 | `backup verify` | ローカル成果物の整合検査(S3接続なし) |
 | 管理 | `pin add` / `pin rm` | ピン留め版(世代管理対象外)の付与・解除 |
-| 管理 | `manage prune/lifecycle/index/location/jobs/reset` | 世代削除・bucket保持設定・索引再構築・旧所在除去・復元job再発行・dev bucket初期化 |
+| 管理 | `manage prune/lifecycle/index/location/jobs/reset/catalog` | 世代削除・bucket保持設定・索引再構築・旧所在除去・復元job再発行・dev bucket初期化・local catalog DB管理 |
+| 管理 | `manage auth api-key` / `manage auth list` / `manage auth remove <credential_id>` | api-key生成・passkey credential/api-key一覧・失効(local catalog DB操作・S3接続不要) |
+| 閲覧 | `serve` | Web frontend+APIの常駐起動(passkey認証・閲覧系APIのみで書込操作APIは無い) |
 | 設定 | `config init` | 設定file群の初期生成(規定pathへtemplate展開・既存file保護) |
 | 設定 | `edit metadata/files/layout/policy` | 設定sectionの確認(検証付き) |
 | 補完 | `completions <bash|zsh|fish>` | shell補完scriptのstdout出力 |
 | 文書 | `docs usage/config` / `docs llm usage/skill/snippet` | 配布ドキュメントのstdout出力(本書を含む) |
 
-主要文法(照会系は末尾に共通option群 `--config`・`--aws-config`・`--key`・`--profile`・`--format human|json` を持つ):
+主要文法(照会系は末尾に共通option群 `--config`・`--aws-config`・`--key`・`--profile`・`--format human|json` を持つ。`list files/versions/pins/runs`と`query`は索引cache(local catalog DB)を使用し`--refresh`で再取得を強制):
 
 ```
 amazing-backup get <title|uuid> [--path P] [--version V] [--version-id ID] [--pin <名>]
@@ -39,9 +41,17 @@ amazing-backup manage index reconcile [--apply]
 amazing-backup manage location rm <source_path> [--uuid <uuid>]
 amazing-backup manage jobs reissue <object_key> [--tier T]
 amazing-backup manage reset [--apply]
+amazing-backup manage catalog sync|rebuild|scan [--sha256]
+amazing-backup manage auth api-key [--name NAME]
+amazing-backup manage auth list
+amazing-backup manage auth remove <credential_id>
+amazing-backup serve [--bootstrap] [--config PATH] [--aws-config PATH] [--profile NAME]
 ```
 
 `<PATH>`は対象アーカイブ(`.zip`/`.7z`。1個以上必須)。titleは実体の人間用ラベル(64文字以内・UTF-8可。新規発行時必須)。uuidはUUIDv7発行キー(hyphenated lowercase 36字)。
+
+- **`manage auth`系はlocal catalog DB(`catalog.db`)の操作**(S3接続不要)。`api-key`はapi-keyを生成してstdoutへ1回だけ表示(SHA-256 hashをapi_keys tableへ保存。再表示不可)。`list`はpasskey credential(credentials table)とapi-key(api_keys table)の統合一覧。`remove`はcredential_id完全一致で両tableから削除し、存在しないcredential_idは対象エラー3(既存終了コード体系の対象エラー3のまま・新しい終了コードは追加しない)
+- **`serve`は常駐command**(server.tomlのlisten先・既定`127.0.0.1:40510`で起動。SIGTERM/SIGINTでgraceful shutdown=正常終了)。設定読込失敗は設定エラー2で起動しない。`--bootstrap`はpasskey登録用のone-time token(期限10分・1回消費)をstdoutへ表示する。認証はpasskey(WebAuthn)とapi-key(POST /api/auth/api-key・接続元LAN内限定)の両方式。APIは閲覧系(entities/versions/pins/locations/pending/sync/diff/runs/jobs/tags/folders/collections)とscan/sync/diff実行・tag/collection編集(catalog DBのlocal語彙のみ。書込はaudit_logへ記録)で、backup push/pull・get・pin・manage系などS3へ書き込む操作APIは無い(操作はCLI既存のまま)
 
 - **`--profile NAME`はaws.tomlとpipeline.tomlの両方のprofileを選択する**(実効pipeline profileは常に実効aws profile名と同一。pipeline.tomlは`[profiles.<name>]`配下のprofile構成で、`<name>`はaws.tomlの`[aws.profiles.<name>]`と同名対応)
 - **backup verifyはaws.toml必須**(実効profile名の解決のため。credentialファイルの実在は不要・S3接続はしない)。検査対象は実効profileのbucketへ帰属するrunのみ(帰属不明記録・他bucket帰属runは対象外+batch id特定の警告表示)
@@ -90,7 +100,8 @@ S3への書込み有無と索引・ローカルregistryの変更有無で4分類
 - **(a) 索引全体再構築PUT+ローカルregistry appendを伴う系**: `backup push`・`pin add`/`pin rm`・`manage prune --apply`・`manage index rebuild`・`manage index reconcile --apply`・`manage location rm`・`manage reset --apply`。**これらの相互同時実行は禁止**(直列に1実行ずつ)。理由: 索引PUTはlast-writer-winsのため並走runの反映を失わせ得る・run manifest PUTとregistry appendの記録が競合する
 - (b) S3へ書込むが索引・registryは不変の系: `manage lifecycle apply`・`manage jobs reissue`・get/backup pullでの復元job発行(RestoreObject)。(a)との並走は可能
 - (c) 読み出しのみの系: list/query/diff・list jobs・各dry-run表示
-- (d) ローカルのみでS3未接触の系: config init(設定file生成。registry append・索引PUTを行わない)・backup verify・edit・completions・docs。並走制約の対象外
+- (d) ローカルのみでS3未接触の系: config init(設定file生成。registry append・索引PUTを行わない)・backup verify・edit・completions・docs・manage auth api-key/list/remove(local catalog DBのcredentials・api_keys table操作のみ)。並走制約の対象外
+- `serve`は常駐commandで、sync取得(HEAD/GET+復号)・scan走査・diff実行のDB書込をsingle-flightで直列化する(serve内のsync・diff実行相互・`manage catalog sync`との並走はDB書込lockで直列化される。(a)系コマンドとの同時実行は(a)側の規則に従うこと)
 
 ## 7. S3非干渉規則
 

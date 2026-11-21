@@ -1,9 +1,13 @@
 //! manage系(TASK-18 5.12・6.2/6.3/6.4・8章): prune(data/一括)・lifecycle(3rule)・
 //! index(rebuild/reconcile)・jobs(reissue)・location rm(旧所在の明示除去)・
-//! reset(dev bucket初期化の全消去・8.1)。
+//! reset(dev bucket初期化の全消去・8.1)・catalog(TASK-9 local catalog DB)・
+//! auth(TASK-9 passkey credential管理)。
 
 use super::get::{RestoreCheck, ensure_restored, restore_guidance};
-use super::{CtxArgs, now_jst, open_session, open_session_with_pipeline, resolve_key, sha256_hex};
+use super::{
+    CtxArgs, now_jst, open_session, open_session_with_pipeline, random_bytes, resolve_key,
+    sha256_hex,
+};
 use crate::errors::{BackupError, BackupResult};
 use crate::index::{INDEX_SCHEMA, IndexFileEntry, IndexLocation, IndexPin, IndexVersion};
 use crate::layout;
@@ -53,6 +57,64 @@ pub enum ManageSub {
         ctx: CtxArgs,
         #[arg(long)]
         apply: bool,
+    },
+    /// local catalog DBの管理(TASK-9: remote replica同期・ローカルregistryからの再構築)
+    Catalog {
+        #[command(subcommand)]
+        sub: CatalogSub,
+    },
+    /// passkey credentialの管理(TASK-9設計8章・12章P6: 失効はmanage auth remove(CLI))
+    Auth {
+        #[command(subcommand)]
+        sub: AuthSub,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum AuthSub {
+    /// 登録credential一覧(credential_id・kind・name・created_at)
+    List {
+        #[command(flatten)]
+        ctx: CtxArgs,
+    },
+    /// credentialの失効(credential_id完全一致の1件削除。S3接続不要のlocal操作)
+    Remove {
+        #[command(flatten)]
+        ctx: CtxArgs,
+        /// 削除するcredential_id(完全一致・manage auth listで確認)
+        credential_id: String,
+    },
+    /// api-keyの生成(`abk_`前置のkeyを1回だけstdout表示。S3接続不要のlocal操作)
+    ApiKey {
+        #[command(flatten)]
+        ctx: CtxArgs,
+        /// api-keyの表示名(manage auth listで確認用に使う。既定"api-key"。空文字はerror)
+        #[arg(long)]
+        name: Option<String>,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum CatalogSub {
+    /// 索引objectのvalidator検証→変化時のみGET+復号でDBへ同期(遅延refresh・D10)
+    Sync {
+        #[command(flatten)]
+        ctx: CtxArgs,
+    },
+    /// ローカルregistry(JSONL)からcache classを置換再構築(永続classは保持)
+    Rebuild {
+        #[command(flatten)]
+        ctx: CtxArgs,
+    },
+    /// scan対象(pipeline.toml [catalog.scan])をlocal FS走査し4状態へ分類・
+    /// pending_itemsを全置換(TASK-9 D6承認・12章P5)
+    Scan {
+        #[command(flatten)]
+        ctx: CtxArgs,
+        /// sha256を再計算しsha_uuid_lookup合流でunknownをokへ確定する(既定は
+        /// size+mtime比較のみ)
+        #[arg(long)]
+        sha256: bool,
     },
 }
 
@@ -144,6 +206,155 @@ pub fn cmd_manage(args: &ManageArgs) -> i32 {
             } => cmd_manage_jobs_reissue(ctx, object_key, tier.as_deref()),
         },
         ManageSub::Reset { ctx, apply } => cmd_manage_reset(ctx, *apply),
+        ManageSub::Catalog { sub } => match sub {
+            CatalogSub::Sync { ctx } => cmd_manage_catalog_sync(ctx),
+            CatalogSub::Rebuild { ctx } => cmd_manage_catalog_rebuild(ctx),
+            CatalogSub::Scan { ctx, sha256 } => cmd_manage_catalog_scan(ctx, *sha256),
+        },
+        ManageSub::Auth { sub } => match sub {
+            AuthSub::List { ctx: _ } => cmd_manage_auth_list(),
+            AuthSub::Remove {
+                ctx: _,
+                credential_id,
+            } => cmd_manage_auth_remove(credential_id),
+            AuthSub::ApiKey { ctx: _, name } => cmd_manage_auth_api_key(name.as_deref()),
+        },
+    }
+}
+
+/// manage auth list(TASK-9設計8章・12章P6+TASK-13設計2.5): catalog DB(2.2の
+/// catalog.db)のcredentials table(passkey)とapi_keys table(api-key)を統合表示
+/// する(credential_id・kind=passkey/api_key・name・created_at)。S3接続不要の
+/// local操作。0件案内(bootstrap案内)は両table合計0件時のみ(api_keys残存時は
+/// api-key login可能のため)。
+fn cmd_manage_auth_list() -> i32 {
+    let run = (|| -> BackupResult<i32> {
+        let db = crate::catalog::CatalogDb::open()?;
+        let credentials = db.load_credentials()?;
+        let api_keys = db.load_api_keys()?;
+        let total = credentials.len() + api_keys.len();
+        if total == 0 {
+            println!("登録されたcredentialはありません(0件)");
+            println!(
+                "案内: 初回登録は `amazing-backup serve --bootstrap` でbootstrap tokenを発行してください"
+            );
+            return Ok(0);
+        }
+        for r in &credentials {
+            println!(
+                "{} passkey {} {}",
+                r.credential_id, r.name, r.created_at
+            );
+        }
+        for k in &api_keys {
+            println!("{} api_key {} {}", k.credential_id, k.name, k.created_at);
+        }
+        println!("{total}件(credential_id・kind・name・created_at)");
+        Ok(0)
+    })();
+    match run {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// manage auth remove <credential_id>(TASK-9設計8章・12章P6+TASK-13設計2.5):
+/// credential_id完全一致の1行をcredentials table→api_keys tableの順に削除する
+/// (失効=nameは一意性が無いため削除対象指定に使わない)。両table合計削除0行の
+/// credential_idは対象エラー3。削除後に両table合計0件(全認証手段紛失時と同一
+/// 状態)となった場合は再bootstrap案内(serve --bootstrap)を表示する(合計0件では
+/// passkey login・api-key loginのいずれの手段も無く・passkey登録はbootstrap
+/// token提示時のみ開く=認証閉鎖fail-closed。api_keys残存時は案内しない)。
+/// S3接続不要のlocal操作。api-key失効は既存sessionを破棄しない(in-memory 24h・
+/// passkey removeと同一挙動)。
+fn cmd_manage_auth_remove(credential_id: &str) -> i32 {
+    let run = (|| -> BackupResult<i32> {
+        let db = crate::catalog::CatalogDb::open()?;
+        let removed_credentials = db.remove_credential(credential_id)?;
+        let removed_api_keys = db.remove_api_key(credential_id)?;
+        if removed_credentials + removed_api_keys == 0 {
+            return Err(BackupError::Target(format!(
+                "credential_id({credential_id})は登録されていません(`manage auth list`で確認してください)"
+            )));
+        }
+        let kind = if removed_credentials > 0 {
+            "passkey"
+        } else {
+            "api_key"
+        };
+        println!("ok: credentialを削除しました (kind={kind} credential_id={credential_id})");
+        let rest = db.credential_count()? + db.api_key_count()?;
+        if rest == 0 {
+            println!(
+                "案内: credentialが0件になりました(未登録状態・login不可)。再登録は `amazing-backup serve --bootstrap` でbootstrap tokenを発行してください"
+            );
+        }
+        Ok(0)
+    })();
+    match run {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// api-keyの生成(TASK-13設計D12・2.2: 32byte乱数を`abk_`+base64url(43文字)へ。
+/// 乱数源はbootstrap token生成(serve)と同じ/dev/urandom=共通helper(random_bytes))。
+fn generate_api_key() -> BackupResult<String> {
+    let buf = random_bytes(32)?;
+    use base64::Engine as _;
+    Ok(format!(
+        "abk_{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
+    ))
+}
+
+/// api-keyのcredential_id生成("ak-"+8byte乱数の16hex表示・random_bytes)。
+fn generate_api_key_credential_id() -> BackupResult<String> {
+    let buf = random_bytes(8)?;
+    Ok(format!(
+        "ak-{}",
+        buf.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ))
+}
+
+/// manage auth api-key [--name <name>](TASK-13設計D12・2.2): api-keyを生成して
+/// **1回だけstdoutへ表示**する(再表示不可・hashから復元不可=SHA-256 hexのみ
+/// api_keys table(永続class)へ保存。平文keyは保存しない)。nameは既定"api-key"
+/// (空文字指定はusage error)。
+/// S3接続不要のlocal操作(既存auth系と同一)。
+fn cmd_manage_auth_api_key(name: Option<&str>) -> i32 {
+    let run = (|| -> BackupResult<i32> {
+        let name = name.unwrap_or("api-key");
+        // 空文字nameは無検査で保存させない(usage error 64。未指定既定"api-key"は維持)
+        if name.is_empty() {
+            return Err(BackupError::Usage(
+                "--nameは空文字を指定できません(省略時は既定のapi-key)".to_string(),
+            ));
+        }
+        let api_key = generate_api_key()?;
+        let credential_id = generate_api_key_credential_id()?;
+        let key_hash = sha256_hex(api_key.as_bytes());
+        let db = crate::catalog::CatalogDb::open()?;
+        db.insert_api_key(&credential_id, &key_hash, name)?;
+        // 保存後に1回限り表示(保存失敗時はkeyを表示しない)
+        println!("api-keyを生成しました(この表示は1回限りです。紛失時は再生成してください):");
+        println!("{api_key}");
+        println!("name: {name}");
+        println!("credential_id: {credential_id}");
+        Ok(0)
+    })();
+    match run {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
     }
 }
 
@@ -344,6 +555,7 @@ fn format_spec(r: &crate::s3::LifecycleSpec) -> String {
 }
 
 /// registryから索引を再構築してS3へ配置する(prune/pin等の索引影響操作後)。
+/// 配置後はTASK-9書込系のDB反映も行う(同一process内・失敗時は警告のみ)。
 fn rebuild_and_upload(
     session: &super::Session,
     registry_path: &std::path::Path,
@@ -357,16 +569,39 @@ fn rebuild_and_upload(
     let reduced = registry::reduce_records(&records);
     let entries =
         crate::index::build_entries(&reduced, &session.aws.bucket, &session.canonical_bucket);
-    crate::index::upload_index(
+    let updated_at = now_jst();
+    let uploaded_index_vid = crate::index::upload_index(
         session.backend.as_ref(),
         &session.aws.bucket,
         &session.aws.prefix,
         &cfg.public_keys,
         &entries,
         run_tag,
-        &now_jst(),
+        &updated_at,
         registry_path,
     )?;
+    let header = crate::index::IndexHeader {
+        schema: INDEX_SCHEMA,
+        record_type: "index_header".into(),
+        updated_at,
+        run_id: run_tag.to_string(),
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        entries: entries.len() as i64,
+    };
+    if let Err(warn) = crate::catalog::reflect_written_index(
+        session.backend.as_ref(),
+        &session.aws.bucket,
+        &session.aws.prefix,
+        &header,
+        &entries,
+        &crate::catalog::SourceMtimes::from_reduced(&reduced),
+        &uploaded_index_vid,
+    ) {
+        eprintln!(
+            "WARNING: catalog DB({})への反映に失敗しました(当該scopeのcacheは失効扱い。処理は継続します): {warn}",
+            crate::catalog::catalog_db_path().display()
+        );
+    }
     Ok(())
 }
 
@@ -847,9 +1082,14 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
         let registry_path = cfg.registry_path.clone();
         let mut excluded: std::collections::BTreeSet<(String, String)> =
             std::collections::BTreeSet::new();
+        // mtime基線はregistryのreduce結果(file_write記録)から供給する(rebuild後の
+        // scanが未変更fileをfalse changedにしないように。レビュー指摘#2=PR#9対応。
+        // registry不在時は供給源なし=空基線)
+        let mut mtimes = crate::catalog::SourceMtimes::empty();
         if registry_path.is_file() {
             let records = registry::load_registry(&registry_path)?;
             let reduced_now = registry::reduce_records(&records);
+            mtimes = crate::catalog::SourceMtimes::from_reduced(&reduced_now);
             for d in reduced_now
                 .prunes
                 .iter()
@@ -901,16 +1141,40 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             .first()
             .and_then(|e| e.versions.first().map(|v| v.batch_id.clone()))
             .unwrap_or_else(|| "rebuild".to_string());
-        crate::index::upload_index(
+        let updated_at = now_jst();
+        let uploaded_index_vid = crate::index::upload_index(
             session.backend.as_ref(),
             &session.aws.bucket,
             &session.aws.prefix,
             &cfg.public_keys,
             &entry_list,
             &run_id,
-            &now_jst(),
+            &updated_at,
             &registry_path,
         )?;
+        // TASK-9 書込系のDB反映(索引upload成功後・同一process内。失敗時は警告のみ)
+        let header = crate::index::IndexHeader {
+            schema: INDEX_SCHEMA,
+            record_type: "index_header".into(),
+            updated_at,
+            run_id: run_id.clone(),
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            entries: entry_list.len() as i64,
+        };
+        if let Err(warn) = crate::catalog::reflect_written_index(
+            session.backend.as_ref(),
+            &session.aws.bucket,
+            &session.aws.prefix,
+            &header,
+            &entry_list,
+            &mtimes,
+            &uploaded_index_vid,
+        ) {
+            eprintln!(
+                "WARNING: catalog DB({})への反映に失敗しました(当該scopeのcacheは失効扱い。処理は継続します): {warn}",
+                crate::catalog::catalog_db_path().display()
+            );
+        }
         println!(
             "索引を再構築しました: entries={} (manifests={})",
             entry_list.len(),
@@ -928,6 +1192,456 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             e.exit_code()
         }
     }
+}
+
+/// manage catalog sync(TASK-9 4章・12章P1): HEAD 1回で索引objectのvalidator
+/// (ETag+VersionId)を取得しsync_stateと比較する。変化(初回含む=sync自身の取得実績が
+/// 無い状態)あればGET+復号で当該scopeのcache行を置換し、fetched_at・validatorを取得
+/// 内容としてsync_stateへ確定する。変化なければGETを行わない(毎回の索引GETを廃止=
+/// 要件1)。転送・復号失敗時はsync_state.status=error(staleness明示)。cache置換
+/// (replace_scope)失敗時もerror化してからエラー終了し、書込履歴があるnamespaceで
+/// remote索引objectが不在(HEADで不在確認)の場合はstale化してから案内エラー終了
+/// する(いずれも置換失敗・rollback後・不在確認後に旧freshを残さない)。索引不在時の
+/// 未書込判定(registry読取)失敗もerror化してからエラー終了する。
+fn cmd_manage_catalog_sync(ctx: &CtxArgs) -> i32 {
+    match catalog_sync_once(ctx) {
+        Ok(msg) => {
+            println!("catalog: {msg}");
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// catalog syncの処理本体(印刷しない)。TASK-9 12章P2: serve起動時syncもこの関数を
+/// spawn_blocking経由で呼ぶ(P1同期層の再利用・Runtime混在panic回避)。
+/// 戻り値はCLI向けの結果message(stdoutの`catalog: `以降)。
+/// 初回(sync_state・local registryともに無い状態)でもremoteのHEAD確認を省略
+/// しない(local履歴の不在はremote索引の不在の証拠にならない=別端末・復旧環境で
+/// S3に索引が存在するなら初回syncで取得する)。
+pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
+    use crate::catalog::{
+        CatalogDb, ReflectOrigin, STATUS_ERROR, STATUS_FRESH, STATUS_STALE, SourceMtimes, Validator,
+    };
+    let session = open_session_with_pipeline(ctx)?;
+    let key_path = resolve_key(ctx, session.cfg.as_ref())?;
+    let index_key = layout::index_object_key(&session.aws.prefix);
+    let mut db = CatalogDb::open()?;
+    let empty_cache = |db: &mut CatalogDb| -> BackupResult<String> {
+        let header = crate::index::IndexHeader {
+            schema: INDEX_SCHEMA,
+            record_type: "index_header".into(),
+            updated_at: now_jst(),
+            run_id: String::new(),
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            entries: 0,
+        };
+        if let Err(e) = db.replace_scope(
+            &session.aws.bucket,
+            &session.aws.prefix,
+            &header,
+            &[],
+            &SourceMtimes::empty(),
+            &Validator::default(),
+            STATUS_FRESH,
+            ReflectOrigin::Fetched,
+        ) {
+            // 置換失敗・rollback後も旧freshを残さない=error化してからエラー
+            // (mark_status失敗は元のerrorに優先させない)
+            let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+            return Err(e);
+        }
+        Ok("未書込namespaceです(空のcacheを同期しました)".to_string())
+    };
+    // remote索引の存在確認から(HEAD)。HEAD失敗もerror化経路へ集約する
+    // (sync_state.status=errorを残し旧freshを持ち越さない)
+    let head = match session.backend.head(&session.aws.bucket, &index_key) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+            return Err(e);
+        }
+    };
+    let Some(head) = head else {
+        // 索引object不在: 未書込namespace例外(HEADでremote不在を確認した上での
+        // 空cache+fresh確定・exit 0)。未書込の判定は registry file自体が無い
+        // (この環境に書込履歴が一切無い)場合か file_upload記録に当該prefix配下が
+        // 無い場合。書込実績があるnamespaceの索引不在は案内エラーにする
+        let registry_absent = !session
+            .cfg
+            .as_ref()
+            .expect("pipeline.toml必須経路(open_session_with_pipeline)")
+            .registry_path
+            .is_file();
+        // 未書込判定の失敗(registry読取・parse失敗)も早期returnさせない=error化して
+        // からエラー(HEADで索引不在を確認済みの状態で旧freshを残さない)
+        let never_written = match super::namespace_never_written(&session) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+                return Err(e);
+            }
+        };
+        if registry_absent || never_written {
+            return empty_cache(&mut db);
+        }
+        // 書込実績があるnamespaceの索引object不在: cacheは旧索引のまま鮮度保証が
+        // ないためstale化してから案内エラー(旧freshを残さない。mark_status失敗は
+        // 元のerrorに優先させない)
+        let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_STALE);
+        return Err(BackupError::Config(format!(
+            "索引object({index_key})を取得・復号できません。`amazing-backup manage index rebuild`で復旧するか、aws.tomlのbucket/prefixを確認してください"
+        )));
+    };
+    let validator = Validator::from_head(&head);
+    if db.replica_synced_fresh(&session.aws.bucket, &session.aws.prefix, &validator)? {
+        db.mark_verified_fresh(&session.aws.bucket, &session.aws.prefix)?;
+        return Ok("変化なし(索引objectのGETを省略しました)".to_string());
+    }
+    let fetch = super::fetch_index_confirmed(&session, &key_path, &head);
+    match fetch {
+        Ok((header, entries, confirmed, fetched)) => {
+            let status = if confirmed {
+                STATUS_FRESH
+            } else {
+                STATUS_STALE
+            };
+            // S3索引replicaはmtime供給源を持たないため、置換前に既存DB行の基線を
+            // 引き継ぐ(local backupの記録基線がreplica取得で消えるとclassify_scan_target
+            // が未変更fileをfalse changedにする。レビュー指摘#2=PR#9対応)
+            let mtimes = match db.existing_source_mtimes(&session.aws.bucket, &session.aws.prefix)
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    // 基線読取失敗も置換失敗と同一の扱い=error化してからエラー
+                    let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+                    return Err(e);
+                }
+            };
+            if let Err(e) = db.replace_scope(
+                &session.aws.bucket,
+                &session.aws.prefix,
+                &header,
+                &entries,
+                &mtimes,
+                &fetched,
+                status,
+                ReflectOrigin::Fetched,
+            ) {
+                // 置換失敗・rollback後も旧freshを残さない=error化してからエラー
+                // (mark_status失敗は元のerrorに優先させない)
+                let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+                return Err(e);
+            }
+            Ok(format!(
+                "同期しました(entries={}{})",
+                entries.len(),
+                if confirmed {
+                    String::new()
+                } else {
+                    "・WARNING: 取得中に索引が変化したためstale扱いです(再実行で確定します)"
+                        .to_string()
+                }
+            ))
+        }
+        Err(e) => {
+            // 取得失敗(転送・復号): status=error(旧fresh状態を残さない)
+            let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+            Err(e)
+        }
+    }
+}
+
+/// manage catalog rebuild(TASK-9 2章・12章P1): ローカルregistry(JSONL=真正)から
+/// cache class(entities/versions/pins/locations/sync_state)のみを置換再構築する
+/// (冪等)。永続class(credentials/push_intents)はdropしない。registry由来の内容と
+/// S3索引の鮮度関係は未知のためstatus=staleで確定する(次回照会のHEAD検証・取得で
+/// S3側と整合する=cacheは常にJSONL+S3から再構築可能)。
+fn cmd_manage_catalog_rebuild(ctx: &CtxArgs) -> i32 {
+    let run = (|| -> BackupResult<i32> {
+        let session = open_session_with_pipeline(ctx)?;
+        let cfg = session
+            .cfg
+            .as_ref()
+            .expect("pipeline.toml必須経路(open_session_with_pipeline)");
+        let registry_path = cfg.registry_path.clone();
+        let records = registry::load_registry(&registry_path)?;
+        let reduced = registry::reduce_records(&records);
+        let entries =
+            crate::index::build_entries(&reduced, &session.aws.bucket, &session.canonical_bucket);
+        let mut db = crate::catalog::CatalogDb::open()?;
+        let header = crate::index::IndexHeader {
+            schema: INDEX_SCHEMA,
+            record_type: "index_header".into(),
+            updated_at: now_jst(),
+            run_id: "catalog-rebuild".into(),
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            entries: entries.len() as i64,
+        };
+        db.replace_scope(
+            &session.aws.bucket,
+            &session.aws.prefix,
+            &header,
+            &entries,
+            &crate::catalog::SourceMtimes::from_reduced(&reduced),
+            &crate::catalog::Validator::default(),
+            crate::catalog::STATUS_STALE,
+            crate::catalog::ReflectOrigin::Written,
+        )?;
+        println!(
+            "catalog: ローカルregistryから再構築しました(entries={}・次回照会時にS3索引と整合します)",
+            entries.len()
+        );
+        Ok(0)
+    })();
+    match run {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// manage catalog scan(TASK-9設計3章D6承認・12章P5): pipeline.toml
+/// [profiles.<n>.catalog.scan]の登録対象をlocal FS走査+catalog DB比較のみで4状態
+/// (unbacked/changed/ok/unknown)へ分類し、当該scopeのpending_itemsを全置換する。
+/// --sha256指定時のみsha256再計算+sha_uuid_lookup合流でunknownをokへ確定する。
+/// 集計表示はdry-runのplan行と同一形式。
+fn cmd_manage_catalog_scan(ctx: &CtxArgs, sha256: bool) -> i32 {
+    match catalog_scan_once(ctx, sha256) {
+        Ok(outcome) => {
+            println!(
+                "scan: {}件 unbacked={} changed={} ok={} unknown={}",
+                outcome.items.len(),
+                outcome.unbacked,
+                outcome.changed,
+                outcome.ok,
+                outcome.unknown
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// scanの分類status(TASK-9設計3章・catalog.toml P5条件の4状態)。
+pub(crate) const SCAN_UNBACKED: &str = "unbacked";
+pub(crate) const SCAN_CHANGED: &str = "changed";
+pub(crate) const SCAN_OK: &str = "ok";
+pub(crate) const SCAN_UNKNOWN: &str = "unknown";
+
+/// scan実行結果(items=置換後のpending_items。countsは集計表示用)。
+pub(crate) struct ScanOutcome {
+    pub items: Vec<crate::catalog::PendingItem>,
+    pub unbacked: usize,
+    pub changed: usize,
+    pub ok: usize,
+    pub unknown: usize,
+}
+
+/// catalog scanの処理本体(印刷しない)。CLI(manage catalog scan)とserve
+/// (POST /api/pending/scan)が呼ぶP5同期層。scanはlocal FS走査+catalog DB比較のみで
+/// S3 APIを呼ばない(設計3章)。sha256=true時のみsha計算+registry由来の
+/// sha_uuid_lookup合流を行う。
+pub(crate) fn catalog_scan_once(ctx: &CtxArgs, sha256: bool) -> BackupResult<ScanOutcome> {
+    // S3 backendを構築しない(scanはS3不要・設計3章。aws/pipeline設定のみ読む)
+    let aws = super::load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
+    let cfg =
+        crate::config::load_pipeline(&super::pipeline_config_path(&ctx.config), &aws.profile)?;
+    let mut db = crate::catalog::CatalogDb::open()?;
+    let baseline = db.scan_baseline(&aws.bucket, &aws.prefix)?;
+
+    // (b') scan対象の明示登録: section無しは0件走査で正常終了(全置換=前回結果を残さない)
+    let scan = cfg
+        .catalog
+        .scan
+        .clone()
+        .unwrap_or(crate::config::ScanConfig {
+            roots: Vec::new(),
+            extensions: Vec::new(),
+            exclude: Vec::new(),
+        });
+
+    // local FS走査(symlink不追従・extensions拡張子比較・exclude相対path部分一致)
+    let mut found: Vec<(std::path::PathBuf, std::path::PathBuf, u64, String)> = Vec::new();
+    for root in &scan.roots {
+        walk_scan_root(root, root, &scan.extensions, &scan.exclude, &mut found)?;
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    // --sha256合流判定の準備(指定時のみregistryを読む)
+    let mut reduced: Option<registry::Reduced> = None;
+    let canonical_bucket = if sha256 {
+        Some(crate::config::canonical_bucket(&super::aws_config_path(
+            &ctx.aws_config,
+        ))?)
+    } else {
+        None
+    };
+
+    let last_scan_at = now_jst();
+    let mut items: Vec<crate::catalog::PendingItem> = Vec::with_capacity(found.len());
+    let (mut n_unbacked, mut n_changed, mut n_ok, mut n_unknown) = (0usize, 0usize, 0usize, 0usize);
+    for (root, abs, size, mtime) in &found {
+        let abs_str = abs.to_string_lossy();
+        let mut status = classify_scan_target(&baseline, abs, *size, mtime);
+        if status == SCAN_UNKNOWN && sha256 {
+            // 明示option指定時のみsha256を計算し合流正本sha_uuid_lookupへ問い合わせ
+            let reduced = match &mut reduced {
+                Some(r) => r,
+                None => {
+                    let records = registry::load_registry(&cfg.registry_path)?;
+                    reduced.insert(registry::reduce_records(&records))
+                }
+            };
+            let canonical = canonical_bucket.as_deref().unwrap_or(aws.bucket.as_str());
+            let sha = super::sha256_hex_streaming(abs)?;
+            if registry::sha_uuid_lookup(reduced, &sha, &aws.bucket, canonical).is_some() {
+                status = SCAN_OK.to_string();
+            }
+        }
+        match status.as_str() {
+            SCAN_UNBACKED => n_unbacked += 1,
+            SCAN_CHANGED => n_changed += 1,
+            SCAN_OK => n_ok += 1,
+            _ => n_unknown += 1,
+        }
+        items.push(crate::catalog::PendingItem {
+            source_root: root.to_string_lossy().into_owned(),
+            path: abs_str.into_owned(),
+            size: *size as i64,
+            mtime: mtime.clone(),
+            status,
+            last_scan_at: last_scan_at.clone(),
+        });
+    }
+    db.replace_pending_items(&aws.bucket, &aws.prefix, &items)?;
+    Ok(ScanOutcome {
+        items,
+        unbacked: n_unbacked,
+        changed: n_changed,
+        ok: n_ok,
+        unknown: n_unknown,
+    })
+}
+
+/// 分類判定(TASK-9設計3章D6承認・catalog.toml P5条件の算法):
+/// (1)path一致の記録がありsize/mtime不一致=changed (2)path一致が無くbasename一致の
+/// 記録のみでsize/mtime不一致=unknown(判定不能をchanged/unbackedへ偽装しない)
+/// (3)size+mtime一致(path一致・basename一致のいずれか)=ok (4)path・basenameとも
+/// 一致する記録なし=unbacked。mtimeはfile_write由来のsource_mtime保存値
+/// (mtime_jst_preciseと同一形式)との文字列比較(保存値が空=供給源なしは不一致扱い)。
+fn classify_scan_target(
+    baseline: &[crate::catalog::ScanBaseline],
+    abs: &std::path::Path,
+    size: u64,
+    mtime: &str,
+) -> String {
+    let size_matches =
+        |b: &crate::catalog::ScanBaseline| b.latest_size == size as i64 && b.latest_size >= 0;
+    let mtime_matches =
+        |b: &crate::catalog::ScanBaseline| !b.source_mtime.is_empty() && b.source_mtime == mtime;
+    let abs_str = abs.to_string_lossy();
+    if let Some(b) = baseline.iter().find(|b| b.source_path == abs_str.as_ref()) {
+        // path一致の記録あり: 一致=ok・不一致=changed
+        return if size_matches(b) && mtime_matches(b) {
+            SCAN_OK.to_string()
+        } else {
+            SCAN_CHANGED.to_string()
+        };
+    }
+    let basename = abs.file_name().map(std::ffi::OsStr::to_string_lossy);
+    let base_matches: Vec<&crate::catalog::ScanBaseline> = baseline
+        .iter()
+        .filter(|b| {
+            basename.as_ref().is_some_and(|name| {
+                std::path::Path::new(&b.source_path)
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy() == *name)
+            })
+        })
+        .collect();
+    if base_matches.is_empty() {
+        return SCAN_UNBACKED.to_string();
+    }
+    if base_matches
+        .iter()
+        .any(|b| size_matches(b) && mtime_matches(b))
+    {
+        return SCAN_OK.to_string();
+    }
+    SCAN_UNKNOWN.to_string()
+}
+
+/// scan root配下の再帰走査(TASK-9設計3章(b')): symlinkはdirectory traverse・
+/// file対象化とも行わない(範囲拡大事故防止=指摘#6)。extensionsは拡張子一致のみ
+/// (省略・空は全regular file)。excludeは走査root基準の相対path部分一致で除外
+/// (一致dir配下も対象外)。rel計算は常にroot基準(root引数)で行う(再帰階層の
+/// dir基準にすると深い階層の除外語が一致しなくなるため)。
+fn walk_scan_root(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    extensions: &[String],
+    exclude: &[String],
+    out: &mut Vec<(std::path::PathBuf, std::path::PathBuf, u64, String)>,
+) -> BackupResult<()> {
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        BackupError::Process(format!("scan走査の読込に失敗({}): {e}", dir.display()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            BackupError::Process(format!("scan走査の読込に失敗({}): {e}", dir.display()))
+        })?;
+        let file_type = entry.file_type().map_err(|e| {
+            BackupError::Process(format!(
+                "scan走査のfile種別取得に失敗({}): {e}",
+                entry.path().display()
+            ))
+        })?;
+        // symlinkは既定で辿らない(directoryもfileも対象外)
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // exclude: 走査対象の相対path部分一致(dir一致=配下ごと対象外)
+        if exclude.iter().any(|e| rel.contains(e.as_str())) {
+            continue;
+        }
+        if file_type.is_dir() {
+            walk_scan_root(root, &path, extensions, exclude, out)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        // extensions(省略・空は全regular file対象)
+        if !extensions.is_empty() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !extensions.iter().any(|e| name.ends_with(e.as_str())) {
+                continue;
+            }
+        }
+        let meta = std::fs::metadata(&path).map_err(|e| {
+            BackupError::Process(format!(
+                "scan対象のmetadata取得に失敗({}): {e}",
+                path.display()
+            ))
+        })?;
+        let mtime = super::mtime_jst_precise(&path)?;
+        out.push((root.to_path_buf(), path, meta.len(), mtime));
+    }
+    Ok(())
 }
 
 /// manage reset(TASK-18 8章・8.1・TASK-25 2章): dev bucket初期化の恒久コマンド

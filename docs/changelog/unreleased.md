@@ -25,5 +25,25 @@
 - 維持(改名対象外): auto_path_roots・unfiled_category・category・source_path・latest_source_path・identity_hash・metadata schema=1。正規化規則・category名規則も不変(名称のみ変更)
 - 内部: normalize_rel_path→normalize_label・ManifestV2File→ManifestV3File等の関数・構造体改名(外部影響なし)
 
+## 0.2.0(未確定・TASK-9/13/16/18/19: local catalog DB・serve+Web frontend)
+
+### 追加(TASK-9)
+
+- local catalog DB(`~/.local/state/amazing-backup/catalog.db`・SQLite): remote索引のlocal複製(復号後の平文view)とローカル書込の導出index。権限0600・平文を含むため取扱注意。真正はregistry.jsonlとS3索引のまま(`manage catalog rebuild`で常に再構築可能)
+- CLI照会のcache利用: `list files/versions/pins/runs`・`query`は起動時HEAD 1回のvalidator(ETag+VersionId)検証でfreshならcatalog DBから回答(S3 GET・復号を省略)。`--refresh`で再取得を強制
+- `manage catalog sync|rebuild|scan`: catalog DBの遅延同期・ローカルregistryからの再構築・アップロード前カタログscan(`[profiles.<name>.catalog.scan]`の登録root走査でunbacked/changed/ok/unknownの4状態へ分類。`--sha256`でsha一致合流によりunknownをokへ確定)
+- `serve` subcommand: Web frontend(frontend/distをrust-embed埋め込み・欠落buildではAPIのみ起動+warning)+読取API(axum・`/api/*`)を起動。listenはserver.toml(既定`127.0.0.1:40510`・不在でも既定値で起動)。設定fileにserver.tomlを新設(`config init`が生成)
+- passkey認証(WebAuthn): `serve --bootstrap`のone-time token(期限10分・1回消費)でpasskey登録。未認証の閲覧系APIは401で拒否(fail-closed)。session期限24時間
+- 認証済み閲覧API: entities(1page=50件のpaging)・versions・pins・locations・pending・sync状態・diff(実行+最終結果参照)・pending scan実行。書込操作API(backup push/pull・get・pin・manage系)は無い(操作はCLI既存のまま)
+- `manage auth list` / `manage auth remove <credential_id>`: passkey credentialの一覧・失効(local catalog DB操作・S3接続不要。全削除時は`serve --bootstrap`の再bootstrap案内を表示)
+- api-key認証(TASK-13): passkeyが使えない端末・browser向けの第二login手段。`manage auth api-key [--name NAME]`でkeyを生成(`abk_`前置・stdout表示は1回限り・SHA-256 hashのみ保存)し、LoginViewのapi-key欄へ入力(接続元LAN内限定で受理・sessionはpasskey loginと同一の24時間)
+- serve Web UIの構成とAPI拡張(TASK-16/18/19): 5タブ構成(ホーム/バックアップ/転送/設定/管理)・ホームサマリ(sync状態・前回backup・未対応・diff・実行中job)・`GET /api/runs`(backup実行batchの集約)・`GET /api/jobs`(現版は空応答)・一覧3ビュー(folder/tag/collection切替)+検索+pager・tag/collection編集API(catalog DBのlocal語彙で索引には入らない。書込は成功・失敗双方をaudit_log tableへ記録)・frontend visual design(cold slate+teal・WCAG AA contrast)
+
+### 修正(PR#9レビュー指摘)
+
+- catalog cacheのvalidator束縛: 書込系(push/pin/prune等)の索引upload後のDB反映は、upload応答のVersionIdがHEAD現行version_idと一致した場合のみfresh化する(不一致=upload→HEAD間に他端末が索引objectを置換した場合は当該scopeをstale化して反映中止=他端末のvalidatorと自processの旧entriesの組でfresh化し、以降のlist/queryがcache hitとして旧内容を受け入れるのを防ぐ。versioning無効bucketでupload応答が空の場合は従来どおりHEAD応答のみで判断)
+- catalog sync・cache miss再取得でのmtime基線保持: S3索引replica取得反映(`manage catalog sync`・照会系cache miss再取得)は既存DB行(versions/locations)からsource_mtime基線を引き継いで置換する(local backup記録の基線がreplica取得で消え、`manage catalog scan`が未変更fileをfalse changedに分類するのを防ぐ)。`manage index rebuild`後のDB反映もregistryのfile_write記録から基線を供給する
+- Web UI詳細画面のentity切替残存解消: entity詳細の要求対象uuidをstoreが管理し、A→B切替時に旧entity(A)の詳細・版一覧・errorを即座にclear+旧uuid向けの遅延応答を棄却する(切替直後の旧詳細表示・編集可能期間の残存=route uuid(B)へAのtagsで置換する事故を構造的に排除)
+
 # 0.1.0
 - 初版(v0.1.0として公開)

@@ -198,12 +198,152 @@ pub(crate) fn read_index_for_query(
     read_index(session.backend.as_ref(), &session.aws, key_path)
 }
 
+/// 照会系(list files/versions/pins/runs・query)のcache利用索引読込(TASK-9 D7・設計
+/// 4章/5章)。別process起動時はHEAD 1回で索引objectのvalidator(ETag+VersionId)を確認し、
+/// 検証済みfreshならS3 GETを行わずlocal catalog DBから回答する(cache hit)。
+/// validator不一致(stale)・--refresh指定時はS3 GET+復号で回答し取得内容をDBへ反映する
+/// (次回起動はcache hit)。DBを開けない(未sync・破損)場合は従来経路(S3直接)へ
+/// 警告付きでfallbackする。diff・get・list jobsは引き続きread_index_for_query
+/// (S3直接)を使う(実態突合・per-object headが目的)。
+pub(crate) fn read_index_cached(
+    session: &Session,
+    key_path: &Path,
+    refresh: bool,
+) -> BackupResult<(crate::index::IndexHeader, Vec<crate::index::IndexFileEntry>)> {
+    use crate::catalog::{
+        CatalogDb, ReflectOrigin, STATUS_ERROR, STATUS_FRESH, STATUS_STALE, Validator,
+    };
+    let index_key = crate::layout::index_object_key(&session.aws.prefix);
+    let head = session.backend.head(&session.aws.bucket, &index_key)?;
+    let Some(head) = head else {
+        // 索引object不在: cacheの対象外(未書込namespace例外・索引不在エラーは
+        // 従来経路の規則に従う)
+        return read_index_for_query(session, key_path);
+    };
+    let validator = Validator::from_head(&head);
+    let mut db = CatalogDb::open();
+    if let Err(e) = &db {
+        // DBを開けない(未sync・破損): cache無しで従来のS3取得へ(照会は継続)
+        eprintln!("WARNING: catalog DBを開けないためS3から取得します({e})");
+    }
+    if !refresh && let Ok(db) = &db {
+        // cache hit判定とentries読込は同一の読取transaction(snapshot)で行う
+        // (判定と読込の間にsyncがcommitしてもfresh判定と内容がずれない)
+        if let Some(loaded) =
+            db.load_entries_if_fresh(&session.aws.bucket, &session.aws.prefix, &validator)?
+        {
+            // HEAD検証一致済みのためS3 GETを行わない
+            let _ = db.mark_verified_fresh(&session.aws.bucket, &session.aws.prefix);
+            return Ok(loaded);
+        }
+    }
+    // cache miss(stale・未sync)または--refresh: S3 GET+復号+DB反映
+    let fetch = fetch_index_confirmed(session, key_path, &head);
+    match fetch {
+        Ok((header, entries, confirmed, fetched)) => {
+            // S3取得経路の戻りにもDB保存側(replace_scope)と同一のscope分離filterを
+            // 適用する(同一bucket複数prefixの索引でcache hit時と--refresh時の
+            // entity・version・pinの集合が変わらないようにする)
+            let scoped = crate::catalog::scope_filter_entries(&entries, &session.aws.prefix);
+            let mut scoped_header = header;
+            scoped_header.entries = scoped.len() as i64;
+            if let Ok(db) = db.as_mut() {
+                let status = if confirmed {
+                    STATUS_FRESH
+                } else {
+                    STATUS_STALE
+                };
+                // S3索引replicaはmtime供給源を持たないため、置換前に既存DB行の基線を
+                // 引き継ぐ(local backupの記録基線がcache miss再取得で消えると
+                // classify_scan_targetが未変更fileをfalse changedにする。レビュー指摘#2
+                // =PR#9対応。基線読取失敗は従来どおり空基線で反映し続行する=反映失敗
+                // とはしない)
+                let mtimes = db
+                    .existing_source_mtimes(&session.aws.bucket, &session.aws.prefix)
+                    .unwrap_or_default();
+                let result = db.replace_scope(
+                    &session.aws.bucket,
+                    &session.aws.prefix,
+                    &scoped_header,
+                    &scoped,
+                    &mtimes,
+                    &fetched,
+                    status,
+                    ReflectOrigin::Fetched,
+                );
+                if let Err(e) = result {
+                    // DB反映失敗は照会自体の失敗にしない(取得済み内容で回答する)。
+                    // 旧fresh状態を残さないためstatus失効を試みる
+                    eprintln!("WARNING: catalog DBへの反映に失敗しました(cacheは無効化): {e}");
+                    let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_STALE);
+                }
+            }
+            Ok((scoped_header, scoped))
+        }
+        Err(e) => {
+            // 取得失敗(転送・復号): sync_state.status=error(旧freshを残さない)
+            if let Ok(db) = db.as_mut() {
+                let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// 索引objectの取得+validator確定(設計4章: GETの応答validatorを取得内容と同一の
+/// sync_stateへ確定する。HEADとGETの間の変化があれば再取得(1回limit)・それでも
+/// 不一致ならstale扱いの確定結果を返す)。
+/// 戻り値は(header, entries, validator一致確認結果, 確定validator)。
+pub(crate) fn fetch_index_confirmed(
+    session: &Session,
+    key_path: &Path,
+    head1: &crate::s3::HeadInfo,
+) -> BackupResult<(
+    crate::index::IndexHeader,
+    Vec<crate::index::IndexFileEntry>,
+    bool,
+    crate::catalog::Validator,
+)> {
+    use crate::catalog::Validator;
+    let index_key = crate::layout::index_object_key(&session.aws.prefix);
+    let head_validator = |head: &crate::s3::HeadInfo| Validator::from_head(head);
+    let (header, entries) = crate::index::fetch_index(
+        session.backend.as_ref(),
+        &session.aws.bucket,
+        &session.aws.prefix,
+        key_path,
+    )?;
+    let head2 = session.backend.head(&session.aws.bucket, &index_key)?;
+    let Some(head2) = head2 else {
+        // GET後に索引が消えた: 取得内容のvalidatorは確定不能のためstale扱い
+        return Ok((header, entries, false, Validator::default()));
+    };
+    if head_validator(&head2) == head_validator(head1) {
+        return Ok((header, entries, true, head_validator(&head2)));
+    }
+    // HEAD→GET間の変化: 1回limitの再取得
+    let (header2, entries2) = crate::index::fetch_index(
+        session.backend.as_ref(),
+        &session.aws.bucket,
+        &session.aws.prefix,
+        key_path,
+    )?;
+    let v2 = head_validator(&head2);
+    let head3 = session.backend.head(&session.aws.bucket, &index_key)?;
+    let Some(head3) = head3 else {
+        return Ok((header2, entries2, false, Validator::default()));
+    };
+    let v3 = head_validator(&head3);
+    let confirmed = v3 == v2;
+    Ok((header2, entries2, confirmed, v3))
+}
+
 /// ローカルregistryに当該prefix配下へのfile_upload記録が無い(=未書込namespace)か。
 /// registry不在はfalse(索引不在を異常扱い)。registryの不正行(parse失敗)はエラー伝播
 /// する(黙って空扱いにしない)。
 /// 書込実績の判定はbucket一致(registry::record_bucket_matched。H-1)を伴う:
 /// 同一prefix・別bucketの他方profileの実績では未書込のまま(0件例外はbucket単位)。
-fn namespace_never_written(session: &Session) -> BackupResult<bool> {
+pub(crate) fn namespace_never_written(session: &Session) -> BackupResult<bool> {
     let Some(cfg) = session.cfg.as_ref() else {
         return Ok(false);
     };
@@ -242,6 +382,18 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(data);
     digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// /dev/urandomから乱数bytesを読む(bootstrap token(server)・api-key/credential_id
+/// 生成(manage auth)の共用helper。open・読取失敗は内部error)。
+pub(crate) fn random_bytes(len: usize) -> BackupResult<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open("/dev/urandom")
+        .map_err(|e| crate::errors::BackupError::Internal(format!("乱数源のopenに失敗: {e}")))?;
+    let mut buf = vec![0u8; len];
+    f.read_exact(&mut buf)
+        .map_err(|e| crate::errors::BackupError::Internal(format!("乱数の読取に失敗: {e}")))?;
+    Ok(buf)
 }
 
 pub(crate) fn sha256_hex_file(path: &Path) -> BackupResult<String> {

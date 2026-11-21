@@ -8,6 +8,8 @@ S3(versioning有効bucket・Deep Archive)へ版管理付きで投入・照会・
 - **1-of-N暗号化**: SSH ed25519公開鍵複数で暗号化し、いずれか1鍵で復元可能(鍵喪失耐性)
 - **索引・registry**: title/uuid/所在pathでの照会・diff(索引とS3実態の突合)・manifest由来の索引再構築
 - **世代管理**: S3 lifecycle(NCVE・MPU abort・delete marker掃除)とprune・pin(世代管理対象外のピン留め)
+- **Web UI**: `serve`でWeb frontend(埋め込み静的配信)+読取APIを起動(passkey認証・
+  entity/pending/diff閲覧・アップロード前カタログscan)
 - **実行形**: 設定はXDG規定path(`~/.config/amazing-backup/`)・repo外のどこからでも実行可能
 
 ## Install

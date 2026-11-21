@@ -38,6 +38,28 @@ pub struct PipelineConfig {
     pub metadata: MetadataConfig,
     /// 手動写像(basename → category/label)。省略時はauto_path_roots相対化へ
     pub files: std::collections::BTreeMap<String, FileMapping>,
+    /// catalog(pending scan)設定(TASK-9設計3章・12章P5。scan対象の明示登録)
+    pub catalog: CatalogConfig,
+}
+
+/// catalog関連設定(TASK-9設計3章D6・12章P5)。P5時点は[catalog.scan]のみ。
+/// 未登録(section無し)の場合も空で成立(scanは0件走査で正常終了)。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogConfig {
+    /// [catalog.scan](省略可=scan対象未登録)
+    pub scan: Option<ScanConfig>,
+}
+
+/// `[catalog.scan]`相当(TASK-9設計3章D6承認: scan対象root・対象種別・除外規則の
+/// 明示登録。auto_path_rootsは転用しない)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanConfig {
+    /// scan対象root(絶対path・1つ以上必須)
+    pub roots: Vec<std::path::PathBuf>,
+    /// 対象拡張子(".zip"形式。空=全regular file対象)
+    pub extensions: Vec<String>,
+    /// 除外(走査対象の相対pathへの部分一致)
+    pub exclude: Vec<String>,
 }
 
 /// XDG配置の規定path一式(TASK-19)。
@@ -47,6 +69,8 @@ pub struct AppPaths {
     pub pipeline_config: PathBuf,
     /// aws.tomlの規定path
     pub aws_config: PathBuf,
+    /// server.tomlの規定path(TASK-9設計8章: serve設定。backup profileと分離)
+    pub server_config: PathBuf,
     /// ローカルregistryの規定path
     pub registry: PathBuf,
     /// 暗号化一時物dirの規定path(旧data/out)
@@ -72,6 +96,7 @@ fn resolve_app_paths_from(getenv: impl Fn(&str) -> Option<OsString>) -> AppPaths
         return AppPaths {
             pipeline_config: root.join("pipeline.toml"),
             aws_config: root.join("aws.toml"),
+            server_config: root.join("server.toml"),
             registry: root.join("registry.jsonl"),
             cache_dir: root.join("cache"),
         };
@@ -82,6 +107,7 @@ fn resolve_app_paths_from(getenv: impl Fn(&str) -> Option<OsString>) -> AppPaths
     AppPaths {
         pipeline_config: config.join(APP_DIR_NAME).join("pipeline.toml"),
         aws_config: config.join(APP_DIR_NAME).join("aws.toml"),
+        server_config: config.join(APP_DIR_NAME).join("server.toml"),
         registry: state.join(APP_DIR_NAME).join("registry.jsonl"),
         cache_dir: cache.join(APP_DIR_NAME),
     }
@@ -246,6 +272,30 @@ struct ProfileFile {
     metadata: Option<MetadataFile>,
     #[serde(default)]
     files: std::collections::BTreeMap<String, FileMappingFile>,
+    /// catalog設定(TASK-9設計3章・12章P5: [catalog.scan]によるscan対象の明示登録)
+    #[serde(default)]
+    catalog: CatalogFile,
+}
+
+/// `[catalog]`のschema(TASK-9 12章P5)。
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct CatalogFile {
+    #[serde(default)]
+    scan: Option<ScanFile>,
+}
+
+/// `[catalog.scan]`のschema(TASK-9設計3章D6承認。roots=絶対path列挙・
+/// extensions/exclude省略可)。
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ScanFile {
+    #[serde(default)]
+    roots: Vec<String>,
+    #[serde(default)]
+    extensions: Vec<String>,
+    #[serde(default)]
+    exclude: Vec<String>,
 }
 
 /// `[metadata]`のschema(TASK-18 2.2)。
@@ -573,6 +623,49 @@ pub fn load_pipeline(path: &Path, profile_name: &str) -> BackupResult<PipelineCo
         );
     }
 
+    // [catalog.scan](TASK-9設計3章D6承認・12章P5): scan対象の明示登録。section在り
+    // ならroots 1つ以上必須・絶対path。extensionsは".zip"形式(先頭ドット)。excludeは
+    // 空文字列拒否(部分一致のため空は全域除外になり事故る)
+    let scan = match prof.catalog.scan.as_ref() {
+        None => None,
+        Some(s) => {
+            if s.roots.is_empty() {
+                return Err(BackupError::Config(format!(
+                    "[profiles.{profile_name}.catalog.scan].rootsが空です(scan対象rootを1つ以上絶対pathで指定してください。section自体の削除でも構いません)"
+                )));
+            }
+            let mut roots = Vec::with_capacity(s.roots.len());
+            for root in &s.roots {
+                let p = std::path::PathBuf::from(root);
+                if !p.is_absolute() {
+                    return Err(BackupError::Config(format!(
+                        "[profiles.{profile_name}.catalog.scan].rootsは絶対pathで指定してください: {root:?}"
+                    )));
+                }
+                roots.push(p);
+            }
+            for ext in s.extensions.iter().chain(s.exclude.iter()) {
+                // extensionsは拡張子(".zip"形式)。excludeは相対path部分一致の単語
+                // (空文字列は全対象一致=全域除外になるため拒否)
+                if ext.is_empty() {
+                    return Err(BackupError::Config(format!(
+                        "[profiles.{profile_name}.catalog.scan].extensions/excludeに空文字列を指定できません"
+                    )));
+                }
+            }
+            if let Some(bad) = s.extensions.iter().find(|e| !e.starts_with('.')) {
+                return Err(BackupError::Config(format!(
+                    "[profiles.{profile_name}.catalog.scan].extensionsは拡張子形式(.zip等・先頭にドット)で指定してください: {bad:?}"
+                )));
+            }
+            Some(ScanConfig {
+                roots,
+                extensions: s.extensions.clone(),
+                exclude: s.exclude.clone(),
+            })
+        }
+    };
+
     // registry・cache dirはXDG規定解決(TASK-19: [output]廃止・env上書きのみ)
     let paths = resolve_app_paths();
     Ok(PipelineConfig {
@@ -590,6 +683,7 @@ pub fn load_pipeline(path: &Path, profile_name: &str) -> BackupResult<PipelineCo
         },
         metadata: MetadataConfig { latest_source_path },
         files,
+        catalog: CatalogConfig { scan },
     })
 }
 
@@ -1045,6 +1139,8 @@ pub enum ConfigSub {
 /// 埋め込みを参照する(include_str!の二重記載を避け埋め込み箇所を1つに保つ)。
 pub(crate) const INIT_PIPELINE_TEMPLATE: &str = include_str!("../configs/pipeline.example.toml");
 pub(crate) const INIT_AWS_TEMPLATE: &str = include_str!("../configs/aws.example.toml");
+/// server.toml template(TASK-9設計8章: server共通設定のみ。置換なし・そのまま生成)
+pub(crate) const INIT_SERVER_TEMPLATE: &str = include_str!("../configs/server.example.toml");
 
 /// aws.toml template内の`credentials_file`置換marker(design doc 3.2)。
 const CREDENTIALS_FILE_MARKER: &str = "__CREDENTIALS_FILE__";
@@ -1173,12 +1269,14 @@ pub fn render_init_template(template: &str, credentials_file: &Path) -> BackupRe
     Ok(rendered)
 }
 
-/// config initの生成対象3file(design doc 3.1。生成順=rollback対象順)。
-fn init_target_paths(config_dir: &Path) -> [PathBuf; 3] {
+/// config initの生成対象4file(design doc 3.1+TASK-9設計8章のserver.toml。
+/// 生成順=rollback対象順)。
+fn init_target_paths(config_dir: &Path) -> [PathBuf; 4] {
     [
         config_dir.join("pipeline.toml"),
         config_dir.join("aws.toml"),
         config_dir.join("aws-credentials.toml"),
+        config_dir.join("server.toml"),
     ]
 }
 
@@ -1215,10 +1313,12 @@ pub fn cmd_config_init_with_writer(
     let dir_existed = std::fs::symlink_metadata(config_dir).is_ok();
     // aws.tomlの内容はfileを作る前に組み立てる(検査失敗時に書込対象を残さない)
     let aws_content = render_init_template(INIT_AWS_TEMPLATE, &targets[2])?;
-    let contents: [(&PathBuf, &[u8], bool); 3] = [
+    let contents: [(&PathBuf, &[u8], bool); 4] = [
         (&targets[0], INIT_PIPELINE_TEMPLATE.as_bytes(), false),
         (&targets[1], aws_content.as_bytes(), false),
         (&targets[2], INIT_CREDENTIALS_TEMPLATE.as_bytes(), true),
+        // server.toml(TASK-9設計8章): 置換なし・秘密値を含まないためprivate=false
+        (&targets[3], INIT_SERVER_TEMPLATE.as_bytes(), false),
     ];
     if let Err(e) = std::fs::create_dir_all(config_dir) {
         return Err(BackupError::Config(format!(
@@ -1302,7 +1402,7 @@ fn create_file_exclusive(path: &Path, contents: &[u8], private: bool) -> std::io
 /// (=`aws_config`のparent)で、相対path解決(相対ABH)の場合は`cwd.join`で絶対化する
 /// (`canonicalize`は非存在path失敗・symlink解消の意図しない効果があるため不使用。
 /// 絶対化は表示・生成物記述のためで、resolve_app_paths自体の解決仕様は変更しない)。
-fn run_config_init() -> BackupResult<[PathBuf; 3]> {
+fn run_config_init() -> BackupResult<[PathBuf; 4]> {
     let paths = resolve_app_paths();
     let config_dir = paths
         .aws_config
@@ -1327,10 +1427,11 @@ fn run_config_init() -> BackupResult<[PathBuf; 3]> {
 /// binary versionと異なる内容を読む可能性があった)。
 fn cmd_config_init() -> i32 {
     match run_config_init() {
-        Ok([pipeline, aws, credentials]) => {
+        Ok([pipeline, aws, credentials, server]) => {
             println!("生成: {}", pipeline.display());
             println!("生成: {}", aws.display());
             println!("生成: {} (permission 600)", credentials.display());
+            println!("生成: {} (serve設定)", server.display());
             println!("次ステップ:");
             println!("  1. aws-credentials.toml に access_key_id / secret_access_key を記述");
             println!("  2. aws.toml の bucket を実際の値へ記述");

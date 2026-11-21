@@ -252,16 +252,40 @@ pub(crate) fn rebuild_and_upload_index(
     let reduced = registry::reduce_records(&records);
     let entries =
         crate::index::build_entries(&reduced, &session.aws.bucket, &session.canonical_bucket);
-    crate::index::upload_index(
+    let updated_at = now_jst();
+    let uploaded_index_vid = crate::index::upload_index(
         session.backend.as_ref(),
         &session.aws.bucket,
         &session.aws.prefix,
         &cfg.public_keys,
         &entries,
         run_tag,
-        &now_jst(),
+        &updated_at,
         registry_path,
     )?;
+    // TASK-9 書込系のDB反映(索引upload成功後・同一process内。失敗時は警告のみ)
+    let header = crate::index::IndexHeader {
+        schema: crate::index::INDEX_SCHEMA,
+        record_type: "index_header".into(),
+        updated_at,
+        run_id: run_tag.to_string(),
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        entries: entries.len() as i64,
+    };
+    if let Err(warn) = crate::catalog::reflect_written_index(
+        session.backend.as_ref(),
+        &session.aws.bucket,
+        &session.aws.prefix,
+        &header,
+        &entries,
+        &crate::catalog::SourceMtimes::from_reduced(&reduced),
+        &uploaded_index_vid,
+    ) {
+        eprintln!(
+            "WARNING: catalog DB({})への反映に失敗しました(当該scopeのcacheは失効扱い。処理は継続します): {warn}",
+            crate::catalog::catalog_db_path().display()
+        );
+    }
     Ok(())
 }
 

@@ -56,7 +56,6 @@ fn schema2_records_survive_append_load_roundtrip() {
     };
     assert_eq!(code, 0, "初回push: {stdout}");
     let uuid = reg_uuid_of(&fx, &a);
-    let key = fx.data_key(&uuid);
     // 3版(各版のfile_upload記録を保持するcrash残存re-put経路・設計4.4)。
     // keep_versions=1のpruneで削除対象が生じる構成(境界=keep番目に新しいnoncurrent版は
     // 残るため2版では削除0件となる・設計5.12)→ prune --applyでprune記録を作る

@@ -314,6 +314,33 @@ fn cmd_backup_push(
         let tty = std::io::stdin().is_terminal();
         let mut state = RunState::new(&reduced);
 
+        // TASK-9設計3章(a)・12章P5: --dry-run(kind=dry_run)と--from-list実push
+        // (kind=from_list)の投入予定をpush_intents(永続class)へ記録する。通常push
+        // (positionalのみ・非dry-run)は記録しない。記録は付帯情報のため失敗時は
+        // 警告のみでpushを継続する(JSONL registryが正本)
+        if dry_run || from_list.is_some() {
+            let kind = if dry_run { "dry_run" } else { "from_list" };
+            let payload = serde_json::json!({
+                "targets": planned.iter().map(|p| serde_json::json!({
+                    "path": p.target.source_path.display().to_string(),
+                    "name": p.target.source_name,
+                    "size": p.target.size,
+                    "title": p.target.title,
+                })).collect::<Vec<_>>(),
+            });
+            let payload_json = serde_json::to_string(&payload).map_err(|e| {
+                BackupError::Internal(format!("push_intents payloadのJSON化に失敗: {e}"))
+            })?;
+            if let Err(warn) = crate::catalog::CatalogDb::open()
+                .and_then(|db| db.record_push_intent(kind, &payload_json))
+            {
+                eprintln!(
+                    "WARNING: catalog DB({})へのpush_intents記録に失敗しました(処理は継続します): {warn}",
+                    crate::catalog::catalog_db_path().display()
+                );
+            }
+        }
+
         if dry_run {
             return dry_run_push(&planned, &reduced, &aws, &canonical_bucket, &mut state);
         }
@@ -781,7 +808,7 @@ fn cmd_backup_push(
             let records_now = registry::load_registry(&registry_path)?;
             let reduced_now = registry::reduce_records(&records_now);
             let entries = crate::index::build_entries(&reduced_now, &aws.bucket, &canonical_bucket);
-            crate::index::upload_index(
+            let uploaded_index_vid = crate::index::upload_index(
                 backend.as_ref(),
                 &aws.bucket,
                 &aws.prefix,
@@ -801,6 +828,31 @@ fn cmd_backup_push(
                     &reduced_now,
                     uuid,
                 )?;
+            }
+            // TASK-9 書込系のDB反映(設計2章書込時序: JSONL append成功→同一process内で
+            // 当該scope反映。反映失敗時は警告表示のみでpush自体は継続=JSONLが正本)
+            let header = crate::index::IndexHeader {
+                schema: crate::index::INDEX_SCHEMA,
+                record_type: "index_header".into(),
+                updated_at: now_jst(),
+                run_id: batch_id.clone(),
+                tool_version: env!("CARGO_PKG_VERSION").to_string(),
+                entries: entries.len() as i64,
+            };
+            let mtimes = crate::catalog::SourceMtimes::from_reduced(&reduced_now);
+            if let Err(warn) = crate::catalog::reflect_written_index(
+                backend.as_ref(),
+                &aws.bucket,
+                &aws.prefix,
+                &header,
+                &entries,
+                &mtimes,
+                &uploaded_index_vid,
+            ) {
+                eprintln!(
+                    "WARNING: catalog DB({})への反映に失敗しました(当該scopeのcacheは失効扱い。backupは継続します): {warn}",
+                    crate::catalog::catalog_db_path().display()
+                );
             }
         }
 

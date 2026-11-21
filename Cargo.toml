@@ -9,6 +9,22 @@ repository = "https://github.com/TomoTom0/amazing-backup"
 keywords = ["backup", "s3", "age", "encryption", "archive"]
 categories = ["command-line-utilities", "backup"]
 
+[features]
+default = ["serve"]
+# TASK-9設計1章(D2承認): serve関連依存は`serve` featureに括りdefault featuresへ含める
+# (cargo install/mise導線で`--features serve`指定を不要にする)。
+# webauthn-rs・tower-sessionsはP4(passkey認証)で導入する(P2では未使用のため省く)。
+serve = [
+  "dep:axum",
+  "dep:tower-http",
+  "dep:tower-sessions",
+  "dep:webauthn-rs",
+  "dep:time",
+  "dep:rust-embed",
+  "tokio/net",
+  "tokio/signal",
+]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 # completionsサブコマンドの補完script生成(TASK-2設計D-1。runtime用・feature分岐なし)
@@ -24,9 +40,34 @@ aws-sdk-s3 = "1"
 # SdkError::ServiceErrorのcode/message/status診断(TASK-26)。SDK中核crateのため実質size影響なし
 aws-smithy-runtime-api = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "fs", "io-util"] }
+# TASK-9 local catalog DB(D1承認: SQLite)。DB層はCLI・serve共用のため無条件依存。
+# bundledでlibsqlite3を同梱build(外部libsqlite3への依存無し)
+rusqlite = { version = "0.40", features = ["bundled"] }
+# schema migration(user_version方式)。rusqlite 0.40系と組合わせる(links衝突回避)
+rusqlite_migration = "2.6.0"
+# TASK-9設計1章(serve feature): HTTP層axum(0.8系)
+axum = { version = "0.8", optional = true }
+# TASK-9設計1章(serve feature): API応答のCache-Control付与(set-headerのみ有効化)
+tower-http = { version = "0.6", optional = true, default-features = false, features = ["set-header"] }
+# TASK-9設計10章(serve feature): frontend/distのbinary埋め込み。allow_missingはderive属性
+# (#[allow_missing = true])で付与しdist欠落でもbuild可能(欠落時は空assets=静的配信なし)
+rust-embed = { version = "8", optional = true }
+# TASK-9設計8章(serve feature・D3承認): passkey認証webauthn-rs(0.6系stable最新)。
+# danger-allow-state-serialisationは不使用(challenge stateはin-memory保持のため不要)
+webauthn-rs = { version = "0.6.2", optional = true }
+# TASK-9設計8章(serve feature): session管理(in-memory store・cookie属性・期限24h)
+tower-sessions = { version = "0.15", optional = true }
+# 上記のExpiry期限指定(time::Duration)。tower-sessions 0.15と同一系列
+time = { version = "0.3", optional = true }
 
 [dev-dependencies]
 # capture_request検証用(設計4.3案4・12.1)。capture_request関数の実体はこのSDK版では
 # aws-smithy-http-client(test-util)にあり、aws-smithy-runtime(test-util)は設計12.1どおりの基盤feature
 aws-smithy-runtime = { version = "1", features = ["test-util"] }
 aws-smithy-http-client = { version = "1", features = ["test-util"] }
+# TASK-9 12章P3(handler単体test): routerへのoneshot request(tower::ServiceExt)
+tower = { version = "0.5", features = ["util"] }
+# TASK-9 12章P4(server-to-server認証test): soft passkey合成応答のP-256鍵・署名と
+# attestationObject(CBOR)・COSE鍵の組立。src/server.rs #[cfg(test)]専用
+p256 = { version = "0.13", features = ["ecdsa"] }
+coset = "0.3"
