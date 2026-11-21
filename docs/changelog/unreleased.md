@@ -39,5 +39,11 @@
 - api-key認証(TASK-13): passkeyが使えない端末・browser向けの第二login手段。`manage auth api-key [--name NAME]`でkeyを生成(`abk_`前置・stdout表示は1回限り・SHA-256 hashのみ保存)し、LoginViewのapi-key欄へ入力(接続元LAN内限定で受理・sessionはpasskey loginと同一の24時間)
 - serve Web UIの構成とAPI拡張(TASK-16/18/19): 5タブ構成(ホーム/バックアップ/転送/設定/管理)・ホームサマリ(sync状態・前回backup・未対応・diff・実行中job)・`GET /api/runs`(backup実行batchの集約)・`GET /api/jobs`(現版は空応答)・一覧3ビュー(folder/tag/collection切替)+検索+pager・tag/collection編集API(catalog DBのlocal語彙で索引には入らない。書込は成功・失敗双方をaudit_log tableへ記録)・frontend visual design(cold slate+teal・WCAG AA contrast)
 
+### 修正(PR#9レビュー指摘)
+
+- catalog cacheのvalidator束縛: 書込系(push/pin/prune等)の索引upload後のDB反映は、upload応答のVersionIdがHEAD現行version_idと一致した場合のみfresh化する(不一致=upload→HEAD間に他端末が索引objectを置換した場合は当該scopeをstale化して反映中止=他端末のvalidatorと自processの旧entriesの組でfresh化し、以降のlist/queryがcache hitとして旧内容を受け入れるのを防ぐ。versioning無効bucketでupload応答が空の場合は従来どおりHEAD応答のみで判断)
+- catalog sync・cache miss再取得でのmtime基線保持: S3索引replica取得反映(`manage catalog sync`・照会系cache miss再取得)は既存DB行(versions/locations)からsource_mtime基線を引き継いで置換する(local backup記録の基線がreplica取得で消え、`manage catalog scan`が未変更fileをfalse changedに分類するのを防ぐ)。`manage index rebuild`後のDB反映もregistryのfile_write記録から基線を供給する
+- Web UI詳細画面のentity切替残存解消: entity詳細の要求対象uuidをstoreが管理し、A→B切替時に旧entity(A)の詳細・版一覧・errorを即座にclear+旧uuid向けの遅延応答を棄却する(切替直後の旧詳細表示・編集可能期間の残存=route uuid(B)へAのtagsで置換する事故を構造的に排除)
+
 # 0.1.0
 - 初版(v0.1.0として公開)

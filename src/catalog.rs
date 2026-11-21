@@ -888,6 +888,60 @@ impl CatalogDb {
         Ok(())
     }
 
+    /// 既存scope行(versions/locations)から非空のsource_mtime基線を構築する。
+    /// S3索引replica取得経路(sync fetch・cache miss再取得)はmtime供給源を持たない
+    /// ため、replace_scopeの前に本methodで既存行の基線を引き継ぐ(空基線で置換する
+    /// とlocal backupの記録基線がreplica取得で消え、classify_scan_targetが未変更
+    /// fileをfalse changedに分類する。レビュー指摘#2=PR#9対応)。
+    /// 同一keyの複数行はordinal順の後勝ち(最後に反映された基線値を採る)。
+    pub fn existing_source_mtimes(&self, bucket: &str, prefix: &str) -> BackupResult<SourceMtimes> {
+        let scope = scope_key(bucket, prefix);
+        let mut mt = SourceMtimes::empty();
+        {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT identity_hash, source_mtime FROM locations \
+                     WHERE scope = ?1 AND source_mtime != '' ORDER BY ordinal",
+                )
+                .map_err(|e| BackupError::Internal(format!("locations基線読取に失敗: {e}")))?;
+            let rows = stmt
+                .query_map([&scope], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(|e| BackupError::Internal(format!("locations基線読取に失敗: {e}")))?;
+            for row in rows {
+                let (identity_hash, mtime) =
+                    row.map_err(|e| BackupError::Internal(format!("locations基線読取に失敗: {e}")))?;
+                mt.by_identity.insert(identity_hash, mtime);
+            }
+        }
+        {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT uuid, source_sha256, source_mtime FROM versions \
+                     WHERE scope = ?1 AND source_mtime != '' ORDER BY ordinal",
+                )
+                .map_err(|e| BackupError::Internal(format!("versions基線読取に失敗: {e}")))?;
+            let rows = stmt
+                .query_map([&scope], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|e| BackupError::Internal(format!("versions基線読取に失敗: {e}")))?;
+            for row in rows {
+                let (uuid, source_sha256, mtime) =
+                    row.map_err(|e| BackupError::Internal(format!("versions基線読取に失敗: {e}")))?;
+                mt.by_uuid_sha.insert((uuid, source_sha256), mtime);
+            }
+        }
+        Ok(mt)
+    }
+
     /// cacheから索引entriesを復元(ordinal順=反映時の索引並び。headerはsync_stateの
     /// 保存値から再構築)。照会系のcache hit経路が使い、entry構造はS3経路と同一。
     /// 一連の読取(sync_state・entities・versions・pins・locations)は単一の読取
@@ -1904,6 +1958,12 @@ pub(crate) fn scope_filter_entries(
 /// 警告表示して処理継続する(JSONLが正本のため)。反映失敗(HEAD失敗・置換失敗)時は
 /// 当該scopeをstale化して旧freshを残さない(設計2章「反映失敗時は当該scopeをstale化
 /// して警告」。mark_status自体の失敗は元のerrorに優先させない=警告logのみ)。
+/// uploaded_version_idはupload_indexの応答(putのVersionId)。upload→HEADの間に
+/// 他端末が索引objectを置換していた場合、HEADのvalidatorは他端末の版由来となり
+/// 自processの旧entriesとの組み合わせでfresh化すると以降の照会がcache hitとして
+/// 旧内容を受け入れるため、HEADの現行version_idと一致した場合のみfresh化する
+/// (不一致は当該scopeのstale化+警告。versioning無効bucketでput応答が空の場合は
+/// version_idでの束縛が不能=従来どおりHEAD応答のvalidatorのみで判断する)。
 pub fn reflect_written_index(
     backend: &dyn S3Backend,
     bucket: &str,
@@ -1911,50 +1971,91 @@ pub fn reflect_written_index(
     header: &IndexHeader,
     entries: &[IndexFileEntry],
     mtimes: &SourceMtimes,
+    uploaded_version_id: &str,
 ) -> Result<(), String> {
     let reflect = || -> BackupResult<()> {
         let mut db = CatalogDb::open()?;
-        let index_key = crate::layout::index_object_key(prefix);
-        // 直前にuploadした索引objectのvalidatorをHEAD 1回で確定する(この時点のsnapshot
-        // 鮮度=自端末書込直後の無条件fresh)
-        let head = match backend.head(bucket, &index_key) {
-            Ok(h) => h,
-            Err(e) => {
-                // HEAD失敗=validator確定不能: 当該scopeをstale化して旧freshを残さない
-                if let Err(mark_e) = db.mark_status(bucket, prefix, STATUS_STALE) {
-                    eprintln!("WARNING: sync_stateのstale化に失敗(logのみ): {mark_e}");
-                }
-                return Err(e);
-            }
-        };
-        let validator = match head {
-            Some(h) => Validator::from_head(&h),
-            None => Validator::default(),
-        };
-        let status = if validator.etag.is_empty() && validator.version_id.is_empty() {
-            STATUS_STALE
-        } else {
-            STATUS_FRESH
-        };
-        if let Err(e) = db.replace_scope(
+        reflect_written_index_with_db(
+            &mut db,
+            backend,
             bucket,
             prefix,
             header,
             entries,
             mtimes,
-            &validator,
-            status,
-            ReflectOrigin::Written,
-        ) {
-            // 置換失敗もstale化して旧freshを残さない
+            uploaded_version_id,
+        )
+    };
+    reflect().map_err(|e| format!("{e}"))
+}
+
+/// 観測用のDB引数版反映本体(単体試験がCatalogDbを注入できる。振る舞いは
+/// reflect_written_indexと同一)。
+#[allow(clippy::too_many_arguments)]
+fn reflect_written_index_with_db(
+    db: &mut CatalogDb,
+    backend: &dyn S3Backend,
+    bucket: &str,
+    prefix: &str,
+    header: &IndexHeader,
+    entries: &[IndexFileEntry],
+    mtimes: &SourceMtimes,
+    uploaded_version_id: &str,
+) -> BackupResult<()> {
+    let index_key = crate::layout::index_object_key(prefix);
+    // 直前にuploadした索引objectのvalidatorをHEAD 1回で確定する(この時点のsnapshot
+    // 鮮度=自端末書込直後の無条件fresh)
+    let head = match backend.head(bucket, &index_key) {
+        Ok(h) => h,
+        Err(e) => {
+            // HEAD失敗=validator確定不能: 当該scopeをstale化して旧freshを残さない
             if let Err(mark_e) = db.mark_status(bucket, prefix, STATUS_STALE) {
                 eprintln!("WARNING: sync_stateのstale化に失敗(logのみ): {mark_e}");
             }
             return Err(e);
         }
-        Ok(())
     };
-    reflect().map_err(|e| format!("{e}"))
+    let validator = match head {
+        Some(h) => Validator::from_head(&h),
+        None => Validator::default(),
+    };
+    // upload応答のVersionIdでHEAD応答が自processのupload版であることを確認する
+    // (versioning有効bucket)。不一致=upload→HEADの間に他端末が索引objectを置換
+    // したため、HEADのvalidator(他端末の版)と自processのentriesでfresh化せず
+    // 当該scopeをstale化する(旧freshを残さない)
+    if !uploaded_version_id.is_empty() && validator.version_id != uploaded_version_id {
+        if let Err(mark_e) = db.mark_status(bucket, prefix, STATUS_STALE) {
+            eprintln!("WARNING: sync_stateのstale化に失敗(logのみ): {mark_e}");
+        }
+        return Err(BackupError::Internal(format!(
+            "索引object({index_key})の現行version_id({})が本runのupload応答\
+             ({uploaded_version_id})と一致しないため反映を中止しました(他端末による書換えの\
+             可能性。当該scopeのcacheは失効扱い)",
+            validator.version_id
+        )));
+    }
+    let status = if validator.etag.is_empty() && validator.version_id.is_empty() {
+        STATUS_STALE
+    } else {
+        STATUS_FRESH
+    };
+    if let Err(e) = db.replace_scope(
+        bucket,
+        prefix,
+        header,
+        entries,
+        mtimes,
+        &validator,
+        status,
+        ReflectOrigin::Written,
+    ) {
+        // 置換失敗もstale化して旧freshを残さない
+        if let Err(mark_e) = db.mark_status(bucket, prefix, STATUS_STALE) {
+            eprintln!("WARNING: sync_stateのstale化に失敗(logのみ): {mark_e}");
+        }
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2411,6 +2512,196 @@ mod tests {
             )
             .unwrap()
             .is_none()
+        );
+    }
+
+    /// mtime基線構築用の最小file_write記録(from_reduced経由の基線供給源)。
+    fn file_write_of(uuid: &str, mtime: &str, sha: &str, identity: &str) -> crate::registry::FileWriteRecord {
+        crate::registry::FileWriteRecord {
+            schema: 1,
+            record_type: "file_write".into(),
+            recorded_at: "2026-11-05T10:00:00+09:00".into(),
+            batch_id: "20261105-abcdef01".into(),
+            batch_date: "2026-11-05".into(),
+            uuid: uuid.into(),
+            title: "t1".into(),
+            source_path: "/data/t1".into(),
+            source_name: "t1".into(),
+            source_size: 100,
+            source_mtime: mtime.into(),
+            source_sha256: sha.into(),
+            age_path: "data/u/20261105-abcdef01.age".into(),
+            age_size: 140,
+            age_sha256: "b".repeat(64),
+            recipients: vec!["age1recipient0000000000000000000000000000000000=".into()],
+            category: "unfiled".into(),
+            label: String::new(),
+            identity_hash: identity.into(),
+            s3_key: format!("data/{uuid}/20261105-abcdef01.age"),
+        }
+    }
+
+    /// [covers:catalog.mtime-baseline-preserved-on-fetch]
+    /// existing_source_mtimesは既存scope行(versions/locations)から非空のmtime基線を
+    /// 構築し、その基線でFetched置換しても旧値が保持される(S3索引replica取得経路は
+    /// mtime供給源を持たないため、基線を引き継がないとlocal backup記録の基線が消えて
+    /// classify_scan_targetが未変更fileをfalse changedにする)。
+    #[test]
+    fn existing_source_mtimes_preserves_baseline_across_replacement() {
+        let (_tmp, mut db) = open_test_db("cat-mtime-keep");
+        let bucket = "b1";
+        let prefix = "p1/";
+        let entries = vec![entry("u1", "t1", "p1/data/u1/20261105-abcdef01.age")];
+        let mtime = "2026-11-05T09:00:00.123456789+09:00";
+        let sha = "a".repeat(64);
+
+        // 自端末書込(Written)反映: registry由来のmtime基線付き
+        let reduced = crate::registry::Reduced {
+            file_writes: vec![file_write_of("u1", mtime, &sha, "deadbeef")],
+            ..Default::default()
+        };
+        db.replace_scope(
+            bucket,
+            prefix,
+            &header(entries.len()),
+            &entries,
+            &SourceMtimes::from_reduced(&reduced),
+            &Validator {
+                etag: "\"etag-m1\"".into(),
+                version_id: "vm1".into(),
+            },
+            STATUS_FRESH,
+            ReflectOrigin::Written,
+        )
+        .expect("Written反映(mtime基線付き)");
+
+        // replica取得(Fetched)反映の前に既存行から基線を構築する=両経路の基線が復元される
+        let existing = db.existing_source_mtimes(bucket, prefix).expect("基線構築");
+        assert_eq!(existing.of_location(&entries[0].locations[0]), mtime);
+        assert_eq!(existing.of_version("u1", &entries[0].versions[0]), mtime);
+
+        // 構築した基線でFetched置換してもversions/locations行のmtimeは消えない
+        db.replace_scope(
+            bucket,
+            prefix,
+            &header(entries.len()),
+            &entries,
+            &existing,
+            &Validator {
+                etag: "\"etag-m2\"".into(),
+                version_id: "vm2".into(),
+            },
+            STATUS_FRESH,
+            ReflectOrigin::Fetched,
+        )
+        .expect("Fetched再置換(基線引き継ぎ)");
+        for (table, key_col) in [("versions", "s3_key"), ("locations", "source_path")] {
+            let mut stmt = db
+                .conn
+                .prepare(&format!(
+                    "SELECT source_mtime FROM {table} WHERE scope = ?1 AND {key_col} != ''"
+                ))
+                .unwrap();
+            let got: Vec<String> = stmt
+                .query_map([scope_key(bucket, prefix)], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(
+                got,
+                vec![mtime.to_string()],
+                "{table}行のsource_mtimeは保持される"
+            );
+        }
+    }
+
+    /// [covers:catalog.written-index-validator-bound-to-uploaded-version]
+    /// 書込反映はHEAD現行version_idがupload応答と一致した場合のみfresh化する。
+    /// upload→HEADの間に他端末が索引objectを置換した場合(現行version_idがupload応答と
+    /// 不一致)、他端末のvalidatorと自processの旧entriesの組でfresh化せず当該scopeを
+    /// stale化する(以降のlist/queryがcache hitとして旧内容を受け入れるのを防ぐ)。
+    /// upload応答が空(versioning無効bucket=束縛不能)の場合は従来どおりHEAD応答の
+    /// validatorのみで判断する。
+    #[test]
+    fn reflect_written_index_binds_freshness_to_uploaded_version() {
+        use crate::s3::FakeS3;
+        let tmp_s3 = TempDir::new("cat-writ-vid-s3");
+        let backend = FakeS3::new(tmp_s3.path());
+        let (_tmp_db, mut db) = open_test_db("cat-writ-vid");
+        let bucket = "b1";
+        let prefix = "p1/";
+        let index_key = crate::layout::index_object_key(prefix);
+        let body = tmp_s3.path().join("index-body.age");
+        std::fs::write(&body, b"index-bytes").expect("index body作成");
+        let entries = vec![entry("u1", "t1", "p1/data/u1/20261105-abcdef01.age")];
+        let mtimes = SourceMtimes::empty();
+        let h = header(entries.len());
+        let head_validator = || {
+            let head = backend.head(bucket, &index_key).unwrap().unwrap();
+            Validator::from_head(&head)
+        };
+
+        // 一致ケース: 自端末のupload版がそのまま現行版ならfresh化される
+        let vid1 = backend
+            .put(bucket, &index_key, &body, "STANDARD")
+            .expect("put1");
+        reflect_written_index_with_db(&mut db, &backend, bucket, prefix, &h, &entries, &mtimes, &vid1)
+            .expect("一致時の反映は成功");
+        let v1 = head_validator();
+        assert!(
+            db.load_entries_if_fresh(bucket, prefix, &v1)
+                .unwrap()
+                .is_some(),
+            "一致時はfresh化される"
+        );
+
+        // 不一致ケース: upload(vid2)→HEADの間に他端末が置換(vid3が現行)
+        let vid2 = backend
+            .put(bucket, &index_key, &body, "STANDARD")
+            .expect("put2(自端末のupload)");
+        let vid3 = backend
+            .put(bucket, &index_key, &body, "STANDARD")
+            .expect("put3(他端末の置換)");
+        assert_ne!(vid2, vid3, "fakeはput毎に新規version idを返す");
+        let err = reflect_written_index_with_db(
+            &mut db,
+            &backend,
+            bucket,
+            prefix,
+            &h,
+            &entries,
+            &mtimes,
+            &vid2,
+        )
+        .expect_err("不一致時は反映中止(Err)");
+        assert!(
+            err.to_string().contains("一致しないため反映を中止"),
+            "他端末書換え検出の警告: {err}"
+        );
+        // 当該scopeはstale化され、現行版(vid3)のvalidatorでもcache hitしない
+        assert_eq!(
+            db.sync_state(bucket, prefix).unwrap().map(|s| s.status),
+            Some(STATUS_STALE.to_string()),
+            "不一致反映後はstale(旧freshを残さない)"
+        );
+        assert!(
+            db.load_entries_if_fresh(bucket, prefix, &head_validator())
+                .unwrap()
+                .is_none(),
+            "他端末のvalidatorで旧entriesがfresh化されることはない"
+        );
+
+        // 束縛不能ケース(versioning無効bucketでput応答が空): 従来どおりfresh化する
+        let _vid4 = backend
+            .put(bucket, &index_key, &body, "STANDARD")
+            .expect("put4");
+        reflect_written_index_with_db(&mut db, &backend, bucket, prefix, &h, &entries, &mtimes, "")
+            .expect("upload応答空は従来どおり反映");
+        assert!(
+            db.load_entries_if_fresh(bucket, prefix, &head_validator())
+                .unwrap()
+                .is_some(),
+            "束縛不能時はHEAD応答のvalidatorでfresh化(従来挙動)"
         );
     }
 }

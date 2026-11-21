@@ -1079,6 +1079,56 @@ fn catalog_scan_sha_option_confirms_merge_by_content() {
     );
 }
 
+/// [covers:catalog.mtime-baseline-preserved-on-fetch]
+/// pushで記録されたmtime基線は、他端末による索引書換え後のsync(fetch反映)・
+/// cache miss再取得(query経路)でも消えない。消えるとclassify_scan_targetが
+/// 未変更fileをfalse changedに分類する(local backupの記録基線がreplica取得で
+/// 消えない=レビュー指摘#2=PR#9対応)。
+#[test]
+fn catalog_fetch_reflection_keeps_mtime_baseline_for_scan() {
+    let Some(fx) = StorageFixture::new("cat-mtime-fetch", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    make_archive(&a, 1024);
+    let (code, stdout, stderr) = fx.push_from_list(&[], &[(&a, Some("alpha"))], &[]);
+    assert_eq!(code, 0, "push(事前): {stdout}{stderr}");
+    // FSは未変更のまま、他端末による索引書換えのみ発生させる(title変更=validator変化)
+    let rewrite = |title: &str| {
+        let mut lines = fx.read_index();
+        for l in lines.iter_mut() {
+            if l.get("record_type").and_then(|t| t.as_str()) == Some("file") {
+                l["title"] = serde_json::Value::String(title.into());
+            }
+        }
+        fx.rewrite_index(&lines);
+    };
+    add_scan_section(&fx, &[&fx.data_root], &[], &[]);
+
+    // sync(fetch反映)経路: 置換後の索引を取得しても基線は保持される
+    rewrite("alpha2");
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync: {stdout}{stderr}");
+    let (code, stdout, stderr) = fx.manage("catalog", &["scan"]);
+    assert_eq!(code, 0, "scan(sync後): {stdout}{stderr}");
+    assert!(
+        stdout.contains("ok=1") && stdout.contains("changed=0"),
+        "未変更fileはokのまま(基線が消えない): {stdout}"
+    );
+
+    // query(cache miss再取得)経路も同様: listがfetch反映しても基線は保持される
+    rewrite("alpha3");
+    let (code, stdout, stderr) = fx.list("files", &[]);
+    assert_eq!(code, 0, "cache miss再取得を伴うlist: {stdout}{stderr}");
+    assert!(stdout.contains("alpha3"), "書換え後の索引内容で回答: {stdout}");
+    let (code, stdout, stderr) = fx.manage("catalog", &["scan"]);
+    assert_eq!(code, 0, "scan(query経路後): {stdout}{stderr}");
+    assert!(
+        stdout.contains("ok=1") && stdout.contains("changed=0"),
+        "query経路でも未変更fileはokのまま: {stdout}"
+    );
+}
+
 /// [covers:catalog.scan-replaces-pending-items]
 /// scan結果は当該scopeのpending_itemsを全置換(冪等)・rebuild/syncはpending_itemsに触れない。
 #[test]

@@ -808,7 +808,7 @@ fn cmd_backup_push(
             let records_now = registry::load_registry(&registry_path)?;
             let reduced_now = registry::reduce_records(&records_now);
             let entries = crate::index::build_entries(&reduced_now, &aws.bucket, &canonical_bucket);
-            crate::index::upload_index(
+            let uploaded_index_vid = crate::index::upload_index(
                 backend.as_ref(),
                 &aws.bucket,
                 &aws.prefix,
@@ -847,6 +847,7 @@ fn cmd_backup_push(
                 &header,
                 &entries,
                 &mtimes,
+                &uploaded_index_vid,
             ) {
                 eprintln!(
                     "WARNING: catalog DB({})への反映に失敗しました(当該scopeのcacheは失効扱い。backupは継続します): {warn}",

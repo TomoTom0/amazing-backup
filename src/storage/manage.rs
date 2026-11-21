@@ -570,7 +570,7 @@ fn rebuild_and_upload(
     let entries =
         crate::index::build_entries(&reduced, &session.aws.bucket, &session.canonical_bucket);
     let updated_at = now_jst();
-    crate::index::upload_index(
+    let uploaded_index_vid = crate::index::upload_index(
         session.backend.as_ref(),
         &session.aws.bucket,
         &session.aws.prefix,
@@ -595,6 +595,7 @@ fn rebuild_and_upload(
         &header,
         &entries,
         &crate::catalog::SourceMtimes::from_reduced(&reduced),
+        &uploaded_index_vid,
     ) {
         eprintln!(
             "WARNING: catalog DB({})への反映に失敗しました(当該scopeのcacheは失効扱い。処理は継続します): {warn}",
@@ -1081,9 +1082,14 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
         let registry_path = cfg.registry_path.clone();
         let mut excluded: std::collections::BTreeSet<(String, String)> =
             std::collections::BTreeSet::new();
+        // mtime基線はregistryのreduce結果(file_write記録)から供給する(rebuild後の
+        // scanが未変更fileをfalse changedにしないように。レビュー指摘#2=PR#9対応。
+        // registry不在時は供給源なし=空基線)
+        let mut mtimes = crate::catalog::SourceMtimes::empty();
         if registry_path.is_file() {
             let records = registry::load_registry(&registry_path)?;
             let reduced_now = registry::reduce_records(&records);
+            mtimes = crate::catalog::SourceMtimes::from_reduced(&reduced_now);
             for d in reduced_now
                 .prunes
                 .iter()
@@ -1136,7 +1142,7 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             .and_then(|e| e.versions.first().map(|v| v.batch_id.clone()))
             .unwrap_or_else(|| "rebuild".to_string());
         let updated_at = now_jst();
-        crate::index::upload_index(
+        let uploaded_index_vid = crate::index::upload_index(
             session.backend.as_ref(),
             &session.aws.bucket,
             &session.aws.prefix,
@@ -1161,7 +1167,8 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             &session.aws.prefix,
             &header,
             &entry_list,
-            &crate::catalog::SourceMtimes::empty(),
+            &mtimes,
+            &uploaded_index_vid,
         ) {
             eprintln!(
                 "WARNING: catalog DB({})への反映に失敗しました(当該scopeのcacheは失効扱い。処理は継続します): {warn}",
@@ -1302,12 +1309,24 @@ pub(crate) fn catalog_sync_once(ctx: &CtxArgs) -> BackupResult<String> {
             } else {
                 STATUS_STALE
             };
+            // S3索引replicaはmtime供給源を持たないため、置換前に既存DB行の基線を
+            // 引き継ぐ(local backupの記録基線がreplica取得で消えるとclassify_scan_target
+            // が未変更fileをfalse changedにする。レビュー指摘#2=PR#9対応)
+            let mtimes = match db.existing_source_mtimes(&session.aws.bucket, &session.aws.prefix)
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    // 基線読取失敗も置換失敗と同一の扱い=error化してからエラー
+                    let _ = db.mark_status(&session.aws.bucket, &session.aws.prefix, STATUS_ERROR);
+                    return Err(e);
+                }
+            };
             if let Err(e) = db.replace_scope(
                 &session.aws.bucket,
                 &session.aws.prefix,
                 &header,
                 &entries,
-                &SourceMtimes::empty(),
+                &mtimes,
                 &fetched,
                 status,
                 ReflectOrigin::Fetched,
