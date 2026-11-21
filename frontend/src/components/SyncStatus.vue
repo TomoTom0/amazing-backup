@@ -21,6 +21,14 @@ function syncStatusText(status: string | null): string {
   if (status === 'unknown') return 'unknown(未同期)'
   return 'unknown'
 }
+
+/** sync状態の色分け(TASK-16のstatus色設計: fresh=ok・stale=warn・error=error・unknown=checking) */
+function syncStatusClass(status: string | null): string {
+  if (status === 'fresh') return 'status-ok'
+  if (status === 'stale') return 'status-warn'
+  if (status === 'error') return 'status-error'
+  return 'status-checking'
+}
 </script>
 
 <template>
@@ -36,7 +44,7 @@ function syncStatusText(status: string | null): string {
       確認中...
     </p>
     <template v-else-if="syncFetch === 'ok' && syncStatus !== null">
-      <p class="status-ok">状態: {{ syncStatusText(syncStatus) }}</p>
+      <p :class="syncStatusClass(syncStatus)">状態: {{ syncStatusText(syncStatus) }}</p>
       <p class="muted">scope: {{ syncScope }}</p>
       <p class="muted">
         取得時刻: {{ syncFetchedAt === '' ? '未取得' : syncFetchedAt }}

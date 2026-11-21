@@ -281,12 +281,14 @@ a:focus-visible {
 
 .status-ok,
 .status-error,
+.status-warn,
 .status-checking {
   color: var(--fg);
 }
 
 .status-ok::before,
 .status-error::before,
+.status-warn::before,
 .status-checking::before {
   content: "";
   display: inline-block;
@@ -303,6 +305,10 @@ a:focus-visible {
 
 .status-error::before {
   background: var(--error);
+}
+
+.status-warn::before {
+  background: var(--warn);
 }
 
 .status-checking::before {
