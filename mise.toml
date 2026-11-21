@@ -1,0 +1,14 @@
+# amazing-backup — project tasks.
+#
+# Execution entry point for development work on this tool (end users
+# install it via cargo install / mise use -g; see README). No task
+# names a binary path: the build output directory is cargo's business
+# (machine-local target-dir configuration).
+
+[tasks.build]
+description = "Build the release binary"
+run = "cargo build --release"
+
+[tasks.test]
+description = "Run the test suite"
+run = "cargo test"
