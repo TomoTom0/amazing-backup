@@ -17,12 +17,12 @@
 [meta]
 feature = "registry"
 source_file = "src/registry.rs"
-verified = false
-verified_at = ""
-verified_by = ""
+verified = true
+verified_at = "2026-11-21"
+verified_by = "claude"
 test_command = "cargo test"
-source_hash = ""
-note = "TASK-18(設計3.2・5.3本文)の条件化。registryは追記型JSONL(data/registry.jsonl・TASK-20でfile_writeのみschema=3・他recordはschema=2)。bucket一致規則(record_bucket_matched)は不変で、H-1/M-R1系の既存条件(cli.profile-namespace-isolated-by-bucket・index.pins-bucket-isolated等)がbucket分離の振る舞いを担保。registry読込の共通振る舞い(不正JSON行・torn write・未知record_type・read error伝播)はverifyエリアの既存条件が担保"
+source_hash = "c76903b63071836eea3b7711defb038f7c6e09e9"
+note = "TASK-18(設計3.2・5.3本文)の条件化。registryは追記型JSONL(data/registry.jsonl・TASK-20でfile_writeのみschema=3・他recordはschema=2)。bucket一致規則(record_bucket_matched)は不変で、H-1/M-R1系の既存条件(cli.profile-namespace-isolated-by-bucket・index.pins-bucket-isolated等)がbucket分離の振る舞いを担保。registry読込の共通振る舞い(不正JSON行・torn write・未知record_type・read error伝播)はverifyエリアの既存条件が担保。2026-11-21 TASK-17 W3(TASK-22)条件追加(rename/location_update record 2条件)でテスト先行のためverified=falseのまま(W3実装後に全件verifyでtrueへ復帰)。2026-11-21 TASK-22(TASK-17 W3)実装後に全件verify(cargo test 417pass=25suite・vitest 169pass=29file・verify-conditions PASS 383条件・実機確認=serve+fake seamでrename→CLI list files/queryへ新title反映・catalog rebuild後も保持)を確認してverified=trueへ復帰・source_hashを更新(W3分実装含む)"
 
 [[condition]]
 id = "registry.schema2-records-roundtrip"
@@ -40,7 +40,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2・5.3(deny_unknown_f
 description = "旧schema1形式のrecord行(旧フィールドfolder/name等の混入・schema=1)はdeny_unknown_fieldsによりparse失敗となる(旧記録の互換読込・黙黙変換は行わない。失敗はverify.torn-write-and-bad-json-linesと同じ不正JSON行の扱い)。TASK-20のfile_write schema 3化に伴い、旧schema=2 file_write行(rel_path入り・label無し)もdeny_unknown_fieldsによりunknown field `rel_path`として同様に拒否される(拒否原因はunknown fieldであり「missing field `label`」文言はtest契約にしない=文言でなく終了code・行番号付きエラーの挙動で検証) (unit)"
 given = "旧schema1形式のfile_write行(folder入り・uuid/title無し・schema=1)と旧schema=2 file_write行(rel_path入り・label無し)を既知recordに混入したregistry"
 expect_return_shape = "いずれの混入行も行番号付きでparseエラー(ProcessError)となり、黙って読み飛ばされず変換もされない"
-source_lines = "src/registry.rs:1130; tests/registry_storage.rs:159"
+source_lines = "src/registry.rs:1445; tests/registry_storage.rs:159"
 
 [[condition]]
 id = "registry.sweep-location-remove-records"
@@ -49,7 +49,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(sweep/location_remov
 description = "新record_typeのparse/reduce: sweep={schema:1, record_type:\"sweep\", recorded_at, reason:\"lifecycle\", deleted:[{s3_key, version_id}]}(manage index reconcileの実行記録・索引再構築で消滅版を復活させない除外集合)・location_remove={schema:1, record_type:\"location_remove\", recorded_at, uuid, identity_hash, source_path}(manage location rmの実行記録)。reduce結果はReducedのsweeps/location_removesへ全件格納される (unit)"
 given = "sweep(deleted 2件)・location_remove各1行を含むregistryのloadとreduce"
 expect_return_shape = "両record_typeが既知種として読み込まれ(未知record_type警告なし)、Reducedのsweeps/location_removesに全件格納される"
-source_lines = "src/registry.rs:1107; tests/registry_storage.rs:230"
+source_lines = "src/registry.rs:1422; tests/registry_storage.rs:230"
 
 [[condition]]
 id = "registry.sha-uuid-lookup-resolves-unique"
@@ -58,7 +58,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(Reducedへの追加�
 description = "sha_uuid_lookup(合流正本・承認事項4): file_uploadsからbucket一致する同source_sha256記録のuuid集合を作り、1件ならそのuuidを返す。bucket一致はrecord_bucket_matchedと同一規則(記録s3_bucket欠損の空文字は正本bucket相当) (unit)"
 given = "実効bucket=正本bucketのregistryに同shaのbucket一致file_uploadが1件だけ存在する状態でのlookup"
 expect_return = "当該uuidのSome(uuid)"
-source_lines = "src/registry.rs:1150; tests/registry_storage.rs:312"
+source_lines = "src/registry.rs:1465; tests/registry_storage.rs:312"
 
 [[condition]]
 id = "registry.sha-uuid-lookup-multiple-picks-min-uuid"
@@ -67,7 +67,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2(複数(歴史的重�
 description = "同一shaがbucket一致する複数uuidに存在する(歴史的重複)場合は辞書順最小uuidを返す(合流先を決定的にする) (unit)"
 given = "同shaのbucket一致file_uploadがuuid昇順でuuid-b・uuid-aの2件存在する状態でのlookup"
 expect_return = "uuid-a(辞書順最小)のSome"
-source_lines = "src/registry.rs:1151; tests/registry_storage.rs:364"
+source_lines = "src/registry.rs:1466; tests/registry_storage.rs:364"
 
 [[condition]]
 id = "registry.sha-uuid-lookup-bucket-scoped"
@@ -76,7 +76,7 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 3.2・10章(registry: bu
 description = "lookupのuuid集合はbucket一致で分離される: 他方bucketの同sha記録は不採用(同一prefix・別bucket構成で他bucket実績へ合流しない)。s3_bucket欠損(空文字)の旧記録相当は正本bucket解釈(record_bucket_matchedと同一規則)で、実効bucket=正本bucketの実行でのみ採用される (unit, fake S3Backend)"
 given = "dev(active_profile=正本)とprodが同一prefix・別bucketの構成で、(1)同shaのfile_uploadがprod bucket側のみ存在する状態でのdev実効bucketでのlookup (2)同shaのfile_upload(s3_bucket空文字)が存在する状態でのdev・prod各実効bucketでのlookup"
 expect_return_shape = "(1)None(他方bucket記録は不採用) (2)正本bucket(dev)側はSome・prod側はNone"
-source_lines = "src/registry.rs:1152; tests/registry_storage.rs:430"
+source_lines = "src/registry.rs:1467; tests/registry_storage.rs:430"
 
 [[excluded]]
 item = "registry喪失(索引はS3に残る)からの回復操作(manage index rebuildで索引をmanifest基準へ現状化したうえで重複実体の不要側をprune・手動deleteで回収)"
@@ -91,3 +91,23 @@ source = "TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md)4章(実装前確
 reason = "実環境の運用手順であり検証対象コードの振る舞い条件ではない。旧形式file_write行が新binaryでparse失敗すること自体はregistry.old-schema-fields-rejected・旧schema索引の拒否はindex.parse-failure-guides-rebuildでそれぞれ担保済み"
 decided_at = "2026-10-25"
 decided_by = "claude"
+
+# --- TASK-17 W3(TASK-22: 書き込み系registry event・2026-11-21テスト先行) ---
+
+[[condition]]
+id = "registry.rename-location-update-records"
+target_function = "registry::append_record / load_registry / reduce_records(rename・location_update)"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.2(新event: RenameRecord {recorded_at, scope, uuid, old_title, new_title}・LocationUpdateRecord {recorded_at, scope, uuid, source_path, old_category, old_label, new_category, new_label}。title変更・所在変更はregistry.jsonlへのevent追記を真正とする)・D-W2・9章W3行・11章(registry.toml: serialize/roundtrip)"
+description = "W3新recordのparse/reduce/roundtrip: rename={schema:1, record_type:\"rename\", recorded_at, scope, uuid, old_title, new_title}(title変更の真正記録)・location_update={schema:1, record_type:\"location_update\", recorded_at, scope, uuid, source_path, old_category, old_label, new_category, new_label}(所在の分類変更の真正記録)。append→load往復で全fieldが失われずRecord enumへ正しく分類され、reduce結果はReducedのrenames/location_updatesへ全件格納される(location_removeと同一の全件保持)。両recordともbucket欄を持たないためmanage reset --applyのregistry行分離(partition_reset_removal)では検証のみ行い温存される(prune/sweep/location_removeと同一扱い。uuidの実体行が除去された後の孤立eventはtitle導出の照合対象が無く不活性) (unit)"
+given = "rename 1件(schema=1・全field値)とlocation_update 1件(schema=1・全field値)を含むregistryのappend→load→reduce往復と、両行を混入したregistryでのpartition_reset_removal(対象bucket=b)"
+expect_return_shape = "load結果はRecord::Rename/Record::LocationUpdateに分類され全fieldが復元される(未知record_type警告なし)。reduce後のrenames/location_updatesに1件ずつ全件格納される。partition_reset_removalは両行を温存する(行順保持)"
+source_lines = "src/registry.rs:1276"
+
+[[condition]]
+id = "registry.entity-title-rename-latest-wins"
+target_function = "registry::entity_title / entity_titles(W3のrename考慮) / latest_rename"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.2(rename適用: reduce処理にも両eventを適用=再構築でtitle変更が失われない)・9章W3行・11章。既存条件registry entity_title(TASK-18)の後方互換拡張(rename無しregistryでは挙動不変=実装時検証事項5の旧registry後方互換)"
+description = "entityの現行title導出はfile_write群とrename群を通したrecorded_at最大の値となる(後勝ち。同一時刻はrenameを新側として扱う=追記順で後のrenameが確定操作)。renameより新しいfile_write(title変更付き再pushがfile_writeを再追記した場合)はfile_write側のtitleが勝つ(rename結果の退行防止)。renameを含まないregistryでは従来どおりfile_write群のみの導出(既存振る舞いの後方互換)。entity_titles(一括導出・build_entriesのfallbackとbackup pushのrun状態初期化で使用)も同一規則 (unit)"
+given = "(1)同一uuidへfile_write(title=A・古い時刻)→rename(A→B)の順のregistry (2)さらに新時刻のfile_write(title=B)を追記したregistry (3)renameのみでfile_writeの無いuuid (4)renameを含まないregistry"
+expect_return_shape = "(1)entity_title=B(rename後勝ち) (2)title=B(file_write側もBのため不変・file_writeが別title CならCへ戻る=file_writeの新記録が勝つ) (3)None(title導出の源はfile_write群の存在下でのrename・単独renameではentityが存在しない) (4)従来規則のまま(file_write群recorded_at最大)"
+source_lines = "src/registry.rs:1333"

@@ -1136,6 +1136,28 @@ fn cmd_manage_index_rebuild(ctx: &CtxArgs) -> i32 {
             for e in entry_list.iter_mut() {
                 e.pins.sort_by(|a, b| a.s3_key.cmp(&b.s3_key));
             }
+            // W3(TASK-22): rename/location_updateの適用(設計4.2: rebuildでtitle/label
+            // 変更が失われないようにする)。registryが正本のため存在すればmanifest由来
+            // の導出値へ上書きする(pins復元と同一位置づけ)。location_updateの適用判定は
+            // 所在のlast_backup日(その所在を記録したfile_writeの日)以降のupdateのみ
+            // =build_entriesのrecorded_at比較と同じ順序規則の日次粒度版
+            let titles = registry::entity_titles(&reduced_now);
+            for e in entry_list.iter_mut() {
+                if let Some(t) = titles.get(&e.uuid) {
+                    e.title = t.clone();
+                }
+                for loc in e.locations.iter_mut() {
+                    if let Some((category, label)) = registry::location_update_for(
+                        &reduced_now,
+                        &e.uuid,
+                        &loc.source_path,
+                        &loc.last_backup,
+                    ) {
+                        loc.category = category.to_string();
+                        loc.label = label.to_string();
+                    }
+                }
+            }
         }
         let run_id = entry_list
             .first()

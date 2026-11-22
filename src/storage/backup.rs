@@ -220,21 +220,12 @@ struct RunState {
 impl RunState {
     /// run開始時の初期化(4.2): run_entity_titlesはreducedから一括導出
     /// (uuid毎のrecorded_at最大・同値ならVec後方=後勝ちのtitle)。
+    /// W3(TASK-22): rename eventを考慮する(rename後の合流・再PUTがrename前の
+    /// titleをfile_writeへ再記録して旧titleへ退行するのを防ぐ=registry::
+    /// entity_titlesと同一規則)。
     fn new(reduced: &Reduced) -> Self {
-        let mut by_uuid: HashMap<&str, Vec<&registry::FileWriteRecord>> = HashMap::new();
-        for w in &reduced.file_writes {
-            by_uuid.entry(w.uuid.as_str()).or_default().push(w);
-        }
-        let run_entity_titles = by_uuid
+        let run_entity_titles = registry::entity_titles(reduced)
             .into_iter()
-            .map(|(uuid, writes)| {
-                let title = writes
-                    .iter()
-                    .max_by(|a, b| a.recorded_at.cmp(&b.recorded_at))
-                    .map(|w| w.title.clone())
-                    .unwrap_or_default();
-                (uuid.to_string(), title)
-            })
             .collect();
         RunState {
             run_map: HashMap::new(),

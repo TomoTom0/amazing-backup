@@ -17,12 +17,12 @@
 [meta]
 feature = "metadata"
 source_file = "src/metadata.rs"
-verified = false
-verified_at = ""
-verified_by = ""
+verified = true
+verified_at = "2026-11-21"
+verified_by = "claude"
 test_command = "cargo test"
-source_hash = ""
-note = "TASK-18(設計2章・5.5本文)の条件化。metadataはregistry reduceから正規形として導出できる実体の身元票(災害時にS3コンソールだけで実体を同定する目的・平文JSON)。書込観測はfake seamのPutObject/GetObject呼び出し記録で行う。encrypted版latest_source_pathは実ageでの暗号化を要する"
+source_hash = "78088f8944c7cafd2a65a6ff23ec3f5e7320bef5"
+note = "TASK-18(設計2章・5.5本文)の条件化。metadataはregistry reduceから正規形として導出できる実体の身元票(災害時にS3コンソールだけで実体を同定する目的・平文JSON)。書込観測はfake seamのPutObject/GetObject呼び出し記録で行う。encrypted版latest_source_pathは実ageでの暗号化を要する。2026-11-21 TASK-17 W3(TASK-22)条件追加(rename由来title追従 1条件)でテスト先行のためverified=falseのまま(W3実装後に全件verifyでtrueへ復帰)。2026-11-21 TASK-22(TASK-17 W3)実装後に全件verifyでverified=trueを記録(W3分: rename由来title追従1条件・TASK-18分の検証記録未記載状態から本タスクで全件緑を確認して記録)"
 
 [[condition]]
 id = "metadata.doc-built-from-registry"
@@ -66,3 +66,14 @@ source = "tmp/tasks/tm-18/design_key-uuid-versioning.md 2.2・5.5(将来用・�
 reason = "復号を必要とする運用経路が存在しない設計(2.2: 災害時の手がかりでありget等の経路では読まない)。実装しない設計判断のため検証対象コードが存在しない"
 decided_at = "2026-10-22"
 decided_by = "claude"
+
+# --- TASK-17 W3(TASK-22: 書き込み系registry event・2026-11-21テスト先行) ---
+
+[[condition]]
+id = "metadata.title-follows-rename"
+target_function = "metadata::build_metadata / sync_entity_metadata(rename由来のtitle変更)"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.2(rename時はmetadata::sync_entity_metadataの別呼出(旧titleキー掃除を含む)が必要・現行title=entity_title導出)・9章W3行・11章"
+description = "rename event後のmetadata docは新titleで構築される(build_metadataの現行title導出はrename考慮のentity_title経由)。sync_entity_metadataは新titleキーmetadata_{新title}.jsonへPUTし旧titleキー(現行titleキー以外のmetadata_接頭辞キー)を掃除する(title変更時のキー掃除はpush時title変更と同一経路=metadata.title-change-rotates-keyの契約をrename源でも満たす)。serveのrename APIはrebuild_and_upload_index(manage.rs)がmetadata syncを含まないためsync_entity_metadataを別呼出する(4.2) (integration, fake seam)"
+given = "1entity(title=A)のregistryへrename(A→B)を追記した状態でsync_entity_metadataを実行"
+expect_return_shape = "metadata_B.jsonへPUT(内容のtitle=B)が行われ・旧キーmetadata_A.jsonへDELETE(delete marker)が行われる(default.ageは不動)"
+source_lines = "tests/metadata_storage.rs:426"

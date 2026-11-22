@@ -660,6 +660,49 @@ export function putEntityTags(uuid: string, tags: string[]): Promise<ApiResult<E
   return apiPut(`/api/entities/${uuid}/tags`, { tags }, isEntityDetailResponse)
 }
 
+/** W3(TASK-22)書込APIの応答: EntityDetail形式+title重複時のみwarning(CLI
+ *  warn_if_title_duplicateと同一文言)。warningは省略可(重複無し時は不在) */
+export type EntityMutationResponse = EntityDetail & { warning?: string }
+
+/** 書込API応答の型ガード(EntityDetail形式+warningはstringまたは不在)。warning検査は
+ * unknown経由でindex accessする(isEntityDetailResponse通過後のnarrow型にwarning keyが
+ * 無いため=hasEntityCollectionsと同一pattern) */
+export function isEntityMutationResponse(v: unknown): v is EntityMutationResponse {
+  return isEntityDetailResponse(v) && hasOptionalWarning(v)
+}
+
+/** warning fieldの検査(不在またはstring) */
+function hasOptionalWarning(v: unknown): boolean {
+  if (!isRecord(v)) return false
+  const warning: unknown = v['warning']
+  return warning === undefined || typeof warning === 'string'
+}
+
+/** entityのtitle変更(POST /api/entities/:uuid/rename。body {title}。応答は操作後の
+ *  対象状態+title重複時のみwarning=許容の警告。title規則違反は422・不在uuidは404) */
+export function renameEntity(
+  uuid: string,
+  title: string,
+): Promise<ApiResult<EntityMutationResponse>> {
+  return apiPost(`/api/entities/${uuid}/rename`, { title }, isEntityMutationResponse)
+}
+
+/** entityの所在の分類変更(POST /api/entities/:uuid/location。body
+ *  {source_path, category, label}。対象locationはsource_path完全一致。不在は404・
+ *  category/label規則違反は422。応答は操作後の対象状態) */
+export function updateEntityLocation(
+  uuid: string,
+  sourcePath: string,
+  category: string,
+  label: string,
+): Promise<ApiResult<EntityDetail>> {
+  return apiPost(
+    `/api/entities/${uuid}/location`,
+    { source_path: sourcePath, category, label },
+    isEntityDetailResponse,
+  )
+}
+
 // --- collection書込(W2レビュー指摘高3=TASK-19。API契約は2026-11-14確定分に固定:
 //     POST /api/collections body{name}応答{collection:{id,name,uuids}}・
 //     PUT /api/collections/:id body{name}・DELETE /api/collections/:id応答

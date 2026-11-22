@@ -422,3 +422,68 @@ fn metadata_title_change_rotates_key() {
         "pin objectへのDELETEは無い: {calls}"
     );
 }
+
+/// [covers:metadata.title-follows-rename]
+/// W3(TASK-22): rename event後のmetadataは新titleで構築され新titleキーへPUT・
+/// 旧titleキーを掃除する(build_metadataの現行title導出はrename考慮のentity_title経由。
+/// キーローテーション自体はpush時title変更と同一経路=設計4.2)。rename記録をregistryへ
+/// 追記したうえで変更の無い再push(skip経路=touch→run末尾のmetadata sync)で同期を
+/// 起こす=serveのrename APIと同じ後段(sync_entity_metadata)を通す。
+#[test]
+fn metadata_title_follows_rename_event() {
+    let Some(fx) = StorageFixture::new("meta-w3-ren", meta_opts()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    write_file(&a, b"metadata-w3-plain");
+    let Some((code, stdout)) = push_titled_pty(&fx, &[&a], "ren-A", &[]) else {
+        return;
+    };
+    assert_eq!(code, 0, "初回push(title ren-A): {stdout}");
+    let uuid = meta_uuid_of(&fx, &a);
+    let key_a = fx.metadata_key(&uuid, "ren-A");
+    assert!(fx.object_path(&key_a).is_file(), "metadata_ren-A.json配置");
+
+    // registryへrename記録を追記(serve rename APIが書くのと同一schema)
+    use amazing_backup::registry::{RenameRecord, append_record};
+    let record = RenameRecord {
+        schema: 1,
+        record_type: "rename".into(),
+        recorded_at: "2999-01-01T00:00:00+09:00".into(),
+        scope: "it-bucket:amazing-backup/".into(),
+        uuid: uuid.clone(),
+        old_title: "ren-A".into(),
+        new_title: "ren-B".into(),
+    };
+    append_record(&fx.registry, &record).expect("rename追記");
+
+    // 変更の無い再push: registry matchでskip→run末尾のmetadata sync(4.2の別呼出と
+    // 同一関数)が新titleでdocを構築する
+    let (code, stdout, stderr) = fx.push(&[&a], &[], &[]);
+    assert_eq!(code, 0, "再push(skip経路): {stdout}{stderr}");
+    let key_b = fx.metadata_key(&uuid, "ren-B");
+    assert!(
+        fx.object_path(&key_b).is_file(),
+        "metadata_ren-B.json配置(現行title=rename後)"
+    );
+    let calls = fx.calls();
+    assert!(
+        calls
+            .lines()
+            .any(|l| l.starts_with("s3 PutObject") && l.contains(&format!("key={key_b}"))),
+        "新titleキーへPUT: {calls}"
+    );
+    assert!(
+        calls
+            .lines()
+            .any(|l| l.starts_with("s3 DeleteObject") && l.contains(&format!("key={key_a}"))),
+        "旧titleキー(ren-A)の掃除: {calls}"
+    );
+    // default.ageは不動
+    let data_key = fx.data_key(&uuid);
+    assert!(
+        !calls.lines().any(|l| l.starts_with("s3 DeleteObject")
+            && l.contains(&format!("key={data_key}"))),
+        "default.ageは不動: {calls}"
+    );
+}

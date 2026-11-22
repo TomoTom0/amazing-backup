@@ -40,7 +40,7 @@
 
 use crate::errors::{BackupError, BackupResult};
 use axum::response::IntoResponse as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// serve subcommandの引数(設計1章・8章: serveは既存profile解決chainを使うため
 /// backup系と同じ選択optionを持つ。server.toml自体のpath指定は設計対象外)。
@@ -901,6 +901,14 @@ fn build_router(state: AppState) -> axum::Router {
         .route(
             "/api/entities/{uuid}/tags",
             axum::routing::put(put_entity_tags),
+        )
+        .route(
+            "/api/entities/{uuid}/rename",
+            axum::routing::post(post_entity_rename),
+        )
+        .route(
+            "/api/entities/{uuid}/location",
+            axum::routing::post(post_entity_location),
         )
         .route("/api/tags", axum::routing::get(get_tags))
         .route("/api/folders", axum::routing::get(get_folders))
@@ -2090,6 +2098,324 @@ async fn delete_collection_item(
                     &db, &bucket, &prefix, "collection_items_remove", &detail, e,
                 ),
             }
+        };
+        flow()
+    })
+    .await?;
+    outcome.into_json_response()
+}
+
+// ---------------------------------------------------------------------------
+// TASK-17 W3(TASK-22)書込API: title変更(rename)・所在の分類変更(location)。
+// W2書込APIと同一のsingle-flight(semaphore 1)で直列化しspawn_blocking経由で実行。
+// 書込の真正はregistry.jsonlへのevent追記+索引全体再構築+PUT+DB反映(設計4.2 D-W2)。
+// 成功auditは操作完了後の記録(W2の同一tx方式と異なる=registry append・S3 PUT・DB反映
+// をまたぐ単一transactionが存在しないため。記録失敗はlogのみで操作結果に影響しない)。
+
+/// W3書込flowの対象entity導出: registry由来の現行state(build_entries結果)からuuidで
+/// 引き当てる。対象uuidが無ければNone(404)。ローカルregistryが知らないentityの
+/// rename/locationは索引再構築で当該entityを消失させるため、cacheでなくregistry由来で
+/// 存在判定する(設計4.2: registry.jsonlが一次記録)。
+fn w3_current_entries(
+    session: &crate::storage::Session,
+    registry_path: &Path,
+) -> BackupResult<Vec<crate::index::IndexFileEntry>> {
+    let records = crate::registry::load_registry(registry_path)?;
+    let reduced = crate::registry::reduce_records(&records);
+    Ok(crate::index::build_entries(
+        &reduced,
+        &session.aws.bucket,
+        &session.canonical_bucket,
+    ))
+}
+
+/// 操作後の対象entity詳細JSON(索引再構築・DB反映後のcacheから引き当て。
+/// EntityDetail形式+tags/collections。失敗は呼び出し側のinternal error経路)。
+fn w3_entity_detail_json(
+    db: &crate::catalog::CatalogDb,
+    bucket: &str,
+    prefix: &str,
+    uuid: &str,
+) -> BackupResult<serde_json::Value> {
+    let (_header, entries) = db.load_entries(bucket, prefix)?;
+    let Some(e) = entries.iter().find(|e| e.uuid == uuid) else {
+        return Err(BackupError::Internal(format!(
+            "rename/location後の索引に対象entity({uuid})が無い"
+        )));
+    };
+    entity_detail_with_vocabulary(db, bucket, prefix, e)
+}
+
+/// POST /api/entities/:uuid/rename(title変更。body {title}。応答はEntityDetail形式
+/// (+title重複時のみwarning=CLI warn_if_title_duplicateと同一文言)。title規則
+/// 違反は422・対象uuidがregistry由来の現行stateに無ければ404・同一titleは冪等成功。
+/// RenameRecord追記→rebuild_and_upload_index(索引再構築+S3 PUT+DB反映)→
+/// metadata sync(新titleキーPUT+旧titleキー掃除)=設計4.2の順。action=entity_rename)
+async fn post_entity_rename(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| invalid_request("リクエストの形式が不正です"))?;
+    let Some(title) = parsed.get("title").and_then(|t| t.as_str()).map(String::from)
+    else {
+        return Err(invalid_request("titleは文字列で指定してください"));
+    };
+    let _permit = acquire_write_permit(&state).await?;
+    let ctx = state.sync_ctx.clone();
+    let outcome = run_blocking(move || {
+        let session = crate::storage::open_session(&ctx)?;
+        let cfg = session
+            .cfg
+            .as_ref()
+            .ok_or_else(|| BackupError::Config("pipeline.tomlが必要です".to_string()))?;
+        let registry_path = cfg.registry_path.clone();
+        let (bucket, prefix) = (session.aws.bucket.clone(), session.aws.prefix.clone());
+        let db = crate::catalog::CatalogDb::open()?;
+        let detail = serde_json::json!({"uuid": uuid, "title": title});
+        let flow = || -> Result<W2Outcome, BackupError> {
+            // title規則(422)
+            if let Err(e) = crate::layout::validate_title(&title) {
+                eprintln!("serve: renameのtitle規則違反: {e}");
+                audit_outcome(
+                    &db, &bucket, &prefix, "entity_rename", &detail, "failed",
+                    Some("validation_failed"),
+                );
+                return Ok(W2Outcome::Validation);
+            }
+            // 対象はregistry由来の現行stateに存在すること(404)
+            let entries = match w3_current_entries(&session, &registry_path) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(w2_audit_internal(
+                        &db, &bucket, &prefix, "entity_rename", &detail, e,
+                    ));
+                }
+            };
+            let Some(entry) = entries.iter().find(|e| e.uuid == uuid).cloned() else {
+                audit_outcome(
+                    &db, &bucket, &prefix, "entity_rename", &detail, "failed",
+                    Some("not_found"),
+                );
+                return Ok(W2Outcome::NotFound);
+            };
+            // title重複は許容+警告応答(CLI仕様と同一。他entityの現行titleとの比較)
+            let warning = if entries
+                .iter()
+                .any(|e| e.uuid != uuid && e.title == title)
+            {
+                Some(format!(
+                    "title({title})は既存entityと重複しています(許容されます。一意化はuuid/所在指定で行ってください)"
+                ))
+            } else {
+                None
+            };
+            // RenameRecord追記(真正記録)→索引全体再構築+PUT+DB反映→metadata sync
+            let record = crate::registry::RenameRecord {
+                schema: 1,
+                record_type: "rename".into(),
+                recorded_at: crate::storage::now_jst(),
+                scope: format!("{bucket}:{prefix}"),
+                uuid: uuid.clone(),
+                old_title: entry.title.clone(),
+                new_title: title.clone(),
+            };
+            if let Err(e) = crate::registry::append_record(&registry_path, &record) {
+                return Err(w2_audit_internal(
+                    &db, &bucket, &prefix, "entity_rename", &detail, e,
+                ));
+            }
+            if let Err(e) = crate::storage::pin::rebuild_and_upload_index(
+                &session,
+                &registry_path,
+                "rename",
+            ) {
+                return Err(w2_audit_internal(
+                    &db, &bucket, &prefix, "entity_rename", &detail, e,
+                ));
+            }
+            // rename時はmetadata syncを別呼出(rebuild_and_upload_indexはmetadata syncを
+            // 含まない=設計4.2。旧titleキー掃除を含む)
+            let records = crate::registry::load_registry(&registry_path)?;
+            let reduced = crate::registry::reduce_records(&records);
+            if let Err(e) = crate::metadata::sync_entity_metadata(
+                session.backend.as_ref(),
+                &session.aws,
+                &session.canonical_bucket,
+                &cfg,
+                &reduced,
+                &uuid,
+            ) {
+                return Err(w2_audit_internal(
+                    &db, &bucket, &prefix, "entity_rename", &detail, e,
+                ));
+            }
+            // 応答は操作後の対象状態(EntityDetail形式+warning)
+            let mut value = match w3_entity_detail_json(&db, &bucket, &prefix, &uuid) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(w2_audit_internal(
+                        &db, &bucket, &prefix, "entity_rename", &detail, e,
+                    ));
+                }
+            };
+            if let Some(w) = warning {
+                value["warning"] = serde_json::json!(w);
+            }
+            // 成功audit(操作完了後の記録。失敗はlogのみ)
+            let detail_json = serde_json::to_string(&detail).unwrap_or_default();
+            if let Err(e) = db.record_audit(&bucket, &prefix, "entity_rename", &detail_json, "ok", None)
+            {
+                eprintln!("serve: audit_log記録に失敗(logのみ): {e}");
+            }
+            Ok(W2Outcome::Ok(value))
+        };
+        flow()
+    })
+    .await?;
+    outcome.into_json_response()
+}
+
+/// POST /api/entities/:uuid/location(所在の分類変更。body {source_path, category, label}。
+/// 対象locationは(uuid, source_path)完全一致で特定し、不一致・不在uuidは404。
+/// category名規則・label正規化規則違反は422。LocationUpdateRecord追記→索引再構築+PUT+
+/// DB反映(metadata sync無し=所在変更はmetadataの内容に影響しない)。action=
+/// entity_location_update)
+async fn post_entity_location(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| invalid_request("リクエストの形式が不正です"))?;
+    let field = |name: &str| -> Result<String, ApiError> {
+        parsed
+            .get(name)
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| {
+                let msg = match name {
+                    "source_path" => "source_pathは文字列で指定してください",
+                    "category" => "categoryは文字列で指定してください",
+                    _ => "labelは文字列で指定してください",
+                };
+                invalid_request(msg)
+            })
+    };
+    let source_path = field("source_path")?;
+    let category = field("category")?;
+    let label = field("label")?;
+    let _permit = acquire_write_permit(&state).await?;
+    let ctx = state.sync_ctx.clone();
+    let outcome = run_blocking(move || {
+        let session = crate::storage::open_session(&ctx)?;
+        let cfg = session
+            .cfg
+            .as_ref()
+            .ok_or_else(|| BackupError::Config("pipeline.tomlが必要です".to_string()))?;
+        let registry_path = cfg.registry_path.clone();
+        let (bucket, prefix) = (session.aws.bucket.clone(), session.aws.prefix.clone());
+        let db = crate::catalog::CatalogDb::open()?;
+        let detail = serde_json::json!({
+            "uuid": uuid,
+            "source_path": source_path,
+            "category": category,
+            "label": label,
+        });
+        let flow = || -> Result<W2Outcome, BackupError> {
+            // 分類の規則検査(422): category名規則+label正規化(空=ラベルなしは正当)
+            if let Err(e) = crate::layout::validate_category_name(&category) {
+                eprintln!("serve: location変更のcategory規則違反: {e}");
+                audit_outcome(
+                    &db, &bucket, &prefix, "entity_location_update", &detail, "failed",
+                    Some("validation_failed"),
+                );
+                return Ok(W2Outcome::Validation);
+            }
+            let normalized_label = match crate::layout::normalize_label(&label) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("serve: location変更のlabel規則違反: {e}");
+                    audit_outcome(
+                        &db, &bucket, &prefix, "entity_location_update", &detail, "failed",
+                        Some("validation_failed"),
+                    );
+                    return Ok(W2Outcome::Validation);
+                }
+            };
+            // 対象はregistry由来の現行stateに存在すること+所在は完全一致で特定(404)
+            let entries = match w3_current_entries(&session, &registry_path) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(w2_audit_internal(
+                        &db, &bucket, &prefix, "entity_location_update", &detail, e,
+                    ));
+                }
+            };
+            let Some(entry) = entries.iter().find(|e| e.uuid == uuid) else {
+                audit_outcome(
+                    &db, &bucket, &prefix, "entity_location_update", &detail, "failed",
+                    Some("not_found"),
+                );
+                return Ok(W2Outcome::NotFound);
+            };
+            let Some(loc) = entry.locations.iter().find(|l| l.source_path == source_path)
+            else {
+                audit_outcome(
+                    &db, &bucket, &prefix, "entity_location_update", &detail, "failed",
+                    Some("not_found"),
+                );
+                return Ok(W2Outcome::NotFound);
+            };
+            // LocationUpdateRecord追記(真正記録)→索引全体再構築+PUT+DB反映
+            let record = crate::registry::LocationUpdateRecord {
+                schema: 1,
+                record_type: "location_update".into(),
+                recorded_at: crate::storage::now_jst(),
+                scope: format!("{bucket}:{prefix}"),
+                uuid: uuid.clone(),
+                source_path: source_path.clone(),
+                old_category: loc.category.clone(),
+                old_label: loc.label.clone(),
+                new_category: category.clone(),
+                new_label: normalized_label,
+            };
+            if let Err(e) = crate::registry::append_record(&registry_path, &record) {
+                return Err(w2_audit_internal(
+                    &db, &bucket, &prefix, "entity_location_update", &detail, e,
+                ));
+            }
+            if let Err(e) = crate::storage::pin::rebuild_and_upload_index(
+                &session,
+                &registry_path,
+                "location-update",
+            ) {
+                return Err(w2_audit_internal(
+                    &db, &bucket, &prefix, "entity_location_update", &detail, e,
+                ));
+            }
+            // 応答は操作後の対象状態(EntityDetail形式)
+            let value = match w3_entity_detail_json(&db, &bucket, &prefix, &uuid) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(w2_audit_internal(
+                        &db, &bucket, &prefix, "entity_location_update", &detail, e,
+                    ));
+                }
+            };
+            let detail_json = serde_json::to_string(&detail).unwrap_or_default();
+            if let Err(e) = db.record_audit(
+                &bucket,
+                &prefix,
+                "entity_location_update",
+                &detail_json,
+                "ok",
+                None,
+            ) {
+                eprintln!("serve: audit_log記録に失敗(logのみ): {e}");
+            }
+            Ok(W2Outcome::Ok(value))
         };
         flow()
     })
@@ -5735,19 +6061,409 @@ mod tests {
     #[test]
     fn api_write_endpoints_unauthenticated_401() {
         let flow = AuthFlow::new("srv-api-w2-auth");
-        let cases: [(&str, String, serde_json::Value); 6] = [
+        let cases: [(&str, String, serde_json::Value); 8] = [
             ("PUT", format!("/api/entities/{W2_ALPHA_UUID}/tags"), serde_json::json!({ "tags": [] })),
             ("POST", "/api/collections".into(), serde_json::json!({ "name": "x" })),
             ("PUT", "/api/collections/1".into(), serde_json::json!({ "name": "x" })),
             ("DELETE", "/api/collections/1".into(), serde_json::Value::Null),
             ("POST", "/api/collections/1/items".into(), serde_json::json!({ "uuids": [] })),
             ("DELETE", format!("/api/collections/1/items/{W2_ALPHA_UUID}"), serde_json::Value::Null),
+            // W3(TASK-22): rename・locationも同一gate
+            ("POST", format!("/api/entities/{W2_ALPHA_UUID}/rename"), serde_json::json!({ "title": "x" })),
+            ("POST", format!("/api/entities/{W2_ALPHA_UUID}/location"), serde_json::json!({ "source_path": "/p", "category": "c", "label": "" })),
         ];
         for (method, path, body) in cases {
             let (status, resp, _) = flow.call(method, &path, Some(body), None);
             assert_eq!(status, 401, "未認証の{method} {path}は401: {resp}");
             expect_error_body(&resp, "unauthenticated");
         }
+    }
+
+    // -------------------------------------------------------------------
+    // TASK-17 W3(TASK-22)書込API(rename・location)のhandler単体test。
+    // テスト先行(実装前はrouting不在のfallback 404で実行failを許容)。
+
+    /// W3 test用: ABH配下のregistry.jsonlへentity実体1件分のfile_write+file_uploadを
+    /// 追記する(rename/location flowはregistry由来の現行stateで存在判定するため
+    /// cacheでなくregistry側のseedが必要)。
+    fn w3_seed_registry(env: &ApiEnv, uuid: &str, title: &str, category: &str, label: &str) {
+        use crate::registry::{FileUploadRecord, FileWriteRecord};
+        let reg = env.home.join("registry.jsonl");
+        let s3_key = format!("{API_TEST_PREFIX}data/{uuid}/default.age");
+        crate::registry::append_record(
+            &reg,
+            &FileWriteRecord {
+                schema: 3,
+                record_type: "file_write".into(),
+                recorded_at: "2026-11-05T10:00:00+09:00".into(),
+                batch_id: "20261105-abcdef01".into(),
+                batch_date: "2026-11-05".into(),
+                uuid: uuid.into(),
+                title: title.into(),
+                source_path: format!("/data/{title}"),
+                source_name: format!("{title}.zip"),
+                source_size: 100,
+                source_mtime: "2026-11-05T09:00:00+09:00".into(),
+                source_sha256: format!("a{uuid}").repeat(8).chars().take(64).collect(),
+                age_path: format!("2026-11-05/{title}.zip.age"),
+                age_size: 140,
+                age_sha256: format!("b{uuid}").repeat(8).chars().take(64).collect(),
+                recipients: vec!["SHA256:testfingerprint".into()],
+                category: category.into(),
+                label: label.into(),
+                identity_hash: format!("hash-{uuid}"),
+                s3_key: s3_key.clone(),
+            },
+        )
+        .expect("file_write追記");
+        crate::registry::append_record(
+            &reg,
+            &FileUploadRecord {
+                schema: 2,
+                record_type: "file_upload".into(),
+                recorded_at: "2026-11-05T10:00:01+09:00".into(),
+                batch_id: "20261105-abcdef01".into(),
+                version_ts: "2026-11-05T10:00:01+09:00".into(),
+                uuid: uuid.into(),
+                title: title.into(),
+                s3_key: s3_key.clone(),
+                s3_bucket: API_TEST_BUCKET.into(),
+                s3_region: "ap-northeast-1".into(),
+                version_id: format!("vid-{uuid}"),
+                s3_size: 140,
+                s3_checksum_sha256: "c".repeat(43),
+                s3_checksum_type: "FULL_OBJECT".into(),
+                source_sha256: format!("a{uuid}").repeat(8).chars().take(64).collect(),
+                age_sha256: format!("b{uuid}").repeat(8).chars().take(64).collect(),
+                source_size: 100,
+                age_size: 140,
+                uploaded_at: "2026-11-05T10:00:02+09:00".into(),
+            },
+        )
+        .expect("file_upload追記");
+    }
+
+    /// W3 test用: fake S3の呼出記録(calls.log)読み出し。
+    fn w3_fake_calls() -> String {
+        let state = std::env::var("AMAZING_BACKUP_FAKE_S3_STATE").expect("fake state env");
+        std::fs::read_to_string(std::path::Path::new(&state).join("calls.log"))
+            .unwrap_or_default()
+    }
+
+    /// [covers:server.entity-rename-endpoint]
+    /// POST /api/entities/:uuid/rename: RenameRecord追記+索引再構築+PUT+DB反映+
+    /// metadata sync(新titleキーPUT+旧キー掃除)。title規則違反422・不在404・
+    /// title重複は許容+warning。audit_logへentity_renameを記録。
+    #[test]
+    fn api_entity_rename_writes_registry_and_index() {
+        let env = api_env("srv-w3-rename");
+        w3_seed_registry(&env, W2_ALPHA_UUID, "alpha", "docs", "work");
+        w3_seed_registry(&env, W2_BETA_UUID, "beta", "docs", "work");
+        let rename_path = format!("/api/entities/{W2_ALPHA_UUID}/rename");
+
+        // 変更成功: 応答はEntityDetail形式(title=renamed・locations/tags/collectionsキー)
+        let (status, body) =
+            api_body("POST", &rename_path, serde_json::json!({ "title": "renamed" }));
+        assert_eq!(status, 200, "renameは200: {body}");
+        assert_eq!(
+            body.get("title").and_then(|t| t.as_str()),
+            Some("renamed"),
+            "応答title=新title: {body}"
+        );
+        assert_eq!(
+            body.get("uuid").and_then(|u| u.as_str()),
+            Some(W2_ALPHA_UUID),
+            "応答は対象entity: {body}"
+        );
+        assert!(
+            body.get("locations").and_then(|l| l.as_array()).is_some_and(|l| !l.is_empty()),
+            "応答はEntityDetail形式(locations付き): {body}"
+        );
+        assert!(
+            body.get("tags").and_then(|t| t.as_array()).is_some(),
+            "応答はtagsキー付き(W2語彙拡張形式): {body}"
+        );
+        assert!(
+            body.get("warning").is_none(),
+            "重複無しrenameにwarningは無い: {body}"
+        );
+
+        // registryへRenameRecord追記(old_title=alpha・new_title=renamed)
+        let records =
+            crate::registry::load_registry(&env.home.join("registry.jsonl")).expect("registry読込");
+        let renames: Vec<&crate::registry::RenameRecord> = records
+            .iter()
+            .filter_map(|r| match r {
+                crate::registry::Record::Rename(x) => Some(x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(renames.len(), 1, "rename記録1件: {records:?}");
+        assert_eq!(renames[0].old_title, "alpha");
+        assert_eq!(renames[0].new_title, "renamed");
+        assert_eq!(renames[0].uuid, W2_ALPHA_UUID);
+        assert_eq!(renames[0].scope, "api-bucket:amazing-backup/");
+        assert!(!renames[0].recorded_at.is_empty());
+
+        // 索引反映: 応答後のGET /api/entities/:uuidでも新title(cacheはfresh反映済み)
+        let (status, got) = api("GET", &format!("/api/entities/{W2_ALPHA_UUID}"));
+        assert_eq!(status, 200, "詳細取得: {got}");
+        assert_eq!(
+            got.get("title").and_then(|t| t.as_str()),
+            Some("renamed"),
+            "索引反映後の詳細も新title: {got}"
+        );
+
+        // 索引objectのPUTとmetadata新キーPUTが行われている
+        let calls = w3_fake_calls();
+        assert!(
+            calls.contains(&format!(
+                "s3 PutObject bucket={API_TEST_BUCKET} key={API_TEST_PREFIX}sys/index.jsonl.age"
+            )),
+            "索引再構築のPUT: {calls}"
+        );
+        assert!(
+            calls.contains(&format!(
+                "s3 PutObject bucket={API_TEST_BUCKET} key={API_TEST_PREFIX}data/{W2_ALPHA_UUID}/metadata_renamed.json"
+            )),
+            "metadata新titleキーPUT: {calls}"
+        );
+
+        // 2回目のrename: 旧titleキー(metadata_renamed)の掃除が行われる
+        let (status, body) =
+            api_body("POST", &rename_path, serde_json::json!({ "title": "final" }));
+        assert_eq!(status, 200, "2回目rename: {body}");
+        let calls = w3_fake_calls();
+        assert!(
+            calls.contains(&format!(
+                "s3 PutObject bucket={API_TEST_BUCKET} key={API_TEST_PREFIX}data/{W2_ALPHA_UUID}/metadata_final.json"
+            )),
+            "metadata新titleキーPUT(2回目): {calls}"
+        );
+        assert!(
+            calls.contains(&format!(
+                "s3 DeleteObject bucket={API_TEST_BUCKET} key={API_TEST_PREFIX}data/{W2_ALPHA_UUID}/metadata_renamed.json"
+            )),
+            "旧titleキーの掃除: {calls}"
+        );
+
+        // title重複は許容+警告応答(betaをfinalへ=alphaと重複)
+        let (status, body) = api_body(
+            "POST",
+            &format!("/api/entities/{W2_BETA_UUID}/rename"),
+            serde_json::json!({ "title": "final" }),
+        );
+        assert_eq!(status, 200, "重複titleは許容: {body}");
+        let warning = body.get("warning").and_then(|w| w.as_str()).unwrap_or_default();
+        assert!(
+            warning.contains("重複"),
+            "warningに重複文言(CLIと同一形式): {body}"
+        );
+
+        // title規則違反は422
+        for bad in ["bad/title", &"x".repeat(66), "bad\ntitle"] {
+            let (status, body) =
+                api_body("POST", &rename_path, serde_json::json!({ "title": bad }));
+            assert_eq!(status, 422, "規則違反({bad:?})は422: {body}");
+            expect_error_body(&body, "validation_failed");
+        }
+        // 不在uuidは404
+        let (status, body) = api_body(
+            "POST",
+            &format!("/api/entities/{W2_ABSENT_UUID}/rename"),
+            serde_json::json!({ "title": "x" }),
+        );
+        assert_eq!(status, 404, "不在uuidは404: {body}");
+        expect_error_body(&body, "not_found");
+
+        // audit_log: entity_renameのok/failed行
+        let rows = w2_audit_log_rows(&env);
+        let rename_rows: Vec<&(String, String, String, Option<String>, String, String)> = rows
+            .iter()
+            .filter(|r| r.0 == "entity_rename")
+            .collect();
+        assert!(rename_rows.len() >= 5, "成功3+失敗422x3+404の記録: {rows:?}");
+        assert!(
+            rename_rows.iter().any(|r| r.2 == "ok"
+                && r.1.contains(W2_ALPHA_UUID)
+                && r.1.contains("renamed")),
+            "成功行(ok・detailにuuidと新title): {rows:?}"
+        );
+        assert!(
+            rename_rows
+                .iter()
+                .any(|r| r.2 == "failed" && r.3.as_deref() == Some("validation_failed")),
+            "422失敗行: {rows:?}"
+        );
+        assert!(
+            rename_rows
+                .iter()
+                .any(|r| r.2 == "failed" && r.3.as_deref() == Some("not_found")),
+            "404失敗行: {rows:?}"
+        );
+        drop(env);
+    }
+
+    /// [covers:server.entity-location-endpoint]
+    /// POST /api/entities/:uuid/location: LocationUpdateRecord追記+索引再構築。
+    /// (uuid, source_path)完全一致で対象所在を特定(不一致404)・category/label規則違反は
+    /// 422・ラベルなし(空文字)は正当。audit_logへentity_location_updateを記録。
+    #[test]
+    fn api_entity_location_updates_classification() {
+        let env = api_env("srv-w3-location");
+        w3_seed_registry(&env, W2_ALPHA_UUID, "alpha", "docs", "work");
+        let location_path = format!("/api/entities/{W2_ALPHA_UUID}/location");
+
+        // 変更成功: 応答のlocationsは新分類
+        let (status, body) = api_body(
+            "POST",
+            &location_path,
+            serde_json::json!({
+                "source_path": "/data/alpha",
+                "category": "photos",
+                "label": "sub",
+            }),
+        );
+        assert_eq!(status, 200, "所在変更は200: {body}");
+        let loc = body
+            .get("locations")
+            .and_then(|l| l.as_array())
+            .and_then(|l| l.first())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            loc.get("source_path").and_then(|p| p.as_str()),
+            Some("/data/alpha"),
+            "対象所在: {body}"
+        );
+        assert_eq!(
+            loc.get("category").and_then(|c| c.as_str()),
+            Some("photos"),
+            "category上書き: {body}"
+        );
+        assert_eq!(
+            loc.get("label").and_then(|l| l.as_str()),
+            Some("sub"),
+            "label上書き: {body}"
+        );
+
+        // registryへLocationUpdateRecord追記
+        let records =
+            crate::registry::load_registry(&env.home.join("registry.jsonl")).expect("registry読込");
+        let updates: Vec<&crate::registry::LocationUpdateRecord> = records
+            .iter()
+            .filter_map(|r| match r {
+                crate::registry::Record::LocationUpdate(x) => Some(x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updates.len(), 1, "location_update記録1件: {records:?}");
+        assert_eq!(updates[0].old_category, "docs");
+        assert_eq!(updates[0].old_label, "work");
+        assert_eq!(updates[0].new_category, "photos");
+        assert_eq!(updates[0].new_label, "sub");
+        assert_eq!(updates[0].source_path, "/data/alpha");
+
+        // 索引反映: GET詳細でも新分類
+        let (status, got) = api("GET", &format!("/api/entities/{W2_ALPHA_UUID}"));
+        assert_eq!(status, 200, "詳細取得: {got}");
+        let loc = got
+            .get("locations")
+            .and_then(|l| l.as_array())
+            .and_then(|l| l.first())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            loc.get("category").and_then(|c| c.as_str()),
+            Some("photos"),
+            "索引反映後の詳細も新分類: {got}"
+        );
+
+        // ラベルなし(空文字)は正当
+        let (status, body) = api_body(
+            "POST",
+            &location_path,
+            serde_json::json!({
+                "source_path": "/data/alpha",
+                "category": "photos",
+                "label": "",
+            }),
+        );
+        assert_eq!(status, 200, "ラベルなしは200: {body}");
+
+        // source_path完全一致なしは404
+        let (status, body) = api_body(
+            "POST",
+            &location_path,
+            serde_json::json!({
+                "source_path": "/data/elsewhere",
+                "category": "photos",
+                "label": "",
+            }),
+        );
+        assert_eq!(status, 404, "不一致source_pathは404: {body}");
+        expect_error_body(&body, "not_found");
+        // 不在uuidは404
+        let (status, body) = api_body(
+            "POST",
+            &format!("/api/entities/{W2_ABSENT_UUID}/location"),
+            serde_json::json!({
+                "source_path": "/data/alpha",
+                "category": "photos",
+                "label": "",
+            }),
+        );
+        assert_eq!(status, 404, "不在uuidは404: {body}");
+        expect_error_body(&body, "not_found");
+        // category規則違反は422
+        let (status, body) = api_body(
+            "POST",
+            &location_path,
+            serde_json::json!({
+                "source_path": "/data/alpha",
+                "category": "Bad",
+                "label": "",
+            }),
+        );
+        assert_eq!(status, 422, "category規則違反は422: {body}");
+        expect_error_body(&body, "validation_failed");
+        // label規則違反(先頭/)は422
+        let (status, body) = api_body(
+            "POST",
+            &location_path,
+            serde_json::json!({
+                "source_path": "/data/alpha",
+                "category": "photos",
+                "label": "/abs",
+            }),
+        );
+        assert_eq!(status, 422, "label規則違反は422: {body}");
+        expect_error_body(&body, "validation_failed");
+
+        // audit_log: entity_location_updateのok/failed行
+        let rows = w2_audit_log_rows(&env);
+        let location_rows: Vec<&(String, String, String, Option<String>, String, String)> = rows
+            .iter()
+            .filter(|r| r.0 == "entity_location_update")
+            .collect();
+        assert!(location_rows.len() >= 5, "成功2+404x2+422x2の記録: {rows:?}");
+        assert!(
+            location_rows.iter().any(|r| r.2 == "ok" && r.1.contains(W2_ALPHA_UUID)),
+            "成功行: {rows:?}"
+        );
+        assert!(
+            location_rows
+                .iter()
+                .any(|r| r.2 == "failed" && r.3.as_deref() == Some("not_found")),
+            "404失敗行: {rows:?}"
+        );
+        assert!(
+            location_rows
+                .iter()
+                .any(|r| r.2 == "failed" && r.3.as_deref() == Some("validation_failed")),
+            "422失敗行: {rows:?}"
+        );
+        drop(env);
     }
 
     /// [covers:server.entities-untagged-filter]

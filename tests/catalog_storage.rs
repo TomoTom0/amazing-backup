@@ -1622,3 +1622,128 @@ fn w2_local_vocabulary_tables_survive_rebuild() {
         assert_eq!(n, 1, "rebuild後も{table}行は保持(永続class)");
     }
 }
+
+/// [covers:catalog.rebuild-preserves-rename-and-location-update]
+/// W3(TASK-22): manage catalog rebuild(ローカルregistryからの再構築)は
+/// rename/location_update eventを反映したentriesを構築する(設計4.2: 再構築で
+/// title/label変更が失われない=W3受入条件)。続けてのmanage index rebuild
+/// (manifest由来+registry補正)後のCLI照会(list files/query)にも新title・新分類が
+/// 現れる(索引反映)。
+#[test]
+fn w3_rename_and_location_update_survive_catalog_rebuild() {
+    let Some(fx) = StorageFixture::new("cat-w3-rebuild", StorageOpts::default()) else {
+        return;
+    };
+    let a = fx.data_root.join("a.zip");
+    make_archive(&a, 1024);
+    let (code, stdout, stderr) = fx.push_from_list(&[], &[(&a, Some("alpha"))], &[]);
+    assert_eq!(code, 0, "push(事前): {stdout}{stderr}");
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(事前): {stdout}{stderr}");
+
+    // registryのfile_write記録から対象の所在値を取得(旧値)
+    let fw = fx
+        .registry_values()
+        .into_iter()
+        .find(|r| {
+            r.get("record_type").and_then(|t| t.as_str()) == Some("file_write")
+        })
+        .expect("file_write記録");
+    let uuid = fw
+        .get("uuid")
+        .and_then(|u| u.as_str())
+        .expect("uuid")
+        .to_string();
+    let source_path = fw
+        .get("source_path")
+        .and_then(|p| p.as_str())
+        .expect("source_path")
+        .to_string();
+    let old_category = fw
+        .get("category")
+        .and_then(|c| c.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let old_label = fw
+        .get("label")
+        .and_then(|l| l.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    // rebuild前の照会は旧title
+    let (code, before, stderr) = fx.list("files", &[]);
+    assert_eq!(code, 0, "rebuild前list: {before}{stderr}");
+    assert!(before.contains("alpha"), "旧titleが見える: {before}");
+
+    // rename + location_update追記(serve書込APIが記録するのと同一schema)
+    use amazing_backup::registry::{LocationUpdateRecord, RenameRecord, append_record};
+    append_record(
+        &fx.registry,
+        &RenameRecord {
+            schema: 1,
+            record_type: "rename".into(),
+            recorded_at: "2999-01-01T00:00:00+09:00".into(),
+            scope: "it-bucket:amazing-backup/".into(),
+            uuid: uuid.clone(),
+            old_title: "alpha".into(),
+            new_title: "renamed".into(),
+        },
+    )
+    .expect("rename追記");
+    append_record(
+        &fx.registry,
+        &LocationUpdateRecord {
+            schema: 1,
+            record_type: "location_update".into(),
+            recorded_at: "2999-01-01T00:00:00+09:00".into(),
+            scope: "it-bucket:amazing-backup/".into(),
+            uuid: uuid.clone(),
+            source_path: source_path.clone(),
+            old_category: old_category.clone(),
+            old_label: old_label.clone(),
+            new_category: "photos".into(),
+            new_label: "sub".into(),
+        },
+    )
+    .expect("location_update追記");
+
+    // manage catalog rebuild: cacheのentities/locationsに新title・新分類が反映される
+    let (code, stdout, stderr) = fx.manage("catalog", &["rebuild"]);
+    assert_eq!(code, 0, "catalog rebuild: {stdout}{stderr}");
+    let conn = rusqlite::Connection::open(fx.catalog_db()).expect("catalog.db open");
+    let title: String = conn
+        .query_row(
+            "SELECT title FROM entities WHERE uuid = ?1",
+            [&uuid],
+            |r| r.get(0),
+        )
+        .expect("entities行");
+    assert_eq!(title, "renamed", "rebuild後のcache titleはrename反映");
+    let (category, label): (String, String) = conn
+        .query_row(
+            "SELECT category, label FROM locations WHERE uuid = ?1",
+            [&uuid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("locations行");
+    assert_eq!(category, "photos", "rebuild後のcache categoryはupdate反映");
+    assert_eq!(label, "sub", "rebuild後のcache labelはupdate反映");
+    drop(conn);
+
+    // manage index rebuild(manifest由来+registry補正)→S3索引へ新title→CLI照会で新title
+    let (code, stdout, stderr) = fx.manage("index", &["rebuild"]);
+    assert_eq!(code, 0, "index rebuild: {stdout}{stderr}");
+    let (code, after, stderr) = fx.list("files", &[]);
+    assert_eq!(code, 0, "index rebuild後list: {after}{stderr}");
+    assert!(after.contains("renamed"), "新titleが見える: {after}");
+    // 新categoryはJSON出力のlocationsで確認(human形式の行にはcategory列が無いため)
+    let (code, after_json, stderr) = fx.list("files", &["--format", "json"]);
+    assert_eq!(code, 0, "index rebuild後list(json): {after_json}{stderr}");
+    assert!(
+        after_json.contains("\"category\":\"photos\"") && after_json.contains("\"label\":\"sub\""),
+        "新category/labelが見える: {after_json}"
+    );
+    let (code, stdout, stderr) = fx.query("renamed", &[]);
+    assert_eq!(code, 0, "query(新title): {stdout}{stderr}");
+    assert!(stdout.contains("renamed"), "queryでも新titleがhit: {stdout}");
+}

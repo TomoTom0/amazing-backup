@@ -2,6 +2,8 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useEntitiesStore } from '../stores/entities'
+import type { EntityLocation } from '../api/client'
+import TwoStepConfirm from '../components/TwoStepConfirm.vue'
 
 // TASK-9設計7章(EntityDetailView)・6章(:uuid=version_list付き詳細・
 // :uuid/versions=state付き版一覧)・コードレビュー指摘高4。詳細・versionsの状態は
@@ -12,6 +14,10 @@ import { useEntitiesStore } from '../stores/entities'
 // excluded参照。tag編集の成否はstoreのlastTagEditError/detail.tagsで担保)。
 // W2レビュー指摘高1対応(TASK-19): 保存中(tagEditSaving)はtag追加form・chipのxを
 // 無効化する(保存応答待ち中に同じ旧配列から作った後続PUTが先行編集を消すのを防ぐ)。
+// W3(TASK-22・設計2.2/8章): 文脈操作の名前変更(title編集form→POST rename)と
+// 所在行ごとの分類変更(category/label編集form→POST location)。実行は2段階確認
+// 部品(TwoStepConfirm=「変更」→同位置が「確認して実行」。dialog不使用)を経る。
+// 成否はstoreのlastRenameError/lastLocationError・detail.title/locationsで担保。
 // PR#9レビュー指摘対応: storeの要求対象uuid(detailTargetUuid)切替で旧entityの詳細を
 // clearするため、mount・route uuid切替ではfetchEntityDetailの切替判定に委ね
 // (detailEpoch watchは対象uuidがrouteと不一致の時のみ再取得=二重fetchしない)。
@@ -39,6 +45,48 @@ const removeTag = (tag: string): void => {
   const detail = entities.detail
   if (uuid === null || detail === null) return
   void entities.updateTags(uuid, detail.tags.filter((t) => t !== tag))
+}
+
+/** 名前変更formの入力(local state) */
+const titleInput = ref('')
+
+/** 名前変更(2段階確認の確定から。空titleは送信しない) */
+const submitRename = (): void => {
+  const uuid = uuidFromRoute.value
+  if (uuid === null) return
+  const title = titleInput.value.trim()
+  if (title === '') return
+  titleInput.value = ''
+  void entities.renameEntity(uuid, title)
+}
+
+/** 所在編集中の行(source_path。null=編集中の行なし) */
+const editingLocation = ref<string | null>(null)
+/** 所在編集formの入力(編集開始時に対象行の現値で初期化) */
+const locCategoryInput = ref('')
+const locLabelInput = ref('')
+
+/** 所在行の編集開始(現値で初期化し直前の失敗表示を消す) */
+const startLocationEdit = (loc: EntityLocation): void => {
+  editingLocation.value = loc.source_path
+  locCategoryInput.value = loc.category
+  locLabelInput.value = loc.label
+}
+
+/** 所在編集の取消 */
+const cancelLocationEdit = (): void => {
+  editingLocation.value = null
+}
+
+/** 所在の分類変更(2段階確認の確定から。空categoryは送信しない) */
+const submitLocation = (sourcePath: string): void => {
+  const uuid = uuidFromRoute.value
+  if (uuid === null) return
+  const category = locCategoryInput.value.trim()
+  const label = locLabelInput.value.trim()
+  if (category === '') return
+  editingLocation.value = null
+  void entities.updateLocation(uuid, sourcePath, category, label)
 }
 
 // vue-routerのparamsはstring | string[]のため型ガードで確定する
@@ -118,6 +166,12 @@ const fmtSize = (size: number): string => {
       </p>
 
       <h4>所在(locations)</h4>
+      <p v-if="entities.lastLocationError" class="message">
+        所在の分類変更に失敗しました({{ entities.lastLocationError.code }})。
+        categoryは小文字英数字と-の64文字以内・labelは先頭/や../を含めません
+        (対象行はsource_path完全一致で指定されます)。
+      </p>
+      <p v-if="entities.locationSaving" class="muted">分類変更を実行中...</p>
       <table v-if="entities.detail.locations.length > 0" class="pending-table">
         <thead>
           <tr>
@@ -125,18 +179,89 @@ const fmtSize = (size: number): string => {
             <th>category</th>
             <th>label</th>
             <th>last_backup</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="loc in entities.detail.locations" :key="loc.source_path">
             <td>{{ loc.source_path }}</td>
-            <td>{{ loc.category }}</td>
-            <td>{{ loc.label === '' ? '(ラベルなし)' : loc.label }}</td>
+            <td v-if="editingLocation === loc.source_path">
+              <label>
+                category
+                <input
+                  v-model="locCategoryInput"
+                  type="text"
+                  name="category"
+                  :disabled="entities.locationSaving"
+                />
+              </label>
+            </td>
+            <td v-else>{{ loc.category }}</td>
+            <td v-if="editingLocation === loc.source_path">
+              <label>
+                label(空=ラベルなし)
+                <input
+                  v-model="locLabelInput"
+                  type="text"
+                  name="label"
+                  :disabled="entities.locationSaving"
+                />
+              </label>
+            </td>
+            <td v-else>{{ loc.label === '' ? '(ラベルなし)' : loc.label }}</td>
             <td>{{ loc.last_backup }}</td>
+            <td>
+              <template v-if="editingLocation === loc.source_path">
+                <TwoStepConfirm
+                  label="変更"
+                  :disabled="entities.locationSaving || locCategoryInput.trim() === ''"
+                  @confirm="submitLocation(loc.source_path)"
+                />
+                <button
+                  type="button"
+                  class="btn-quiet"
+                  :disabled="entities.locationSaving"
+                  @click="cancelLocationEdit"
+                >取消</button>
+              </template>
+              <button
+                v-else
+                type="button"
+                class="btn-quiet"
+                :disabled="entities.locationSaving"
+                @click="startLocationEdit(loc)"
+              >編集</button>
+            </td>
           </tr>
         </tbody>
       </table>
       <p v-else class="muted">所在は登録されていません。</p>
+
+      <h4>名前変更</h4>
+      <p v-if="entities.lastRenameError" class="message">
+        名前変更に失敗しました({{ entities.lastRenameError.code }})。titleは64文字以内で
+        /・改行・制御文字を含めません。
+      </p>
+      <p v-if="entities.lastRenameWarning" class="message">
+        {{ entities.lastRenameWarning }}
+      </p>
+      <p v-if="entities.renameSaving" class="muted">名前変更を実行中...</p>
+      <div class="inline-edit-form">
+        <label>
+          新しいtitle
+          <input
+            v-model="titleInput"
+            type="text"
+            name="title"
+            :disabled="entities.renameSaving"
+          />
+        </label>
+        <TwoStepConfirm
+          label="名前変更"
+          :disabled="entities.renameSaving || titleInput.trim() === ''"
+          @confirm="submitRename"
+        />
+      </div>
 
       <h4>tag</h4>
       <p v-if="entities.lastTagEditError" class="message">

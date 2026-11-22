@@ -922,3 +922,228 @@ describe('entities storeのuntagged絞り込み(W2レビュー指摘中9)', () =
     expect(captured[captured.length - 1]).toBe('/api/entities')
   })
 })
+
+// --- W3(TASK-22): 名前変更(renameEntity)・所在の分類変更(updateLocation) ---
+// (TASK-17設計2.2の文脈操作・3.3の書込form送信時のpending状態表示の基盤)
+
+// [covers:frontend.entity-rename-client-and-store]
+describe('entities storeの名前変更(renameEntity・W3)', () => {
+  const detailAfterRename = { ...detailBody, title: 'renamed' }
+
+  it('renameEntityはPOST renameを呼び応答(操作後の対象状態)でdetailを更新し一覧を再取得する', async () => {
+    const calls: string[] = []
+    const bodies: unknown[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        calls.push(`${init?.method ?? 'GET'} ${url}`)
+        const parsed: unknown =
+          init?.body === undefined || init?.body === null ? null : JSON.parse(String(init.body))
+        bodies.push(parsed)
+        if (url === `/api/entities/${UUID_A}/rename`) {
+          return Promise.resolve(responseOf(200, detailAfterRename))
+        }
+        if (url.startsWith('/api/entities?') || url === '/api/entities') {
+          return Promise.resolve(responseOf(200, listBody([UUID_A], 1, 1)))
+        }
+        return Promise.resolve(responseOf(200, detailBody))
+      }),
+    )
+    const entities = useEntitiesStore()
+    await entities.fetchEntities()
+    await entities.fetchEntityDetail(UUID_A)
+    expect(entities.detail?.title).toBe('a.zip')
+    await entities.renameEntity(UUID_A, 'renamed')
+    // 詳細は応答で更新(操作後の再GETを行わない)・title変更のため一覧も再取得
+    expect(calls).toEqual([
+      'GET /api/entities?page=1',
+      `GET /api/entities/${UUID_A}`,
+      `POST /api/entities/${UUID_A}/rename`,
+      'GET /api/entities?page=1',
+    ])
+    expect(bodies[2]).toEqual({ title: 'renamed' })
+    expect(entities.detail?.title).toBe('renamed')
+    expect(entities.lastRenameError).toBeNull()
+    expect(entities.lastRenameWarning).toBeNull()
+  })
+
+  it('title重複応答のwarningはlastRenameWarningへ保持される', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (url === `/api/entities/${UUID_A}/rename`) {
+          return Promise.resolve(
+            responseOf(200, {
+              ...detailAfterRename,
+              warning:
+                'title(renamed)は既存entityと重複しています(許容されます。一意化はuuid/所在指定で行ってください)',
+            }),
+          )
+        }
+        return Promise.resolve(responseOf(200, detailBody))
+      }),
+    )
+    const entities = useEntitiesStore()
+    await entities.fetchEntityDetail(UUID_A)
+    await entities.renameEntity(UUID_A, 'renamed')
+    expect(entities.lastRenameWarning).toContain('重複')
+  })
+
+  it('POST失敗(422)はlastRenameErrorで示しdetailは旧状態のまま・成功でクリア', async () => {
+    const calls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        calls.push(url)
+        if (url === `/api/entities/${UUID_A}`) {
+          return Promise.resolve(responseOf(200, detailBody))
+        }
+        if (calls.length === 2) {
+          return Promise.resolve(
+            responseOf(422, {
+              error: { code: 'validation_failed', message: '入力値の規則に違反しています' },
+            }),
+          )
+        }
+        return Promise.resolve(responseOf(200, detailAfterRename))
+      }),
+    )
+    const entities = useEntitiesStore()
+    await entities.fetchEntityDetail(UUID_A)
+    await entities.renameEntity(UUID_A, 'bad/title')
+    expect(calls).toHaveLength(2)
+    expect(entities.lastRenameError?.code).toBe('validation_failed')
+    expect(entities.detail?.title).toBe('a.zip')
+    // 成功でlastRenameErrorはクリアされdetailは応答で更新される
+    await entities.renameEntity(UUID_A, 'renamed')
+    expect(entities.lastRenameError).toBeNull()
+    expect(entities.detail?.title).toBe('renamed')
+  })
+
+  it('renameEntity実行中はrenameSaving=true・成功完了でfalseへ戻る', async () => {
+    let savingDuringPost = false
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (url === `/api/entities/${UUID_A}/rename`) {
+          savingDuringPost = useEntitiesStore().renameSaving
+          return Promise.resolve(responseOf(200, detailAfterRename))
+        }
+        return Promise.resolve(responseOf(200, detailBody))
+      }),
+    )
+    const entities = useEntitiesStore()
+    expect(entities.renameSaving).toBe(false)
+    await entities.fetchEntityDetail(UUID_A)
+    await entities.renameEntity(UUID_A, 'renamed')
+    expect(savingDuringPost).toBe(true)
+    expect(entities.renameSaving).toBe(false)
+  })
+})
+
+// [covers:frontend.entity-location-edit-client-and-store]
+describe('entities storeの所在の分類変更(updateLocation・W3)', () => {
+  const detailAfterLocation = {
+    ...detailBody,
+    locations: [
+      {
+        source_path: '/data/a.zip',
+        category: 'photos',
+        label: 'sub',
+        identity_hash: 'sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+        last_backup: '2026-11-05T12:00:00+09:00',
+      },
+    ],
+  }
+
+  it('updateLocationはPOST locationを呼び応答でdetailを更新し一覧を再取得する', async () => {
+    const calls: string[] = []
+    const bodies: unknown[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        calls.push(`${init?.method ?? 'GET'} ${url}`)
+        const parsed: unknown =
+          init?.body === undefined || init?.body === null ? null : JSON.parse(String(init.body))
+        bodies.push(parsed)
+        if (url === `/api/entities/${UUID_A}/location`) {
+          return Promise.resolve(responseOf(200, detailAfterLocation))
+        }
+        if (url.startsWith('/api/entities?') || url === '/api/entities') {
+          return Promise.resolve(responseOf(200, listBody([UUID_A], 1, 1)))
+        }
+        return Promise.resolve(responseOf(200, detailBody))
+      }),
+    )
+    const entities = useEntitiesStore()
+    await entities.fetchEntities()
+    await entities.fetchEntityDetail(UUID_A)
+    expect(entities.detail?.locations[0]?.category).toBe('docs')
+    await entities.updateLocation(UUID_A, '/data/a.zip', 'photos', 'sub')
+    expect(calls).toEqual([
+      'GET /api/entities?page=1',
+      `GET /api/entities/${UUID_A}`,
+      `POST /api/entities/${UUID_A}/location`,
+      'GET /api/entities?page=1',
+    ])
+    expect(bodies[2]).toEqual({ source_path: '/data/a.zip', category: 'photos', label: 'sub' })
+    expect(entities.detail?.locations[0]?.category).toBe('photos')
+    expect(entities.detail?.locations[0]?.label).toBe('sub')
+    expect(entities.lastLocationError).toBeNull()
+  })
+
+  it('POST失敗(404)はlastLocationErrorで示しdetailは旧状態のまま・成功でクリア', async () => {
+    const calls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        calls.push(url)
+        if (url === `/api/entities/${UUID_A}`) {
+          return Promise.resolve(responseOf(200, detailBody))
+        }
+        if (calls.length === 2) {
+          return Promise.resolve(
+            responseOf(404, { error: { code: 'not_found', message: '対象が見つかりません' } }),
+          )
+        }
+        return Promise.resolve(responseOf(200, detailAfterLocation))
+      }),
+    )
+    const entities = useEntitiesStore()
+    await entities.fetchEntityDetail(UUID_A)
+    await entities.updateLocation(UUID_A, '/data/elsewhere', 'photos', 'sub')
+    expect(calls).toHaveLength(2)
+    expect(entities.lastLocationError?.code).toBe('not_found')
+    expect(entities.detail?.locations[0]?.category).toBe('docs')
+    await entities.updateLocation(UUID_A, '/data/a.zip', 'photos', 'sub')
+    expect(entities.lastLocationError).toBeNull()
+    expect(entities.detail?.locations[0]?.category).toBe('photos')
+  })
+
+  it('updateLocation実行中はlocationSaving=true・成功完了でfalseへ戻る', async () => {
+    let savingDuringPost = false
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (url === `/api/entities/${UUID_A}/location`) {
+          savingDuringPost = useEntitiesStore().locationSaving
+          return Promise.resolve(responseOf(200, detailAfterLocation))
+        }
+        return Promise.resolve(responseOf(200, detailBody))
+      }),
+    )
+    const entities = useEntitiesStore()
+    expect(entities.locationSaving).toBe(false)
+    await entities.fetchEntityDetail(UUID_A)
+    await entities.updateLocation(UUID_A, '/data/a.zip', 'photos', 'sub')
+    expect(savingDuringPost).toBe(true)
+    expect(entities.locationSaving).toBe(false)
+  })
+})

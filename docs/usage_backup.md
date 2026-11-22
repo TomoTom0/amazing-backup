@@ -663,10 +663,11 @@ Web frontend(埋め込み静的配信)と読取API(`/api/*`・axum)を起動す�
 - backup実行run一覧(`GET /api/runs`・batch単位の集約)とjob一覧(`GET /api/jobs`・取得/uploadのjob発行は今後の版で追加)
 - tag一覧(`GET /api/tags`)・folder一覧(`GET /api/folders`=所在labelの階層集約)・collection一覧と詳細(`GET /api/collections`・`/api/collections/{id}`)
 - tag編集(`PUT /api/entities/{uuid}/tags`)とcollectionの作成・改名・削除・構成の追加・除去(`POST`/`PUT`/`DELETE /api/collections`・`POST /api/collections/{id}/items`・`DELETE /api/collections/{id}/items/{uuid}`)
+- 名前変更と所在の分類変更(`POST /api/entities/{uuid}/rename`・`POST /api/entities/{uuid}/location`・4.2の語彙。registry.jsonlへのevent追記を真正として索引全体再構築+PUTを行うため、変更後にCLIの`list files`/`query`でも新title・新分類が見える)
 
-これらの閲覧・操作はfrontendの各画面(5タブ構成: ホーム=sync状態・前回backup・未対応・diff・実行中jobのサマリ、バックアップ=folder構造(tag付けされたlabel階層)/tag/collectionの3ビュー切替+検索box・pager(3ビュー共通)・pending/diff絞り込み表示・行のtag列(chip)・entity詳細=所在・pins・版一覧・tag編集・所属collection、転送・設定・管理=今後の版で整備)から操作できる(CLIの`query`/`list`と同一の索引語彙で表示)。
+これらの閲覧・操作はfrontendの各画面(5タブ構成: ホーム=sync状態・前回backup・未対応・diff・実行中jobのサマリ、バックアップ=folder構造(tag付けされたlabel階層)/tag/collectionの3ビュー切替+検索box・pager(3ビュー共通)・pending/diff絞り込み表示・行のtag列(chip)・entity詳細=所在・pins・版一覧・tag編集・所属collection・名前変更formと所在行ごとの分類変更form(2段階確認部品=「変更」→「確認して実行」で実行)、転送・設定・管理=今後の版で整備)から操作できる(CLIの`query`/`list`と同一の索引語彙で表示)。
 
-未認証の閲覧系APIは401で拒否される(空dataを返さない)。S3へ書き込む操作系CLI(backup push/pull・get・pin・manage系のfile操作)のAPIは提供しない(操作はCLI既存のまま)。UIから書き込めるのはcatalog DBのlocal語彙(4.2: tag・collection)のみで、これらの書込APIは成功・失敗双方をaudit_log tableへ記録する(UI書込操作のみが対象でCLI操作は記録しない。履歴のUI表示は今後の版)。
+未認証の閲覧系APIは401で拒否される(空dataを返さない)。backup push/pull・get・pin・manage系のfile操作APIは提供しない(操作はCLI既存のまま)。UIから書き込めるのは(1)catalog DBのlocal語彙(4.2: tag・collection)と(2)名前変更・所在の分類変更(registry.jsonlへのrename/location_update event追記を真正とし、索引全体再構築+PUT・metadata配置替え(rename時)を行う=8.1の(a)系に相当するためCLI書込系との同時実行は不可)で、書込APIは成功・失敗双方をaudit_log tableへ記録する(UI書込操作のみが対象でCLI操作は記録しない。履歴のUI表示は今後の版)。
 
 **api-key認証(接続元LAN内限定)**: passkeyが使えない端末・browser向けに、api-keyでの認証をもう一つのlogin手段として提供する(passkey認証に追加する第二手段・接続元がLAN内の場合のみ有効):
 
@@ -683,8 +684,9 @@ Web frontend(埋め込み静的配信)と読取API(`/api/*`・axum)を起動す�
 - `GET /api/entities`は`query`/`category`/`label`/`tag`/`collection`/`scope`絞り込み+`page`でpaging(tag絞り込み=当該tagを持つentity・collection絞り込み=当該collectionの構成entity。folder絞り込み用のparamは設けず既存`label=`で扱う)。**1page=50件・pageは1始点**(0・非数値は400)。応答は`{"entities":[...],"page":n,"total_pages":n}`(total_pagesは0件でも1)。一覧の各要素と詳細応答にはtag一覧(`tags`・昇順)が付き、詳細応答には所属collection名一覧(`collections`・name昇順)も付く
 - tag/folder/collection読取APIの応答: `GET /api/tags`は`{"tags":[{tag,entity_count}]}`(tag名昇順)・`GET /api/folders`はlabelのdirectory区切りで階層導出した`{"folders":[{label,path,entity_count}]}`(中間nodeも1行・path昇順・entity_countは子folder配下の合計)・`GET /api/collections`は`{"collections":[{id,name,entity_count}]}`(name昇順)・`GET /api/collections/{id}`は`{"collection":{id,name,uuids}}`(構成uuid一覧・追加順)
 - tag/collection系の書込API: `PUT /api/entities/{uuid}/tags`(body `{"tags":[...]}`でtag一覧を丸ごと置換・冪等・空配列は全削除。tag名規則はcategoryと同一の`^[a-z0-9][a-z0-9-]{0,63}$`で違反は422)・`POST`/`PUT`/`DELETE /api/collections`(作成・改名・削除。同(scope,name)重複は409。削除は構成参照の解除のみでentity・tagへ影響しない)・`POST /api/collections/{id}/items`(body `{"uuids":[...]}`で一括追加・追加済みuuidの再追加は冪等に成功)・`DELETE /api/collections/{id}/items/{uuid}`(除去)。書込応答は操作後の対象状態(読取系と同一schemaのため操作後に再GETは不要)
+- 名前変更・所在変更API: `POST /api/entities/{uuid}/rename`(body `{"title"}`。title規則はCLIと同一=64文字以内・`/`・改行・制御文字拒否で違反は422。titleが他entityと重複する場合は許容のうえ応答へ`warning` fieldを付ける=CLIの重複警告と同一文言)・`POST /api/entities/{uuid}/location`(body `{"source_path","category","label"}`。対象所在は(uuid, source_path)完全一致で特定し不一致は404。categoryはcategory名規則・labelはlabel正規化規則(3.1)違反で422・空label=ラベルなしは正当)。対象uuidはローカルregistry由来の現行stateに存在する必要があり(不在は404)。実行はrename/location_update eventをregistry.jsonlへ追記してから索引全体再構築+PUT・catalog DB反映を行い(rename時は加えてmetadataの新titleキーPUT+旧キー掃除)、応答は操作後の対象状態(読取系と同一schema)。所在の分類変更を恒続させるにはpipeline.toml(3.1)の分類規則側の変更が必要(変更後に同fileを再pushすると分類規則の解決結果が記録され直すため=記録順序どおり後勝ち)
 - error応答は`{"error":{"code","message"}}`形式(HTTP statusはerror code種別に対応: 400 invalid_request・401 unauthenticated・404 not_found・409 duplicate・422 validation_failed・502 upstream・503 configuration等)
-- S3へ書き込む操作(push/pin等)のAPIは無く、serve経由でS3へ書き込むのはsync取得系GET・scan走査のみ。tag/collection系書込はcatalog DB(local語彙・4.2)への書込でS3・索引には書かない
+- serve経由でS3へ書き込むのは名前変更・所在変更(索引`sys/index.jsonl.age`の再構築PUTとmetadata objectの配置替え・8.1の(a)系)のみ。tag/collection系書込はcatalog DB(local語彙・4.2)への書込でS3・索引には書かない
 
 **pending scanの手順(serve画面)**: pipeline.tomlの`[profiles.<name>.catalog.scan]`(3.1)へ対象rootを登録した上で、pending画面(pending)のscanボタン(`POST /api/pending/scan`)で`manage catalog scan`と同一の走査・分類(unbacked/changed/ok/unknown)を実行できる。
 
@@ -795,7 +797,7 @@ get/pullは出力先の既存平文を保護する:
 
 ### 8.1 書込み系の同時実行禁止
 
-書き込み系command(**backup push・pin add/rm・manage系**)の並列実行は禁止する(registry append・索引書換えの競合防止。lock file等の自動直列化は個人運用に対し過剰のため不採用)。書き込み系を実行中は、他の書き込み系commandを起動しないこと。照会系(list/query/get/diff)は並列に実行してよい。
+書き込み系command(**backup push・pin add/rm・manage系・serveの名前変更/所在変更API**)の並列実行は禁止する(registry append・索引書換えの競合防止。lock file等の自動直列化は個人運用に対し過剰のため不採用。serve内の書込APIはsync/scanとsingle-flightで直列化されるが、CLI書込系commandとの並走はこの規則で防ぐ)。書き込み系を実行中は、他の書き込み系commandを起動しないこと。照会系(list/query/get/diff)は並列に実行してよい。
 
 ### 8.2 profile運用(dev/prod・prod系3bucket)
 

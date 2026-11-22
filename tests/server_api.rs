@@ -421,8 +421,9 @@ fn http_request_raw(addr: &str, method: &str, path: &str) -> Option<(u16, String
 }
 
 /// [covers:server.write-api-auth-gate]
-/// 書込API群(tags系・collections系)は未認証401(session gate=設計6章: 読取/書込の
-/// 区別無く同一gate)。serve経由でrouter実装へのgate適用を回帰観測する。
+/// 書込API群(tags系・collections系+W3(TASK-22)のrename/location)は未認証401
+/// (session gate=設計6章: 読取/書込の区別無く同一gate)。serve経由でrouter実装への
+/// gate適用を回帰観測する。
 #[test]
 fn serve_write_api_unauthenticated_401() {
     let Some(fx) = common::StorageFixture::new("srv-w2-write-auth", common::StorageOpts::default())
@@ -448,6 +449,15 @@ fn serve_write_api_unauthenticated_401() {
         (
             "DELETE",
             "/api/collections/1/items/11111111-1111-1111-1111-111111111111",
+        ),
+        // W3(TASK-22): rename・locationも同一gate
+        (
+            "POST",
+            "/api/entities/11111111-1111-1111-1111-111111111111/rename",
+        ),
+        (
+            "POST",
+            "/api/entities/11111111-1111-1111-1111-111111111111/location",
         ),
     ] {
         let (code, body) = http_request_raw(&addr, method, path).expect("応答");
