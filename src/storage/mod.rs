@@ -253,12 +253,20 @@ pub(crate) fn read_index_cached(
                 } else {
                     STATUS_STALE
                 };
+                // S3索引replicaはmtime供給源を持たないため、置換前に既存DB行の基線を
+                // 引き継ぐ(local backupの記録基線がcache miss再取得で消えると
+                // classify_scan_targetが未変更fileをfalse changedにする。レビュー指摘#2
+                // =PR#9対応。基線読取失敗は従来どおり空基線で反映し続行する=反映失敗
+                // とはしない)
+                let mtimes = db
+                    .existing_source_mtimes(&session.aws.bucket, &session.aws.prefix)
+                    .unwrap_or_default();
                 let result = db.replace_scope(
                     &session.aws.bucket,
                     &session.aws.prefix,
                     &scoped_header,
                     &scoped,
-                    &crate::catalog::SourceMtimes::empty(),
+                    &mtimes,
                     &fetched,
                     status,
                     ReflectOrigin::Fetched,

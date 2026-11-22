@@ -88,6 +88,11 @@ export const useEntitiesStore = defineStore('entities', {
      * 応答は不採用とする(失効後への旧内容再格納防止)。EntityDetailViewは本値の
      * 変化をwatchして表示中の詳細を再取得する */
     detailEpoch: 0,
+    /** 詳細・versionsの要求対象uuid(fetchEntityDetailの開始時に先行set)。要求対象の
+     *  切替でdetail・versionsをclearする=切替直後に旧entityの詳細が表示・編集可能な
+     *  まま残り、route uuid(B)へ旧entity(A)のtagsで置換されるのを防ぐ。EntityDetailView
+     *  は本値とroute uuidの不一致を再取得の条件に使う(二重fetch防止) */
+    detailTargetUuid: null as string | null,
   }),
   getters: {
     /** EntitiesViewのUI誘導状態: 取得中=loading・一覧保持済み=result(0件の成功も
@@ -205,6 +210,7 @@ export const useEntitiesStore = defineStore('entities', {
       this.view = 'flat'
       this.page = 1
       this.detailEpoch += 1
+      this.detailTargetUuid = null
       this.selectedUuid = null
       this.detail = null
       this.detailError = null
@@ -216,8 +222,22 @@ export const useEntitiesStore = defineStore('entities', {
       this.applyListResult(result)
     },
     /** 詳細の取得(version_list付き。selectedUuid=uuid。不在404はdetailErrorで示し
-     * detailは保持しない。失効(sync後再取得)をまたいだ応答は不採用とする) */
+     * detailは保持しない。失効(sync後再取得)をまたいだ応答は不採用とする。要求対象
+     * uuidの切替(既に別の対象を取得済みでの切替)時は旧uuid向けのdetail・versions応答
+     * を棄却するためdetailEpochを進め表示中の内容をclearする=切替直後に旧entityの詳細
+     * が表示・編集可能なまま残るのを防ぐ=route uuid(B)へ旧entity(A)のtagsで置換する
+     * 事故の防止。対象が未設定(null)からの初回取得はclearしない=並行versions取得の
+     * errorをdetail取得が隠さない(error分離仕様を維持)) */
     async fetchEntityDetail(uuid: string): Promise<void> {
+      const switching = this.detailTargetUuid !== null && this.detailTargetUuid !== uuid
+      if (switching) {
+        this.detailEpoch += 1
+        this.detail = null
+        this.detailError = null
+        this.versions = null
+        this.versionsError = null
+      }
+      this.detailTargetUuid = uuid
       const epoch = this.detailEpoch
       const result = await fetchEntityDetail(uuid)
       if (epoch !== this.detailEpoch) return

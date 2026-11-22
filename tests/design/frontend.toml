@@ -365,7 +365,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesVi
 description = "entities storeは一覧(items)・検索語(query)・絞り込み(category)・page/total_pages・loading・lastErrorを保持し、fetchEntitiesは現在の絞り込み状態をURL queryへ反映して一覧を取得する(検索・絞込状態の変更(setQuery/setCategory)はpageを1へ戻す=絞り込み変更後は先頭pageから表示。setPageは指定pageで取得)。取得失敗時はitemsを空へ戻しlastErrorを保持する(空dataを表示しない=fail-closedと共通) (vitest)"
 given = "fetch mock(200+一覧body・401+{\"error\":{\"code\":\"unauthenticated\",...}})でのfetchEntities呼び出しと、setQuery/setCategory/setPage後の再取得のURL観測・取得中のloading観測"
 expect_return_shape = "成功時はitems・page・totalPagesを保持しloadingはtrueからfalseへ戻りlastError=null。失敗時はitems=[]・lastError={code:\"unauthenticated\"}。setQuery(\"beta\")はpageを1へ戻し続くfetchEntitiesはquery=beta&page=1のURLへ向かう(実装前のためsrc/stores/entities.ts未実装で実行failを許容)"
-source_lines = "frontend/src/stores/entities.spec.ts:87"
+source_lines = "frontend/src/stores/entities.spec.ts:103"
 
 [[condition]]
 id = "frontend.sync-refresh-trigger"
@@ -383,7 +383,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesVi
 description = "entities storeはEntitiesViewのUI誘導状態をgetter(entitiesView)で提供する: 取得中=loading・一覧保持済み=result(0件の成功も含む)・取得失敗=error・未取得=not_fetched。EntityDetailView基盤として詳細(version_list付き)とversions一覧の状態(selectedUuid・detail・versions・detailError)をfetchEntityDetail(uuid)/fetchEntityVersions(uuid)で保持し、不在uuidの404 not_foundはdetailErrorで示す(空dataを表示しない)。component実描画は実browser観測のため本条件はstore層の状態で担保する (vitest)"
 given = "各状態(未取得・fetchEntities成功後・fetchEntities失敗後・取得中)でのentitiesView getter参照と、fetch mock(200+詳細body・200+versions body・404+{\"error\":{\"code\":\"not_found\",...}})でのfetchEntityDetail/fetchEntityVersions呼び出し"
 expect_return_shape = "状態に応じてloading/result/error/not_fetchedを返す。fetchEntityDetail(uuid)はdetail(version_list含む)を保持しselectedUuid=uuid・404はdetailError={code:\"not_found\"}でdetailは保持しない・fetchEntityVersions(uuid)はversions(state=現行/noncurrent付き)を保持する(実装前のため実行failを許容)"
-source_lines = "frontend/src/stores/entities.spec.ts:181; frontend/src/stores/entities.spec.ts:222"
+source_lines = "frontend/src/stores/entities.spec.ts:197; frontend/src/stores/entities.spec.ts:238"
 
 [[condition]]
 id = "frontend.entities-routes-nav"
@@ -401,7 +401,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesVi
 description = "entities storeのapplyFilters(query, category)は検索語とcategory絞り込みを1回の適用でstoreへ反映し再取得も1回にまとめる: EntitiesViewのfilter form submitは両入力をこのactionへ渡す=1つのsubmit処理でquery・category両方がURL queryへ乗る(片方だけが適用される経路を作らない。絞り込み変更でpageは1へ戻る。category=nullはcategory paramを付けない) (vitest)"
 given = "2page閲覧中の状態からのapplyFilters(\"beta\", \"docs\")呼び出しと、applyFilters(\"\", null)呼び出しでのfetch mock URL観測"
 expect_return_shape = "前者は1回のfetchで/api/entities?query=beta&category=docs&page=1へ向かいquery=\"beta\"・category=\"docs\"・page=1を保持。後者は/api/entities?page=1(category paramなし)"
-source_lines = "frontend/src/stores/entities.spec.ts:276"
+source_lines = "frontend/src/stores/entities.spec.ts:292"
 
 [[condition]]
 id = "frontend.sync-refresh-invalidates-detail-state"
@@ -410,7 +410,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntitiesVi
 description = "手動sync成功後のentities一覧再取得(refetchEntities)は詳細・versionsの保持状態(selectedUuid・detail・detailError・versions・versionsError)を失効させる: syncはremote索引の置き換えのため旧詳細の内容保証が無く、失効により詳細を開く際の再取得を強制する(旧locations/pinsと新versions一覧の混在を構造的に排除) (vitest)"
 given = "fetchEntityDetail/fetchEntityVersions成功後(detail・versions保持状態)でのrefetchEntities呼び出し"
 expect_return_shape = "一覧(items)は再取得結果へ更新され、selectedUuid=null・detail=null・detailError=null・versions=null・versionsError=nullへ失効する"
-source_lines = "frontend/src/stores/entities.spec.ts:304"
+source_lines = "frontend/src/stores/entities.spec.ts:320"
 
 [[condition]]
 id = "frontend.entities-stale-detail-response-rejected"
@@ -419,7 +419,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(EntityDetailView)�
 description = "refetchEntities(sync後再取得)による詳細・versionsの失効(detailEpoch増加)をまたいで完了した取得応答は採用しない(失効後の状態へ旧locations/pins・旧versionsを再格納しない)。EntityDetailViewはdetailEpochの変化をwatchして表示中の詳細・versionsを再取得する(表示中失効に対するwatchの実行は実browser観測=excluded) (vitest)"
 given = "fetchEntityDetail/fetchEntityVersionsの応答が未完了のままrefetchEntitiesで失効した後に旧応答が完了する場合・および失効後の新規fetchEntityDetail/fetchEntityVersions"
 expect_return_shape = "旧応答の完了後もdetail=null・versions=nullのまま(旧内容を再格納しない)。失効後の新規取得応答は採用されdetail/versionsへ保持される"
-source_lines = "frontend/src/stores/entities.spec.ts:390"
+source_lines = "frontend/src/stores/entities.spec.ts:406"
 
 [[condition]]
 id = "frontend.entities-detail-versions-error-separation"
@@ -428,7 +428,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 7章(画面: EntityDeta
 description = "詳細取得のerror(detailError)とversions取得のerror(versionsError)は別状態として保持する: 並行取得で詳細が失敗した後にversionsが成功してもdetailErrorは残り(詳細部分は失敗表示のまま)・逆にversionsが失敗してもversionsErrorは詳細の成功で消えない(EntityDetailViewは両errorを別々に表示) (vitest)"
 given = "fetch mock(詳細404 not_found+versions 200・versions 500 internal+詳細200)でのfetchEntityDetail/fetchEntityVersions順次呼び出し"
 expect_return_shape = "前者はdetail=null+detailError={code:\"not_found\"}が残りversionsは保持・versionsError=null。後者はdetailは保持+detailError=nullでversions=null+versionsError={code:\"internal\"}が残る"
-source_lines = "frontend/src/stores/entities.spec.ts:339"
+source_lines = "frontend/src/stores/entities.spec.ts:355"
 
 [[condition]]
 id = "frontend.diff-run-error-visible-without-result"
@@ -547,7 +547,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(検索=quer
 description = "fetchEntitiesの絞り込みparamへtag・collection(値のあるparamのみURL queryへ直列化=既存query/category/label/pageと同一規則。collectionはcollection idを文字列化)を追加し、entities storeはtagFilter(string|null)・collectionFilter(number|null)状態とsetTagFilter/setCollectionFilter(null=解除。絞り込み変更でpageを1へ戻す=setQuery/setCategoryと同一規則)を持ちfetchEntitiesが現在の絞り込み状態をURL queryへ反映する。tag/collection絞り込みは検索語(query)・page(pager)と共存する(検索box・pagerが3ビュー共通で動く=2.2) (vitest)"
 given = "2page閲覧中の状態からのsetTagFilter(\"work\")・setCollectionFilter(3)呼び出し後のfetch mock URL観測(query併存・pager page指定・null解除を含む)と、fetchEntitiesのtag/collection param直列化(fetch mock URL観測)"
 expect_return_shape = "setTagFilter(\"work\")はpageを1へ戻し続くfetchEntitiesはtag=work&page=1(&query併存時はqueryも乗る)のURLへ向かう。setCollectionFilter(3)はcollection=3&page=1へ向かう。setPage(2)後の再取得はtag=work&page=2(絞り込みとpagerの共存)。null解除はtag/collection paramを付けない。fetchEntitiesは値のあるtag/collectionのみURL queryへ直列化する(空文字tag・undefined collectionは付けない)(実装前のため該当testは実行failを許容)"
-source_lines = "frontend/src/api/entities.spec.ts:164; frontend/src/stores/entities.spec.ts:443"
+source_lines = "frontend/src/api/entities.spec.ts:164; frontend/src/stores/entities.spec.ts:503"
 
 [[condition]]
 id = "frontend.entities-view-switch-state"
@@ -556,7 +556,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(ビュー�
 description = "entities storeは一覧のビュー切替状態(view: 'flat'|'folder'|'tag'|'collection'・初期値flat)を保持し、setViewはビュー切替時に選択系絞り込み(tagFilter・untaggedOnly・collectionFilter・labelFilter)をクリアしてpageを1へ戻す(検索語query・categoryは3ビュー共通で動くため維持=ビュー切替をまたいだ検索boxの共存。untaggedOnlyのクリアは2026-11-14レビュー指摘対応=frontend.entities-untagged-filter)。folderビューの選択folderはlabelFilter(label=param=既存・folder絞り込みの新paramは設けない)で・tagビューの選択tagはtagFilter(tag=param)で・collectionビューの選択collectionはcollectionFilter(collection=param)でそれぞれ一覧取得へ接続する(3ビュー+flat共存のdata面。ビュー切替tabの実描画はcomponent実描画のためexcluded) (vitest)"
 given = "初期stateでのview参照と、tag/collection/label選択済み・page=3の状態からのsetView呼び出し後のstate・fetch mock URL観測(tag/collection/folder各ビューでの選択と絞り込みparamの接続)"
 expect_return_shape = "初期viewはflat。setViewはviewを切替えtagFilter/collectionFilter/labelFilter=null・untaggedOnly=false・page=1へ戻しquery/categoryは維持する(続くfetchEntitiesはquery/category/page=1のみのURL)。tagビューはtag=work&page=1・collectionビューはcollection=3(tagFilterは切替でクリア済み)・folderビューはlabel=<選択folder>&page=1(ラベルpathはURL encode)へ向かう(実装前のためsrc/stores/entities.tsのview系未実装で実行failを許容)"
-source_lines = "frontend/src/stores/entities.spec.ts:495"
+source_lines = "frontend/src/stores/entities.spec.ts:555"
 
 [[condition]]
 id = "frontend.entity-tags-edit-client-and-store"
@@ -565,7 +565,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(詳細のta
 description = "PUT /api/entities/:uuid/tags呼出(putEntityTags(uuid, tags)は{\"tags\":[...]}のJSON bodyで一覧置換を送り、応答はEntityDetail形式(tags/collections付き=操作後の対象状態)の型ガードで検証)とentities storeのtag編集action(updateTags(uuid, tags))を持ち、成功時はPUT応答でdetailを更新する(操作後に対象詳細の再GETを行わない=3.1の読取系と同一schema原則。一覧・tags選択肢の失効再取得は2026-11-14レビュー指摘対応のfrontend.entity-tags-edit-refreshes-list-and-tags。422 validation_failed・404 not_foundはerror扱い)。失敗は取得系errorとは別状態lastTagEditErrorで保持しdetailは旧状態のまま(P5 lastScanError・P6 lastRunError・sync lastRefreshErrorと同一構成)。成功でlastTagEditErrorはクリアされる (vitest)"
 given = "fetch mock(GET /api/entities/:uuid 200+詳細body(tags:['work'])・PUT /api/entities/:uuid/tags 200+操作後詳細body(tags:['work','nas'])・PUT 422+{\"error\":{\"code\":\"validation_failed\",...}})でのputEntityTags呼び出しのmethod/URL/body観測・fetchEntityDetail後のupdateTags実行(失敗後の成功再実行を含む)"
 expect_return_shape = "putEntityTagsはPUT /api/entities/<uuid>/tagsへ{\"tags\":[...]}bodyで呼ばれ200は操作後の対象状態(tags/collections付き)をdataへ・422は{code:\"validation_failed\",httpStatus:422}・404は{code:\"not_found\"}。updateTags成功後はdetail.tagsが応答値へ更新され再GETは行われず(fetch呼出はGET 1回+PUT 1回のみ)lastTagEditError=null・失敗時はlastTagEditError={code:\"validation_failed\"}でdetailは旧状態のまま(成功再実行でクリア)(実装前のためputEntityTags・updateTags未実装で実行failを許容)"
-source_lines = "frontend/src/api/entity-tags.spec.ts:52; frontend/src/stores/entities.spec.ts:563"
+source_lines = "frontend/src/api/entity-tags.spec.ts:52; frontend/src/stores/entities.spec.ts:623"
 
 [[excluded]]
 item = "W2のcomponent実描画面: /backups一覧のビュー切替tab(folder/tag/collection・現位置のnavと同一active表現)・folder tree部品(ul入れ子・details open)・tag chip部品(inline-block・1px --border・radius 4px・13px・選択中のみ--accent-soft背景)・行のtag列chip表示(最大3件+他N件)・検索box・pagerの実描画・詳細画面のtag編集form(chipのx実操作)・所属collection表示の実描画"
@@ -583,7 +583,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(詳細のta
 description = "entities storeはtag編集の実行中状態(tagEditSaving)を持ち、updateTags実行中はtrue・完了(成功・失敗とも)でfalseへ戻る。EntityDetailViewは本値でtag編集UI(追加form・chipのx)を無効化する(保存応答待ち中に同じ旧配列から作った後続PUTが先行編集を消すのを防ぐ。UIの無効化はcomponent実描画のためexcluded=本条件はstore層の状態で担保) (vitest)"
 given = "PUT /api/entities/:uuid/tagsのfetch mock実行中(応答前)のtagEditSaving参照と、成功応答・422失敗応答完了後の参照"
 expect_return_shape = "未実行=false・PUT実行中(応答前)=true・成功完了後=false・失敗完了後もfalse(trueのまま残らない)"
-source_lines = "frontend/src/stores/entities.spec.ts:635"
+source_lines = "frontend/src/stores/entities.spec.ts:695"
 
 [[condition]]
 id = "frontend.entity-tags-edit-refreshes-list-and-tags"
@@ -592,7 +592,7 @@ source = "TASK-19コードレビュー指摘中6(tag更新成功時にdetailし�
 description = "updateTags成功時はdetail更新(PUT応答)に加えて一覧を現在の絞り込み状態(query・tag絞り込み等)で再取得し、tags選択肢を取得済み(tags storeのfetchState=ok)なら再取得する(tag編集は行のtags・tag選択肢の両方に影響するため。一覧未取得=fetchedでない時・tags未取得(not_fetched)の時は再取得しない=表示されていないdataのために取得しない。PUT失敗時は一覧・tags選択肢の再取得を行わない) (vitest)"
 given = "一覧取得済み(query+tag=work絞り込み)・tags選択肢取得済み(fetchState=ok)・詳細取得済みの状態でのupdateTags成功と、一覧・tags未取得の状態でのupdateTags成功・PUT 422失敗でのfetch呼出のURL観測"
 expect_return_shape = "取得済み状態での成功時はPUT /api/entities/:uuid/tags後にGET /api/entities(現在の絞り込みparam付き)とGET /api/tagsが呼ばれる。一覧・tags未取得ではPUTのみ(追加のGET無し)。失敗時もPUTのみで一覧・tagsの再取得は行われない"
-source_lines = "frontend/src/stores/entities.spec.ts:682"
+source_lines = "frontend/src/stores/entities.spec.ts:742"
 
 [[condition]]
 id = "frontend.entities-list-request-generation"
@@ -601,7 +601,7 @@ source = "TASK-17設計2.2(3ビュー共通の一覧・検索box・pager) + TASK
 description = "entities storeの一覧取得は要求世代(番号)を持ち、fetchEntities/refetchEntitiesの開始時に世代を進め、完了応答が最新世代と一致する時のみitems・page・totalPages・fetched・lastError・loadingを更新する(並行取得の旧応答の後着は不採用=選択状態と一覧の食い違い防止。旧応答が後から完了してもstateは最新要求の結果のまま。詳細系のdetailEpochと同一構成) (vitest)"
 given = "1回目のfetchEntities(tag=work)の応答を保留したまま2回目(tag=nas)を開始し2回目のみ完了させた後で1回目の応答(500失敗)を完了させるfetch mock(gate)"
 expect_return_shape = "2回目完了時点でitems・page・totalPagesは2回目の応答値・loading=false。1回目の応答が後着してもitems・page・totalPages・lastError・loadingは2回目の結果のまま(旧応答の500でlastErrorは設定されない)"
-source_lines = "frontend/src/stores/entities.spec.ts:764"
+source_lines = "frontend/src/stores/entities.spec.ts:824"
 
 [[condition]]
 id = "frontend.view-options-fetch-state"
@@ -619,7 +619,7 @@ source = "TASK-17設計2.2(tagビュー=tag選択+tag付きentity一覧・tag無
 description = "fetchEntitiesへuntagged絞り込みparam(true時URL queryへuntagged=1を直列化・false・未指定は付けない)を追加し、entities storeはuntaggedOnly状態とsetUntaggedFilter(tagFilterをクリアしpageを1へ戻す)を持ち、setTagFilterはuntaggedOnlyをクリアする(tag=とuntagged=の相互排他=同時指定はserver側400のためclientは同時に送らない)。setView・sync後再取得(refetchEntities)はuntaggedOnlyもクリアする(他の選択系絞り込みと同一)。Viewのtagビューは「(tag無し)」chip(他tag選択と同一chip様式)で本絞り込みへ接続する(実描画はexcluded) (vitest)"
 given = "setUntaggedFilter後のfetch mock URL観測(tagFilter併存の排除を含む)とsetTagFilter・setView・refetchEntitiesでのuntaggedOnlyクリア観測・fetchEntitiesのuntagged直列化観測"
 expect_return_shape = "setUntaggedFilterはuntaggedOnly=true・tagFilter=null・page=1とし続くfetchEntitiesはuntagged=1&page=1(tag=は付かない)へ向かう。setTagFilter(\"work\")はuntaggedOnly=falseとしtag=work(untagged=無し)へ向かう。setView・refetchEntities後はuntaggedOnly=false(再取得URLにuntagged=が無い)。fetchEntitiesはuntagged=trueのみuntagged=1を直列化する(false・未指定は付けない)"
-source_lines = "frontend/src/api/entities.spec.ts:239; frontend/src/stores/entities.spec.ts:814"
+source_lines = "frontend/src/api/entities.spec.ts:239; frontend/src/stores/entities.spec.ts:874"
 
 [[condition]]
 id = "frontend.folders-labelless-node"
@@ -648,7 +648,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(名前変�
 description = "renameEntity clientはPOST /api/entities/<uuid>/renameへ{title} bodyを送り応答(EntityDetail形式+warning(重複時のみ)を型ガードで検証)を返す。entities storeのrenameEntity actionは応答でdetailを更新(操作後に再GET不要=3.1方針)し・title変更は一覧表示に影響するため取得済みなら現在の絞り込みで一覧を再取得する。実行中はrenameSaving=true(Viewはtitle編集UIを無効化=tagEditSavingと対)・失敗(422等)はlastRenameErrorで示しdetailは旧状態のまま。重複警告はlastRenameWarningへ保持し成功時クリア (unit)"
 given = "fetchをstubした応答(200 EntityDetail+warning付き/無し・422 error body)でのclient呼出とstore action実行"
 expect_return_shape = "clientはPOST /api/entities/<uuid>/renameへ{title}を送る。storeは成功時detail.title=新title・lastRenameError=null・warning有りならlastRenameWarning=文言(無しならnull)・fetchedならfetchEntities再実行。失敗時detail不変+lastRenameError設定。renameSavingは実行中のみtrue"
-source_lines = "frontend/src/api/entity-rename.spec.ts:50; frontend/src/stores/entities.spec.ts:869"
+source_lines = "frontend/src/api/entity-rename.spec.ts:50; frontend/src/stores/entities.spec.ts:929"
 
 [[condition]]
 id = "frontend.entity-location-edit-client-and-store"
@@ -657,7 +657,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(folder変�
 description = "updateEntityLocation clientはPOST /api/entities/<uuid>/locationへ{source_path, category, label} bodyを送り応答(EntityDetail形式)を返す。entities storeのupdateLocation actionは応答でdetailを更新し・所在変更はfolder一覧ビューに影響するため取得済みなら一覧を再取得する。実行中はlocationSaving=true・失敗はlastLocationErrorで示しdetailは旧状態のまま (unit)"
 given = "fetchをstubした応答(200 EntityDetail・404/422 error body)でのclient呼出とstore action実行"
 expect_return_shape = "clientはPOST /api/entities/<uuid>/locationへ{source_path,category,label}を送る。storeは成功時detail.locations=操作後の所在・lastLocationError=null・fetchedならfetchEntities再実行。失敗時detail不変+lastLocationError設定。locationSavingは実行中のみtrue"
-source_lines = "frontend/src/api/entity-location.spec.ts:41; frontend/src/stores/entities.spec.ts:988"
+source_lines = "frontend/src/api/entity-location.spec.ts:41; frontend/src/stores/entities.spec.ts:1048"
 
 [[condition]]
 id = "frontend.two-step-confirm-state"
@@ -667,3 +667,11 @@ description = "2段階確認の状態logic(composable): 初期は非armed(部品
 given = "useTwoStepConfirmの初期状態・advance(1回目)・advance(2回目)・Esc keydown・cancelの各操作"
 expect_return_shape = "初期armed=false・1回目advanceは'armed'を返しarmed=true・2回目advanceは'confirmed'を返しarmed=falseへ戻る・Esc keydown(armed時)はarmed=false・cancelもarmed=false(非armed時のEsc/cancelは状態不変)"
 source_lines = "frontend/src/composables/two-step-confirm.spec.ts:11"
+[[condition]]
+id = "frontend.entities-detail-switch-clears-previous"
+target_function = "frontend stores/entities.ts fetchEntityDetail(要求対象切替・detailTargetUuid)・views/EntityDetailView.vue(detailEpoch watchの対象ガード・route uuid watch)"
+source = "TASK-9設計7章(EntityDetailView) + PR#9コードレビュー指摘(PRRT_kwDOVVJEqc66ZJRu・P2): fetchEntityDetailはuuid切替時にdetailEpochを更新しないためA→一覧→B遷移でBの応答完了までAの詳細が表示・編集可能なまま残り、Aの遅延応答の後着でAが再表示されupdateTagsがroute uuid(B)へAのtagsで置換する"
+description = "entities storeは詳細・versionsの要求対象uuid(detailTargetUuid)を持ち、fetchEntityDetailは要求対象の切替(既に別対象を取得済みでの切替)時にdetailEpochを進めてdetail・versionsと各errorをclearし対象uuidを先行setする(旧uuid向け応答の棄却=切替直後に旧entityの詳細が表示・編集可能なまま残らない。対象未設定nullからの初回取得はclearしない=並行versions取得のerror分離仕様を維持)。refetchEntities(sync後再取得)はdetailTargetUuidもnullへ戻す。EntityDetailViewのdetailEpoch watchはdetailTargetUuid!==route uuidのときのみ再取得する(store側切替処理でのepoch増加では二重fetchしない)し、route uuid watchで同一component再利用のA→B直接遷移も拾う (vitest)"
+given = "Aの詳細応答のみ保留(gate)したままBへ切替するfetch mockでの切替直後のstate観測と、A後着応答の不採用・B応答のみ採用の観測(実描画は実browser観測のため条件書frontend.tomlのexcluded参照)"
+expect_return_shape = "切替直後はdetail=null・detailError=null・versions=null・versionsError=null・detailTargetUuid=B。Aの保留応答を完了させてもdetailはBの内容のまま(uuid=B・selectedUuid=B)"
+source_lines = "frontend/src/stores/entities.spec.ts:456"

@@ -18,6 +18,9 @@ import TwoStepConfirm from '../components/TwoStepConfirm.vue'
 // 所在行ごとの分類変更(category/label編集form→POST location)。実行は2段階確認
 // 部品(TwoStepConfirm=「変更」→同位置が「確認して実行」。dialog不使用)を経る。
 // 成否はstoreのlastRenameError/lastLocationError・detail.title/locationsで担保。
+// PR#9レビュー指摘対応: storeの要求対象uuid(detailTargetUuid)切替で旧entityの詳細を
+// clearするため、mount・route uuid切替ではfetchEntityDetailの切替判定に委ね
+// (detailEpoch watchは対象uuidがrouteと不一致の時のみ再取得=二重fetchしない)。
 
 const route = useRoute()
 const entities = useEntitiesStore()
@@ -96,25 +99,40 @@ const uuidFromRoute = computed<string | null>(() => {
 onMounted(() => {
   const uuid = uuidFromRoute.value
   if (uuid === null) return
-  if (entities.selectedUuid !== uuid || entities.detail === null) {
+  if (entities.detailTargetUuid !== uuid || entities.detail === null) {
     void entities.fetchEntityDetail(uuid)
   }
   void entities.fetchEntityVersions(uuid)
 })
 
-// sync後の一覧再取得(refetchEntities)で詳細・versionsが失効(detail=null化)した
-// 場合、表示中の画面でも再取得する(mount時のみでは失効後に「読み込み中」で
-// 止まる)。失効前に開始した旧応答はstore側(detailEpoch)で不採用になるため
-// ここでの再取得結果が採用される
+// sync後の一覧再取得(refetchEntities)で詳細・versionsが失効(detailTargetUuid=null化
+// ・detail=null化)した場合、表示中の画面でも再取得する(mount時のみでは失効後に
+// 「読み込み中」で止まる)。失効前に開始した旧応答はstore側(detailEpoch)で不採用に
+// なるためここでの再取得結果が採用される。store側のuuid切替処理
+// (fetchEntityDetailの要求対象切替)でもdetailEpochは進むが、その時点で要求対象は
+// 既にroute uuidと一致している=二重fetchしない(detailTargetUuid !== uuidのときのみ
+// 再取得する)
 watch(
   () => entities.detailEpoch,
   () => {
     const uuid = uuidFromRoute.value
     if (uuid === null) return
+    if (entities.detailTargetUuid === uuid) return
     void entities.fetchEntityDetail(uuid)
     void entities.fetchEntityVersions(uuid)
   },
 )
+
+// A→Bの直接遷移など同一componentを再利用するroute切替ではonMountedが走らない
+// ため、route uuidの変化をwatchしてstoreの要求対象を切り替える(store側
+// fetchEntityDetailのuuid切替処理=旧応答棄却と表示中内容のclearが発動する)
+watch(uuidFromRoute, (uuid) => {
+  if (uuid === null) return
+  if (entities.detailTargetUuid !== uuid || entities.detail === null) {
+    void entities.fetchEntityDetail(uuid)
+  }
+  void entities.fetchEntityVersions(uuid)
+})
 
 const fmtSize = (size: number): string => {
   if (size >= 1024 * 1024 * 1024) return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`

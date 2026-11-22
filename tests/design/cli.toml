@@ -835,7 +835,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(追加登録・失
 description = "manage auth listは登録credential一覧(credential_id・kind・name・created_at=TASK-13統合表示。kind=passkey/api_key)を表示し、manage auth remove <credential_id>はcredential_id完全一致の1件をcredentials table→api_keys tableの順に検索して削除する(永続class・ABH配下catalog.db。S3接続不要のlocal操作)。存在しないcredential_id指定(両table合計削除0行)は対象エラー3 (integration)"
 given = "catalog.db credentials tableへ2行挿入(rusqlite直接)後の manage auth list・manage auth remove <一方のid>・manage auth remove <存在しないid> の各実行(rusqlite直接で行数観測)"
 expect_return_shape = "listはexit 0で両credentialの行(id・name)を表示。removeはexit 0で当該1行のみ削除(残1行・他行は不変)。存在しないidはexit 3(TASK-13改訂分の統合表示・両table削除の観測はcli.manage-auth-list-integrates-api-keys・cli.manage-auth-remove-both-tablesが追加担保)"
-source_lines = "tests/catalog_storage.rs:1207; tests/catalog_storage.rs:1406"
+source_lines = "tests/catalog_storage.rs:1257; tests/catalog_storage.rs:1456"
 
 [[condition]]
 id = "cli.manage-auth-remove-all-guides-rebootstrap"
@@ -844,7 +844,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(追加登録・失
 description = "manage auth removeでcredentials+api_keys合計0件(全認証手段紛失時と同一状態)となった場合は再bootstrap案内(serve --bootstrapの再発行)を表示して未登録状態へ戻る(合計0件ではpasskey login・api-key loginのいずれの手段も無く・passkey登録はbootstrap token提示時のみ開く=認証閉鎖fail-closed。閉鎖・登録のserver側契約はwebauthn.register-closed-without-valid-token等が担保し本条件はCLI表示と合計0件遷移を観測する) (integration)"
 given = "catalog.db credentials tableへ1行挿入(rusqlite直接)後の manage auth remove <id> 実行(rusqlite直接で行数観測)"
 expect_return_shape = "exit 0でcredentials tableは0行・stdoutに再bootstrap案内(--bootstrapを含む語)が表示される(合計0件時のみ表示の観測はcli.manage-auth-zero-guides-total-countが追加担保)"
-source_lines = "tests/catalog_storage.rs:1244; tests/catalog_storage.rs:1444"
+source_lines = "tests/catalog_storage.rs:1294; tests/catalog_storage.rs:1494"
 
 [[condition]]
 id = "cli.manage-auth-api-key-generates"
@@ -853,7 +853,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) D12・2.2(manage
 description = "manage auth api-keyは32byte乱数から`abk_`前置+base64url(43文字)のapi-keyを生成しstdoutへ1回だけ表示する(再表示不可・hashから復元不可)。SHA-256(api-key全文)のhexをcredential_id(\"ak-\"+16hex乱数)・name(既定\"api-key\"・--nameで指定可)・created_atとともにapi_keys table(永続class・ABH配下catalog.db)へ保存する(S3接続不要のlocal操作=既存auth系と同一)。直後のmanage auth listに当該api-keyのcredential_idが表示される (integration)"
 given = "manage catalog sync済みDBでの manage auth api-key --name laptop 実行と、続く manage auth list 実行(rusqlite直接でapi_keys行観測)"
 expect_return_shape = "exit 0でstdoutに`abk_`で始まるkeyを含む行が1回だけ表示される(当該key文字列の出現は1回=再表示しない)。api_keys tableは1行(credential_idはak-前置・key_hash=表示keyのSHA-256 hex・name=laptop・created_at非空)。list表示に当該credential_idが含まれる(実装前は未知subcommandのexit 64でfailを許容)"
-source_lines = "tests/catalog_storage.rs:1316"
+source_lines = "tests/catalog_storage.rs:1366"
 
 [[condition]]
 id = "cli.manage-auth-api-key-rejects-empty-name"
@@ -862,7 +862,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.2(nameは--nam
 description = "manage auth api-key --name \"\"(空文字指定)はusage error(exit 64)としてapi_keysへの保存を行わない(name未指定時の既定\"api-key\"での生成は従来どおり) (integration)"
 given = "manage catalog sync済みDBでの manage auth api-key --name \"\" 実行(rusqlite直接でapi_keys行数観測)"
 expect_return_shape = "exit 64でstderrに--nameのusage error文言。api_keys tableは0行(保存しない)"
-source_lines = "tests/catalog_storage.rs:1357"
+source_lines = "tests/catalog_storage.rs:1407"
 
 [[condition]]
 id = "cli.manage-auth-list-integrates-api-keys"
@@ -871,7 +871,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.5(list: creden
 description = "manage auth listはcredentials(passkey)とapi_keys(api-key)を統合表示する: 行形式はcredential_id kind name created_atでkind=passkey/api_keyの区別付き・フッタは合計件数(credential_id・kind・name・created_at)。どちらか一方のtableのみに行があってももう一方のtableの行を表示から落とさない (integration)"
 given = "credentials 1行(passkey)・api_keys 1行(rusqlite直接挿入)の状態での manage auth list"
 expect_return_shape = "exit 0で両方の行がkind区別付きで表示される(passkey行とapi_key行・フッタは2件)(実装前はapi_keys table不在・行が表示されずfailを許容)"
-source_lines = "tests/catalog_storage.rs:1377"
+source_lines = "tests/catalog_storage.rs:1427"
 
 [[condition]]
 id = "cli.manage-auth-remove-both-tables"
@@ -880,7 +880,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.5(remove <cred
 description = "manage auth remove <credential_id>はcredentials table→api_keys tableの順にcredential_id完全一致で削除する(両tableを検索する=api-keyのcredential_idでも削除できる)。合計削除0行(どちらのtableにも存在しない)は対象エラー3・失敗時はどちらのtableも削除しない (integration)"
 given = "credentials 1行+api_keys 1行(rusqlite直接挿入)の状態での manage auth remove <api-keyのid>・manage auth remove <passkeyのid>・manage auth remove <存在しないid> の各実行(rusqlite直接で両table行数観測)"
 expect_return_shape = "api-key id指定はapi_keysのみ1行削除(credentialsは不変)・passkey id指定はcredentialsのみ1行削除(api_keysは不変)・存在しないidはexit 3で両tableとも削除なし(実装前はapi_keys table不在によりfailを許容)"
-source_lines = "tests/catalog_storage.rs:1405"
+source_lines = "tests/catalog_storage.rs:1455"
 
 [[condition]]
 id = "cli.manage-auth-zero-guides-total-count"
@@ -889,7 +889,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.5(0件案内(b
 description = "0件案内(bootstrap案内)と削除後の再bootstrap案内はcredentials+api_keysの両table合計0件時のみ表示する(api_keysが1件でも残っていればapi-key login可能のため案内しない=全手段紛失と異なる状態を区別する) (integration)"
 given = "api_keys 1行のみ(credentials 0行)の状態での manage auth list(案内なし観測)・manage auth remove <id>(削除後の案内なし観測)と、両table0件での manage auth list(案内あり観測)・およびapi_keys 1行を削除して合計0件となった直後のstdout(案内あり観測)"
 expect_return_shape = "api_keys残存時のlist・removeはいずれも--bootstrapを含む案内文言を表示しない。合計0件ではlist・removeとも再bootstrap案内(serve --bootstrap)を表示する(実装前はapi_keys table不在によりfailを許容)"
-source_lines = "tests/catalog_storage.rs:1443"
+source_lines = "tests/catalog_storage.rs:1493"
 
 [[excluded]]
 item = "api-key生成の乱数経路詳細(既存bootstrap token生成と同じgetrandom経路であること・32byte乱数の乱雑性)"

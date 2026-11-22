@@ -54,6 +54,22 @@ const detailBody = {
   ],
 }
 
+// 指定uuid/titleの詳細body(要求対象切替のtestでB側の応答体として使う)
+const detailBodyOf = (uuid: string, title: string) => ({
+  ...summaryOf(uuid, title),
+  tags: [],
+  collections: [],
+  version_list: [
+    {
+      date: '2026-11-05',
+      version_ts: '2026-11-05T12:00:00Z',
+      version_id: 'vid-b1',
+      batch_id: 'batch-b1',
+      source_size: 512,
+    },
+  ],
+})
+
 const versionsBody = {
   uuid: UUID_A,
   title: 'a.zip',
@@ -434,6 +450,50 @@ describe('entities storeの失効をまたいだ詳細応答(detailEpoch)', () =
     expect(entities.detail).not.toBeNull()
     expect(entities.versions).not.toBeNull()
     expect(entities.selectedUuid).toBe(UUID_A)
+  })
+})
+
+// [covers:frontend.entities-detail-switch-clears-previous]
+describe('entities storeの詳細要求対象切替(detailTargetUuid)', () => {
+  it('A→B切替直後はdetail=null・versions=nullになり旧uuid(A)向けの後着応答は不採用・B応答のみ採用される', async () => {
+    // Aの詳細応答のみ保留(gate)とし、Bへ切替した後に完了させる(遅延応答の再表示
+    // =route uuid(B)へAのtagsが置換される事故の回帰観察)
+    let releaseA: () => void = () => {}
+    const aGate = new Promise<void>((resolve) => {
+      releaseA = resolve
+    })
+    const detailB = detailBodyOf(UUID_B, 'b.zip')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (url === `/api/entities/${UUID_A}`) {
+          return aGate.then(() => responseOf(200, detailBody))
+        }
+        if (url === `/api/entities/${UUID_B}`) {
+          return Promise.resolve(responseOf(200, detailB))
+        }
+        return Promise.reject(new TypeError(`unexpected fetch: ${url}`))
+      }),
+    )
+    const entities = useEntitiesStore()
+    const aPromise = entities.fetchEntityDetail(UUID_A)
+    await entities.fetchEntityVersions(UUID_A)
+    // Aの応答が未完のうちに要求対象をBへ切替する(A→一覧→B遷移と同型の操作)
+    const bPromise = entities.fetchEntityDetail(UUID_B)
+    // 切替直後: 旧entity(A)の詳細が表示・編集可能なまま残らない
+    expect(entities.detail).toBeNull()
+    expect(entities.detailError).toBeNull()
+    expect(entities.versions).toBeNull()
+    expect(entities.versionsError).toBeNull()
+    expect(entities.detailTargetUuid).toBe(UUID_B)
+    // 旧uuid(A)向けの応答が後着しても再表示されない
+    releaseA()
+    await aPromise
+    await bPromise
+    expect(entities.detail?.uuid).toBe(UUID_B)
+    expect(entities.detail?.tags).toEqual([])
+    expect(entities.selectedUuid).toBe(UUID_B)
   })
 })
 

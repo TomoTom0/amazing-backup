@@ -253,7 +253,7 @@ pub(crate) fn rebuild_and_upload_index(
     let entries =
         crate::index::build_entries(&reduced, &session.aws.bucket, &session.canonical_bucket);
     let updated_at = now_jst();
-    crate::index::upload_index(
+    let uploaded_index_vid = crate::index::upload_index(
         session.backend.as_ref(),
         &session.aws.bucket,
         &session.aws.prefix,
@@ -279,6 +279,7 @@ pub(crate) fn rebuild_and_upload_index(
         &header,
         &entries,
         &crate::catalog::SourceMtimes::from_reduced(&reduced),
+        &uploaded_index_vid,
     ) {
         eprintln!(
             "WARNING: catalog DB({})への反映に失敗しました(当該scopeのcacheは失効扱い。処理は継続します): {warn}",
