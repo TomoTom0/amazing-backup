@@ -12,6 +12,6 @@
 | `llm/skill.md` | SKILL.md正本(`amazing-backup docs llm skill`の配布正本。frontmatter(name/description)+実行原則+契約取得pointer+定期運用/非常時の最小手引き。`~/.claude/skills/amazing-backup/SKILL.md`へredirect配置可能な最終形) |
 | `llm/snippet.md` | pointer snippet正本(`amazing-backup docs llm snippet`の配布正本。CLAUDE.md/AGENTS.mdへ追記して使う数行。契約本文は内包せず`docs llm usage`/`docs usage`参照のみ) |
 | `dev/dev_backup.md` | repo開発者向け手順書(repo前提。repo内運用のconfigs/構成・buildと実行形式・検証用bucket(dev: your-dev-bucket)の準備手順・repo所在資産を使うrecipient鍵生成と手動復元・設計書などdocs外の正本の参照一覧) |
-| `dev/schema_migration.md` | 保存形式の互換性と移行の設計(TASK-26。0.2.0移行方式の見直し: 本体不変・移行は例外・履歴は書き換えないの原則、現行方式(reset+再push)の問題点の実測、読取互換を既定とする形式別設計(reader alias・版数受理・保存形式fixtureテスト)とschema版数の運用規則。実装は本書のレビュー承認後) |
+| `dev/schema_migration.md` | 保存形式の互換性と移行の設計(TASK-26。0.2.0移行方式の見直し: 本体不変・移行は例外・履歴は書き換えないの原則、現行方式(reset+再push)の問題点の実測、確定部分(reset+再pushの除外・層別の性質と使える機構)、読取互換の扱いの選択肢比較(案A無期限保持/案B期限・範囲付き保持/案C保持しない+非破壊ローカル変換。未確定・本人判断待ち)とschema版数の運用規則。実装は選択と本書のレビュー承認後) |
 
 docs外の正本(タスク紐付き設計書・テスト構成・開発ルール)の参照一覧は `dev/dev_backup.md` にまとめている。
