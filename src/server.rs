@@ -2128,16 +2128,19 @@ impl JobManager {
                 eprintln!("serve: job workerを停止します(graceful shutdown)");
                 break;
             }
-            // 1. queued jobを1件実行(設計5.1: queued順に1件ずつ)。semaphoreを
+            // 1. 確認時刻を過ぎたwaiting_restore jobを確認(読取・semaphore外。
+            //    復元済みなら再acquireして取得を再開する)。queued jobより先に
+            //    毎回確認する: queuedが途切れない間も確認を回さないと、復元完了
+            //    済みjobがnext_check_atを過ぎても放置され、復元コピーの失効で
+            //    再復元が発生し得る。実行は本loop内で直列のまま。
+            if self.check_waiting_restore().await {
+                continue;
+            }
+            // 2. queued jobを1件実行(設計5.1: queued順に1件ずつ)。semaphoreを
             //    acquireしてからrunningへ遷移する(3.1: 実行時にsemaphoreをacquire
             //    =書込APIとの相互直列化。acquire待ちの間はqueuedのまま)。
             if let Some(job) = self.next_queued().await {
                 self.run_job(job).await;
-                continue;
-            }
-            // 2. 確認時刻を過ぎたwaiting_restore jobを確認(読取・semaphore外。
-            //    復元済みなら再acquireして取得を再開する)
-            if self.check_waiting_restore().await {
                 continue;
             }
             // 3. 待機(新規job通知・tick・shutdownのいずれかで起床)
