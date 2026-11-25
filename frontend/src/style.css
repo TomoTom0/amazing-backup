@@ -629,11 +629,92 @@ a.tag-chip:hover {
 }
 
 /* ---------------------------------------------------------------------------
+ * 18b. job status dot・進行表示(TASK-17 W4・設計2.0/2.3/8章)
+ *      status dot部品(9章)の流用=dot+通常文字色。進行はN/M(tabular)・bar無し
+ * ------------------------------------------------------------------------- */
+
+.job-status {
+  color: var(--fg);
+}
+
+.job-status::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 0.45rem;
+  vertical-align: middle;
+}
+
+.job-status.st-queued::before,
+.job-status.st-running::before {
+  background: var(--checking);
+  animation: status-checking-pulse 1.6s ease-in-out infinite;
+}
+
+.job-status.st-waiting_restore::before {
+  background: var(--warn);
+}
+
+.job-status.st-succeeded::before {
+  background: var(--ok);
+}
+
+.job-status.st-failed::before {
+  background: var(--error);
+}
+
+.job-status.st-interrupted::before,
+.job-status.st-cancelled::before {
+  background: var(--fg-muted);
+}
+
+/* nav転送tabの実行中job dot(設計2.0: checking色。link内のinline dotのため
+   marginのみ調整) */
+.nav-job-dot::before {
+  margin-right: 0;
+  margin-left: 0.3rem;
+}
+
+/* 進行のN/M表示(tabular・設計8章: bar graphは使わない) */
+.progress-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* job行の現在path(等幅・折返し。設計8章: overflow-wrap anywhere) */
+.job-current-path {
+  overflow-wrap: anywhere;
+}
+
+/* 転送タブの取得form(縦並びlabel) */
+.transfer-get-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 34rem;
+}
+
+.transfer-get-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.transfer-overwrite {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.4rem !important;
+}
+
+/* ---------------------------------------------------------------------------
  * 19. media query(動きの停止・窄幅)
  * ------------------------------------------------------------------------- */
 
 @media (prefers-reduced-motion: reduce) {
-  .status-checking::before {
+  .status-checking::before,
+  .job-status.st-queued::before,
+  .job-status.st-running::before {
     animation: none;
   }
 }

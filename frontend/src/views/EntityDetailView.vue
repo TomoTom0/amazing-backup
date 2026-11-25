@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useEntitiesStore } from '../stores/entities'
 import type { EntityLocation } from '../api/client'
 import TwoStepConfirm from '../components/TwoStepConfirm.vue'
@@ -23,6 +23,7 @@ import TwoStepConfirm from '../components/TwoStepConfirm.vue'
 // (detailEpoch watchは対象uuidがrouteと不一致の時のみ再取得=二重fetchしない)。
 
 const route = useRoute()
+const router = useRouter()
 const entities = useEntitiesStore()
 
 /** tag追加formの入力(local state。文字入力のたびにPUTしない) */
@@ -133,6 +134,17 @@ watch(uuidFromRoute, (uuid) => {
   }
   void entities.fetchEntityVersions(uuid)
 })
+
+/** 版行の「取得」: 転送タブのget formへprefillして遷移(設計2.2文脈操作。
+ *  job発行までは転送タブで確認=ここでは遷移のみ行う) */
+const startGet = (versionId: string): void => {
+  const uuid = uuidFromRoute.value
+  if (uuid === null) return
+  void router.push({
+    path: '/transfer',
+    query: { get: uuid, version_id: versionId },
+  })
+}
 
 const fmtSize = (size: number): string => {
   if (size >= 1024 * 1024 * 1024) return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`
@@ -326,6 +338,7 @@ const fmtSize = (size: number): string => {
             <th>version_id</th>
             <th>batch_id</th>
             <th>size</th>
+            <th>取得</th>
           </tr>
         </thead>
         <tbody>
@@ -335,6 +348,14 @@ const fmtSize = (size: number): string => {
             <td class="mono">{{ v.version_id }}</td>
             <td class="mono">{{ v.batch_id }}</td>
             <td class="mono">{{ fmtSize(v.source_size) }}</td>
+            <td>
+              <button
+                type="button"
+                class="btn-quiet"
+                :aria-label="`版 ${v.version_id} を転送タブで取得`"
+                @click="startGet(v.version_id)"
+              >取得</button>
+            </td>
           </tr>
         </tbody>
       </table>

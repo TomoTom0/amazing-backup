@@ -54,6 +54,15 @@
 #   cargo test --no-runのcompileは通る)。
 #   [meta]はテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。
 
+# 2026-11-24: TASK-17 9章W4(TASK-27: job機構+get)対応でテスト先行の条件追加
+#   (2条件)・文言改訂(1条件=catalog.schema-migrationの14 tables化。id不変)。
+#   出典: tmp/tasks/tm-17/design_webui-overall.md 4.1(jobs table=設計schemaどおり・
+#   永続class)・5章(job機構)・9章W4行・11章(catalog.toml: jobs table永続class条件)。
+#   テストはsrc/catalog.rs内#[cfg(test)](jobs table schema・行API 1件)と
+#   tests/catalog_storage.rs(rebuildでの永続class保持観測1件)で観測。
+#   [meta]はテスト先行で始め・同一session内でW4実装後に全件verifyを確認して
+#   verified=trueへ復帰した。
+
 [meta]
 feature = "catalog"
 source_file = "src/catalog.rs"
@@ -62,7 +71,7 @@ verified_at = "2026-11-21"
 verified_by = "claude"
 test_command = "cargo test"
 source_hash = "eb82ef68c7394689bd1bf4b6992c83ac951ee6aa"
-note = "TASK-9設計2章(DB層)・4章(replica同期)・5章(CLI照会cache)・12章P1+3章(D6承認)・12章P5(pending catalog)の条件化。DB真正はJSONL registryのまま・DBは導出index+S3索引replica(平文view・D11承認)。テストはbin subprocess+fake seam(StorageFixture)で観測しsrc/catalog.rs直接参照のunit testは実装時に追加。P5分6条件はテスト先行(2026-11-05)のためverified=falseへ(P5実装後に復帰)。2026-11-05 TASK-13(api_keys table)実装後にcargo test --lib catalog::全緑(5 tests・schema 9 table観測含む)・cargo test --test catalog_storage全緑(29 tests・api_keys永続class観測含む)を確認してverified=trueへ復帰・source_hashを更新。2026-11-14 TASK-17 W2(TASK-19)条件追加(tags/collections/collection_items/audit_log 4 table 2条件+schema-migration 13 tables化の文言改訂+unit test 1件+結合test 1件)でテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。2026-11-15 全件verify(cargo test全binary緑・vitest 126tests緑・build成功・verify-conditions PASS 364条件)を確認してverified=trueへ復帰・source_hashを更新(W2分: tags/collections/collection_items/audit_log 4 table追加・schema 13 tables化)。2026-11-15 レビュー指摘対応(tags/collections件数の現存entities JOIN化・audit_ok_on_tx導入)によるsrc/catalog.rs変更でsource_hashを更新。2026-11-21 TASK-17 W3(TASK-22)条件追加(rebuild保持 1条件)でテスト先行のためverified=falseへ(W3実装後に全件verifyでtrueへ復帰)。2026-11-21 TASK-22(TASK-17 W3)実装後に全件verifyでverified=trueへ復帰(W3分: rebuild保持条件1件・src/catalog.rsは不変のためhash不変)"
+note = "TASK-9設計2章(DB層)・4章(replica同期)・5章(CLI照会cache)・12章P1+3章(D6承認)・12章P5(pending catalog)の条件化。DB真正はJSONL registryのまま・DBは導出index+S3索引replica(平文view・D11承認)。テストはbin subprocess+fake seam(StorageFixture)で観測しsrc/catalog.rs直接参照のunit testは実装時に追加。P5分6条件はテスト先行(2026-11-05)のためverified=falseへ(P5実装後に復帰)。2026-11-05 TASK-13(api_keys table)実装後にcargo test --lib catalog::全緑(5 tests・schema 9 table観測含む)・cargo test --test catalog_storage全緑(29 tests・api_keys永続class観測含む)を確認してverified=trueへ復帰・source_hashを更新。2026-11-14 TASK-17 W2(TASK-19)条件追加(tags/collections/collection_items/audit_log 4 table 2条件+schema-migration 13 tables化の文言改訂+unit test 1件+結合test 1件)でテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。2026-11-15 全件verify(cargo test全binary緑・vitest 126tests緑・build成功・verify-conditions PASS 364条件)を確認してverified=trueへ復帰・source_hashを更新(W2分: tags/collections/collection_items/audit_log 4 table追加・schema 13 tables化)。2026-11-15 レビュー指摘対応(tags/collections件数の現存entities JOIN化・audit_ok_on_tx導入)によるsrc/catalog.rs変更でsource_hashを更新。2026-11-21 TASK-17 W3(TASK-22)条件追加(rebuild保持 1条件)でテスト先行のためverified=falseへ(W3実装後に全件verifyでtrueへ復帰)。2026-11-21 TASK-22(TASK-17 W3)実装後に全件verifyでverified=trueへ復帰(W3分: rebuild保持条件1件・src/catalog.rsは不変のためhash不変)。2026-11-25 TASK-27(TASK-17 W4)条件追加(jobs table schema+永続class 2条件+schema-migrationの14 tables化改訂=id不変)後・同一sessionで実装も行い全件verify(cargo test 429pass・verify-conditions PASS 399条件)を確認してverified=trueを維持・source_hashを更新(W4分: jobs table migration+行API insert_job/job_by_id/update_job/list_jobs/next_queued_job/waiting_restore_jobs/cancel_queued_job/interrupt_active_jobs・初回openのmigration直列化とbusy_timeout)"
 
 [[condition]]
 id = "catalog.db-path-and-file-permissions"
@@ -86,10 +95,10 @@ source_lines = "tests/catalog_storage.rs:93"
 id = "catalog.schema-migration"
 target_function = "catalog::migrations(rusqlite_migration)"
 source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(schema要約・table契約)・12章P1(schema/migration) + TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.1(api_keys table追加・migration M::up listへの追加で既存DBへ適用=レビューL-1) + TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.1(tags/collections/collection_items/audit_log table追加=いずれも永続class)・9章W2行"
-description = "DB新規作成はmigrationによりschemaを構築する: cache class 6 table(entities/versions/pins/locations/sync_state/pending_items)+永続class 7 table(credentials/push_intents/api_keys/tags/collections/collection_items/audit_log)(TASK-13でapi_keysを・TASK-17 W2(TASK-19)でtags/collections/collection_items/audit_logを追加=計13 table。api_keysはcredential_id PK・key_hash(SHA-256 hex)・name・created_atで平文keyは保存しない。新4 tableのschema・制約詳細はcatalog.tags-collections-audit-log-tablesが担保。jobs/settings tableはW4/W7で追加=本条件時点では対象外)。versions/locationsはfile_write由来のsource_mtimeを保存する(3章の比較基準供給源)。migrationは冪等(既存DBへの再適用で内容を壊さない)。WAL modeで運用する (unit; integrationではDB file生成を観測)"
+description = "DB新規作成はmigrationによりschemaを構築する: cache class 6 table(entities/versions/pins/locations/sync_state/pending_items)+永続class 8 table(credentials/push_intents/api_keys/tags/collections/collection_items/audit_log/jobs)(TASK-13でapi_keysを・TASK-17 W2(TASK-19)でtags/collections/collection_items/audit_logを・TASK-17 W4(TASK-27)でjobsを追加=計14 table。api_keysはcredential_id PK・key_hash(SHA-256 hex)・name・created_atで平文keyは保存しない。jobs tableのschema詳細はcatalog.jobs-table-schemaが担保。settings tableはW7で追加=本条件時点では対象外)。versions/locationsはfile_write由来のsource_mtimeを保存する(3章の比較基準供給源)。migrationは冪等(既存DBへの再適用で内容を壊さない)。WAL modeで運用する (unit; integrationではDB file生成を観測)"
 given = "存在しないpathへの初回DB作成(manage catalog sync実行)と、同一DBへの再実行"
 expect_return_shape = "初回実行でSQLite database file(magic header \"SQLite format 3\")が作成され後続の照会が動作。再実行はexit 0で既存内容を壊さない(TASK-13改訂分=api_keys table・TASK-17 W2改訂分=新4 tableの13 table化観測はsrc/catalog.rs unit test。実装前は当該table不在でfailを許容)"
-source_lines = "src/catalog.rs:2137; src/catalog.rs:2340; tests/catalog_storage.rs:147"
+source_lines = "src/catalog.rs:2421; src/catalog.rs:2695; tests/catalog_storage.rs:147"
 
 [[condition]]
 id = "catalog.sync-fetches-replica-on-change"
@@ -125,7 +134,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 4章(freshness整合規
 description = "list files/versions/pins/runs・queryは別process起動時にHEAD 1回のvalidator一致確認を行い、検証済みfreshならS3 GETを行わずDBから回答する(cache hit。HEADとGETの毎回取得を廃止)。HEAD validator一致確認は毎process起動時に必須(検証なしfreshの持ち越し期限は設けない) (integration, fake seam)"
 given = "manage catalog sync済み(fresh)状態での list files と query の実行(いずれもsyncとは別process)"
 expect_return_shape = "索引objectへのHeadObject 1回のみでGetObjectは呼ばれず、表示結果はS3索引の内容と一致する"
-source_lines = "src/catalog.rs:2425; src/catalog.rs:2467; tests/catalog_storage.rs:263"
+source_lines = "src/catalog.rs:2780; src/catalog.rs:2822; tests/catalog_storage.rs:263"
 
 [[condition]]
 id = "catalog.cache-miss-refreshes-db"
@@ -152,7 +161,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 2章(table契約: rebui
 description = "manage catalog rebuildはローカルregistry(JSONL)からcache class(entities/versions/pins/locations/sync_state/pending_items)のみを置換再構築し、永続class(credentials/push_intents)はdropしない。再実行で同一内容(冪等)。cacheは常にJSONL+S3から再構築可能 (integration, fake seam; 永続class保持の直接観測はsrc/catalog.rs実装時のunit test)"
 given = "sync済みDBへの manage catalog rebuild 2回実行と、rebuild後のlist files実行"
 expect_return_shape = "rebuildはexit 0でS3索引由来と同一の照会結果をDBから回答し、2回のrebuild後のlist結果は同一(冪等)"
-source_lines = "src/catalog.rs:2363; tests/catalog_storage.rs:586"
+source_lines = "src/catalog.rs:2718; tests/catalog_storage.rs:586"
 
 [[condition]]
 id = "catalog.scope-isolation-multi-profile"
@@ -313,7 +322,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.1(新table: t
 description = "W2の新4 table(tags/collections/collection_items/audit_log)をmigrationが構築する(設計4.1のSQLどおり。全て永続class)。tagsの同(scope,uuid,tag)行・collectionsの同(scope,name)行の重複挿入は制約(PK/UNIQUE)で拒否される(POST /api/collectionsの同名409・items再追加の冪等skipのtable側契約) (unit)"
 given = "存在しないpathへの初回DB作成(open_test_db)後のPRAGMA table_info観測と、tags・collectionsへの重複行挿入"
 expect_return_shape = "4 tableが存在し各主要columnが観測される(tags: scope/uuid/tag/created_at・collections: id/scope/name/created_at・collection_items: collection_id/scope/uuid/added_at・audit_log: id/scope/recorded_at/action/detail_json/outcome/error_code)。tags同PK行・collections同(scope,name)行の重複挿入はerror(実装前はtable不在でfailを許容)"
-source_lines = "src/catalog.rs:2260"
+source_lines = "src/catalog.rs:2544"
 
 [[condition]]
 id = "catalog.tags-collections-persistent-class"
@@ -333,7 +342,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.2(manage cata
 description = "manage catalog rebuild(ローカルregistryからcache classを再構築)はrename/location_update eventを反映したentriesを構築する(build_entries経由=W3受入条件「manage catalog rebuild後も変更が保持される」)。rebuild後のlist files/query照会にも新title・新category/labelが現れる(CLI照会の索引反映) (integration, fake seam)"
 given = "1entity(title=alpha・category/label既定値)をpush済みのregistryへrename(alpha→renamed)とlocation_update(category/label変更)を追記し、sync後の状態から manage catalog rebuild → list files → query(新title) を実行"
 expect_return_shape = "rebuildはexit 0・list filesの表示に新title(renamed)と新category/labelが現れ・query ren(新title部分一致)で当該entityが1件hitする(rebuild前の照会は旧title)"
-source_lines = "tests/catalog_storage.rs:1626"
+source_lines = "tests/catalog_storage.rs:1680"
 
 # --- PR#9レビュー指摘対応(2026-11-21): 書込反映のvalidator束縛・fetch反映のmtime基線 ---
 
@@ -344,7 +353,7 @@ source = "TASK-9設計4章(自端末書込直後のみ無条件fresh) + PR#9コ�
 description = "書込系(push/pin/prune等)の索引upload後のDB反映(reflect_written_index)はupload_indexの応答VersionId(put応答)を受け取り、HEAD現行version_idと一致した場合のみfresh化する。不一致(=upload→HEADの間に他端末が索引objectを置換)は当該scopeをstale化して反映を中止する(他端末のvalidatorと自processの旧entriesの組でのfresh化を防ぐ)。upload応答が空(versioning無効bucket=束縛不能)の場合は従来どおりHEAD応答のvalidatorのみで判断する (unit, fake seam)"
 given = "FakeS3へindex objectを2回put(1回目=自端末upload想定・2回目=他端末置換想定)した状態でのreflect_written_index_with_db呼出と、一致ケース・不一致ケース・upload応答空ケースでのsync_state.status・load_entries_if_fresh応答の観測"
 expect_return_shape = "一致ケースはfresh化されload_entries_if_freshがSome。不一致ケースはErr(他端末書換え検出の警告)となりstatus=stale・現行版validatorでもload_entries_if_freshはNone。upload応答空ケースは従来どおりfresh化(束縛不能)"
-source_lines = "src/catalog.rs:2618"
+source_lines = "src/catalog.rs:2973"
 
 [[condition]]
 id = "catalog.mtime-baseline-preserved-on-fetch"
@@ -353,4 +362,24 @@ source = "TASK-9設計3章D6(mtimeはfile_write由来のsource_mtime保存値と
 description = "S3索引replica取得経路(manage catalog syncのfetch反映・照会系cache miss再取得)はmtime供給源を持たないため、replace_scope前に既存scope行(versions/locations)から非空のsource_mtime基線を構築して引き継ぐ(local backupの記録基線がreplica取得で消えない=classify_scan_targetが未変更fileをfalse changedに分類しない)。manage index rebuildのDB反映はregistryがある場合reduce結果(file_write記録)から基線を供給する (unit+integration, fake seam)"
 given = "単位: Written反映(from_reduced基線付き)→existing_source_mtimes→Fetched再置換でのversions/locations行のsource_mtime保持観測。統合: push→索引書換え(他端末模擬)→sync→scanとpush→索引書換え→list(cache miss再取得)→scanでの4状態分類観測"
 expect_return_shape = "単位: 既存行の基線(mtime文字列)が復元されFetched置換後も保持される。統合: いずれの経路でもscanはok=1・changed=0(未変更fileがfalse changedにならない)"
-source_lines = "src/catalog.rs:2544; tests/catalog_storage.rs:1082"
+source_lines = "src/catalog.rs:2899; tests/catalog_storage.rs:1082"
+
+# --- TASK-17 W4(TASK-27: job機構+get・2026-11-24テスト先行) ---
+
+[[condition]]
+id = "catalog.jobs-table-schema"
+target_function = "catalog::migrations(jobs table追加) / CatalogDb jobs行API"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.1(jobs table: id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, params_json TEXT NOT NULL, progress_json TEXT NOT NULL, result_json TEXT, error_code TEXT, error_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)・5章(jobの正本)・9章W4行・11章"
+description = "W4のjobs table(長時間jobの実行記録の正本=永続class)をmigrationが設計4.1のschemaどおり構築する。行API(insert_job=queued+NULL系初期値で作成しJobRowを返す・job_by_id=scope分離付き読取・update_job=status/progress差し替え+result/errorはSome時のみ設定+updated_at刻み・cancel_queued_job=queued行のみ更新)が一貫して動作する (unit)"
+given = "存在しないpathへの初回DB作成(open_test_db)後のPRAGMA table_info(jobs)観測とinsert_job→job_by_id(同一scope・対照scope)→update_job→cancel_queued_job(1回目・2回目)の呼出"
+expect_return_shape = "jobs tableにid/scope/kind/status/params_json/progress_json/result_json/error_code/error_message/created_at/updated_atの全列がある。insert_jobはstatus=queued・result/error系NULL・scope=<bucket>:<prefix>形式。job_by_idは同一scopeのみ読める。update_jobはstatus/resultを設定しupdated_at>=created_at。cancel_queued_jobは1回目=1行更新(queuedで無くなる)・2回目=0行"
+source_lines = "src/catalog.rs:2624"
+
+[[condition]]
+id = "catalog.jobs-table-persistent-class"
+target_function = "catalog::replace_scope(永続class対象外) / manage catalog rebuild"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.1(class分類: jobsは永続class=再構築不能の実行記録。cache側に置くとmanage catalog rebuildでjob履歴が失われる)・9章W4行・11章"
+description = "jobs tableは永続classとして作成され、manage catalog rebuildのcache class置換(replace_scope)でもdropされない(credentials/push_intents/api_keys/W2 4 tableと同一契約=jobの発行・実行履歴がrebuildで失われない) (integration, fake seam)"
+given = "sync済みDBのjobsへ2行(succeeded・waiting_restore)挿入(rusqlite直接=server側insert_jobと同一schema)した状態での manage catalog rebuild 実行(rusqlite直接で行数・status観測)"
+expect_return_shape = "rebuildはexit 0でjobs行は2行とも保持される(status値も保持=cache class置換の対象外)(実装前はtable不在によりfailを許容)"
+source_lines = "tests/catalog_storage.rs:1631"

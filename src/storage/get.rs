@@ -455,19 +455,23 @@ pub(crate) fn resolve_fetch_target(
     Ok(FetchTarget::from_version(entry, v))
 }
 
-/// 平文衝突保護(索引・ローカルregistry問わず対象のsource_sha256と比較)。
-/// 既存平文の読込失敗(sha256検証不能)も--yesなしでは上書きせず対象エラー3
-/// (--yes=明示的上書き指示のため--yes付きは続行。pull側と同一挙動・L-R5)。
-/// 戻り値Some(code)は処理確定(skip=0)・Noneは取得続行(上書き許可または既存なし)。
-pub(crate) fn plain_conflict_check(
+/// 平文衝突保護の判定結果(TASK-17 W4: job実行側から使う印刷なし版の基盤)。
+/// Skip=既存平文のsha256一致(冪等skip)・Proceed=取得続行(既存なし・または
+/// --yesによる上書き)。
+pub(crate) enum PlainConflictOutcome {
+    Proceed,
+    Skip,
+}
+
+/// 平文衝突保護の判定(表示なし。CLI表示はplain_conflict_checkが担う)。
+pub(crate) fn plain_conflict_outcome(
     target: &FetchTarget,
     out_dir: &Path,
     yes: bool,
-    format: Format,
-) -> BackupResult<Option<i32>> {
+) -> BackupResult<PlainConflictOutcome> {
     let dest = target.dest_path(out_dir);
     if !dest.is_file() {
-        return Ok(None);
+        return Ok(PlainConflictOutcome::Proceed);
     }
     let sha = match sha256_of_plain(&dest) {
         Ok(sha) => sha,
@@ -479,18 +483,10 @@ pub(crate) fn plain_conflict_check(
             )));
         }
         // --yes: 明示的上書き指示のため検証不能でも上書きして続行(pull側と同一)
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(PlainConflictOutcome::Proceed),
     };
     if sha == target.source_sha256 {
-        match format {
-            Format::Json => print_json(&serde_json::json!({
-                "name": target.dest_name,
-                "dest": dest.display().to_string(),
-                "skip": true,
-            })),
-            Format::Human => println!("skip {} (既存平文のsha256一致・冪等)", dest.display()),
-        }
-        return Ok(Some(0));
+        return Ok(PlainConflictOutcome::Skip);
     }
     if !yes {
         return Err(BackupError::Target(format!(
@@ -499,7 +495,36 @@ pub(crate) fn plain_conflict_check(
             target.dest_name
         )));
     }
-    Ok(None)
+    Ok(PlainConflictOutcome::Proceed)
+}
+
+/// 平文衝突保護(索引・ローカルregistry問わず対象のsource_sha256と比較)。
+/// 既存平文の読込失敗(sha256検証不能)も--yesなしでは上書きせず対象エラー3
+/// (--yes=明示的上書き指示のため--yes付きは続行。pull側と同一挙動・L-R5)。
+/// 戻り値Some(code)は処理確定(skip=0)・Noneは取得続行(上書き許可または既存なし)。
+pub(crate) fn plain_conflict_check(
+    target: &FetchTarget,
+    out_dir: &Path,
+    yes: bool,
+    format: Format,
+) -> BackupResult<Option<i32>> {
+    match plain_conflict_outcome(target, out_dir, yes)? {
+        PlainConflictOutcome::Skip => {
+            let dest = target.dest_path(out_dir);
+            match format {
+                Format::Json => print_json(&serde_json::json!({
+                    "name": target.dest_name,
+                    "dest": dest.display().to_string(),
+                    "skip": true,
+                })),
+                Format::Human => {
+                    println!("skip {} (既存平文のsha256一致・冪等)", dest.display())
+                }
+            }
+            Ok(Some(0))
+        }
+        PlainConflictOutcome::Proceed => Ok(None),
+    }
 }
 
 /// 平文衝突の事前検査(索引GET前)。ローカルregistryから対象を解決でき

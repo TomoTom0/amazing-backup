@@ -167,15 +167,40 @@
 #   frontend.sync-refresh-trigger(refresh成功時の取得済み選択肢の再取得)。
 #   [meta]はverified=falseへ(指揮役の全件verify後にtrueへ復帰)。
 
+# 2026-11-24: TASK-17 9章W4(TASK-27: job機構+get・転送タブ)対応でテスト先行の
+#   条件追加(4条件)・文言改訂(1条件=frontend.jobs-client-and-storeのW4拡張。
+#   id不変)。出典: tmp/tasks/tm-17/design_webui-overall.md 2.0(nav転送tab status
+#   dot)・2.1(ホーム実行中job区画)・2.3(取得form・job一覧・再実行button)・
+#   3.2(POST /api/jobs/get・GET /api/jobs(/:id)・cancel)・5.3(polling既定10秒=
+#   ui-refresh設定)・9章W4行・11章。
+#   テストはapi/jobs.spec.ts・stores/jobs.spec.ts・stores/transfer.spec.tsの
+#   vitestで観測(store/client層。転送タブ・ホーム区画・nav dotの実描画は
+#   excluded=component実描画は実browser観測のため従来どおり)。
+#   設計に詳細が規定されない点は以下の解釈で条件化(実装はこれに従う):
+#   - job objectのfrontend型はW4拡張schema(params=GetJobParams{uuid,version_id,
+#     pin,out,tier,days,overwrite}で未指定はnull・progress={phase,total,done,
+#     current_path}(waiting_restore中のみnext_check_at)・result={name,dest}(sha
+#     一致skip時skip:true)・error={code,message})。応答wrapは{"job":{...}}
+#   - fetchJobsはstatus/kind絞り込みparamを値のあるもののみURL queryへ直列化
+#   - pollingは参照カウント式startPolling/stopPolling(App.vueのnav dot用・
+#     転送タブ・ホームの表示中追従が独立に開始/停止できる)。間隔は毎tick
+#     ui-refresh storeから読み直す(設定変更は次tickから反映)・無効(null)時は
+#     fetchせず1秒後に設定変更を再確認する
+#   - 取得formのprefillは?get=<uuid>&version_id=...(getが無いqueryでは適用
+#     しない=導線は詳細画面の取得button由来で必ずgetを伴う)。1度だけ適用
+#   - prefill・発行・取消・再実行の成否はjobs/transfer storeの状態で担保
+#   [meta]はテスト先行で始め・同一session内でW4実装後に全件verifyを確認して
+#   verified=trueへ復帰した。
+
 [meta]
 feature = "frontend"
 source_file = "frontend/src/"
 verified = true
-verified_at = "2026-11-21"
+verified_at = "2026-11-25"
 verified_by = "claude"
 test_command = "pnpm --dir frontend test"
-source_hash = "cd06c611994b95338bf802f8fab27435e65cf6cf"
-note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3〜P6時点+コードレビュー指摘高4(EntitiesView・EntityDetailView・手動sync)分+レビュー再指摘①〜④分のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff・entities)のvitestで担保。P3分5条件・P4分4条件・P5分2条件・P6分3条件+レビュー分2条件は2026-11-05実装後に全件pass(44 tests)で検証記録を復帰済み。レビュー高4分5条件(entities-client・entities-store・sync-refresh-trigger・entities-view-state・entities-routes-nav)も2026-11-05実装後に全件pass(61 tests)で検証記録を復帰。レビュー再指摘①〜④分4条件(entities-filter-apply・sync-refresh-invalidates-detail-state・entities-detail-versions-error-separation・diff-run-error-visible-without-result)も2026-11-05実装後に全件pass(66 tests)で検証記録を更新。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)。2026-11-05 TASK-13(api-key認証UI)実装後にfrontend vitest全緑(80 tests・api-key系14test+文言改訂分含む)・frontend build成功を確認してverified=trueへ復帰・source_hashを更新。2026-11-06 TASK-13レビュー指摘対応(apiKeyErrorの寿命をlastErrorと同一へ=stores/auth.ts変更)でverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-06 全件verify(vitest 82tests緑・apiKeyErrorクリア分2test含む・frontend build成功・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新。2026-11-11 TASK-16(visual design)実装のためverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-11 全件verify(vitest 82tests緑・frontend build成功・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新(TASK-16分: style.css全面書換・View属性追加・nav追加・IBM Plex latin同梠。条件本文の追加・削除なし=visual designはexcluded領域のため。test_commandをpnpm --dir frontend testへ修正=直接的vitest run形式はpnpm v10でERR_PNPM_RECURSIVE_EXEC_FIRST_FAILとなるため・package.json test script=vitest runと同一)2026-11-11 レビュー指摘#5対応でsource_hashをfrontend/src tree自身のhashへ方式統一(旧方式は上位tree hashでnote説明と不一致。TASK-13時旧値8b33d71はrepo root tree相当だった)。2026-11-14 TASK-17 W1(TASK-18)条件追加3件+entities-routes-nav改訂(id不変)+spec改訂1件/新規5fileでテスト先行のためverified=falseへ(W1実装後に全件verifyでtrueへ復帰)。2026-11-14 全件verify(vitest 19file/98tests緑・frontend build成功・verify-conditions PASS 347条件・cargo test 392 passedは同一revisionで実装委任先が確認)を経てverified=trueへ復帰・source_hashを更新(W1分: routes 5タブ化・client runs/jobs・stores 3新規・HomeView/EntitiesView再編・TransferView/SettingsView/AdminView枠新規・PendingView/DiffView削除)。2026-11-14 コードレビュー指摘対応(diff filterのentity一覧をmissing対象のみへ絞り込み・空job時ホーム区画非表示・store失敗testを非空保持からの消去検証へ強化)後にvitest 98tests緑・build成功・cargo test全緑・verify-conditions PASSを確認してsource_hashを更新。2026-11-14 TASK-17 W2(TASK-19)条件追加6件+entities-client改訂(id不変)+spec新規7file・拡張2file(api/entities.spec.ts・stores/entities.spec.ts)でテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。2026-11-15 全件verify(cargo test全binary緑・vitest 126tests緑・build成功・verify-conditions PASS 364条件)を確認してverified=trueへ復帰・source_hashを更新(W2分: 一覧3ビュー切替(folder/tag/collection)+検索・pager共存・行tag列chip・詳細tag編集・所属collection表示)。2026-11-14 TASK-19 W2レビュー指摘frontend側対応(条件追加7件+文言改訂5件=id不変: tag編集保存中状態・一覧/tags失効再取得・一覧要求世代・選択肢fetchState+sync後再取得・untagged絞り込み・ラベルなしnode・collection書込client/store)でverified=falseへ(指揮役の全件verify後にtrueへ復帰・source_hash更新)。2026-11-15 レビュー指摘対応(条件7新規+5改訂: collection書込client/store・untagged・ラベルなしnode・request世代・fetchState・tag編集保存中無効化・一覧失効再取得)後に全件verify(vitest 26file/152tests緑・build成功・cargo test全binary緑・verify-conditions PASS)を確認してverified=trueへ復帰・source_hashを更新。2026-11-21 TASK-17 W3(TASK-22)条件追加(rename/location client+store 2条件+2段階確認状態 1条件)でテスト先行のためverified=falseへ(W3実装後に全件verifyでtrueへ復帰)。2026-11-21 TASK-22(TASK-17 W3)実装後に全件verify(cargo test 417pass=25suite・vitest 169pass=29file・verify-conditions PASS 383条件・実機確認=serve+fake seamでrename→CLI list files/queryへ新title反映・catalog rebuild後も保持)を確認してverified=trueへ復帰・source_hashを更新(W3分実装含む)"
+source_hash = "0d35c0c366d12fb0537b6255790eabd1561ccff1"
+note = "TASK-9設計7章(frontend構成・Pinia stores)・6章(error body形式)・4章(staleness)・8章(passkey認証UI)・12章P3〜P6時点+コードレビュー指摘高4(EntitiesView・EntityDetailView・手動sync)分+レビュー再指摘①〜④分のfrontend期待動作。API client(src/api/client.ts)とstores(sync・auth・pending・diff・entities)のvitestで担保。P3分5条件・P4分4条件・P5分2条件・P6分3条件+レビュー分2条件は2026-11-05実装後に全件pass(44 tests)で検証記録を復帰済み。レビュー高4分5条件(entities-client・entities-store・sync-refresh-trigger・entities-view-state・entities-routes-nav)も2026-11-05実装後に全件pass(61 tests)で検証記録を復帰。レビュー再指摘①〜④分4条件(entities-filter-apply・sync-refresh-invalidates-detail-state・entities-detail-versions-error-separation・diff-run-error-visible-without-result)も2026-11-05実装後に全件pass(66 tests)で検証記録を更新。source_hashはfrontend/src配下のgit tree hash(directory対象のためblob hashの代用)。2026-11-05 TASK-13(api-key認証UI)実装後にfrontend vitest全緑(80 tests・api-key系14test+文言改訂分含む)・frontend build成功を確認してverified=trueへ復帰・source_hashを更新。2026-11-06 TASK-13レビュー指摘対応(apiKeyErrorの寿命をlastErrorと同一へ=stores/auth.ts変更)でverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-06 全件verify(vitest 82tests緑・apiKeyErrorクリア分2test含む・frontend build成功・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新。2026-11-11 TASK-16(visual design)実装のためverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-11 全件verify(vitest 82tests緑・frontend build成功・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新(TASK-16分: style.css全面書換・View属性追加・nav追加・IBM Plex latin同梠。条件本文の追加・削除なし=visual designはexcluded領域のため。test_commandをpnpm --dir frontend testへ修正=直接的vitest run形式はpnpm v10でERR_PNPM_RECURSIVE_EXEC_FIRST_FAILとなるため・package.json test script=vitest runと同一)2026-11-11 レビュー指摘#5対応でsource_hashをfrontend/src tree自身のhashへ方式統一(旧方式は上位tree hashでnote説明と不一致。TASK-13時旧値8b33d71はrepo root tree相当だった)。2026-11-14 TASK-17 W1(TASK-18)条件追加3件+entities-routes-nav改訂(id不変)+spec改訂1件/新規5fileでテスト先行のためverified=falseへ(W1実装後に全件verifyでtrueへ復帰)。2026-11-14 全件verify(vitest 19file/98tests緑・frontend build成功・verify-conditions PASS 347条件・cargo test 392 passedは同一revisionで実装委任先が確認)を経てverified=trueへ復帰・source_hashを更新(W1分: routes 5タブ化・client runs/jobs・stores 3新規・HomeView/EntitiesView再編・TransferView/SettingsView/AdminView枠新規・PendingView/DiffView削除)。2026-11-14 コードレビュー指摘対応(diff filterのentity一覧をmissing対象のみへ絞り込み・空job時ホーム区画非表示・store失敗testを非空保持からの消去検証へ強化)後にvitest 98tests緑・build成功・cargo test全緑・verify-conditions PASSを確認してsource_hashを更新。2026-11-14 TASK-17 W2(TASK-19)条件追加6件+entities-client改訂(id不変)+spec新規7file・拡張2file(api/entities.spec.ts・stores/entities.spec.ts)でテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。2026-11-15 全件verify(cargo test全binary緑・vitest 126tests緑・build成功・verify-conditions PASS 364条件)を確認してverified=trueへ復帰・source_hashを更新(W2分: 一覧3ビュー切替(folder/tag/collection)+検索・pager共存・行tag列chip・詳細tag編集・所属collection表示)。2026-11-14 TASK-19 W2レビュー指摘frontend側対応(条件追加7件+文言改訂5件=id不変: tag編集保存中状態・一覧/tags失効再取得・一覧要求世代・選択肢fetchState+sync後再取得・untagged絞り込み・ラベルなしnode・collection書込client/store)でverified=falseへ(指揮役の全件verify後にtrueへ復帰・source_hash更新)。2026-11-15 レビュー指摘対応(条件7新規+5改訂: collection書込client/store・untagged・ラベルなしnode・request世代・fetchState・tag編集保存中無効化・一覧失効再取得)後に全件verify(vitest 26file/152tests緑・build成功・cargo test全binary緑・verify-conditions PASS)を確認してverified=trueへ復帰・source_hashを更新。2026-11-21 TASK-17 W3(TASK-22)条件追加(rename/location client+store 2条件+2段階確認状態 1条件)でテスト先行のためverified=falseへ(W3実装後に全件verifyでtrueへ復帰)。2026-11-21 TASK-22(TASK-17 W3)実装後に全件verify(cargo test 417pass=25suite・vitest 169pass=29file・verify-conditions PASS 383条件・実機確認=serve+fake seamでrename→CLI list files/queryへ新title反映・catalog rebuild後も保持)を確認してverified=trueへ復帰・source_hashを更新(W3分実装含む)。2026-11-25 TASK-27(TASK-17 W4)条件追加(job発行/詳細/取消client+store・polling・転送form 4条件+frontend.jobs-client-and-storeのW4拡張改訂=id不変)後・同一sessionで実装も行い全件verify(vitest 191pass=31file・frontend build成功・cargo test 429pass・verify-conditions PASS 399条件)を確認してverified=trueを維持・source_hashを更新(W4分: JobItemのW4拡張schema・fetchJobs絞り込み・fetchJobDetail/postJobsGet/postJobCancel・jobs storeのissueGet/rerunGet/cancelJob/polling(参照カウント)・transfer store新規・TransferView実装・HomeView実行中job区画拡張・App.vue nav dot・EntityDetailView版行の取得button)"
 
 [[condition]]
 id = "frontend.api-error-body-guard"
@@ -489,11 +514,11 @@ source_lines = "frontend/src/api/runs.spec.ts:26; frontend/src/api/runs.spec.ts:
 [[condition]]
 id = "frontend.jobs-client-and-store"
 target_function = "frontend api/client.ts GET /api/jobs応答型ガード・fetchJobs / stores/jobs.ts job一覧取得"
-source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.1(ホーム実行中job区画・空時は表示なし)・2.3(job一覧の表示語彙)・3.2(GET /api/jobs?status=&kind=)・5.3(進行報告pollingは転送タブ実装(W4)で追加)・9章W1行(GET /api/jobs空応答・polling制御なし=W1は手動表示のみ)"
-description = "GET /api/jobs応答({\"jobs\": [...]})の型ガード(isJobsResponse。要素は{id: number, kind: string, status: string, created_at: string, updated_at: string}の最小schemaで検証し進行(params/progress/result/error)の詳細fieldはW4のjob実装時に拡張)とjob一覧取得fetchJobsを持ち、jobs storeは一覧(items)を取得して保持する(ホーム実行中job区画・転送タブのW1基盤。W1のserver応答は常に空配列=server.jobs-list)。W1ではpolling(setInterval等の自動更新)を行わずfetchJobsは手動呼出のみとする(設計5.3のpollingはW4の転送タブ実装で追加。自動更新間隔設定の保持はfrontend.ui-refresh-interval-localstorage)。取得失敗時はlastErrorを保持しitemsは空へ戻す(空dataを表示しない) (vitest)"
-given = "合成入力への型ガード呼び出しと、fetch mock(200+{\"jobs\":[]}・401+{\"error\":{\"code\":\"unauthenticated\",...}})でのfetchJobs呼び出しのmethod/URL観測・jobs store(fetchJobs)の取得とfetch後のfake timer進行(vi.useFakeTimers)"
-expect_return_shape = "型ガードは形式一致のみtrue(jobs欠落・jobs非配列・要素のkind欠落・status非string・id非number・nullはfalse。{\"jobs\":[]}はtrue)。fetchJobsはGET /api/jobsへ向かう。storeは成功時items(空)を保持しlastError=null・失敗時はitems空+lastError={code:...}。fetch後にtimerを進めてもfetch呼出は増えない(W1はpolling無し=手動表示のみ)(実装前のためclient.tsのjobs系・src/stores/jobs.ts未実装で実行failを許容)"
-source_lines = "frontend/src/api/jobs.spec.ts:28; frontend/src/api/jobs.spec.ts:64; frontend/src/stores/jobs.spec.ts:25"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.1(ホーム実行中job区画・空時は表示なし)・2.3(job一覧の表示語彙)・3.2(GET /api/jobs?status=&kind=)・5.3(進行報告pollingは転送タブ実装(W4)で追加)・9章W1行(GET /api/jobs空応答)+9章W4行(W4でjobs実データ追従・fetchJobs拡張)"
+description = "GET /api/jobs応答({\"jobs\": [...]})の型ガード(isJobsResponse。要素はW4(TASK-27)拡張schema{id,kind,status,params,progress,result,error,created_at,updated_at}=server.jobs-listの契約に整合。params=GetJobParams(uuid/out/tier/days/overwrite必須・version_id/pinはnull許容)・progress={phase,total,done,current_path}(waiting_restore中のみnext_check_at)・result={name,dest}(skipは省略可)・error={code,message}・各詳細fieldはnull許容)とjob一覧取得fetchJobs(status/kind絞り込みparam付き=値のあるparamのみURL queryへ直列化)を持ち、jobs storeは一覧(items)を取得して保持し進行中jobの集計getter(activeJobs=queued/running/waiting_restore・hasActiveJobs)を提供する(ホーム実行中job区画・nav dot・転送タブの基盤)。polling自体はfrontend.jobs-pollingが担う。取得失敗時はlastErrorを保持しitemsは空へ戻す(空dataを表示しない) (vitest)"
+given = "合成入力への型ガード呼び出し(W4 schema一致・各field違反)と、fetch mock(200+jobs一覧body・401 error body)でのfetchJobs呼び出しのmethod/URL観測(絞り込み4種)・jobs store(fetchJobs・activeJobs)の取得"
+expect_return_shape = "型ガードは形式一致のみtrue(jobs欠落・jobs非配列・id非number・params.version_id非string/non-null・progress.done非number・resultのname/dest欠落・error.code非stringはfalse)。fetchJobsはGET /api/jobs(絞り込み無し)・?status=running・?kind=get・?status&succeeded&kind=getへ向かう。storeは成功時items(W4 schemaの要素)を保持しactiveJobsが進行中のみを抽出・失敗時はitems空+lastError={code:...}"
+source_lines = "frontend/src/api/jobs.spec.ts:142; frontend/src/api/jobs.spec.ts:53; frontend/src/stores/jobs.spec.ts:94"
 
 [[condition]]
 id = "frontend.ui-refresh-interval-localstorage"
@@ -675,3 +700,41 @@ description = "entities storeは詳細・versionsの要求対象uuid(detailTarge
 given = "Aの詳細応答のみ保留(gate)したままBへ切替するfetch mockでの切替直後のstate観測と、A後着応答の不採用・B応答のみ採用の観測(実描画は実browser観測のため条件書frontend.tomlのexcluded参照)"
 expect_return_shape = "切替直後はdetail=null・detailError=null・versions=null・versionsError=null・detailTargetUuid=B。Aの保留応答を完了させてもdetailはBの内容のまま(uuid=B・selectedUuid=B)"
 source_lines = "frontend/src/stores/entities.spec.ts:456"
+
+# --- TASK-17 W4(TASK-27: job機構+get・転送タブ・2026-11-24テスト先行) ---
+
+[[condition]]
+id = "frontend.jobs-get-issue-client"
+target_function = "frontend api/client.ts postJobsGet / stores/jobs.ts issueGet・rerunGet / stores/transfer.ts 取得form"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.3(取得form: 対象(uuid・prefill対応)・版(省略=最新・version_id/pin指定)・出力dir・tier・days(既定7)・overwrite(既定false)・「取得を開始」→POST /api/jobs/get・再実行button(冪等))・2.2(詳細の版行「取得」→/transfer?get=<uuid>&version_id=...のprefill導線)・3.2(POST /api/jobs/get body・即時応答はjob object(queued))・3.3(書込form送信時のpending状態表示)・9章W4行・11章"
+description = "取得jobの発行: client(postJobsGetはPOST /api/jobs/getへ{uuid,version_id?,pin?,out,tier,days,overwrite}のJSON bodyを送り{\"job\":{...}}応答を型ガード検証・422等はerror扱い)とjobs storeのissueGet(発行後一覧再取得・issuing実行中状態・失敗はlastIssueErrorで分離し一覧は変更しない)・rerunGet(job.paramsで同一内容を再発行=再実行buttonの基盤。paramsが読めないjobはinternal error)を持つ。転送タブの取得form状態はtransfer store(uuid/versionId/pin/out/tier(既定Standard)/days(既定7)/overwrite(既定false)・prefillFromQuery(?get=&version_id=を1度だけ適用・get無しqueryでは適用しない)・submitGetはuuid/out空欄のclient側検証後にissueGetへ接続しsubmitting/lastSubmitError/clientErrorを保持)が担う(実描画はexcluded) (vitest)"
+given = "合成入力とfetch mock(POST /api/jobs/get 200+queued job・422 error body・続くGET /api/jobs 200)でのpostJobsGet呼び出しのmethod/URL/body観測・jobs storeのissueGet/rerunGet実行(失敗再実行含む)・transfer storeのprefillFromQuery・submitGet実行(空欄検証・成功・失敗)"
+expect_return_shape = "postJobsGetはPOST /api/jobs/getへbody(uuid/out/tier/days/overwrite・空のversion_id/pinはkey自体を送らない)で呼ばれ200は{\"job\":{status:queued,...}}をdataへ・422は{code:\"validation_failed\"}。issueGet成功時はPOST→GETの順で呼ばれissuingはtrue→false・lastIssueError=null・items再取得・失敗時はlastIssueError設定で一覧変更なし。rerunGetは元jobのparamsで再発行(nullのversion_id/pinは省略)。transfer storeのprefillはgetを伴うqueryでuuid/versionIdへ適用(2度目は不適用)・submitGetは空欄でclientError+POST無し・成功でPOST+一覧再取得・失敗でlastSubmitError"
+source_lines = "frontend/src/api/jobs.spec.ts:273; frontend/src/stores/jobs.spec.ts:158"
+
+[[condition]]
+id = "frontend.jobs-detail-and-cancel-client"
+target_function = "frontend api/client.ts fetchJobDetail・postJobCancel / stores/jobs.ts fetchJobDetail・cancelJob"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.3(job一覧: 状態・進行・error表示・再実行。取消はqueuedのみ)・3.2(GET /api/jobs/:id=job詳細(params・progress・result・error)・POST /api/jobs/:id/cancel=queuedの取消・実行中は409)・9章W4行・11章"
+description = "job詳細と取消: client(fetchJobDetail(id)=GET /api/jobs/:id・postJobCancel(id)=POST /api/jobs/:id/cancel。応答は{\"job\":{...}}の型ガード検証・404/409はerror扱い)とjobs storeのfetchJobDetail(detail/detailErrorで保持)・cancelJob(成功時一覧再取得・409(実行中・完了済み)はlastCancelErrorで分離し一覧再取得を行わない=P5 lastScanError等と同一構成)を持つ (vitest)"
+given = "fetch mock(GET /api/jobs/:id 200+job object・404 error body・POST /api/jobs/:id/cancel 200+cancelled job・409 error body)でのclient呼び出しのmethod/URL観測・jobs storeのfetchJobDetail/cancelJob実行"
+expect_return_shape = "fetchJobDetailはGET /api/jobs/<id>へ向かい200はjob objectをdataへ・404は{code:\"not_found\"}。cancelJob成功時はPOST cancel→GET /api/jobsの順で呼ばれlastCancelError=null・409時はPOSTのみでlastCancelError={code:\"duplicate\"}"
+source_lines = "frontend/src/api/jobs.spec.ts:203; frontend/src/stores/jobs.spec.ts:264"
+
+[[condition]]
+id = "frontend.jobs-polling"
+target_function = "frontend stores/jobs.ts startPolling/stopPolling(polling制御) / stores/ui-refresh.ts intervalMs"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 5.3(進行報告はpolling: 転送タブ表示中(およびホームの実行中job区画)でGET /api/jobsを既定10秒間隔でpolling・間隔は2.4のUI更新挙動設定で調整可)・2.0(実行中jobがある間の転送tab status dot=進行の気づき。nav dotは表示中以外でも追従)・2.4(UI更新挙動の保存はfrontend側localStorage)・9章W4行・11章"
+description = "jobs storeのpolling制御: startPolling/stopPollingは参照カウント式(App.vueのnav dot用と転送タブ・ホームの表示中追従が独立に開始/停止できる=最初の要求でloopを1本だけ起動し最後の解放で停止)。間隔は毎tick ui-refresh storeのintervalMsから読み直す(設定変更は次tickから反映・既定10秒)。無効(null)時はfetchを行わず1秒後に設定変更を再確認する(再有効化を拾う)。pollingはfetchJobsを呼ぶ(失敗してもloopは継続) (vitest)"
+given = "vi.useFakeTimers+fetch mockでのstartPolling→timer進行(10秒×3)・stopPolling後のtimer進行・startPolling2回+stopPolling1回/2回・intervalMsのnull→5000切替・10000→5000切替でのfetch呼出回数観測"
+expect_return_shape = "startPolling後30秒進行で初期手動fetch込み4回のGET /api/jobs・stopPolling後は増えない。参照カウントは片方のstopPolling後もpolling継続・全stopで停止。null時は30秒進行でもfetch 0回・5000ms再有効化後10秒進行で2回。10000→5000切替は次tickから5秒間隔に反映"
+source_lines = "frontend/src/stores/jobs.spec.ts:324"
+
+[[condition]]
+id = "frontend.transfer-get-form"
+target_function = "frontend stores/transfer.ts 取得form状態(prefill・submit)"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.3(取得form: 対象(uuid・prefill対応)・版(省略=最新・version_id/pin指定)・出力dir(server側path・必須)・tier(Standard/Bulk)・days(既定7)・overwrite(既定false))・2.2(詳細の版行「取得」→/transfer?get=<uuid>(&version_id=...)へ遷移しget formをprefill)・9章W4行・11章"
+description = "転送タブの取得form状態(transfer store): form値(uuid/versionId/pin/out/tier/days/overwrite・既定はtier=Standard・days=7・overwrite=false=CLI getと同一)とprefillFromQuery(?get=<uuid>&version_id=...を1度だけ適用=手動入力をprefillで上書きしない。getが無いqueryでは適用しない)・reset(既定値へ戻す)・submitGet(uuid/out必須のclient側最低限検証→jobs storeのissueGetへ接続。submitting実行中状態・clientError・lastSubmitError(jobs storeのlastIssueErrorの転写))を持つ。upload form(push)はW5実装のため含めない (vitest)"
+given = "transfer storeの初期state参照・prefillFromQuery(get付き・2度呼出・get無し)・reset・submitGet(空欄・成功・422失敗)の実行とfetch呼出のmethod/URL/body観測"
+expect_return_shape = "初期値は空欄+既定(tier=Standard・days=7・overwrite=false)。prefillはuuid/versionIdへ適用され2度目・get無しでは適用されない。resetは既定値へ戻す。submitGet空欄はclientError+fetch無し・成功はPOST /api/jobs/get(form値body: 空のversion_id/pinはkeyを送らない)+GET /api/jobs再取得・issuing/submittingは実行中のみtrue・失敗はlastSubmitError"
+source_lines = "frontend/src/stores/transfer.spec.ts:100; frontend/src/stores/transfer.spec.ts:45"

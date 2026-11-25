@@ -660,14 +660,15 @@ Web frontend(埋め込み静的配信)と読取API(`/api/*`・axum)を起動す�
 - アップロード前カタログ(`GET /api/pending`)とscan実行(`POST /api/pending/scan`)
 - sync状態(`GET /api/sync`)と手動refresh(`POST /api/sync`)
 - diff実行(`POST /api/diff`)と最終diff結果参照(`GET /api/diff`)
-- backup実行run一覧(`GET /api/runs`・batch単位の集約)とjob一覧(`GET /api/jobs`・取得/uploadのjob発行は今後の版で追加)
+- backup実行run一覧(`GET /api/runs`・batch単位の集約)
+- 取得jobの発行・進行・取消(`POST /api/jobs/get`・`GET /api/jobs`・`GET /api/jobs/{id}`・`POST /api/jobs/{id}/cancel`。下記「取得job(転送タブ)」)
 - tag一覧(`GET /api/tags`)・folder一覧(`GET /api/folders`=所在labelの階層集約)・collection一覧と詳細(`GET /api/collections`・`/api/collections/{id}`)
 - tag編集(`PUT /api/entities/{uuid}/tags`)とcollectionの作成・改名・削除・構成の追加・除去(`POST`/`PUT`/`DELETE /api/collections`・`POST /api/collections/{id}/items`・`DELETE /api/collections/{id}/items/{uuid}`)
 - 名前変更と所在の分類変更(`POST /api/entities/{uuid}/rename`・`POST /api/entities/{uuid}/location`・4.2の語彙。registry.jsonlへのevent追記を真正として索引全体再構築+PUTを行うため、変更後にCLIの`list files`/`query`でも新title・新分類が見える)
 
-これらの閲覧・操作はfrontendの各画面(5タブ構成: ホーム=sync状態・前回backup・未対応・diff・実行中jobのサマリ、バックアップ=folder構造(tag付けされたlabel階層)/tag/collectionの3ビュー切替+検索box・pager(3ビュー共通)・pending/diff絞り込み表示・行のtag列(chip)・entity詳細=所在・pins・版一覧・tag編集・所属collection・名前変更formと所在行ごとの分類変更form(2段階確認部品=「変更」→「確認して実行」で実行)、転送・設定・管理=今後の版で整備)から操作できる(CLIの`query`/`list`と同一の索引語彙で表示)。
+これらの閲覧・操作はfrontendの各画面(5タブ構成: ホーム=sync状態・前回backup・未対応・diff・実行中jobのサマリ(実行中jobは一覧実データで追従)、バックアップ=folder構造(tag付けされたlabel階層)/tag/collectionの3ビュー切替+検索box・pager(3ビュー共通)・pending/diff絞り込み表示・行のtag列(chip)・entity詳細=所在・pins・版一覧(版行ごとの「取得」button=転送タブの取得formへprefill)・tag編集・所属collection・名前変更formと所在行ごとの分類変更form(2段階確認部品=「変更」→「確認して実行」で実行)、転送=取得formとjob一覧(下記「取得job(転送タブ)」。upload(push)は今後の版)、設定・管理=今後の版で整備)から操作できる(CLIの`query`/`list`と同一の索引語彙で表示)。実行中jobがある間はnavの転送tabにstatus dotが付く(進行の気づき)。
 
-未認証の閲覧系APIは401で拒否される(空dataを返さない)。backup push/pull・get・pin・manage系のfile操作APIは提供しない(操作はCLI既存のまま)。UIから書き込めるのは(1)catalog DBのlocal語彙(4.2: tag・collection)と(2)名前変更・所在の分類変更(registry.jsonlへのrename/location_update event追記を真正とし、索引全体再構築+PUT・metadata配置替え(rename時)を行う=8.1の(a)系に相当するためCLI書込系との同時実行は不可)で、書込APIは成功・失敗双方をaudit_log tableへ記録する(UI書込操作のみが対象でCLI操作は記録しない。履歴のUI表示は今後の版)。
+未認証の閲覧系APIは401で拒否される(空dataを返さない)。backup push/pull・pin・manage系のfile操作APIは提供しない(操作はCLI既存のまま)。UIから書き込めるのは(1)catalog DBのlocal語彙(4.2: tag・collection)と(2)名前変更・所在の分類変更(registry.jsonlへのrename/location_update event追記を真正とし、索引全体再構築+PUT・metadata配置替え(rename時)を行う=8.1の(a)系に相当するためCLI書込系との同時実行は不可)と(3)取得jobの発行・取消(下記。server側background実行でS3から平文を取得しserver上の出力dirへ配置する)で、書込APIは成功・失敗双方をaudit_log tableへ記録する(UI書込操作のみが対象でCLI操作は記録しない。履歴のUI表示は今後の版。jobの発行・実行履歴はjobs tableが正本)。
 
 **api-key認証(接続元LAN内限定)**: passkeyが使えない端末・browser向けに、api-keyでの認証をもう一つのlogin手段として提供する(passkey認証に追加する第二手段・接続元がLAN内の場合のみ有効):
 
@@ -685,8 +686,18 @@ Web frontend(埋め込み静的配信)と読取API(`/api/*`・axum)を起動す�
 - tag/folder/collection読取APIの応答: `GET /api/tags`は`{"tags":[{tag,entity_count}]}`(tag名昇順)・`GET /api/folders`はlabelのdirectory区切りで階層導出した`{"folders":[{label,path,entity_count}]}`(中間nodeも1行・path昇順・entity_countは子folder配下の合計)・`GET /api/collections`は`{"collections":[{id,name,entity_count}]}`(name昇順)・`GET /api/collections/{id}`は`{"collection":{id,name,uuids}}`(構成uuid一覧・追加順)
 - tag/collection系の書込API: `PUT /api/entities/{uuid}/tags`(body `{"tags":[...]}`でtag一覧を丸ごと置換・冪等・空配列は全削除。tag名規則はcategoryと同一の`^[a-z0-9][a-z0-9-]{0,63}$`で違反は422)・`POST`/`PUT`/`DELETE /api/collections`(作成・改名・削除。同(scope,name)重複は409。削除は構成参照の解除のみでentity・tagへ影響しない)・`POST /api/collections/{id}/items`(body `{"uuids":[...]}`で一括追加・追加済みuuidの再追加は冪等に成功)・`DELETE /api/collections/{id}/items/{uuid}`(除去)。書込応答は操作後の対象状態(読取系と同一schemaのため操作後に再GETは不要)
 - 名前変更・所在変更API: `POST /api/entities/{uuid}/rename`(body `{"title"}`。title規則はCLIと同一=64文字以内・`/`・改行・制御文字拒否で違反は422。titleが他entityと重複する場合は許容のうえ応答へ`warning` fieldを付ける=CLIの重複警告と同一文言)・`POST /api/entities/{uuid}/location`(body `{"source_path","category","label"}`。対象所在は(uuid, source_path)完全一致で特定し不一致は404。categoryはcategory名規則・labelはlabel正規化規則(3.1)違反で422・空label=ラベルなしは正当)。対象uuidはローカルregistry由来の現行stateに存在する必要があり(不在は404)。実行はrename/location_update eventをregistry.jsonlへ追記してから索引全体再構築+PUT・catalog DB反映を行い(rename時は加えてmetadataの新titleキーPUT+旧キー掃除)、応答は操作後の対象状態(読取系と同一schema)。所在の分類変更を恒続させるにはpipeline.toml(3.1)の分類規則側の変更が必要(変更後に同fileを再pushすると分類規則の解決結果が記録され直すため=記録順序どおり後勝ち)
+- job系API(TASK-27/TASK-17 W4): `POST /api/jobs/get`(body `{"uuid","version_id"?,"pin"?,"out","tier"?,"days"?,"overwrite"?}`。必須field欠落・型違反は400・値域規則違反(tier/days/空uuid/空out)は422。応答は`{"job":{...}}`=status queued)。job objectは`{"id","kind","status","params","progress","result","error","created_at","updated_at"}`(progressは`{phase,total,done,current_path}`・waiting_restore中のみnext_check_at付き・resultはget成功時`{name,dest}`・errorは失敗時`{code,message}`)で、`GET /api/jobs`(一覧=進行中優先・各group内はid降順。`?status=`/`?kind=`絞り込みで不正値は400)・`GET /api/jobs/{id}`(詳細)・`POST /api/jobs/{id}/cancel`(queuedのみ受理=status cancelledで応答。実行中・完了済みは409)が同じ形式で応答する。jobの状態の正本はcatalog DBのjobs table(永続class=`manage catalog rebuild`でも保持)
 - error応答は`{"error":{"code","message"}}`形式(HTTP statusはerror code種別に対応: 400 invalid_request・401 unauthenticated・404 not_found・409 duplicate・422 validation_failed・502 upstream・503 configuration等)
 - serve経由でS3へ書き込むのは名前変更・所在変更(索引`sys/index.jsonl.age`の再構築PUTとmetadata objectの配置替え・8.1の(a)系)のみ。tag/collection系書込はcatalog DB(local語彙・4.2)への書込でS3・索引には書かない
+
+**取得job(転送タブ・server側background実行)**: DEEP_ARCHIVE復元待ち(12〜48時間)を伴うfileの取得を、CLIの`get`(5.4)の代わりにserver側のbackground jobとして発行・追従できる:
+
+1. 転送タブの取得formへ対象uuid(詳細画面の版行「取得」buttonからprefill可)・版(省略=最新・version_id/pin指定)・出力dir(server側path・必須)・tier(Standard/Bulk)・days・overwriteを入力して「取得を開始」を押す(`POST /api/jobs/get`)。**応答は即時**(jobはqueuedで発行され、解決・衝突検査はjob実行時に行われる=対象不在などはjobのfailedとして一覧に表示される)
+2. job一覧(転送タブ・ホームの実行中job区画。自動更新間隔は設定タブのUI更新挙動・既定10秒)で状態・進行(N/M件・現在path)・結果・errorを確認できる。状態は queued(待機中)→ running(解決・衝突検査)→ waiting_restore(復元job発行済み・定期確認中)→ running(取得・sha照合・復号・配置)→ succeeded/failed と遷移する
+3. **DEEP_ARCHIVE・GLACIER系対象は復元待ちをserverが自動追従する**: 復元job発行後もserveは起動し続け、timer(既定15分間隔)がhead-objectのRestore headerを確認し、復元済みになると取得を再開する(CLI `get`の「完了後に再実行してください」運用の置き換え。復元の費用・所要時間自体は7.3の目安のまま)
+4. 取得した平文はCLI `get`と同一の検証(取得objectのsha256照合・復号平文のsha256照合)を経て`<out>/<title>`へ配置される。出力先にsha不一致の既存平文がある場合はoverwrite指定なしだと上書きせずjobがfailedになる(7.4の平文衝突保護と同一規則=衝突時はoverwriteを指定して再発行)
+5. **server再起動時の追従**: 再起動すると前回起動時の未完了job(queued/running/waiting_restore)は一括して`interrupted`になる(**自動再開はしない**。getは冪等設計のためjob一覧の「再実行」buttonで安全に回復できる。意図しない復元費用の再発行を避けるため手動再実行としている)。待機中(queued)のjobは「取り消す」buttonで取消できる(実行中・完了済みの取消は409)
+6. jobの発行は書込APIと同じsingle-flight(semaphore 1)で直列化され・job実行中は書込API(sync・scan・tag編集等)が順番待ちになる。ただし**復元待ち(waiting_restore)の間はsemaphoreを解放する**ため・復元待ちの最大48時間が他の操作を塞ぐことはない。upload(push)jobは今後の版
 
 **pending scanの手順(serve画面)**: pipeline.tomlの`[profiles.<name>.catalog.scan]`(3.1)へ対象rootを登録した上で、pending画面(pending)のscanボタン(`POST /api/pending/scan`)で`manage catalog scan`と同一の走査・分類(unbacked/changed/ok/unknown)を実行できる。
 

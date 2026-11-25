@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, onUnmounted } from 'vue'
 import { useSyncStore } from '../stores/sync'
 import { usePendingStore } from '../stores/pending'
 import { useDiffStore } from '../stores/diff'
@@ -27,6 +27,13 @@ onMounted(() => {
   void pending.fetchPending()
   void diff.fetchDiff()
   void jobs.fetchJobs()
+  // 実行中job区画の自動更新(設計5.3: ホーム表示中のjob追従。nav dot用polling
+  // (App.vue)とは参照カウントで独立=ホームを離れてもnav dot分は継続)
+  jobs.startPolling()
+})
+
+onUnmounted(() => {
+  jobs.stopPolling()
 })
 
 /** pending statusの表示文言(PendingView由来の語彙) */
@@ -112,10 +119,10 @@ const pendingLabel: Record<string, string> = {
     </ul>
   </section>
 
-  <!-- 実行中job区画: 取得成功かつ空配列なら区画全体を非表示(設計2.1「空時は
-  表示なし」。W1の/api/jobsは常に空のため通常時は非表示)。取得失敗(lastError)
-  のみ案内のために表示する -->
-  <section v-if="jobs.lastError !== null || jobs.items.length > 0" class="card">
+  <!-- 実行中job区画: 取得成功かつ実行中job無し(空配列)なら区画全体を非表示
+  (設計2.1「空時は表示なし」)。完了済みjobは転送タブで確認するためここには
+  出さない。取得失敗(lastError)のみ案内のために表示する -->
+  <section v-if="jobs.lastError !== null || jobs.hasActiveJobs" class="card">
     <h2>実行中job</h2>
     <p v-if="jobs.lastError" class="message">
       job一覧の取得に失敗しました({{ jobs.lastError.code }})。
@@ -126,14 +133,22 @@ const pendingLabel: Record<string, string> = {
         <thead>
           <tr>
             <th>種類</th>
+            <th>対象</th>
             <th>状態</th>
+            <th>進行</th>
             <th>開始</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="job in jobs.items" :key="job.id">
+          <tr v-for="job in jobs.activeJobs" :key="job.id">
             <td>{{ job.kind }}</td>
-            <td>{{ job.status }}</td>
+            <td class="mono">{{ job.params?.uuid ?? '-' }}</td>
+            <td>
+              <span :class="`job-status st-${job.status}`">{{ job.status }}</span>
+            </td>
+            <td class="progress-num">
+              {{ job.progress === null ? '-' : `${job.progress.done}/${job.progress.total}` }}
+            </td>
             <td class="mono">{{ job.created_at }}</td>
           </tr>
         </tbody>

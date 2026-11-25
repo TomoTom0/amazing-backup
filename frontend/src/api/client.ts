@@ -524,37 +524,157 @@ export function fetchRuns(): Promise<ApiResult<RunsResponse>> {
   return apiGet('/api/runs', isRunsResponse)
 }
 
-/** GET /api/jobs のjob schema(W1の最小schema。params/progress/result/errorの詳細
- *  fieldはW4のjob実装時に拡張) */
+/** get jobの発行params(POST /api/jobs/get body=jobs table params_json。
+ *  version_id/pinの未指定はnullで表現する) */
+export type GetJobParams = {
+  uuid: string
+  version_id: string | null
+  pin: string | null
+  out: string
+  tier: string
+  days: number
+  overwrite: boolean
+}
+
+/** jobの進行(設計5.2: {phase,total,done,current_path}。getは対象1件のため
+ *  total=1。waiting_restore中のみnext_check_at(timer確認時刻)が入る) */
+export type JobProgress = {
+  phase: string
+  total: number
+  done: number
+  current_path: string | null
+  next_check_at?: string | null
+}
+
+/** get jobの結果(succeeded時。skipは既存平文sha一致の冪等skip時のみ) */
+export type GetJobResult = { name: string; dest: string; skip?: boolean }
+
+/** GET /api/jobs のjob schema(W4(TASK-27)拡張: params/progress/result/error。
+ *  paramsはget jobの発行body(kind=getの現在対象。push jobはW5で拡張)。
+ *  resultはget jobの結果・errorは失敗時の{code,message}) */
 export type JobItem = {
   id: number
   kind: string
   status: string
+  params: GetJobParams | null
+  progress: JobProgress | null
+  result: GetJobResult | null
+  error: { code: string; message: string } | null
   created_at: string
   updated_at: string
 }
 
-/** GET /api/jobs の応答形式({"jobs":[...]}・W1のserver応答は常に空配列) */
+/** GET /api/jobs の応答形式({"jobs":[...]}。並びは進行中優先・id降順) */
 export type JobsResponse = { jobs: JobItem[] }
 
-/** GET /api/jobs応答の型ガード(jobs配列+各要素のid/kind/status/created_at/
- *  updated_at一致のみtrue) */
-export function isJobsResponse(v: unknown): v is JobsResponse {
-  if (!isRecord(v) || !Array.isArray(v['jobs'])) return false
-  return v['jobs'].every(
-    (j) =>
-      isRecord(j) &&
-      typeof j['id'] === 'number' &&
-      typeof j['kind'] === 'string' &&
-      typeof j['status'] === 'string' &&
-      typeof j['created_at'] === 'string' &&
-      typeof j['updated_at'] === 'string',
+/** get jobの発行paramsの型ガード */
+function isGetJobParams(v: unknown): v is GetJobParams {
+  if (!isRecord(v)) return false
+  if (typeof v['uuid'] !== 'string' || typeof v['out'] !== 'string') return false
+  if (typeof v['tier'] !== 'string' || typeof v['days'] !== 'number') return false
+  if (typeof v['overwrite'] !== 'boolean') return false
+  const versionId = v['version_id']
+  const pin = v['pin']
+  return (
+    (versionId === null || typeof versionId === 'string') &&
+    (pin === null || typeof pin === 'string')
   )
 }
 
-/** job一覧の取得(保護API。W1のserver応答は常に空配列。失敗時はerror扱い) */
-export function fetchJobs(): Promise<ApiResult<JobsResponse>> {
-  return apiGet('/api/jobs', isJobsResponse)
+/** job進行の型ガード(next_check_atはwaiting_restore中のみ・他は無いまたはnull) */
+function isJobProgress(v: unknown): v is JobProgress {
+  if (!isRecord(v)) return false
+  if (typeof v['phase'] !== 'string' || typeof v['total'] !== 'number') return false
+  if (typeof v['done'] !== 'number') return false
+  const currentPath = v['current_path']
+  const nextCheckAt = v['next_check_at']
+  return (
+    (currentPath === null || typeof currentPath === 'string') &&
+    (nextCheckAt === undefined || nextCheckAt === null || typeof nextCheckAt === 'string')
+  )
+}
+
+/** get job結果の型ガード(skipは省略可) */
+function isGetJobResult(v: unknown): v is GetJobResult {
+  if (!isRecord(v)) return false
+  if (typeof v['name'] !== 'string' || typeof v['dest'] !== 'string') return false
+  const skip = v['skip']
+  return skip === undefined || typeof skip === 'boolean'
+}
+
+/** job要素の型ガード(id/kind/status/created_at/updated_at+W4のparams/progress/
+ *  result/error。params/progress/result/errorはnullを許容する) */
+function isJobItem(v: unknown): v is JobItem {
+  if (!isRecord(v)) return false
+  if (typeof v['id'] !== 'number' || typeof v['kind'] !== 'string') return false
+  if (typeof v['status'] !== 'string') return false
+  if (typeof v['created_at'] !== 'string' || typeof v['updated_at'] !== 'string') return false
+  const params = v['params']
+  const progress = v['progress']
+  const result = v['result']
+  const error = v['error']
+  if (!(params === null || isGetJobParams(params))) return false
+  if (!(progress === null || isJobProgress(progress))) return false
+  if (!(result === null || isGetJobResult(result))) return false
+  if (error !== null) {
+    if (!isRecord(error)) return false
+    if (typeof error['code'] !== 'string' || typeof error['message'] !== 'string') return false
+  }
+  return true
+}
+
+/** GET /api/jobs応答の型ガード(jobs配列+各要素のW4 schema一致のみtrue) */
+export function isJobsResponse(v: unknown): v is JobsResponse {
+  if (!isRecord(v) || !Array.isArray(v['jobs'])) return false
+  return v['jobs'].every((j) => isJobItem(j))
+}
+
+/** job詳細・発行・取消応答の形式({"job": <job object>}。3.1の操作後の対象状態) */
+export type JobResponse = { job: JobItem }
+
+/** {"job": <job object>}応答の型ガード */
+export function isJobResponse(v: unknown): v is JobResponse {
+  return isRecord(v) && isJobItem(v['job'])
+}
+
+/** job一覧の取得(保護API。?status=/?kind=絞り込みは値のあるparamのみ直列化。
+ *  並びは進行中優先・id降順。失敗時はerror扱い) */
+export function fetchJobs(filter?: {
+  status?: string
+  kind?: string
+}): Promise<ApiResult<JobsResponse>> {
+  const params = new URLSearchParams()
+  if (filter?.status) params.set('status', filter.status)
+  if (filter?.kind) params.set('kind', filter.kind)
+  const query = params.toString()
+  return apiGet(query === '' ? '/api/jobs' : `/api/jobs?${query}`, isJobsResponse)
+}
+
+/** job詳細の取得(保護API。不在idは404 not_foundのerror扱い) */
+export function fetchJobDetail(id: number): Promise<ApiResult<JobResponse>> {
+  return apiGet(`/api/jobs/${id}`, isJobResponse)
+}
+
+/** get jobの発行request body(tier/days/overwriteは既定込みで明示送信する) */
+export type GetJobRequest = {
+  uuid: string
+  version_id?: string
+  pin?: string
+  out: string
+  tier: string
+  days: number
+  overwrite: boolean
+}
+
+/** 取得jobの発行(保護API・POST /api/jobs/get。即時応答はqueuedのjob object) */
+export function postJobsGet(params: GetJobRequest): Promise<ApiResult<JobResponse>> {
+  return apiPost('/api/jobs/get', params, isJobResponse)
+}
+
+/** queued jobの取消(保護API・POST /api/jobs/:id/cancel。応答は取消後のjob
+ *  object。実行中・完了済みは409 duplicateのerror扱い) */
+export function postJobCancel(id: number): Promise<ApiResult<JobResponse>> {
+  return apiPost(`/api/jobs/${id}/cancel`, null, isJobResponse)
 }
 
 // --- tags/folders/collections(TASK-17設計2.2(バックアップ一覧の3ビュー)・3.2
