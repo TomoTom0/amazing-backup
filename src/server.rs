@@ -2175,18 +2175,20 @@ impl JobManager {
             eprintln!("serve: job semaphoreのacquireに失敗(logのみ): id={}", job.id);
             return;
         };
-        // runningへ遷移(phase=resolve開始)。DB反映失敗はlogのみで実行は続行
-        // (実行結果の確定時にもう一度書くため二重書込で整合する)
-        let _ = self
-            .update_job_row(
-                job.id,
-                "running",
-                &job_progress_json("resolve", false, None, None),
-                None,
-                None,
-                None,
-            )
-            .await;
+        // runningへ遷移(phase=resolve開始)。遷移はstatus='queued'の条件付き
+        // claimで行う: acquire待ちの間にcancelされたjob(取消は200で確定済み)
+        // をrunningへ戻して実行しない。claim不成立(取消先行・DB失敗)は実行
+        // せずに戻る(jobがqueuedのままなら次回loopで再試行される)
+        if !self
+            .claim_queued_job(job.id, &job_progress_json("resolve", false, None, None))
+            .await
+        {
+            eprintln!(
+                "serve: jobのclaimが不成立のため実行しません: id={}",
+                job.id
+            );
+            return;
+        }
         let ctx = self.ctx.clone();
         // permitはclosure内へmove=stepのreturn(終状態・waiting_restore遷移のいず
         // れも)でdropされsemaphoreが解放される(設計5.1: waiting_restore遷移時の解放
@@ -2441,6 +2443,28 @@ impl JobManager {
                 Some(message),
             )
             .await;
+    }
+
+    /// queued jobの実行開始claim(catalog側の条件付き遷移の非同期wrapper)。
+    /// 戻り値=falseは取消先行(更新0行)またはDB失敗=いずれも実行しない。
+    async fn claim_queued_job(&self, id: i64, progress: &str) -> bool {
+        let progress = progress.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            let db = crate::catalog::CatalogDb::open()?;
+            db.claim_queued_job(id, &progress)
+        })
+        .await;
+        match result {
+            Ok(Ok(updated)) => updated > 0,
+            Ok(Err(e)) => {
+                eprintln!("serve: jobのclaimに失敗(logのみ・実行しない): id={id}: {e}");
+                false
+            }
+            Err(e) => {
+                eprintln!("serve: jobのclaimが異常終了(logのみ・実行しない): id={id}: {e}");
+                false
+            }
+        }
     }
 
     /// job行の更新(DB書込失敗はlogのみ=worker継続)。引数はfn内で所有化して
@@ -7142,6 +7166,80 @@ mod tests {
             drop(permit);
             fx.state.jobs.notify_worker();
             job_wait_status(id, "succeeded").await;
+            let _ = shutdown_tx.send(true);
+        });
+    }
+
+    /// [covers:server.jobs-cancel]
+    /// semaphore待ちの間に取消されたqueued jobは、permit解放後も実行されない
+    /// (workerはacquire後のrunning遷移をstatus='queued'条件付きclaimで行い、
+    /// 取消が先行したjobはclaim不成立で実行しない=取消の200応答と矛盾しない)。
+    #[test]
+    fn api_jobs_cancelled_during_semaphore_wait_is_not_executed() {
+        let Some(fx) = job_exec_setup("srv-w4-job-cancel-claim", "STANDARD") else {
+            eprintln!("SKIP: ssh-keygen/ageが使えない環境");
+            return;
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime");
+        let mgr = fx.state.jobs.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        rt.block_on(async move {
+            let _worker = tokio::task::spawn(async move { mgr.worker_loop(shutdown_rx).await });
+            // test側が書込semaphoreを保持(workerはjobを拾ってacquire待ちに入る)
+            let permit = fx
+                .state
+                .sync_permits
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("test側semaphore acquire");
+            let body = serde_json::json!({
+                "uuid": fx.uuid,
+                "out": fx.out_dir.display().to_string(),
+            });
+            let (status, resp) =
+                job_call(fx.router.clone(), "POST", "/api/jobs/get", Some(body)).await;
+            assert_eq!(status, 200, "発行は200: {resp}");
+            let id = resp
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(|i| i.as_i64())
+                .expect("job id");
+            // workerがacquire待ちに入る間もjobはqueuedのまま
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert_eq!(job_status_of(id), "queued", "semaphore保持中はqueuedのまま");
+            // acquire待ちの間に取消する(queuedのため受理されcancelledで確定する)
+            let (status, resp) = job_call(
+                fx.router.clone(),
+                "POST",
+                &format!("/api/jobs/{id}/cancel"),
+                None,
+            )
+            .await;
+            assert_eq!(status, 200, "取消は200: {resp}");
+            assert_eq!(
+                resp.get("job")
+                    .and_then(|j| j.get("status"))
+                    .and_then(|s| s.as_str()),
+                Some("cancelled"),
+                "取消後のjob objectはcancelled: {resp}"
+            );
+            // permitを解放してもworkerはclaim不成立で実行しない
+            drop(permit);
+            fx.state.jobs.notify_worker();
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            assert_eq!(
+                job_status_of(id),
+                "cancelled",
+                "取消済みjobはpermit解放後も実行されない(claim不成立)"
+            );
+            assert!(
+                !fx.out_dir.join(&fx.title).exists(),
+                "取消済みjobの配置ファイルは作られない"
+            );
             let _ = shutdown_tx.send(true);
         });
     }

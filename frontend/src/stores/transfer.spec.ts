@@ -5,7 +5,7 @@ import { useJobsStore } from './jobs'
 
 // 転送タブの取得form状態(TASK-17設計2.3・9章W4): form初期値(既定はCLI getと同一=
 // tier Standard・days 7・overwrite false)・route queryからのprefill
-// (?get=<uuid>&version_id=...・2度適用しない)・submitGet(jobs storeのissueGetへ
+// (?get=<uuid>&version_id=...・同一対象は再適用しない/別対象は再適用)・submitGet(jobs storeのissueGetへ
 // 接続=POST /api/jobs/get後の一覧再取得。uuid/outのclient側最低限検証)。
 
 const responseOf = (status: number, body: unknown): Response =>
@@ -66,10 +66,18 @@ describe('transfer store(form初期値・prefill)', () => {
     expect(transfer.versionId).toBe('v1')
     expect(transfer.prefillApplied).toBe(true)
 
-    // 2度目は適用しない(手動入力をprefillで上書きしない)
+    // 同一対象の再適用はしない(手動入力をprefillで上書きしない)
     transfer.uuid = '22222222-2222-2222-2222-222222222222'
-    transfer.prefillFromQuery({ get: '99999999-9999-9999-9999-999999999999' })
+    transfer.prefillFromQuery({
+      get: '11111111-1111-1111-1111-111111111111',
+      version_id: 'v1',
+    })
     expect(transfer.uuid).toBe('22222222-2222-2222-2222-222222222222')
+
+    // 別対象の明示選択は新しい対象で再適用する(旧対象のversionIdは残さない)
+    transfer.prefillFromQuery({ get: '99999999-9999-9999-9999-999999999999' })
+    expect(transfer.uuid).toBe('99999999-9999-9999-9999-999999999999')
+    expect(transfer.versionId).toBe('')
 
     // getが無いqueryでは何も適用しない(別store instance=piniaを作り直して観測)
     setActivePinia(createPinia())
@@ -94,6 +102,7 @@ describe('transfer store(form初期値・prefill)', () => {
     expect(transfer.days).toBe(7)
     expect(transfer.overwrite).toBe(false)
     expect(transfer.prefillApplied).toBe(false)
+    expect(transfer.prefillKey).toBeNull()
   })
 })
 

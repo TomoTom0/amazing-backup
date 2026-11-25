@@ -1958,6 +1958,21 @@ impl CatalogDb {
         Ok(updated)
     }
 
+    /// queued jobの実行開始claim(status='queued'の条件付きでrunningへ遷移し
+    /// progressを差し替える)。workerがsemaphore待ちの間に取消されたjobは
+    /// 更新0行となり、呼出側は実行しない(取消の確定を上書きしない)。
+    pub fn claim_queued_job(&self, id: i64, progress_json: &str) -> BackupResult<usize> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE jobs SET status = 'running', progress_json = ?3, \
+                 updated_at = ?2 WHERE id = ?1 AND status = 'queued'",
+                rusqlite::params![id, now_jst(), progress_json],
+            )
+            .map_err(|e| BackupError::Internal(format!("jobsのclaimに失敗: {e}")))?;
+        Ok(updated)
+    }
+
     /// 起動時の一括interrupted化(設計5.4: queued/running/waiting_restoreを
     /// interruptedへ更新=自動再開しない。server再起動の起動処理から呼ぶ)。
     /// 完了系(succeeded/failed/interrupted/cancelled)の行は変更しない。
@@ -2690,6 +2705,21 @@ mod tests {
             .expect("insert_job");
         assert_eq!(db.cancel_queued_job(other.id).expect("cancel"), 1);
         assert_eq!(db.cancel_queued_job(other.id).expect("再cancel"), 0);
+        // claim_queued_jobはqueued行のみrunningへ遷移する(progress差し替え)
+        let third = db
+            .insert_job("b", "p/", "get", "{}", "{}")
+            .expect("insert_job");
+        assert_eq!(
+            db.claim_queued_job(third.id, "{\"phase\":\"resolve\"}")
+                .expect("claim"),
+            1
+        );
+        let got = db.job_by_id("b", "p/", third.id).unwrap().expect("行がある");
+        assert_eq!(got.status, "running");
+        assert_eq!(got.progress_json, "{\"phase\":\"resolve\"}");
+        // running行・cancelled行はclaim不成立(取消が先行したjobを実行しない)
+        assert_eq!(db.claim_queued_job(third.id, "{}").expect("再claim"), 0);
+        assert_eq!(db.claim_queued_job(other.id, "{}").expect("取消済みclaim"), 0);
     }
 
     /// [covers:catalog.schema-migration]

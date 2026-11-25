@@ -25,8 +25,10 @@ export const useTransferStore = defineStore('transfer', {
     days: 7,
     /** sha不一致の既存平文への上書き(getの--yes相当・既定false) */
     overwrite: false,
-    /** prefill適用済みflag(2度適用しない=手動入力をprefillで上書きしない) */
+    /** prefill適用済みflag(同一対象の再適用をしない=手動入力をprefillで上書きしない) */
     prefillApplied: false,
+    /** prefill適用済みの対象key(<uuid>改行<version_id>)。別対象の明示選択では再適用する */
+    prefillKey: null as string | null,
     /** 発行実行中(Viewは発行buttonを無効化) */
     submitting: false,
     /** client側検証の案内文(server検証とは別の簡易前置き) */
@@ -35,18 +37,20 @@ export const useTransferStore = defineStore('transfer', {
     lastSubmitError: null as ApiError | null,
   }),
   actions: {
-    /** route queryからのprefill(?get=<uuid>&version_id=...。1度だけ適用。
+    /** route queryからのprefill(?get=<uuid>&version_id=...)。適用済みと同一の
+     *  対象は再適用しない(同一画面での手動入力をprefillで上書きしない)が、
+     *  別対象の明示選択(詳細画面の取得button)は新しい対象で再適用する。
      *  getが無いqueryでは適用しない=詳細画面の取得button導線は必ずgetを伴う) */
     prefillFromQuery(query: Record<string, string | undefined>): void {
-      if (this.prefillApplied) return
       const target = query['get']
       if (!target) return
+      const versionId = query['version_id'] ?? ''
+      const key = `${target}\n${versionId}`
+      if (this.prefillApplied && this.prefillKey === key) return
       this.prefillApplied = true
+      this.prefillKey = key
       this.uuid = target
-      const versionId = query['version_id']
-      if (versionId) {
-        this.versionId = versionId
-      }
+      this.versionId = versionId
     },
     /** formのリセット(既定値へ戻す) */
     reset(): void {
@@ -58,6 +62,7 @@ export const useTransferStore = defineStore('transfer', {
       this.days = 7
       this.overwrite = false
       this.prefillApplied = false
+      this.prefillKey = null
       this.clientError = null
       this.lastSubmitError = null
     },
