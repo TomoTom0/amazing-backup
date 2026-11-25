@@ -5,7 +5,9 @@
 //! - HTTP層はaxum。mount prefixは`/api/`。P3が読取API(entities/versions/pins/
 //!   locations/pending/sync/diff)をrouteし、P4が認証API(register/login start/finish・
 //!   logout・status)と保護API開放(session検証gate)を担う。TASK-17 W1がruns/jobs
-//!   読取API(run履歴集約・W1はjob空応答)を追加
+//!   読取API(run履歴集約)を追加し、W4(TASK-27)がjob機構(jobs table正本・
+//!   JobManager直列worker・POST /api/jobs/get・GET /api/jobs(/:id)・cancel・
+//!   waiting_restore定期確認・起動時interrupted一括化)を追加
 //! - 保護APIのgate(設計12章P4・指摘#11の解消): 認証機構構成後(P4)は
 //!   `/api/health`・`/api/auth/*`以外の`/api/*`をsession検証し、未認証は
 //!   401(unauthenticated)で応答する(P2〜P3の503 fail-closedからの置換)。
@@ -215,7 +217,13 @@ pub fn cmd_serve(args: &ServeArgs) -> i32 {
             return 1;
         }
     };
-    runtime.block_on(run_server(cfg, args))
+    let code = runtime.block_on(run_server(cfg, args));
+    // runtimeのdropは実行中spawn_blocking(jobの実処理)の完了を無界に待つため、
+    // worker joinの有界待ち(10秒)だけでは停止全体が有界にならない。明示的に
+    // 有界shutdownし、超過分はprocess終了で中断する(実行中jobは次回起動時の
+    // interrupted一括化で回復する=設計5.4)
+    runtime.shutdown_timeout(std::time::Duration::from_secs(10));
+    code
 }
 
 /// server本体(async側。同期層呼び出しはspawn_blocking経由のみ)。
@@ -266,6 +274,36 @@ async fn run_server(cfg: ServerConfig, args: &ServeArgs) -> i32 {
             eprintln!("error: {e}");
             return e.exit_code();
         }
+    };
+
+    // TASK-17 W4(TASK-27・設計5.4): 起動処理でstatusがqueued/running/
+    // waiting_restoreのjob行をinterruptedへ一括更新する(自動再開しない=対象・費用
+    // (DEEP_ARCHIVE復元)の意図しない再発行を避ける。get/pushとも冪等設計のため
+    // 再発行で安全に回復する)。worker起動の前に行う(旧queuedをworkerが拾う前に
+    // interruptedへ確定させる)。run_blocking経由=async contextからの同期層呼出境界
+    {
+        let scope = state.scope.clone();
+        match run_blocking(move || JobManager::interrupt_jobs_at_boot(&scope)).await {
+            Ok(updated) if updated > 0 => {
+                eprintln!(
+                    "serve: 前回起動時の未完了job {updated}件をinterruptedにしました(再実行は転送タブから)"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("WARNING: 起動時のjob状態interrupted化に失敗: {}", e.message);
+            }
+        }
+    }
+
+    // TASK-17 W4(設計5.1): job直列実行worker(同時実行1・書込APIと同一semaphoreで
+    // 相互直列化・waiting_restore遷移時に解放)。graceful shutdownはwatch channel
+    // でworkerへ伝達し、workerの終了待ちは有界(進行中jobのspawn_blockingが長時間
+    // の場合に停止を塞がない=残った実行中行は次回起動時のinterrupted一括化で回復)
+    let (job_shutdown_tx, job_shutdown_rx) = tokio::sync::watch::channel(false);
+    let job_handle = {
+        let mgr = state.jobs.clone();
+        tokio::task::spawn(async move { mgr.worker_loop(job_shutdown_rx).await })
     };
     let sync_permits = state.sync_permits.clone();
     let sync_ctx = state.sync_ctx.clone();
@@ -333,7 +371,18 @@ async fn run_server(cfg: ServerConfig, args: &ServeArgs) -> i32 {
         return 1;
     }
     // graceful shutdown(設計1章): 進行中spawn_blocking(起動時sync)の完了を待つ
-    // (結果のlog出力はtask側で完了時点に済んでいるためここでは待ち合わせのみ)
+    // (結果のlog出力はtask側で完了時点に済んでいるためここでは待ち合わせのみ)。
+    // job workerも停止通知→有界待ち(超過時はprocess終了で中断し・実行中job行は
+    // 次回起動時のinterrupted一括化(設計5.4)で回復する)
+    let _ = job_shutdown_tx.send(true);
+    if tokio::time::timeout(std::time::Duration::from_secs(10), job_handle)
+        .await
+        .is_err()
+    {
+        eprintln!(
+            "serve: job workerの停止待ちがタイムアウトしました(進行中jobは次回起動時にinterrupted化)"
+        );
+    }
     if !sync_handle.is_finished() {
         eprintln!("serve: 起動時syncの完了を待っています(graceful shutdown)");
     }
@@ -365,12 +414,15 @@ fn serve_ctx_args(args: &ServeArgs) -> crate::storage::CtxArgs {
 ///   従う=更新対象(sync/scan/diff)と表示対象(読取API)が同じscopeになる)
 /// - `auth`: P4認証状態。`None`は認証機構未構成のrouter(P3系handler単体testが
 ///   oneshotするgate無効構成。serve起動では常に`Some`)
+/// - `jobs`: TASK-17 W4のjob機構(JobManager)。workerの起床notify・時刻注入seam
+///   の到達先(直列worker自体はrun_serverがspawnする)
 #[derive(Clone)]
 struct AppState {
     sync_permits: std::sync::Arc<tokio::sync::Semaphore>,
     sync_ctx: std::sync::Arc<crate::storage::CtxArgs>,
     scope: (String, String),
     auth: Option<std::sync::Arc<AuthState>>,
+    jobs: std::sync::Arc<JobManager>,
 }
 
 impl AppState {
@@ -379,11 +431,15 @@ impl AppState {
     /// (aws.toml読込を伴うため呼出側の同期文脈で使う)。
     fn from_ctx_args(ctx: crate::storage::CtxArgs) -> BackupResult<AppState> {
         let aws = crate::storage::load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
+        let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let scope = (aws.bucket, aws.prefix);
+        let jobs = JobManager::new(std::sync::Arc::new(ctx.clone()), scope.clone(), permits.clone());
         Ok(AppState {
-            sync_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            sync_permits: permits,
             sync_ctx: std::sync::Arc::new(ctx),
-            scope: (aws.bucket, aws.prefix),
+            scope,
             auth: None,
+            jobs,
         })
     }
 
@@ -944,6 +1000,9 @@ fn build_router(state: AppState) -> axum::Router {
         )
         .route("/api/runs", axum::routing::get(get_runs))
         .route("/api/jobs", axum::routing::get(get_jobs))
+        .route("/api/jobs/get", axum::routing::post(post_jobs_get))
+        .route("/api/jobs/{id}", axum::routing::get(get_job_detail))
+        .route("/api/jobs/{id}/cancel", axum::routing::post(post_job_cancel))
         .fallback(fallback);
     if has_auth {
         router = router
@@ -1502,14 +1561,959 @@ async fn get_runs(
     Ok(axum::Json(serde_json::json!({ "runs": runs })))
 }
 
-/// GET /api/jobs(TASK-17設計3.2・9章W1: job一覧`{"jobs":[...]}`)。W1時点では
-/// job機構(get/push job発行・jobs table=設計4.1)がW4未実装のため常に200+空配列で
-/// 応答する(ホーム実行中job区画・転送タブのW1表示基盤)。status/kind絞り込みparam
-/// はW4のjob実装で実質化するためW1では読み捨て(空配列に影響しない)。scope絞り
-/// 込みparamは設計3.2どおり持たない(実効1 scope)。保護は/api/*共通のauth_gateが
-/// 構造的に担う(job系APIも同一session gate=設計6章D-W11)。
-async fn get_jobs() -> impl axum::response::IntoResponse {
-    axum::Json(serde_json::json!({"jobs": []}))
+/// GET /api/jobs(TASK-17設計3.2・9章W4: job一覧`{"jobs":[...]}`の実質化)。
+/// jobs tableから実効scopeの行を応答する(設計5.4: job状態の正本はjobs table)。
+/// 並びは進行中(queued/running/waiting_restore)優先・各group内はid降順
+/// (=新しい順。進行中jobが一覧上位に来る=ホーム・転送タブの追従表示基盤)。
+/// ?status=・?kind=絞り込み(不正値は400 invalid_request=既存error体系と共通)。
+/// scope絞り込みparamは設計3.2どおり持たない(実効1 scope)。保護は/api/*共通の
+/// auth_gateが構造的に担う(job系APIも同一session gate=設計6章D-W11)。
+async fn get_jobs(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    uri: axum::http::Uri,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let params = parse_query_params(uri.query());
+    let status = parse_job_status_param(&params)?;
+    let kind = parse_job_kind_param(&params)?;
+    let scope = state.scope.clone();
+    let jobs = run_blocking(move || {
+        let db = crate::catalog::CatalogDb::open()?;
+        db.list_jobs(&scope.0, &scope.1, status.as_deref(), kind.as_deref())
+    })
+    .await?;
+    let items = jobs.iter().map(job_json).collect::<Vec<_>>();
+    Ok(axum::Json(serde_json::json!({ "jobs": items })))
+}
+
+/// GET /api/jobs/:id(job詳細。params・progress・result・error付きのjob objectを
+/// `{"job": {...}}`で応答。不在id・他scopeのidは404 not_found)。
+async fn get_job_detail(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let id = parse_job_id(&id)?;
+    let scope = state.scope.clone();
+    let job = run_blocking(move || {
+        let db = crate::catalog::CatalogDb::open()?;
+        db.job_by_id(&scope.0, &scope.1, id)?
+            .ok_or_else(|| BackupError::Target("対象のjobが見つかりません".to_string()))
+    })
+    .await?;
+    Ok(axum::Json(serde_json::json!({ "job": job_json(&job) })))
+}
+
+/// POST /api/jobs/:id/cancel(TASK-17設計3.2: 待機中(queued)jobの取消)。
+/// queuedのみ受理(status=cancelledへ更新・応答は操作後のjob object)。実行中
+/// (running/waiting_restore)は409 duplicate(完了まで実行=冪等再実行で回復)。
+/// 完了系(succeeded/failed/interrupted/cancelled)も404でなく409(取消対象が
+/// 無い=取り消し済み・確定済み)。不在idは404 not_found。status="cancelled"は
+/// 設計3.2に取消後の状態値の規定が無いための解釈(取消の記録=再実行対象として
+/// 一覧に残る。jobs tableは履歴兼用のため行は消さない)。
+async fn post_job_cancel(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let id = parse_job_id(&id)?;
+    let scope = state.scope.clone();
+    let outcome = run_blocking(move || {
+        let db = crate::catalog::CatalogDb::open()?;
+        let job = db
+            .job_by_id(&scope.0, &scope.1, id)?
+            .ok_or_else(|| BackupError::Target("対象のjobが見つかりません".to_string()))?;
+        if job.status != "queued" {
+            // 実行中・完了系は取消不可(呼出側で409へ変換)
+            return Ok(CancelOutcome::NotQueued);
+        }
+        let updated = db.cancel_queued_job(id)?;
+        if updated == 0 {
+            // status確認後にworkerが実行へ遷移した競合も409(実行中扱い)
+            return Ok(CancelOutcome::NotQueued);
+        }
+        let job = db
+            .job_by_id(&scope.0, &scope.1, id)?
+            .ok_or_else(|| BackupError::Internal("取消直後のjob行が読めない".to_string()))?;
+        Ok(CancelOutcome::Cancelled(job))
+    })
+    .await?;
+    match outcome {
+        CancelOutcome::Cancelled(job) => {
+            Ok(axum::Json(serde_json::json!({ "job": job_json(&job) })))
+        }
+        CancelOutcome::NotQueued => Err(duplicate(
+            "実行中・完了済みのjobは取り消せません(完了まで実行されます)",
+        )),
+    }
+}
+
+/// cancel処理の結果(NotQueued=409変換用)。
+enum CancelOutcome {
+    Cancelled(crate::catalog::JobRow),
+    NotQueued,
+}
+
+/// POST /api/jobs/get(TASK-17設計3.2・9章W4: 取得job発行)。body
+/// {uuid,version_id?,pin?,out,tier?,days?,overwrite?}を検証してjob行をqueuedで
+/// insertし即時応答する(設計5.1: POST /api/jobs/*はjob行insert(queued)で即時応答)。
+/// 対象の索引解決は発行時に行わずjob実行時の失敗(status=failed+error)として記録
+/// する(長時間jobのため発行を解決で止めない)。省略時既定はCLI getと同一
+/// (tier=Standard・days=7・overwrite=false=getの--yes相当)。
+/// 応答は{"job": <job object>}(status=queued。操作後の対象状態=読取系と同一schema)。
+async fn post_jobs_get(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let params = parse_get_job_body(&body)?;
+    let scope = state.scope.clone();
+    let job = run_blocking(move || {
+        let db = crate::catalog::CatalogDb::open()?;
+        let params_json =
+            serde_json::to_string(&params.to_json()).expect("job params serialize");
+        let progress_json = job_progress_json("queued", false, None, None);
+        db.insert_job(&scope.0, &scope.1, "get", &params_json, &progress_json)
+    })
+    .await?;
+    // workerへの起床通知(queued到着の即時実行。通知を逃してもworkerのtickが拾う
+    // =DBが正本のため通知はbest-effort)
+    state.jobs.notify_worker();
+    Ok(axum::Json(serde_json::json!({ "job": job_json(&job) })))
+}
+
+// ---------------------------------------------------------------------------
+// TASK-17 W4(TASK-27)job機構(設計4.1 jobs table・5章)。jobs tableを正本とする
+// 長時間job(get。pushはW5)の直列実行worker(JobManager)。
+
+/// waiting_restore定期確認の既定間隔(分・設計5.2の既定15分)。W7でsettings table
+/// (restore_check_interval_min)へ移行するまでJobManager側の値として持つ。
+const RESTORE_CHECK_INTERVAL_MIN: i64 = 15;
+
+/// workerの待機tick(ms)。queued到着はnotifyで即時起床する一方・waiting_restoreの
+/// 確認時刻(next_check_at)到来はこのtick(1秒粒度)で検出する(確認自体は15分単位
+/// のため1秒粒度で十分)。
+const JOB_WORKER_TICK_MS: u64 = 1000;
+
+/// job status語彙(?status=絞り込みの検証・並び規則と共通の正本)。
+const JOB_STATUSES: [&str; 7] = [
+    "queued",
+    "running",
+    "waiting_restore",
+    "succeeded",
+    "failed",
+    "interrupted",
+    "cancelled",
+];
+
+/// job kind語彙(?kind=絞り込みの検証。get=W4・push=W5で発行される)。
+const JOB_KINDS: [&str; 2] = ["get", "push"];
+
+/// get jobの発行params(POST /api/jobs/get body=jobs table params_jsonの内容)。
+#[derive(Debug, Clone)]
+struct GetJobParams {
+    uuid: String,
+    version_id: Option<String>,
+    pin: Option<String>,
+    out: std::path::PathBuf,
+    tier: String,
+    days: u32,
+    overwrite: bool,
+}
+
+impl GetJobParams {
+    /// paramsの応答・保存表現(version_id/pinの未指定はnullで表現する)。
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "uuid": self.uuid,
+            "version_id": self.version_id,
+            "pin": self.pin,
+            "out": self.out.display().to_string(),
+            "tier": self.tier,
+            "days": self.days,
+            "overwrite": self.overwrite,
+        })
+    }
+
+    /// params_jsonからの復元(job実行側)。params_jsonは本構造がto_jsonで書いた値
+    /// ため不正時はNone(呼出側はjobをfailedで確定させる)。
+    fn from_json(v: &serde_json::Value) -> Option<GetJobParams> {
+        let uuid = v.get("uuid")?.as_str()?.to_string();
+        let version_id = opt_str_of(v, "version_id")?;
+        let pin = opt_str_of(v, "pin")?;
+        let out = std::path::PathBuf::from(v.get("out")?.as_str()?);
+        let tier = v.get("tier")?.as_str()?.to_string();
+        let days = v.get("days")?.as_u64()? as u32;
+        let overwrite = v.get("overwrite")?.as_bool()?;
+        Some(GetJobParams {
+            uuid,
+            version_id,
+            pin,
+            out,
+            tier,
+            days,
+            overwrite,
+        })
+    }
+}
+
+/// JSON objectからnull許容のstring fieldを取り出す(null・不在はNone・非stringは
+/// None=復元失敗扱い)。
+fn opt_str_of(v: &serde_json::Value, key: &str) -> Option<Option<String>> {
+    match v.get(key) {
+        None | Some(serde_json::Value::Null) => Some(None),
+        Some(serde_json::Value::String(s)) => Some(Some(s.clone())),
+        _ => None,
+    }
+}
+
+/// POST /api/jobs/get bodyの検証(必須field欠落・型違反は400 invalid_request・
+/// 規則違反(tier/daysの値域・空uuid/out)は422 validation_failed=既存書込APIと
+/// 同一の区分)。
+fn parse_get_job_body(body: &axum::body::Bytes) -> Result<GetJobParams, ApiError> {
+    let v: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|_| invalid_request("リクエストの形式が不正です"))?;
+    let str_field = |name: &str| v.get(name).and_then(|x| x.as_str()).map(String::from);
+    let uuid = str_field("uuid")
+        .ok_or_else(|| invalid_request("uuidは文字列で指定してください"))?;
+    let out = str_field("out")
+        .ok_or_else(|| invalid_request("outは文字列で指定してください"))?;
+    let opt_str_field = |name: &'static str, label: &'static str| match v.get(name) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(invalid_request(label)),
+    };
+    let version_id = opt_str_field("version_id", "version_idは文字列で指定してください")?
+        .filter(|s| !s.is_empty());
+    let pin = opt_str_field("pin", "pinは文字列で指定してください")?.filter(|s| !s.is_empty());
+    let tier = match v.get("tier") {
+        None => "Standard".to_string(),
+        Some(serde_json::Value::String(s)) => s.to_string(),
+        Some(_) => return Err(invalid_request("tierは文字列で指定してください")),
+    };
+    if !["Standard", "Bulk"].contains(&tier.as_str()) {
+        return Err(validation_failed(
+            "tierはStandard/Bulkのいずれかです",
+        ));
+    }
+    let days = match v.get("days") {
+        None => 7,
+        Some(serde_json::Value::Number(n)) => {
+            let d = n
+                .as_u64()
+                .ok_or_else(|| invalid_request("daysは数値で指定してください"))?;
+            u32::try_from(d).map_err(|_| invalid_request("daysは数値で指定してください"))?
+        }
+        Some(_) => return Err(invalid_request("daysは数値で指定してください")),
+    };
+    if !(1..=365).contains(&days) {
+        return Err(validation_failed("daysは1〜365で指定してください"));
+    }
+    let overwrite = match v.get("overwrite") {
+        None => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => return Err(invalid_request("overwriteは真偽値で指定してください")),
+    };
+    if uuid.is_empty() {
+        return Err(validation_failed("uuidを指定してください"));
+    }
+    if out.is_empty() {
+        return Err(validation_failed("出力dirを指定してください"));
+    }
+    Ok(GetJobParams {
+        uuid,
+        version_id,
+        pin,
+        out: std::path::PathBuf::from(out),
+        tier,
+        days,
+        overwrite,
+    })
+}
+
+/// ?status=絞り込みparamの検証(不正値は400 invalid_request。設計3.2 status語彙)。
+fn parse_job_status_param(
+    params: &std::collections::HashMap<String, String>,
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = params.get("status") else {
+        return Ok(None);
+    };
+    if JOB_STATUSES.contains(&value.as_str()) {
+        return Ok(Some(value.clone()));
+    }
+    Err(invalid_request("statusの値が不正です"))
+}
+
+/// ?kind=絞り込みparamの検証(不正値は400 invalid_request。get=W4・push=W5)。
+fn parse_job_kind_param(
+    params: &std::collections::HashMap<String, String>,
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = params.get("kind") else {
+        return Ok(None);
+    };
+    if JOB_KINDS.contains(&value.as_str()) {
+        return Ok(Some(value.clone()));
+    }
+    Err(invalid_request("kindの値が不正です"))
+}
+
+/// :id path paramの検証(数値idで無ければ400)。
+fn parse_job_id(raw: &str) -> Result<i64, ApiError> {
+    raw.parse::<i64>()
+        .map_err(|_| invalid_request("jobは数値idで指定してください"))
+}
+
+/// jobs行のAPI応答表現(job object。読取・発行応答・取消応答で共通)。params/
+/// progress/resultは保存済みJSON文字列のparse結果(書込は本serverのみのため
+/// parse失敗はnullで応答する)。errorは{code,message}(無しはnull)。
+fn job_json(row: &crate::catalog::JobRow) -> serde_json::Value {
+    let params: serde_json::Value =
+        serde_json::from_str(&row.params_json).unwrap_or(serde_json::Value::Null);
+    let progress: serde_json::Value =
+        serde_json::from_str(&row.progress_json).unwrap_or(serde_json::Value::Null);
+    let result: serde_json::Value = row
+        .result_json
+        .as_deref()
+        .and_then(|r| serde_json::from_str(r).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let error = match (&row.error_code, &row.error_message) {
+        (Some(code), Some(message)) => serde_json::json!({ "code": code, "message": message }),
+        _ => serde_json::Value::Null,
+    };
+    serde_json::json!({
+        "id": row.id,
+        "kind": row.kind,
+        "status": row.status,
+        "params": params,
+        "progress": progress,
+        "result": result,
+        "error": error,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    })
+}
+
+/// get jobのprogress_json(設計5.2: {phase,total,done,current_path}。段階単位で更新
+/// する=getは対象file 1件のためtotal=1)。phase語彙: queued(発行直後)→resolve
+/// (解決・衝突検査)→restore(復元待ち・定期確認中)→fetch(取得・sha照合・復号・配置)。
+/// waiting_restore中のみnext_check_at(timerの次回確認時刻・UIは未知fieldを無視)。
+fn job_progress_json(
+    phase: &str,
+    done: bool,
+    current_path: Option<&str>,
+    next_check_at: Option<&str>,
+) -> String {
+    let done_n = if done { 1 } else { 0 };
+    serde_json::to_string(&serde_json::json!({
+        "phase": phase,
+        "total": 1,
+        "done": done_n,
+        "current_path": current_path,
+        "next_check_at": next_check_at,
+    }))
+    .expect("progress serialize")
+}
+
+/// job実行step(spawn_blocking内)の結果。workerがDB反映へ変換する。
+enum JobStep {
+    /// 終状態(status・progress・result・error一式)
+    Terminal {
+        status: &'static str,
+        progress: String,
+        result_json: Option<String>,
+        error_code: Option<&'static str>,
+        error_message: Option<String>,
+    },
+    /// 復元job発行済み・未復原(waiting_restoreへ遷移。semaphoreはstepのreturnで
+    /// 解放される=permitがclosure内でdropされる。current_path=対象s3_key)
+    WaitingRestore { current_path: String },
+}
+
+/// get job実行の1step(同期層・spawn_blocking内で実行。permitは呼出側からmove
+/// して持ち込み・stepのreturnでdrop=waiting_restore遷移時にsemaphore解放)。
+/// 解決→平文衝突検査→復元要否判定→(Readyなら)取得・sha照合・復号・配置。
+/// 復元が必要な場合はWaitingRestoreを返す(呼出側はstatus=waiting_restoreへ
+/// 遷移しtimerの定期確認で再開する)。
+fn execute_get_step(ctx: &crate::storage::CtxArgs, params: &GetJobParams) -> BackupResult<JobStep> {
+    use crate::storage::get::{
+        ensure_restored, plain_conflict_outcome, preflight_decrypt_env, resolve_fetch_target,
+        PlainConflictOutcome, RestoreCheck,
+    };
+    let session = crate::storage::open_session(ctx)?;
+    let key_path = crate::storage::resolve_key(ctx, session.cfg.as_ref())?;
+    preflight_decrypt_env(&key_path)?;
+    let (_header, entries) = crate::storage::read_index_for_query(&session, &key_path)?;
+    let target = resolve_fetch_target(
+        &entries,
+        &params.uuid,
+        None,
+        None,
+        params.version_id.as_deref(),
+        params.pin.as_deref(),
+    )?;
+    let s3_key = target.s3_key.clone();
+    match plain_conflict_outcome(&target, &params.out, params.overwrite)? {
+        // sha一致skip(冪等): succeeded+skip付きresult(設計2.3の衝突時はoverwrite
+        // 再取得で回復。sha一致は既に回復済みの状態)
+        PlainConflictOutcome::Skip => {
+            let dest = target.dest_path(&params.out);
+            let shown = dest
+                .strip_prefix(&params.out)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| dest.display().to_string());
+            return Ok(JobStep::Terminal {
+                status: "succeeded",
+                progress: job_progress_json("fetch", true, Some(&s3_key), None),
+                result_json: Some(
+                    serde_json::to_string(&serde_json::json!({
+                        "name": target.dest_name,
+                        "dest": shown,
+                        "skip": true,
+                    }))
+                    .expect("result serialize"),
+                ),
+                error_code: None,
+                error_message: None,
+            });
+        }
+        PlainConflictOutcome::Proceed => {}
+    }
+    match ensure_restored(
+        session.backend.as_ref(),
+        &session.aws,
+        &target.s3_key,
+        target.version_id.as_deref(),
+        params.days,
+        &params.tier,
+    )? {
+        RestoreCheck::Issued | RestoreCheck::Ongoing => {
+            Ok(JobStep::WaitingRestore { current_path: s3_key })
+        }
+        RestoreCheck::Ready => {
+            let dest = target.fetch_verify_decrypt(
+                session.backend.as_ref(),
+                &session.aws,
+                &params.out,
+                &key_path,
+            )?;
+            let shown = dest
+                .strip_prefix(&params.out)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| dest.display().to_string());
+            Ok(JobStep::Terminal {
+                status: "succeeded",
+                progress: job_progress_json("fetch", true, Some(&s3_key), None),
+                result_json: Some(
+                    serde_json::to_string(&serde_json::json!({
+                        "name": target.dest_name,
+                        "dest": shown,
+                    }))
+                    .expect("result serialize"),
+                ),
+                error_code: None,
+                error_message: None,
+            })
+        }
+    }
+}
+
+/// waiting_restore jobの復元確認(timerから・読取のみ=semaphore外)。設計5.2:
+/// head-objectのRestore headerを確認(`list jobs`と同一parse)。索引は都度読み直す
+/// (復元待ちの最大48hの間に索引が置換えられていても対象を追従させる)。
+fn probe_restore(ctx: &crate::storage::CtxArgs, params: &GetJobParams) -> BackupResult<bool> {
+    use crate::storage::get::{
+        ensure_restored, preflight_decrypt_env, resolve_fetch_target, RestoreCheck,
+    };
+    let session = crate::storage::open_session(ctx)?;
+    let key_path = crate::storage::resolve_key(ctx, session.cfg.as_ref())?;
+    preflight_decrypt_env(&key_path)?;
+    let (_header, entries) = crate::storage::read_index_for_query(&session, &key_path)?;
+    let target = resolve_fetch_target(
+        &entries,
+        &params.uuid,
+        None,
+        None,
+        params.version_id.as_deref(),
+        params.pin.as_deref(),
+    )?;
+    let check = ensure_restored(
+        session.backend.as_ref(),
+        &session.aws,
+        &target.s3_key,
+        target.version_id.as_deref(),
+        params.days,
+        &params.tier,
+    )?;
+    // true=復元済み(取得処理を再開できる)・false=まだ復元待ち(Issuedは確認の
+    // 間に復元要求が失効して再発行された場合=引き続き待つ)
+    Ok(matches!(check, RestoreCheck::Ready))
+}
+
+/// 長時間jobの実行管理(TASK-17設計5章・AppState拡張)。直列worker(tokio task)が
+/// queued順に1件ずつspawn_blockingで実行する(同時実行1=書込系同時実行禁止の
+/// server側徹底・設計5.1)。job実行は書込APIと同一のsingle-flight semaphoreを
+/// acquireしてから行う(3.1: jobはjob queueで並び実行時にsemaphoreをacquire。
+/// 書込APIとjobの相互直列化)。waiting_restoreへ遷移する際にsemaphoreを解放する
+/// (復元待ちの最大48hを書込API・他jobの停止にしない)。
+struct JobManager {
+    /// storage層呼出のcontext(serve起動時の実効profile)
+    ctx: std::sync::Arc<crate::storage::CtxArgs>,
+    /// 実効scope(bucket, prefix)。jobの読書はこのscopeに限る(設計2章scope分離)
+    scope: (String, String),
+    /// workerの起床notify(新規job発行・時刻注入seamでの即時再確認)
+    notify: tokio::sync::Notify,
+    /// 書込APIと共有のsingle-flight semaphore(workerもacquireして直列化)
+    permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// waiting_restore定期確認の間隔(分・設計5.2既定15。W7でsettingsへ移行)
+    restore_check_interval_min: i64,
+    /// 時刻注入seam(test用。本番は常に0=実時間。AuthState::set_time_offset_msと
+    /// 同一流儀=waiting_restoreのnext_check_at到来をreal-time待ち無しで進める)
+    time_offset_ms: std::sync::atomic::AtomicI64,
+}
+
+impl JobManager {
+    /// AppState構築時に作る(semaphoreはAppState.sync_permitsと同一Arcを共有)。
+    fn new(
+        ctx: std::sync::Arc<crate::storage::CtxArgs>,
+        scope: (String, String),
+        permits: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> std::sync::Arc<JobManager> {
+        std::sync::Arc::new(JobManager {
+            ctx,
+            scope,
+            notify: tokio::sync::Notify::new(),
+            permits,
+            restore_check_interval_min: RESTORE_CHECK_INTERVAL_MIN,
+            time_offset_ms: std::sync::atomic::AtomicI64::new(0),
+        })
+    }
+
+    /// workerへの起床通知(新規jobのqueued到着・seamでの時刻進行)。
+    fn notify_worker(&self) {
+        self.notify.notify_one();
+    }
+
+    /// seam考慮の現在時刻(JST ISO8601秒精度=storage::now_jstと同一形式。本番は
+    /// 実時間・testはset_time_offset_msで進められる)。
+    fn now_jst(&self) -> String {
+        let offset = self
+            .time_offset_ms
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let now =
+            crate::targets::now_jst() + chrono::Duration::milliseconds(offset.max(0) as i64);
+        crate::targets::format_jst(&now)
+    }
+
+    /// 時刻注入seam(testability。AuthStateと同一流儀): 現在時刻への加算offsetを
+    /// 設定しworkerを起こす(waiting_restoreの確認時刻経過を短縮検証できる)。
+    #[cfg(test)]
+    fn set_time_offset_ms(&self, offset_ms: i64) {
+        self.time_offset_ms
+            .store(offset_ms, std::sync::atomic::Ordering::SeqCst);
+        self.notify_worker();
+    }
+
+    /// 起動処理(設計5.4): server再起動時にstatusがqueued/running/waiting_restoreの
+    /// 行をinterruptedへ一括更新する(自動再開しない。get/pushとも冪等設計のため
+    /// 再発行で安全に回復する=UIに再実行案内)。run_serverの起動処理(run_blocking
+    /// 経由)から呼ぶ・unit testからは直接呼べる同期関数。
+    fn interrupt_jobs_at_boot(scope: &(String, String)) -> BackupResult<usize> {
+        let db = crate::catalog::CatalogDb::open()?;
+        db.interrupt_active_jobs(&scope.0, &scope.1)
+    }
+
+    /// worker本体(直列実行・同時1)。run_serverからspawnする。
+    async fn worker_loop(
+        self: std::sync::Arc<Self>,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) {
+        loop {
+            if *shutdown.borrow() {
+                eprintln!("serve: job workerを停止します(graceful shutdown)");
+                break;
+            }
+            // 1. 確認時刻を過ぎたwaiting_restore jobを確認(読取・semaphore外。
+            //    復元済みなら再acquireして取得を再開する)。queued jobより先に
+            //    毎回確認する: queuedが途切れない間も確認を回さないと、復元完了
+            //    済みjobがnext_check_atを過ぎても放置され、復元コピーの失効で
+            //    再復元が発生し得る。実行は本loop内で直列のまま。
+            if self.check_waiting_restore().await {
+                continue;
+            }
+            // 2. queued jobを1件実行(設計5.1: queued順に1件ずつ)。semaphoreを
+            //    acquireしてからrunningへ遷移する(3.1: 実行時にsemaphoreをacquire
+            //    =書込APIとの相互直列化。acquire待ちの間はqueuedのまま)。
+            if let Some(job) = self.next_queued().await {
+                self.run_job(job).await;
+                continue;
+            }
+            // 3. 待機(新規job通知・tick・shutdownのいずれかで起床)
+            tokio::select! {
+                _ = self.notify.notified() => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(JOB_WORKER_TICK_MS)) => {}
+                _ = shutdown.changed() => {}
+            }
+        }
+    }
+
+    /// 次のqueued jobの読み出し(DB読取失敗はlogのみで待機へ戻る=worker継続)。
+    async fn next_queued(&self) -> Option<crate::catalog::JobRow> {
+        let (bucket, prefix) = self.scope.clone();
+        run_blocking(move || {
+            let db = crate::catalog::CatalogDb::open()?;
+            db.next_queued_job(&bucket, &prefix)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// 1 jobの実行(permitをclosureへmove=stepのreturnで解放。terminalは結果を
+    /// 確定し・waiting_restoreはstatus遷移のみ行う)。
+    async fn run_job(self: &std::sync::Arc<Self>, job: crate::catalog::JobRow) {
+        let params_value: serde_json::Value =
+            serde_json::from_str(&job.params_json).unwrap_or(serde_json::Value::Null);
+        let Some(params) = GetJobParams::from_json(&params_value) else {
+            self.fail_job(
+                job.id,
+                "internal",
+                "jobの実行paramsが読み取れないため失敗しました",
+            )
+            .await;
+            return;
+        };
+        // semaphore acquire(書込APIと相互直列化)。失敗(worker数0でclose無し)は
+        // 内部errorとしてjob失敗にしない=再試行の機会を残すためqueuedのまま戻る
+        let Ok(permit) = self.permits.clone().acquire_owned().await else {
+            eprintln!("serve: job semaphoreのacquireに失敗(logのみ): id={}", job.id);
+            return;
+        };
+        // runningへ遷移(phase=resolve開始)。遷移はstatus='queued'の条件付き
+        // claimで行う: acquire待ちの間にcancelされたjob(取消は200で確定済み)
+        // をrunningへ戻して実行しない。claim不成立(取消先行・DB失敗)は実行
+        // せずに戻る(jobがqueuedのままなら次回loopで再試行される)
+        if !self
+            .claim_queued_job(job.id, &job_progress_json("resolve", false, None, None))
+            .await
+        {
+            eprintln!(
+                "serve: jobのclaimが不成立のため実行しません: id={}",
+                job.id
+            );
+            return;
+        }
+        let ctx = self.ctx.clone();
+        // permitはclosure内へmove=stepのreturn(終状態・waiting_restore遷移のいず
+        // れも)でdropされsemaphoreが解放される(設計5.1: waiting_restore遷移時の解放
+        // =復元待ちの最大48hを書込API・他jobの停止にしない)
+        let outcome = run_blocking(move || {
+            let _held = permit;
+            execute_get_step(&ctx, &params)
+        })
+        .await;
+        match outcome {
+            Ok(JobStep::Terminal {
+                status,
+                progress,
+                result_json,
+                error_code,
+                error_message,
+            }) => {
+                let _ = self
+                    .update_job_row(job.id, status, &progress, result_json.as_deref(), error_code, error_message.as_deref())
+                    .await;
+            }
+            Ok(JobStep::WaitingRestore { current_path }) => {
+                // waiting_restoreへ遷移・next_check_at=現在時刻+確認間隔。
+                // permitはspawn_blocking closureのreturnで既に解放済み(復元待ちの
+                // 最大48hを書込API・他jobの停止にしない=設計5.1)
+                let next_check_at = self.next_check_at();
+                let progress = job_progress_json(
+                    "restore",
+                    false,
+                    Some(&current_path),
+                    Some(&next_check_at),
+                );
+                let _ = self
+                    .update_job_row(job.id, "waiting_restore", &progress, None, None, None)
+                    .await;
+            }
+            Err(api_error) => {
+                // 実行失敗(job単位で捕捉=設計5.5: status=failed+error code。
+                // api_error_from相当の一般化messageはrun_blocking内で付与済み)
+                let _ = self
+                    .update_job_row(
+                        job.id,
+                        "failed",
+                        &job_progress_json("resolve", false, None, None),
+                        None,
+                        Some(api_error.code),
+                        Some(api_error.message),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    /// waiting_restore jobの定期確認。戻り値=1件でも処理した(loopを直ちに回す)。
+    async fn check_waiting_restore(self: &std::sync::Arc<Self>) -> bool {
+        let (bucket, prefix) = self.scope.clone();
+        let jobs = match run_blocking(move || {
+            let db = crate::catalog::CatalogDb::open()?;
+            db.waiting_restore_jobs(&bucket, &prefix)
+        })
+        .await
+        {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                eprintln!("serve: waiting_restore job一覧の読込に失敗(logのみ): {}", e.message);
+                return false;
+            }
+        };
+        let now = self.now_jst();
+        for job in jobs {
+            // progress_jsonのnext_check_at(無し・不正な行は即時確認して回復させる)
+            let progress: serde_json::Value =
+                serde_json::from_str(&job.progress_json).unwrap_or(serde_json::Value::Null);
+            let next_check_at = progress
+                .get("next_check_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !next_check_at.is_empty() && next_check_at > now.as_str() {
+                continue; // まだ確認時刻で無い
+            }
+            let params_value: serde_json::Value =
+                serde_json::from_str(&job.params_json).unwrap_or(serde_json::Value::Null);
+            let Some(params) = GetJobParams::from_json(&params_value) else {
+                self.fail_job(
+                    job.id,
+                    "internal",
+                    "jobの実行paramsが読み取れないため失敗しました",
+                )
+                .await;
+                return true;
+            };
+            // 復元確認(読取のみ・semaphore外。設計5.1: timerによるhead-object確認は
+            // 読取のためsemaphore不要)。probe側へはparamsのcloneを渡す(復元済み時の
+            // 取得再開で元のparamsを続けて使う)
+            let ctx = self.ctx.clone();
+            let probe_params = params.clone();
+            let probe = run_blocking(move || probe_restore(&ctx, &probe_params)).await;
+            match probe {
+                Ok(true) => {
+                    // 復元済み(Restore headerが復元済み・または非archive化):
+                    // 再acquireして取得処理を再開(設計5.1)
+                    let Ok(permit) = self.permits.clone().acquire_owned().await else {
+                        eprintln!(
+                            "serve: job semaphoreのacquireに失敗(logのみ): id={}",
+                            job.id
+                        );
+                        return true;
+                    };
+                    let _ = self
+                        .update_job_row(
+                            job.id,
+                            "running",
+                            &job_progress_json("fetch", false, None, None),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                    let ctx = self.ctx.clone();
+                    // permitはclosure内へmove(stepのreturnで解放)
+                    let outcome = run_blocking(move || {
+                        let _held = permit;
+                        execute_get_step(&ctx, &params)
+                    })
+                    .await;
+                    match outcome {
+                        Ok(JobStep::Terminal {
+                            status,
+                            progress,
+                            result_json,
+                            error_code,
+                            error_message,
+                        }) => {
+                            let _ = self
+                                .update_job_row(job.id, status, &progress, result_json.as_deref(), error_code, error_message.as_deref())
+                                .await;
+                        }
+                        Ok(JobStep::WaitingRestore { current_path }) => {
+                            // 確認と取得の間に復元が失効する等して再び復元待ちへ
+                            let next_check_at = self.next_check_at();
+                            let progress = job_progress_json(
+                                "restore",
+                                false,
+                                Some(&current_path),
+                                Some(&next_check_at),
+                            );
+                            let _ = self
+                                .update_job_row(
+                                    job.id,
+                                    "waiting_restore",
+                                    &progress,
+                                    None,
+                                    None,
+                                    None,
+                                )
+                                .await;
+                        }
+                        Err(api_error) => {
+                            let _ = self
+                                .update_job_row(
+                                    job.id,
+                                    "failed",
+                                    &job_progress_json("restore", false, None, None),
+                                    None,
+                                    Some(api_error.code),
+                                    Some(api_error.message),
+                                )
+                                .await;
+                        }
+                    }
+                    return true;
+                }
+                Ok(false) => {
+                    // まだ復元中(次回確認へ。進行のcurrent_pathは前回値を引き継ぐ)
+                    let next_check_at = self.next_check_at();
+                    let current = progress
+                        .get("current_path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let p = job_progress_json(
+                        "restore",
+                        false,
+                        if current.is_empty() { None } else { Some(current) },
+                        Some(&next_check_at),
+                    );
+                    let _ = self
+                        .update_job_row(job.id, "waiting_restore", &p, None, None, None)
+                        .await;
+                }
+                Err(e) => {
+                    // 転送系失敗(S3 head等)は一時的=jobを失敗させず次回確認で再試行
+                    // (15分後に同じheadを打つ)。それ以外(解決失敗等)はjob失敗。
+                    if e.code == "upstream" {
+                        let next_check_at = self.next_check_at();
+                        let current = progress
+                            .get("current_path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let p = job_progress_json(
+                            "restore",
+                            false,
+                            if current.is_empty() { None } else { Some(current) },
+                            Some(&next_check_at),
+                        );
+                        let _ = self
+                            .update_job_row(job.id, "waiting_restore", &p, None, None, None)
+                            .await;
+                        eprintln!(
+                            "serve: 復元確認が一時的に失敗(次回確認で再試行): id={}: {}",
+                            job.id, e.message
+                        );
+                    } else {
+                        let _ = self
+                            .update_job_row(
+                                job.id,
+                                "failed",
+                                &job_progress_json("restore", false, None, None),
+                                None,
+                                Some(e.code),
+                                Some(e.message),
+                            )
+                            .await;
+                    }
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// 次回確認時刻(現在時刻+確認間隔。ISO8601秒精度のため辞書順比較で時刻順)。
+    fn next_check_at(&self) -> String {
+        let interval_ms = self.restore_check_interval_min * 60_000;
+        let offset = self
+            .time_offset_ms
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .max(0);
+        let now =
+            crate::targets::now_jst() + chrono::Duration::milliseconds(offset as i64 + interval_ms);
+        crate::targets::format_jst(&now)
+    }
+
+    /// job失敗の確定(params読取不能などの実行前失敗用)。
+    async fn fail_job(&self, id: i64, code: &str, message: &str) {
+        let _ = self
+            .update_job_row(
+                id,
+                "failed",
+                &job_progress_json("resolve", false, None, None),
+                None,
+                Some(code),
+                Some(message),
+            )
+            .await;
+    }
+
+    /// queued jobの実行開始claim(catalog側の条件付き遷移の非同期wrapper)。
+    /// 戻り値=falseは取消先行(更新0行)またはDB失敗=いずれも実行しない。
+    async fn claim_queued_job(&self, id: i64, progress: &str) -> bool {
+        let progress = progress.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            let db = crate::catalog::CatalogDb::open()?;
+            db.claim_queued_job(id, &progress)
+        })
+        .await;
+        match result {
+            Ok(Ok(updated)) => updated > 0,
+            Ok(Err(e)) => {
+                eprintln!("serve: jobのclaimに失敗(logのみ・実行しない): id={id}: {e}");
+                false
+            }
+            Err(e) => {
+                eprintln!("serve: jobのclaimが異常終了(logのみ・実行しない): id={id}: {e}");
+                false
+            }
+        }
+    }
+
+    /// job行の更新(DB書込失敗はlogのみ=worker継続)。引数はfn内で所有化して
+    /// spawn_blockingへ渡す(borrowの寿命をawaitをまたいで保持しない)。
+    async fn update_job_row(
+        &self,
+        id: i64,
+        status: &str,
+        progress: &str,
+        result_json: Option<&str>,
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+    ) {
+        let status = status.to_string();
+        let progress = progress.to_string();
+        let result_json = result_json.map(String::from);
+        let error_code = error_code.map(String::from);
+        let error_message = error_message.map(String::from);
+        let result = tokio::task::spawn_blocking(move || {
+            let db = crate::catalog::CatalogDb::open()?;
+            db.update_job(
+                id,
+                &status,
+                &progress,
+                result_json.as_deref(),
+                error_code.as_deref(),
+                error_message.as_deref(),
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                eprintln!("serve: job状態のDB反映に失敗(logのみ): id={id}: {e}")
+            }
+            Err(e) => {
+                eprintln!("serve: job状態のDB反映が異常終了(logのみ): id={id}: {e}")
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5229,11 +6233,12 @@ mod tests {
     }
 
     /// [covers:server.jobs-list]
-    /// GET /api/jobsはW1時点ではjob機構(W4)未実装のため常に200+{"jobs":[]}の
-    /// 空応答(status/kind param付きも同様)。auth構成routerでの未認証は401
-    /// unauthenticated(job系APIも同一session gate=設計6章)。
+    /// GET /api/jobsはjobs tableから実効scopeの行を応答する(W4実質化。jobが
+    /// 1件も無ければ空配列)。並びは進行中(queued/running/waiting_restore)優先・
+    /// group内id降順。?status=・?kind=絞り込みが機能し不正値は400 invalid_request。
+    /// auth構成routerでの未認証は401(job系APIも同一session gate=設計6章)。
     #[test]
-    fn api_jobs_list_responds_empty_in_w1_and_requires_auth() {
+    fn api_jobs_list_responds_from_jobs_table_and_requires_auth() {
         // api_envはAuthFlow::new内で取得する(lock競合防止のため本testでは追加しない)。
         // api()は認証機構未構成のrouterでhandlerを直接観測する(ABHはflowのenvが設定)
         let flow = AuthFlow::new("srv-api-jobs");
@@ -5243,22 +6248,1009 @@ mod tests {
             .get("jobs")
             .and_then(|v| v.as_array())
             .expect("jobs配列");
-        assert!(jobs.is_empty(), "W1は常に空配列: {body}");
-
-        // 絞り込みparam付きもW1では空配列のまま(実質化はW4)
-        let (status, body) = api("GET", "/api/jobs?status=running&kind=get");
-        assert_eq!(status, 200, "param付きも200: {body}");
-        assert!(
-            body.get("jobs")
-                .and_then(|v| v.as_array())
-                .is_some_and(|j| j.is_empty()),
-            "param付きもW1は空配列: {body}"
-        );
+        assert!(jobs.is_empty(), "jobが無ければ空配列: {body}");
 
         // 保護API: auth構成routerでの未認証は401(job系APIも同一session gate)
         let (status, body, _) = flow.call("GET", "/api/jobs", None, None);
         assert_eq!(status, 401, "未認証のGET /api/jobsは401: {body}");
         expect_error_body(&body, "unauthenticated");
+
+        // job行を注入(発行順: succeeded→running→failed→queued・対照scopeへ1件)して
+        // 並び(進行中優先・id降順)・絞り込み・不正値を観測。api_envはflowが既に
+        // config_env_lockを保持しているため新たに取らず(flowのABH設定の下で
+        // catalog.dbへ直接注入=旧W1 testと同一構成)
+        let s1 = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "succeeded", None);
+        let r2 = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "running", None);
+        let f3 = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "failed", Some("not_found"));
+        let q4 = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "queued", None);
+        job_seed_row(API_OTHER_BUCKET, API_TEST_PREFIX, "queued", None);
+
+        let (status, body) = api("GET", "/api/jobs");
+        assert_eq!(status, 200, "GET /api/jobsは200: {body}");
+        let ids: Vec<i64> = body
+            .get("jobs")
+            .and_then(|v| v.as_array())
+            .expect("jobs配列")
+            .iter()
+            .filter_map(|j| j.get("id").and_then(|i| i.as_i64()))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![q4, r2, f3, s1],
+            "進行中(queued/running)優先・各group内id降順・対照scopeは混入しない: {body}"
+        );
+
+        // status絞り込み(進行中のみへ)
+        let (status, body) = api("GET", "/api/jobs?status=running");
+        assert_eq!(status, 200, "status=runningは200: {body}");
+        let ids: Vec<i64> = body
+            .get("jobs")
+            .and_then(|v| v.as_array())
+            .expect("jobs配列")
+            .iter()
+            .filter_map(|j| j.get("id").and_then(|i| i.as_i64()))
+            .collect();
+        assert_eq!(ids, vec![r2], "status絞り込み: {body}");
+
+        // kind絞り込み(全行getのため4件)
+        let (status, body) = api("GET", "/api/jobs?kind=get");
+        assert_eq!(status, 200, "kind=getは200: {body}");
+        assert_eq!(
+            body.get("jobs").and_then(|v| v.as_array()).map(|j| j.len()),
+            Some(4),
+            "kind=getは実効scopeの4件: {body}"
+        );
+
+        // 不正値は400 invalid_request
+        let (status, body) = api("GET", "/api/jobs?status=bogus");
+        assert_eq!(status, 400, "status不正値は400: {body}");
+        expect_error_body(&body, "invalid_request");
+        let (status, body) = api("GET", "/api/jobs?kind=bogus");
+        assert_eq!(status, 400, "kind不正値は400: {body}");
+        expect_error_body(&body, "invalid_request");
+    }
+
+    // -------------------------------------------------------------------
+    // TASK-17 W4(TASK-27)job機構のhandler・JobManager単体test。
+    // jobs tableはcatalog.rs migrationで作成される(api_envのcatalog.db openで適用)。
+
+    /// bytesのSHA-256 hex(job実行testのfixture値計算用)。
+    fn job_sha256_hex(data: &[u8]) -> String {
+        use sha2::Digest;
+        let d = sha2::Sha256::digest(data);
+        d.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// jobs test用: jobs tableへ1行注入(insert_job+update_jobでstatus指定。
+    /// 戻り値=id)。
+    fn job_seed_row(bucket: &str, prefix: &str, status: &str, error_code: Option<&str>) -> i64 {
+        let db = crate::catalog::CatalogDb::open().expect("catalog DB open");
+        let row = db
+            .insert_job(
+                bucket,
+                prefix,
+                "get",
+                &serde_json::to_string(&serde_json::json!({
+                    "uuid": W2_ALPHA_UUID,
+                    "version_id": None::<String>,
+                    "pin": None::<String>,
+                    "out": "/tmp/amazing-backup-job-test-out",
+                    "tier": "Standard",
+                    "days": 7,
+                    "overwrite": false,
+                }))
+                .expect("params serialize"),
+                &job_progress_json("queued", false, None, None),
+            )
+            .expect("job行挿入");
+        if status != "queued" || error_code.is_some() {
+            db.update_job(
+                row.id,
+                status,
+                &job_progress_json("resolve", false, Some("amazing-backup/data/x.age"), None),
+                None,
+                error_code,
+                error_code.map(|_| "対象が見つかりません"),
+            )
+            .expect("job行更新");
+        }
+        row.id
+    }
+
+    /// [covers:server.jobs-get-issue]
+    /// POST /api/jobs/get: body検証(必須欠落・型違反400・規則違反422)と
+    /// queued job行の即時応答({"job":{...}}。params echo・progress=queued)。
+    /// 未認証401(job系APIも同一session gate)。
+    #[test]
+    fn api_jobs_get_issues_queued_job() {
+        let env = api_env("srv-w4-jobs-issue");
+        let out = env.home.join("restore-out");
+        let body = serde_json::json!({
+            "uuid": W2_ALPHA_UUID,
+            "out": out.display().to_string(),
+        });
+        let (status, resp) = api_body("POST", "/api/jobs/get", body);
+        assert_eq!(status, 200, "発行は200: {resp}");
+        let job = resp.get("job").expect("job object wrap");
+        assert_eq!(
+            job.get("status").and_then(|s| s.as_str()),
+            Some("queued"),
+            "即時応答はqueued: {resp}"
+        );
+        assert_eq!(
+            job.get("kind").and_then(|s| s.as_str()),
+            Some("get"),
+            "kind=get: {resp}"
+        );
+        assert_eq!(
+            job.get("params").and_then(|p| p.get("uuid")).and_then(|u| u.as_str()),
+            Some(W2_ALPHA_UUID),
+            "paramsは発行bodyのecho: {resp}"
+        );
+        assert_eq!(
+            job.get("params").and_then(|p| p.get("tier")).and_then(|u| u.as_str()),
+            Some("Standard"),
+            "tier省略既定=Standard: {resp}"
+        );
+        assert_eq!(
+            job.get("params").and_then(|p| p.get("days")).and_then(|u| u.as_i64()),
+            Some(7),
+            "days省略既定=7: {resp}"
+        );
+        assert_eq!(
+            job.get("params").and_then(|p| p.get("overwrite")).and_then(|u| u.as_bool()),
+            Some(false),
+            "overwrite省略既定=false: {resp}"
+        );
+        assert_eq!(
+            job.get("progress").and_then(|p| p.get("phase")).and_then(|u| u.as_str()),
+            Some("queued"),
+            "初期progress.phase=queued: {resp}"
+        );
+        assert_eq!(
+            job.get("progress").and_then(|p| p.get("total")).and_then(|u| u.as_i64()),
+            Some(1),
+            "progress.total=1(getは対象1件): {resp}"
+        );
+        assert_eq!(
+            job.get("result").and_then(|r| r.as_null()),
+            Some(()),
+            "発行直後のresultはnull: {resp}"
+        );
+        // jobs tableへ行が入っている(GET /api/jobsに現れる)
+        let (status, list) = api("GET", "/api/jobs");
+        assert_eq!(status, 200, "一覧は200: {list}");
+        assert_eq!(
+            list.get("jobs").and_then(|v| v.as_array()).map(|j| j.len()),
+            Some(1),
+            "発行したjobが一覧に現れる: {list}"
+        );
+
+        // 必須field欠落・型違反は400 invalid_request
+        let cases_400: [(serde_json::Value, &str); 5] = [
+            (serde_json::json!({"out": "/tmp/x"}), "uuid欠落"),
+            (serde_json::json!({"uuid": "u"}), "out欠落"),
+            (serde_json::json!({"uuid": 1, "out": "/tmp/x"}), "uuid非string"),
+            (serde_json::json!({"uuid": "u", "out": "/tmp/x", "version_id": 5}), "version_id非string"),
+            (serde_json::json!({"uuid": "u", "out": "/tmp/x", "overwrite": "yes"}), "overwrite非bool"),
+        ];
+        for (body, what) in cases_400 {
+            let (status, resp) = api_body("POST", "/api/jobs/get", body);
+            assert_eq!(status, 400, "{what}は400: {resp}");
+            expect_error_body(&resp, "invalid_request");
+        }
+        // 規則違反は422 validation_failed
+        let cases_422: [(serde_json::Value, &str); 4] = [
+            (serde_json::json!({"uuid": "", "out": "/tmp/x"}), "空uuid"),
+            (serde_json::json!({"uuid": "u", "out": ""}), "空out"),
+            (serde_json::json!({"uuid": "u", "out": "/tmp/x", "tier": "Bogus"}), "tier値域外"),
+            (serde_json::json!({"uuid": "u", "out": "/tmp/x", "days": 0}), "days値域外"),
+        ];
+        for (body, what) in cases_422 {
+            let (status, resp) = api_body("POST", "/api/jobs/get", body);
+            assert_eq!(status, 422, "{what}は422: {resp}");
+            expect_error_body(&resp, "validation_failed");
+        }
+        let (status, resp) = api_body(
+            "POST",
+            "/api/jobs/get",
+            serde_json::json!({"uuid": "u", "out": "/tmp/x", "days": 366}),
+        );
+        assert_eq!(status, 422, "days=366は422: {resp}");
+        expect_error_body(&resp, "validation_failed");
+
+        // 不在JSONは400
+        let (status, resp) = api("POST", "/api/jobs/get");
+        assert_eq!(status, 400, "body無しは400: {resp}");
+        drop(env);
+
+        // 保護API: job系API(発行・詳細・取消)は未認証401
+        let flow = AuthFlow::new("srv-w4-jobs-issue-auth");
+        let (status, resp, _) = flow.call(
+            "POST",
+            "/api/jobs/get",
+            Some(serde_json::json!({"uuid": "u", "out": "/tmp/x"})),
+            None,
+        );
+        assert_eq!(status, 401, "未認証のPOST /api/jobs/getは401: {resp}");
+        expect_error_body(&resp, "unauthenticated");
+        let (status, resp, _) = flow.call("GET", "/api/jobs/1", None, None);
+        assert_eq!(status, 401, "未認証のGET /api/jobs/:idは401: {resp}");
+        expect_error_body(&resp, "unauthenticated");
+        let (status, resp, _) = flow.call("POST", "/api/jobs/1/cancel", None, None);
+        assert_eq!(status, 401, "未認証のPOST /api/jobs/:id/cancelは401: {resp}");
+        expect_error_body(&resp, "unauthenticated");
+    }
+
+    /// [covers:server.jobs-detail]
+    /// GET /api/jobs/:id: params・progress・result・error付きのjob objectを
+    /// {"job":{...}}で応答。不在id・他scopeのidは404 not_found。
+    #[test]
+    fn api_jobs_detail_response() {
+        let env = api_env("srv-w4-jobs-detail");
+        // 結果付きのsucceeded行と失敗行を注入
+        let db = crate::catalog::CatalogDb::open().expect("catalog DB open");
+        let ok_row = db
+            .insert_job(
+                API_TEST_BUCKET,
+                API_TEST_PREFIX,
+                "get",
+                &serde_json::to_string(&serde_json::json!({
+                    "uuid": W2_ALPHA_UUID, "version_id": null, "pin": null,
+                    "out": "/tmp/out", "tier": "Standard", "days": 7, "overwrite": false,
+                }))
+                .expect("params serialize"),
+                &job_progress_json("queued", false, None, None),
+            )
+            .expect("挿入");
+        db.update_job(
+            ok_row.id,
+            "succeeded",
+            &job_progress_json("fetch", true, Some("amazing-backup/data/a.age"), None),
+            Some(r#"{"name":"alpha","dest":"alpha"}"#),
+            None,
+            None,
+        )
+        .expect("更新");
+        let fail_row = db
+            .insert_job(
+                API_TEST_BUCKET,
+                API_TEST_PREFIX,
+                "get",
+                &serde_json::to_string(&serde_json::json!({
+                    "uuid": W2_BETA_UUID, "version_id": null, "pin": null,
+                    "out": "/tmp/out", "tier": "Bulk", "days": 3, "overwrite": true,
+                }))
+                .expect("params serialize"),
+                &job_progress_json("queued", false, None, None),
+            )
+            .expect("挿入");
+        db.update_job(
+            fail_row.id,
+            "failed",
+            &job_progress_json("resolve", false, None, None),
+            None,
+            Some("not_found"),
+            Some("対象が見つかりません"),
+        )
+        .expect("更新");
+
+        let (status, resp) = api("GET", &format!("/api/jobs/{}", ok_row.id));
+        assert_eq!(status, 200, "詳細は200: {resp}");
+        let job = resp.get("job").expect("job object wrap");
+        assert_eq!(
+            job.get("status").and_then(|s| s.as_str()),
+            Some("succeeded"),
+            "status: {resp}"
+        );
+        assert_eq!(
+            job.get("result").and_then(|r| r.get("name")).and_then(|n| n.as_str()),
+            Some("alpha"),
+            "result.name: {resp}"
+        );
+        assert_eq!(
+            job.get("progress").and_then(|p| p.get("done")).and_then(|d| d.as_i64()),
+            Some(1),
+            "progress.done=1: {resp}"
+        );
+        assert_eq!(
+            job.get("error").and_then(|e| e.as_null()),
+            Some(()),
+            "成功jobのerrorはnull: {resp}"
+        );
+        assert!(
+            job.get("created_at").is_some_and(|c| c.as_str().is_some())
+                && job.get("updated_at").is_some_and(|u| u.as_str().is_some()),
+            "created_at/updated_at: {resp}"
+        );
+
+        // 失敗jobのerrorは{code,message}
+        let (status, resp) = api("GET", &format!("/api/jobs/{}", fail_row.id));
+        assert_eq!(status, 200, "失敗job詳細は200: {resp}");
+        let error = resp
+            .get("job")
+            .and_then(|j| j.get("error"))
+            .expect("error object");
+        assert_eq!(
+            error.get("code").and_then(|c| c.as_str()),
+            Some("not_found"),
+            "error.code: {resp}"
+        );
+        assert!(
+            error.get("message").is_some_and(|m| m.as_str().is_some()),
+            "error.message: {resp}"
+        );
+
+        // 不在id・他scopeのidは404
+        let other = job_seed_row(API_OTHER_BUCKET, API_TEST_PREFIX, "queued", None);
+        let (status, resp) = api("GET", "/api/jobs/99999");
+        assert_eq!(status, 404, "不在idは404: {resp}");
+        expect_error_body(&resp, "not_found");
+        let (status, resp) = api("GET", &format!("/api/jobs/{other}"));
+        assert_eq!(status, 404, "他scopeのidは404: {resp}");
+        expect_error_body(&resp, "not_found");
+        // 非数値idは400
+        let (status, resp) = api("GET", "/api/jobs/abc");
+        assert_eq!(status, 400, "非数値idは400: {resp}");
+        expect_error_body(&resp, "invalid_request");
+        drop(env);
+    }
+
+    /// [covers:server.jobs-cancel]
+    /// POST /api/jobs/:id/cancel: queuedはstatus=cancelledで応答(操作後のjob
+    /// object)。running・完了系は409 duplicate。不在idは404。
+    #[test]
+    fn api_jobs_cancel_queued_only() {
+        let env = api_env("srv-w4-jobs-cancel");
+        let queued = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "queued", None);
+        let running = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "running", None);
+        let done = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "succeeded", None);
+
+        let (status, resp) = api("POST", &format!("/api/jobs/{queued}/cancel"));
+        assert_eq!(status, 200, "queued取消は200: {resp}");
+        assert_eq!(
+            resp.get("job").and_then(|j| j.get("status")).and_then(|s| s.as_str()),
+            Some("cancelled"),
+            "取消後のjob object(status=cancelled): {resp}"
+        );
+        // 取消済みの再取消も409(取消対象が無い)
+        let (status, resp) = api("POST", &format!("/api/jobs/{queued}/cancel"));
+        assert_eq!(status, 409, "取消済みの再取消は409: {resp}");
+        expect_error_body(&resp, "duplicate");
+
+        // 実行中・完了系は409 duplicate
+        let (status, resp) = api("POST", &format!("/api/jobs/{running}/cancel"));
+        assert_eq!(status, 409, "実行中の取消は409: {resp}");
+        expect_error_body(&resp, "duplicate");
+        let (status, resp) = api("POST", &format!("/api/jobs/{done}/cancel"));
+        assert_eq!(status, 409, "完了jobの取消は409: {resp}");
+        expect_error_body(&resp, "duplicate");
+
+        // 不在idは404・非数値idは400
+        let (status, resp) = api("POST", "/api/jobs/99999/cancel");
+        assert_eq!(status, 404, "不在idは404: {resp}");
+        expect_error_body(&resp, "not_found");
+        let (status, resp) = api("POST", "/api/jobs/abc/cancel");
+        assert_eq!(status, 400, "非数値idは400: {resp}");
+        expect_error_body(&resp, "invalid_request");
+
+        // 取消行は一覧に残る(jobs tableは履歴兼用・再実行対象)
+        let (status, list) = api("GET", "/api/jobs?status=cancelled");
+        assert_eq!(status, 200, "一覧: {list}");
+        assert_eq!(
+            list.get("jobs").and_then(|v| v.as_array()).map(|j| j.len()),
+            Some(1),
+            "取消行はcancelled絞り込みに現れる: {list}"
+        );
+        drop(env);
+    }
+
+    /// [covers:server.jobs-interrupted-on-restart]
+    /// 起動時の一括interrupted化(設計5.4): queued/running/waiting_restoreは
+    /// interruptedへ・完了系は変更しない。自動再開は行わない(本testは状態変更の
+    /// み観測。workerが旧queuedを拾わないことの保証はrun_serverの呼出順
+    /// (sweep→worker起動)による)。
+    #[test]
+    fn api_jobs_interrupted_at_boot_sweep() {
+        let env = api_env("srv-w4-jobs-interrupt");
+        let q = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "queued", None);
+        let r = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "running", None);
+        let w = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "waiting_restore", None);
+        let s = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "succeeded", None);
+        let f = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "failed", Some("not_found"));
+        job_seed_row(API_OTHER_BUCKET, API_TEST_PREFIX, "queued", None);
+
+        let updated = JobManager::interrupt_jobs_at_boot(&(
+            API_TEST_BUCKET.to_string(),
+            API_TEST_PREFIX.to_string(),
+        ))
+        .expect("起動時sweep");
+        assert_eq!(updated, 3, "実効scopeの3行(queued/running/waiting_restore)が対象");
+
+        let status_of = |id: i64| {
+            let db = crate::catalog::CatalogDb::open().expect("catalog DB open");
+            db.job_by_id(API_TEST_BUCKET, API_TEST_PREFIX, id)
+                .expect("job読込")
+                .expect("行がある")
+                .status
+        };
+        assert_eq!(status_of(q), "interrupted", "queued→interrupted");
+        assert_eq!(status_of(r), "interrupted", "running→interrupted");
+        assert_eq!(status_of(w), "interrupted", "waiting_restore→interrupted");
+        assert_eq!(status_of(s), "succeeded", "succeededは変更しない");
+        assert_eq!(status_of(f), "failed", "failedは変更しない");
+        // 他scopeのqueuedは実効scopeのsweep対象外
+        let db = crate::catalog::CatalogDb::open().expect("catalog DB open");
+        let other = db
+            .next_queued_job(API_OTHER_BUCKET, API_TEST_PREFIX)
+            .expect("読込")
+            .expect("他scopeのqueuedは残る");
+        assert_eq!(other.status, "queued", "他scopeはsweep対象外");
+        drop(env);
+    }
+
+    /// W4 job実行test用の鍵・対象object・索引の用意(実ssh鍵pair+実age。
+    /// ssh-keygen/ageが使えない環境はNone=呼出側testはskip扱い=restore系結合
+    /// testと同一扱い)。
+    struct JobExecFixture {
+        env: ApiEnv,
+        state: AppState,
+        router: axum::Router,
+        uuid: String,
+        title: String,
+        s3_key: String,
+        plain: Vec<u8>,
+        out_dir: std::path::PathBuf,
+    }
+
+    /// api_envのconfigを実鍵pairとstorage_classへ書換え・fake S3へ対象objectと
+    /// 索引を用意する(索引はregistry由来entriesをupload_indexでPUT=実経路)。
+    fn job_exec_setup(tag: &str, storage_class: &str) -> Option<JobExecFixture> {
+        let env = api_env(tag);
+        // throwaway ssh ed25519鍵pair(recipient=pub・decrypt_key=secret)
+        let key_dir = env._tmp.path().join("keys");
+        std::fs::create_dir_all(&key_dir).expect("key dir");
+        let secret = key_dir.join("jobkey");
+        let public = key_dir.join("jobkey.pub");
+        let out = std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-C", "amazing-backup-w4-test", "-f"])
+            .arg(&secret)
+            .output()
+            .expect("ssh-keygen実行");
+        if !out.status.success() || !public.is_file() {
+            return None; // ssh-keygen不可環境はskip
+        }
+        // pipeline.toml(recipients=実pub・decrypt_key=実secret)・aws.toml
+        // (storage_class)を書換え
+        let creds = env._tmp.path().join("aws-credentials.toml");
+        crate::testutil::write_file(
+            &env.home.join("pipeline.toml"),
+            format!(
+                "[profiles.dev.recipients]\npublic_keys = [\"{}\"]\n\
+                 [profiles.dev.verify]\ndecrypt_key = \"{}\"\n",
+                public.display(),
+                secret.display()
+            )
+            .as_bytes(),
+        );
+        crate::testutil::write_file(
+            &env.home.join("aws.toml"),
+            format!(
+                "[aws]\nactive_profile = \"dev\"\n\
+                 [aws.lifecycle]\nnoncurrent_days = 180\nkeep_versions = 10\nmpu_abort_days = 7\n\
+                 [aws.profiles.dev]\npurpose = \"dev\"\nbucket = \"{API_TEST_BUCKET}\"\n\
+                 region = \"ap-northeast-1\"\nprefix = \"{API_TEST_PREFIX}\"\n\
+                 storage_class = \"{storage_class}\"\ncredentials_file = \"{}\"\n",
+                creds.display()
+            )
+            .as_bytes(),
+        );
+        // 対象平文と.age object(実age暗号化)
+        let uuid = W2_ALPHA_UUID.to_string();
+        let title = "alpha".to_string();
+        let plain = b"w4-job-get-plain-content\n".to_vec();
+        let plain_sha256 = job_sha256_hex(&plain);
+        let source_size = plain.len() as u64;
+        let age_path = env._tmp.path().join("alpha.zip.age");
+        let age_sha256 =
+            crate::crypto::encrypt_bytes(&plain, &age_path, &[public.clone()]).ok()?;
+        let age_size = std::fs::metadata(&age_path).map(|m| m.len()).unwrap_or(0);
+        let s3_key = format!("{API_TEST_PREFIX}data/{uuid}/default.age");
+        // registry(file_write→object PUT→file_upload→索引upload=実経路の順)
+        let registry_path = env.home.join("registry.jsonl");
+        let ctx = crate::storage::CtxArgs {
+            config: None,
+            aws_config: None,
+            key: None,
+            profile: None,
+            format: crate::storage::Format::Human,
+        };
+        let session = crate::storage::open_session(&ctx).expect("session(openはfake選択)");
+        let bucket = session.aws.bucket.clone();
+        let prefix = session.aws.prefix.clone();
+        let reg_out = (|| -> Option<()> {
+            crate::registry::append_record(
+                &registry_path,
+                &crate::registry::FileWriteRecord {
+                    schema: 3,
+                    record_type: "file_write".into(),
+                    recorded_at: "2026-11-24T10:00:00+09:00".into(),
+                    batch_id: "20261124-abcdef01".into(),
+                    batch_date: "2026-11-24".into(),
+                    uuid: uuid.clone(),
+                    title: title.clone(),
+                    source_path: format!("/data/{title}"),
+                    source_name: format!("{title}.zip"),
+                    source_size,
+                    source_mtime: "2026-11-24T09:00:00+09:00".into(),
+                    source_sha256: plain_sha256.clone(),
+                    age_path: format!("2026-11-24/{title}.zip.age"),
+                    age_size,
+                    age_sha256: age_sha256.clone(),
+                    recipients: vec!["SHA256:testfingerprint".into()],
+                    category: "docs".into(),
+                    label: "work".into(),
+                    identity_hash: format!("hash-{uuid}"),
+                    s3_key: s3_key.clone(),
+                },
+            )
+            .ok()?;
+            let vid = session
+                .backend
+                .put(&bucket, &s3_key, &age_path, storage_class)
+                .ok()?;
+            crate::registry::append_record(
+                &registry_path,
+                &crate::registry::FileUploadRecord {
+                    schema: 2,
+                    record_type: "file_upload".into(),
+                    recorded_at: "2026-11-24T10:00:01+09:00".into(),
+                    batch_id: "20261124-abcdef01".into(),
+                    version_ts: "2026-11-24T10:00:01+09:00".into(),
+                    uuid: uuid.clone(),
+                    title: title.clone(),
+                    s3_key: s3_key.clone(),
+                    s3_bucket: bucket.clone(),
+                    s3_region: "ap-northeast-1".into(),
+                    version_id: vid,
+                    s3_size: age_size as i64,
+                    s3_checksum_sha256: "c".repeat(43),
+                    s3_checksum_type: "FULL_OBJECT".into(),
+                    source_sha256: plain_sha256.clone(),
+                    age_sha256: age_sha256.clone(),
+                    source_size,
+                    age_size,
+                    uploaded_at: "2026-11-24T10:00:02+09:00".into(),
+                },
+            )
+            .ok()?;
+            let entries = w3_current_entries(&session, &registry_path).ok()?;
+            crate::index::upload_index(
+                session.backend.as_ref(),
+                &bucket,
+                &prefix,
+                &[public.clone()],
+                &entries,
+                "20261124-abcdef01",
+                "2026-11-24T10:00:03+09:00",
+                &registry_path,
+            )
+            .ok()?;
+            Some(())
+        })();
+        reg_out?;
+        // catalog DBを先に1回openしておく(worker・handlerの並行初回openで
+        // journal_mode=WAL切替のSQLITE_BUSYが起きないように=serve起動時の
+        // interrupt sweepが先にopenするのと同一条件)
+        crate::catalog::CatalogDb::open().expect("catalog DB事前open");
+        // AppState・router(worker testは同一state/semaphoreの下で観測する)
+        let state = AppState::from_ctx_args(ctx).expect("AppState構築");
+        let router = build_router(state.clone());
+        let out_dir = env._tmp.path().join("restore-out");
+        Some(JobExecFixture {
+            env,
+            state,
+            router,
+            uuid,
+            title,
+            s3_key,
+            plain,
+            out_dir,
+        })
+    }
+
+    /// router oneshot呼出(async・workerと同一runtime上で使う)。
+    async fn job_call(
+        router: axum::Router,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (u16, serde_json::Value) {
+        use tower::ServiceExt as _;
+        let mut builder = axum::http::Request::builder()
+            .method(axum::http::Method::from_bytes(method.as_bytes()).expect("method"))
+            .uri(uri);
+        let req = match body {
+            Some(b) => {
+                builder = builder.header("content-type", "application/json");
+                builder.body(axum::body::Body::from(b.to_string()))
+            }
+            None => builder.body(axum::body::Body::empty()),
+        }
+        .expect("request build");
+        let resp = router.oneshot(req).await.expect("oneshot");
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body read");
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    /// job行のstatus読み出し(worker testの待ち合わせで使う)。
+    fn job_status_of(id: i64) -> String {
+        let db = crate::catalog::CatalogDb::open().expect("catalog DB open");
+        db.job_by_id(API_TEST_BUCKET, API_TEST_PREFIX, id)
+            .expect("job読込")
+            .expect("行がある")
+            .status
+    }
+
+    /// jobの終状態到達待ち(waiting_restoreのような中間statusも指定可)。
+    async fn job_wait_status(id: i64, want: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if job_status_of(id) == want {
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "job {id} がstatus={want}へ到達しない(現在={})",
+                    job_status_of(id)
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// [covers:server.jobs-get-execution]
+    /// get jobの実行(queued→running→succeeded): Standard tier(非archive)対象は
+    /// 即時に取得・sha照合・復号・配置まで進みresult={name,dest}を記録する。
+    /// 対象不在uuidはfailed+error code(not_found)で終わる。
+    #[test]
+    fn api_jobs_get_execution_standard_tier() {
+        let Some(fx) = job_exec_setup("srv-w4-job-exec", "STANDARD") else {
+            eprintln!("SKIP: ssh-keygen/ageが使えない環境");
+            return;
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime");
+        let mgr = fx.state.jobs.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        rt.block_on(async move {
+            let _worker = tokio::task::spawn(async move { mgr.worker_loop(shutdown_rx).await });
+            // job発行(即時応答はqueued)
+            let body = serde_json::json!({
+                "uuid": fx.uuid,
+                "out": fx.out_dir.display().to_string(),
+            });
+            let (status, resp) = job_call(fx.router.clone(), "POST", "/api/jobs/get", Some(body)).await;
+            assert_eq!(status, 200, "発行は200: {resp}");
+            let id = resp
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(|i| i.as_i64())
+                .expect("job id");
+            assert_eq!(
+                resp.get("job").and_then(|j| j.get("status")).and_then(|s| s.as_str()),
+                Some("queued"),
+                "即時応答はqueued: {resp}"
+            );
+            // workerが実行してsucceededへ(Standard=復元不要)
+            job_wait_status(id, "succeeded").await;
+            let db = crate::catalog::CatalogDb::open().expect("catalog DB open");
+            let row = db
+                .job_by_id(API_TEST_BUCKET, API_TEST_PREFIX, id)
+                .expect("job読込")
+                .expect("行がある");
+            assert_eq!(row.error_code, None, "成功jobにerrorは無い");
+            let result: serde_json::Value =
+                serde_json::from_str(&row.result_json.expect("result")).expect("result JSON");
+            assert_eq!(
+                result.get("name").and_then(|n| n.as_str()),
+                Some("alpha"),
+                "result.name=配置名: {result}"
+            );
+            assert_eq!(
+                result.get("dest").and_then(|d| d.as_str()),
+                Some("alpha"),
+                "result.dest=out基準相対path: {result}"
+            );
+            // 配置fileの実在と平文一致(sha照合・復号を経た配置の観測)
+            let dest = fx.out_dir.join("alpha");
+            let bytes = std::fs::read(&dest).expect("配置された平文");
+            assert_eq!(bytes, fx.plain, "配置平文の内容一致");
+            // progressはfetch完了(done=1)
+            let progress: serde_json::Value =
+                serde_json::from_str(&row.progress_json).expect("progress JSON");
+            assert_eq!(
+                progress.get("done").and_then(|d| d.as_i64()),
+                Some(1),
+                "progress.done=1: {progress}"
+            );
+
+            // 対象不在uuidのjobはfailed+error_codeで終わる(索引解決失敗)
+            let body = serde_json::json!({
+                "uuid": W2_ABSENT_UUID,
+                "out": fx.out_dir.display().to_string(),
+            });
+            let (status, resp) = job_call(fx.router.clone(), "POST", "/api/jobs/get", Some(body)).await;
+            assert_eq!(status, 200, "不在uuidも発行は200: {resp}");
+            let absent_id = resp
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(|i| i.as_i64())
+                .expect("job id");
+            job_wait_status(absent_id, "failed").await;
+            let db = crate::catalog::CatalogDb::open().expect("catalog DB open");
+            let row = db
+                .job_by_id(API_TEST_BUCKET, API_TEST_PREFIX, absent_id)
+                .expect("job読込")
+                .expect("行がある");
+            assert_eq!(row.error_code.as_deref(), Some("not_found"), "解決失敗のerror code");
+            let _ = shutdown_tx.send(true);
+        });
+    }
+
+    /// [covers:server.jobs-get-waiting-restore]
+    /// DEEP_ARCHIVE対象のget job: running(復元job発行)→waiting_restore(semaphore
+    /// 解放=書込APIが待機なく完了)→timerの定期確認(時刻注入seamで短縮)→
+    /// 復元済み確認→running→取得→succeeded。復元job進行中はwaiting_restoreの
+    /// まま次回確認へ。
+    #[test]
+    fn api_jobs_get_waiting_restore_timer() {
+        let Some(fx) = job_exec_setup("srv-w4-job-wait", "DEEP_ARCHIVE") else {
+            eprintln!("SKIP: ssh-keygen/ageが使えない環境");
+            return;
+        };
+        // fake S3の呼出記録確認用にstate dirを控える(seed_restoreで状態を制御)
+        let fake_state = std::path::PathBuf::from(
+            std::env::var("AMAZING_BACKUP_FAKE_S3_STATE").expect("fake state env"),
+        );
+        let s3_key = fx.s3_key.clone();
+        let restore_state_dir = fake_state.clone();
+        let seed_restore = move |state: &str| {
+            let p = restore_state_dir.join("restore").join(&s3_key);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).expect("restore parent");
+            }
+            std::fs::write(p, state.as_bytes()).expect("restore state seed");
+        };
+        // W2書込API(PUT tags)のsemaphore解放観測に使うentityをcacheへ注入
+        api_seed(&[api_entry(W2_ALPHA_UUID, "alpha", "docs", "work")], API_TEST_BUCKET, API_TEST_PREFIX);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime");
+        let mgr = fx.state.jobs.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        rt.block_on(async move {
+            let worker_mgr = mgr.clone();
+            let _worker =
+                tokio::task::spawn(async move { worker_mgr.worker_loop(shutdown_rx).await });
+            // job発行→workerが復元jobを発行してwaiting_restoreへ
+            let body = serde_json::json!({
+                "uuid": fx.uuid,
+                "out": fx.out_dir.display().to_string(),
+            });
+            let (status, resp) = job_call(fx.router.clone(), "POST", "/api/jobs/get", Some(body)).await;
+            assert_eq!(status, 200, "発行は200: {resp}");
+            let id = resp
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(|i| i.as_i64())
+                .expect("job id");
+            job_wait_status(id, "waiting_restore").await;
+            // 復元job発行(RestoreObject)とnext_check_atの記録を観測
+            let calls = std::fs::read_to_string(fake_state.join("calls.log")).unwrap_or_default();
+            assert!(
+                calls.contains(&format!(
+                    "s3 RestoreObject bucket={API_TEST_BUCKET} key={}",
+                    fx.s3_key
+                )),
+                "復元job発行(restore)が行われている: {calls}"
+            );
+            let db = crate::catalog::CatalogDb::open().expect("catalog DB open");
+            let row = db
+                .job_by_id(API_TEST_BUCKET, API_TEST_PREFIX, id)
+                .expect("job読込")
+                .expect("行がある");
+            let progress: serde_json::Value =
+                serde_json::from_str(&row.progress_json).expect("progress JSON");
+            assert_eq!(
+                progress.get("phase").and_then(|p| p.as_str()),
+                Some("restore"),
+                "waiting_restore中のphase=restore: {progress}"
+            );
+            assert!(
+                progress.get("next_check_at").is_some_and(|n| n.as_str().is_some()),
+                "progressにnext_check_at(timer確認時刻): {progress}"
+            );
+
+            // waiting_restore遷移時にsemaphoreは解放されている=書込API(PUT tags)が
+            // 待機なく完了する(semaphoreを保持したままだと本呼出はtimeoutする)
+            let tags_uri = format!("/api/entities/{}/tags", fx.uuid);
+            let put = job_call(
+                fx.router.clone(),
+                "PUT",
+                &tags_uri,
+                Some(serde_json::json!({ "tags": ["w4"] })),
+            );
+            let put = tokio::time::timeout(std::time::Duration::from_secs(5), put).await;
+            let (status, resp) = put.expect("PUT tagsがsemaphore待ちで停止していない");
+            assert_eq!(status, 200, "waiting_restore中の書込APIは完了する: {resp}");
+
+            // 復元job進行中(ongoing)はtimer確認でもwaiting_restoreのまま
+            seed_restore("ongoing");
+            mgr.set_time_offset_ms(16 * 60 * 1000);
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert_eq!(
+                job_status_of(id),
+                "waiting_restore",
+                "復元中はwaiting_restoreのまま(次回確認へ)"
+            );
+
+            // 復元済みへ遷移→seamで確認時刻を進める→running→succeeded
+            seed_restore("restored");
+            mgr.set_time_offset_ms(32 * 60 * 1000);
+            job_wait_status(id, "succeeded").await;
+            let db = crate::catalog::CatalogDb::open().expect("catalog DB open");
+            let row = db
+                .job_by_id(API_TEST_BUCKET, API_TEST_PREFIX, id)
+                .expect("job読込")
+                .expect("行がある");
+            assert_eq!(row.error_code, None, "成功: {row:?}");
+            let result: serde_json::Value =
+                serde_json::from_str(&row.result_json.expect("result")).expect("result JSON");
+            assert_eq!(
+                result.get("name").and_then(|n| n.as_str()),
+                Some("alpha"),
+                "取得結果のname: {result}"
+            );
+            let dest = fx.out_dir.join("alpha");
+            let bytes = std::fs::read(&dest).expect("配置された平文");
+            assert_eq!(bytes, fx.plain, "配置平文の内容一致");
+            let _ = shutdown_tx.send(true);
+        });
+    }
+
+    /// [covers:server.jobs-semaphore-serialization]
+    /// job実行は書込APIと同一のsingle-flight semaphoreをacquireしてから行う
+    /// (設計3.1: jobはjob queueで並び実行時にsemaphoreをacquire=書込APIとの相互
+    /// 直列化)。testがsemaphoreを保持している間はjobはqueuedのまま・解放すると
+    /// 実行される。
+    #[test]
+    fn api_jobs_wait_for_write_semaphore() {
+        let Some(fx) = job_exec_setup("srv-w4-job-semaphore", "STANDARD") else {
+            eprintln!("SKIP: ssh-keygen/ageが使えない環境");
+            return;
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime");
+        let mgr = fx.state.jobs.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        rt.block_on(async move {
+            let _worker = tokio::task::spawn(async move { mgr.worker_loop(shutdown_rx).await });
+            // test側が書込semaphoreを保持(job実行のacquireを塞ぐ)
+            let permit = fx
+                .state
+                .sync_permits
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("test側semaphore acquire");
+            let body = serde_json::json!({
+                "uuid": fx.uuid,
+                "out": fx.out_dir.display().to_string(),
+            });
+            let (status, resp) = job_call(fx.router.clone(), "POST", "/api/jobs/get", Some(body)).await;
+            assert_eq!(status, 200, "発行は200: {resp}");
+            let id = resp
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(|i| i.as_i64())
+                .expect("job id");
+            // semaphoreが塞がれている間はjobはqueuedのまま(workerは実行を開始しない)
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert_eq!(
+                job_status_of(id),
+                "queued",
+                "書込semaphore保持中はjobはqueuedのまま(相互直列化)"
+            );
+            // 解放するとworkerが実行してsucceededへ
+            drop(permit);
+            fx.state.jobs.notify_worker();
+            job_wait_status(id, "succeeded").await;
+            let _ = shutdown_tx.send(true);
+        });
+    }
+
+    /// [covers:server.jobs-cancel]
+    /// semaphore待ちの間に取消されたqueued jobは、permit解放後も実行されない
+    /// (workerはacquire後のrunning遷移をstatus='queued'条件付きclaimで行い、
+    /// 取消が先行したjobはclaim不成立で実行しない=取消の200応答と矛盾しない)。
+    #[test]
+    fn api_jobs_cancelled_during_semaphore_wait_is_not_executed() {
+        let Some(fx) = job_exec_setup("srv-w4-job-cancel-claim", "STANDARD") else {
+            eprintln!("SKIP: ssh-keygen/ageが使えない環境");
+            return;
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime");
+        let mgr = fx.state.jobs.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        rt.block_on(async move {
+            let _worker = tokio::task::spawn(async move { mgr.worker_loop(shutdown_rx).await });
+            // test側が書込semaphoreを保持(workerはjobを拾ってacquire待ちに入る)
+            let permit = fx
+                .state
+                .sync_permits
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("test側semaphore acquire");
+            let body = serde_json::json!({
+                "uuid": fx.uuid,
+                "out": fx.out_dir.display().to_string(),
+            });
+            let (status, resp) =
+                job_call(fx.router.clone(), "POST", "/api/jobs/get", Some(body)).await;
+            assert_eq!(status, 200, "発行は200: {resp}");
+            let id = resp
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(|i| i.as_i64())
+                .expect("job id");
+            // workerがacquire待ちに入る間もjobはqueuedのまま
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert_eq!(job_status_of(id), "queued", "semaphore保持中はqueuedのまま");
+            // acquire待ちの間に取消する(queuedのため受理されcancelledで確定する)
+            let (status, resp) = job_call(
+                fx.router.clone(),
+                "POST",
+                &format!("/api/jobs/{id}/cancel"),
+                None,
+            )
+            .await;
+            assert_eq!(status, 200, "取消は200: {resp}");
+            assert_eq!(
+                resp.get("job")
+                    .and_then(|j| j.get("status"))
+                    .and_then(|s| s.as_str()),
+                Some("cancelled"),
+                "取消後のjob objectはcancelled: {resp}"
+            );
+            // permitを解放してもworkerはclaim不成立で実行しない
+            drop(permit);
+            fx.state.jobs.notify_worker();
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            assert_eq!(
+                job_status_of(id),
+                "cancelled",
+                "取消済みjobはpermit解放後も実行されない(claim不成立)"
+            );
+            assert!(
+                !fx.out_dir.join(&fx.title).exists(),
+                "取消済みjobの配置ファイルは作られない"
+            );
+            let _ = shutdown_tx.send(true);
+        });
     }
 
     // -----------------------------------------------------------------------

@@ -392,6 +392,43 @@ fn serve_pending_scan_unauthenticated_401() {
 }
 
 // ---------------------------------------------------------------------------
+// TASK-17 W4(TASK-27: job機構・2026-11-24)の結合test。job系API(発行・詳細・取消)の
+// 未認証401をserve経由で回帰観測する(=gate配置漏れの検出。job実行・状態遷移の
+// 詳細観測はsrc/server.rs内handler単体testが担う)。
+
+/// [covers:server.jobs-get-issue]
+/// job系API(POST /api/jobs/get・GET /api/jobs/:id・POST /api/jobs/:id/cancel)は
+/// 未認証401(job系APIも同一session gate=設計6章D-W11)。serve経由でrouter実装への
+/// gate適用を回帰観測する。
+#[test]
+fn serve_jobs_api_unauthenticated_401() {
+    let Some(fx) = common::StorageFixture::new(
+        "srv-w4-jobs-auth",
+        common::StorageOpts::default(),
+    ) else {
+        return;
+    };
+    let (addr, mut child, _err) = start_serve(&fx, free_local_port(), "w4-jobs-auth");
+    // POST /api/jobs/getはJSON bodyを要するが未認証はbody検証の前のgateで401に
+    // なる(Content-Length: 0の素朴requestで観測)
+    for (method, path) in [
+        ("POST", "/api/jobs/get"),
+        ("GET", "/api/jobs/1"),
+        ("POST", "/api/jobs/1/cancel"),
+    ] {
+        let (code, body) = http_request_raw(&addr, method, path).expect("応答");
+        assert_eq!(
+            code, 401,
+            "未認証の{method} {path}は401(job系APIも同一session gate): status={code} body={body}"
+        );
+        assert!(
+            body.contains("\"unauthenticated\""),
+            "error bodyは既存error体系形式(unauthenticated): {body}"
+        );
+    }
+    drop(child);
+}
+
 // TASK-17 W2(TASK-19: tag/collection・audit_log・2026-11-14テスト先行)の結合test。
 // 書込API(tags系・collections系)も同一auth_gateで保護のserve経由観測
 // (=P4以降のgate配置漏れの回帰検出。実装前はrouting不在のfallback 404でfailを許容)。

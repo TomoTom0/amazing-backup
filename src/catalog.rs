@@ -9,7 +9,8 @@
 //! - cache class(削除再構築可): entities/versions/pins/locations/sync_state/pending_items
 //! - 永続class(rebuildでもdropしない): credentials/passkey・push_intents・api_keys・
 //!   tags/collections/collection_items/audit_log(TASK-17 W2=local語彙とUI書込操作の
-//!   履歴。cache側に置くとrebuildでtag・履歴が失われるため)
+//!   履歴。cache側に置くとrebuildでtag・履歴が失れるため)・
+//!   jobs(TASK-17 W4=長時間jobの実行記録の正本。設計4.1「再構築不能の実行記録」)
 //! 全cache tableはscope(bucket+prefix)をPK/検索条件に持ち(指摘#3)、scope単位の
 //! 置換は単一transactionでdelete+insertする(原子的置換・途中状態を作らない)。
 
@@ -148,6 +149,10 @@ fn now_jst() -> String {
 
 // ---------------------------------------------------------------------------
 // migration(設計2章schema要約。cache class 6 table+永続class 2 table)
+
+/// 初回open時のmigration適用のprocess内直列化(並行openのcheck-then-act競合
+/// 防止。W4。ロックは適用済みDBのopenでは即時に通る=常用経路の直列化ではない)
+static OPEN_MIGRATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn migrations() -> rusqlite_migration::Migrations<'static> {
     use rusqlite_migration::M;
@@ -291,6 +296,29 @@ fn migrations() -> rusqlite_migration::Migrations<'static> {
                 detail_json TEXT NOT NULL,
                 outcome TEXT NOT NULL,
                 error_code TEXT);
+            "#,
+        ),
+        // TASK-17 W4(TASK-27・設計4.1・5章): 長時間job(get/push)の正本table。
+        // 永続class(実行記録はregistry+S3から再構築不能のため=4.1 class分類。
+        // cache側に置くとmanage catalog rebuildでjob履歴が失われる)。scopeは
+        // tags/audit_logと同一の<bucket>:<prefix>形式。status値はserver側で
+        // queued/running/waiting_restore/succeeded/failed/interrupted/cancelled。
+        // progress_jsonは{phase,total,done,current_path}(waiting_restore時は
+        // next_check_atを追加)でUI表示とtimer確認時刻の双方に使う
+        M::up(
+            r#"
+            CREATE TABLE jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                params_json TEXT NOT NULL,
+                progress_json TEXT NOT NULL,
+                result_json TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL);
             "#,
         ),
     ])
@@ -442,6 +470,24 @@ pub struct CollectionDetail {
     pub uuids: Vec<String>,
 }
 
+/// jobs tableの1行(TASK-17 W4・設計4.1/5章。job一覧・詳細の要素で
+/// params_json/progress_json/result_jsonはJSON文字列のまま保持し、
+/// 応答組立(server側)でparseする)。
+#[derive(Debug, Clone)]
+pub struct JobRow {
+    pub id: i64,
+    pub scope: String,
+    pub kind: String,
+    pub status: String,
+    pub params_json: String,
+    pub progress_json: String,
+    pub result_json: Option<String>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// W2 tag/collection書込の失敗区分(TASK-17 W2。storage層は状態遷移の可否だけを
 /// 返し、HTTPのerror codeへの変換はserver側が行う)。
 #[derive(Debug)]
@@ -483,17 +529,24 @@ impl CatalogDb {
         {
             use std::os::unix::fs::OpenOptionsExt;
             if !db_path.exists() {
-                std::fs::OpenOptions::new()
+                match std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .mode(0o600)
                     .open(db_path)
-                    .map_err(|e| {
-                        BackupError::Config(format!(
+                {
+                    Ok(_) => {}
+                    // 並行openとのcreate_new競合(他の接続が同一瞬間に作成)は
+                    // 作成済みfileへそのまま接続する(W4: job workerとhandlerが
+                    // 同一fresh DBへ並行openし得るため)
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => {
+                        return Err(BackupError::Config(format!(
                             "catalog DB fileの作成に失敗({}): {e}",
                             db_path.display()
-                        ))
-                    })?;
+                        )));
+                    }
+                }
             }
         }
         #[cfg(not(unix))]
@@ -509,6 +562,11 @@ impl CatalogDb {
         }
         let open_db = || -> Result<Connection, rusqlite::Error> {
             let conn = Connection::open(db_path)?;
+            // busy_timeoutを最初に設定する(以降のWAL設定・migrationの書込衝突も
+            // 即時SQLITE_BUSYでなく待機に変える。W4: job workerの更新とhandlerの
+            // 読書が並行し得るため。書込系APIはsemaphoreで直列化されるが読取と
+            // 書込・初回open同士の並行は排他されない)
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
             // WAL mode(設計2章)。journal_modeは値を返すpragmaのためqueryで実行する
             conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
             conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -518,6 +576,12 @@ impl CatalogDb {
         let mut conn = open_db().map_err(|e| {
             BackupError::Config(format!("catalog DBを開けない({}): {e}", db_path.display()))
         })?;
+        // 初回openのmigration適用はprocess内で直列化する(migrationは
+        // user_version確認→CREATEのcheck-then-actのため・2接続が同一fresh DBへ
+        // 並行適用すると「table already exists」で失敗し得る。W4: job workerと
+        // handlerが同一fresh DBへ並行openし得る。既に適用済みのopenは
+        // user_version一致で直ちに通るためlockの実costは初回のみ)
+        let _migration_lock = OPEN_MIGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         migrations()
             .to_latest(&mut conn)
             .map_err(|e| BackupError::Config(format!("catalog DBのmigrationに失敗: {e}")))?;
@@ -1710,6 +1774,241 @@ impl CatalogDb {
             .map_err(|e| BackupError::Internal(format!("audit_log記録に失敗: {e}")))?;
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // jobs table(TASK-17 W4・設計4.1/5章)。永続class(replace_scopeの置換対象外)。
+    // 呼出側はserve(JobManager・job系API。single-flight直列化の下でspawn_blocking
+    // 経由で読み書きする。timerによるwaiting_restore確認のhead-objectは読取のため
+    // semaphore外で実行される=本層の呼出も読取で完結する)。
+
+    /// job行の挿入(設計5.1: POST /api/jobs/*はjob行をqueuedでinsertして即時応答)。
+    /// progress_jsonは初期値(呼出側がphase=queuedの初期progressを組む)。
+    pub fn insert_job(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        kind: &str,
+        params_json: &str,
+        progress_json: &str,
+    ) -> BackupResult<JobRow> {
+        let now = now_jst();
+        self.conn
+            .execute(
+                "INSERT INTO jobs (scope, kind, status, params_json, progress_json,\
+                 result_json, error_code, error_message, created_at, updated_at) \
+                 VALUES (?1, ?2, 'queued', ?3, ?4, NULL, NULL, NULL, ?5, ?5)",
+                rusqlite::params![
+                    w2_scope(bucket, prefix),
+                    kind,
+                    params_json,
+                    progress_json,
+                    now
+                ],
+            )
+            .map_err(|e| BackupError::Internal(format!("jobs挿入に失敗: {e}")))?;
+        let id = self.conn.last_insert_rowid();
+        self.job_by_id(bucket, prefix, id)?
+            .ok_or_else(|| BackupError::Internal("挿入直後のjob行が読めない".to_string()))
+    }
+
+    /// job状態の更新(status・progressは常に差し替え。result/errorはSome時のみ設定
+    /// =Noneは変更しない。遷移で設定済みfieldをクリアする経路は無い)。updated_at刻み。
+    pub fn update_job(
+        &self,
+        id: i64,
+        status: &str,
+        progress_json: &str,
+        result_json: Option<&str>,
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+    ) -> BackupResult<()> {
+        self.conn
+            .execute(
+                "UPDATE jobs SET status = ?2, progress_json = ?3, \
+                 result_json = COALESCE(?4, result_json), \
+                 error_code = COALESCE(?5, error_code), \
+                 error_message = COALESCE(?6, error_message), \
+                 updated_at = ?7 WHERE id = ?1",
+                rusqlite::params![
+                    id,
+                    status,
+                    progress_json,
+                    result_json,
+                    error_code,
+                    error_message,
+                    now_jst()
+                ],
+            )
+            .map_err(|e| BackupError::Internal(format!("jobs更新に失敗: {e}")))?;
+        Ok(())
+    }
+
+    /// job詳細(当該scopeの行のみ。不在・他scopeのidはNone)。
+    pub fn job_by_id(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        id: i64,
+    ) -> BackupResult<Option<JobRow>> {
+        let scope = w2_scope(bucket, prefix);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, scope, kind, status, params_json, progress_json, result_json,\
+                 error_code, error_message, created_at, updated_at FROM jobs \
+                 WHERE id = ?1 AND scope = ?2",
+            )
+            .map_err(|e| BackupError::Internal(format!("jobs準備に失敗: {e}")))?;
+        stmt.query_row(rusqlite::params![id, scope], job_row_of)
+            .optional()
+            .map_err(|e| BackupError::Internal(format!("jobs読込に失敗: {e}")))
+    }
+
+    /// job一覧(設計3.2: 進行中優先・降順=queued/running/waiting_restoreを先頭group
+    /// へ・各group内はid降順=新しい順。status/kind絞り込みは呼出側検証済み値)。
+    pub fn list_jobs(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        status: Option<&str>,
+        kind: Option<&str>,
+    ) -> BackupResult<Vec<JobRow>> {
+        let scope = w2_scope(bucket, prefix);
+        // 絞り込み条件は位置placeholder「?」+動的param数で組む(条件の有無で
+        // param過不足エラーにならない構成)
+        let mut sql = "SELECT id, scope, kind, status, params_json, progress_json, \
+             result_json, error_code, error_message, created_at, updated_at FROM jobs \
+             WHERE scope = ?"
+            .to_string();
+        let mut params: Vec<String> = vec![scope];
+        if let Some(s) = status {
+            sql.push_str(" AND status = ?");
+            params.push(s.to_string());
+        }
+        if let Some(k) = kind {
+            sql.push_str(" AND kind = ?");
+            params.push(k.to_string());
+        }
+        sql.push_str(
+            " ORDER BY CASE WHEN status IN ('queued','running','waiting_restore') THEN 0 \
+             ELSE 1 END, id DESC",
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| BackupError::Internal(format!("jobs準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), job_row_of)
+            .map_err(job_read_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(job_read_err)?);
+        }
+        Ok(out)
+    }
+
+    /// 実行待ちの最古job(queued・id昇順=発行順。JobManager workerの取り出し順)。
+    pub fn next_queued_job(&self, bucket: &str, prefix: &str) -> BackupResult<Option<JobRow>> {
+        let scope = w2_scope(bucket, prefix);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, scope, kind, status, params_json, progress_json, result_json,\
+                 error_code, error_message, created_at, updated_at FROM jobs \
+                 WHERE scope = ?1 AND status = 'queued' ORDER BY id LIMIT 1",
+            )
+            .map_err(|e| BackupError::Internal(format!("jobs準備に失敗: {e}")))?;
+        stmt.query_row([&scope], job_row_of)
+            .optional()
+            .map_err(|e| BackupError::Internal(format!("jobs読込に失敗: {e}")))
+    }
+
+    /// waiting_restore中のjob一覧(id昇順。timerの確認対象)。
+    pub fn waiting_restore_jobs(&self, bucket: &str, prefix: &str) -> BackupResult<Vec<JobRow>> {
+        let scope = w2_scope(bucket, prefix);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, scope, kind, status, params_json, progress_json, result_json,\
+                 error_code, error_message, created_at, updated_at FROM jobs \
+                 WHERE scope = ?1 AND status = 'waiting_restore' ORDER BY id",
+            )
+            .map_err(|e| BackupError::Internal(format!("jobs準備に失敗: {e}")))?;
+        let rows = stmt
+            .query_map([&scope], job_row_of)
+            .map_err(job_read_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(job_read_err)?);
+        }
+        Ok(out)
+    }
+
+    /// queued jobの取消(status=cancelledへ。queuedでない場合は更新0行。呼出側は
+    /// 先にjob_by_idで存在とstatusを確認し404/409を区別する)。
+    pub fn cancel_queued_job(&self, id: i64) -> BackupResult<usize> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE jobs SET status = 'cancelled', updated_at = ?2 \
+                 WHERE id = ?1 AND status = 'queued'",
+                rusqlite::params![id, now_jst()],
+            )
+            .map_err(|e| BackupError::Internal(format!("jobs取消に失敗: {e}")))?;
+        Ok(updated)
+    }
+
+    /// queued jobの実行開始claim(status='queued'の条件付きでrunningへ遷移し
+    /// progressを差し替える)。workerがsemaphore待ちの間に取消されたjobは
+    /// 更新0行となり、呼出側は実行しない(取消の確定を上書きしない)。
+    pub fn claim_queued_job(&self, id: i64, progress_json: &str) -> BackupResult<usize> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE jobs SET status = 'running', progress_json = ?3, \
+                 updated_at = ?2 WHERE id = ?1 AND status = 'queued'",
+                rusqlite::params![id, now_jst(), progress_json],
+            )
+            .map_err(|e| BackupError::Internal(format!("jobsのclaimに失敗: {e}")))?;
+        Ok(updated)
+    }
+
+    /// 起動時の一括interrupted化(設計5.4: queued/running/waiting_restoreを
+    /// interruptedへ更新=自動再開しない。server再起動の起動処理から呼ぶ)。
+    /// 完了系(succeeded/failed/interrupted/cancelled)の行は変更しない。
+    pub fn interrupt_active_jobs(&self, bucket: &str, prefix: &str) -> BackupResult<usize> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE jobs SET status = 'interrupted', updated_at = ?2 \
+                 WHERE scope = ?1 AND status IN ('queued','running','waiting_restore')",
+                rusqlite::params![w2_scope(bucket, prefix), now_jst()],
+            )
+            .map_err(|e| BackupError::Internal(format!("jobsのinterrupted化に失敗: {e}")))?;
+        Ok(updated)
+    }
+}
+
+/// jobs行の読取(rusqlite row → JobRow)。
+fn job_row_of(r: &rusqlite::Row) -> rusqlite::Result<JobRow> {
+    Ok(JobRow {
+        id: r.get(0)?,
+        scope: r.get(1)?,
+        kind: r.get(2)?,
+        status: r.get(3)?,
+        params_json: r.get(4)?,
+        progress_json: r.get(5)?,
+        result_json: r.get(6)?,
+        error_code: r.get(7)?,
+        error_message: r.get(8)?,
+        created_at: r.get(9)?,
+        updated_at: r.get(10)?,
+    })
+}
+
+/// jobs行読取errorの変換(共通文言)。
+fn job_read_err(e: rusqlite::Error) -> BackupError {
+    BackupError::Internal(format!("jobs行読取に失敗: {e}"))
 }
 
 /// pending_items 1行分(設計2章schema・§3のscan結果)。
@@ -2335,6 +2634,92 @@ mod tests {
             [],
         );
         assert!(dup.is_err(), "collections同(scope,name)行の重複挿入はUNIQUE制約違反: {dup:?}");
+    }
+
+    /// [covers:catalog.jobs-table-schema]
+    /// TASK-17 W4(TASK-27・設計4.1)のjobs table(長時間jobの正本=永続class)を
+    /// migrationが構築する: id/scope/kind/status/params_json/progress_json/
+    /// result_json/error_code/error_message/created_at/updated_at。
+    /// insert_job→job_by_id→update_jobの行APIが一貫して動作する(初期値:
+    /// status=queued・result/error系はNULL)。
+    #[test]
+    fn migration_builds_jobs_table() {
+        let (_tmp, db) = open_test_db("cat-w4-jobs-table");
+        let mut stmt = db
+            .conn
+            .prepare("PRAGMA table_info(jobs)")
+            .expect("jobs table_info(実装前はtable不在でfailを許容)");
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for c in [
+            "id",
+            "scope",
+            "kind",
+            "status",
+            "params_json",
+            "progress_json",
+            "result_json",
+            "error_code",
+            "error_message",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(cols.contains(&c.to_string()), "jobsに{c}列がある: {cols:?}");
+        }
+        // 行API: insert_jobはqueued・NULL系で作成しjob_by_idが読める
+        let row = db
+            .insert_job("b", "p/", "get", "{\"uuid\":\"u\"}", "{\"phase\":\"queued\"}")
+            .expect("insert_job");
+        assert_eq!(row.status, "queued");
+        assert_eq!(row.kind, "get");
+        assert_eq!(row.scope, "b:p/");
+        assert!(row.result_json.is_none());
+        assert!(row.error_code.is_none());
+        assert!(!row.created_at.is_empty());
+        assert_eq!(row.updated_at, row.created_at);
+        let got = db.job_by_id("b", "p/", row.id).expect("job_by_id").expect("行がある");
+        assert_eq!(got.id, row.id);
+        // 他scopeのidでは読めない(scope分離)
+        assert!(db.job_by_id("other", "p/", row.id).expect("読み").is_none());
+        // update_job: status差し替え・result/errorはSome時のみ設定
+        db.update_job(
+            row.id,
+            "succeeded",
+            "{\"phase\":\"fetch\",\"done\":1}",
+            Some("{\"name\":\"a\"}"),
+            None,
+            None,
+        )
+        .expect("update_job");
+        let got = db.job_by_id("b", "p/", row.id).unwrap().expect("行がある");
+        assert_eq!(got.status, "succeeded");
+        assert_eq!(got.result_json.as_deref(), Some("{\"name\":\"a\"}"));
+        assert!(got.error_code.is_none());
+        assert!(got.updated_at >= got.created_at, "updated_at刻み");
+        // cancel_queued_jobはqueued行のみ更新
+        let other = db
+            .insert_job("b", "p/", "get", "{}", "{}")
+            .expect("insert_job");
+        assert_eq!(db.cancel_queued_job(other.id).expect("cancel"), 1);
+        assert_eq!(db.cancel_queued_job(other.id).expect("再cancel"), 0);
+        // claim_queued_jobはqueued行のみrunningへ遷移する(progress差し替え)
+        let third = db
+            .insert_job("b", "p/", "get", "{}", "{}")
+            .expect("insert_job");
+        assert_eq!(
+            db.claim_queued_job(third.id, "{\"phase\":\"resolve\"}")
+                .expect("claim"),
+            1
+        );
+        let got = db.job_by_id("b", "p/", third.id).unwrap().expect("行がある");
+        assert_eq!(got.status, "running");
+        assert_eq!(got.progress_json, "{\"phase\":\"resolve\"}");
+        // running行・cancelled行はclaim不成立(取消が先行したjobを実行しない)
+        assert_eq!(db.claim_queued_job(third.id, "{}").expect("再claim"), 0);
+        assert_eq!(db.claim_queued_job(other.id, "{}").expect("取消済みclaim"), 0);
     }
 
     /// [covers:catalog.schema-migration]

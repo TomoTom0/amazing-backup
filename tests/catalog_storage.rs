@@ -1623,6 +1623,60 @@ fn w2_local_vocabulary_tables_survive_rebuild() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// TASK-17 W4(TASK-27: job機構・2026-11-24テスト先行)。jobs tableの永続class契約
+// (rebuildでdropしない)を結合観測する。table自体のschema・行APIはsrc/catalog.rs
+// unit test(catalog.jobs-table-schema)が担保。
+
+/// [covers:catalog.jobs-table-persistent-class]
+/// TASK-17 W4のjobs table(長時間jobの実行記録の正本=永続class)はmanage catalog
+/// rebuildのcache class置換(replace_scope)でもdropされない(credentials/push_intents/
+/// api_keys/W2 4 tableと同一契約。job履歴がrebuildで失われない=設計4.1のclass分類
+/// 「再構築不能の実行記録」)。
+#[test]
+fn jobs_table_survives_rebuild() {
+    let Some(fx) = StorageFixture::new("cat-w4-jobs-persist", StorageOpts::default()) else {
+        return;
+    };
+    let (code, stdout, stderr) = fx.manage("catalog", &["sync"]);
+    assert_eq!(code, 0, "sync(DB作成・事前): {stdout}{stderr}");
+
+    // jobsへ2行挿入(rusqlite直接=server側insert_jobと同一schema)
+    let conn = rusqlite::Connection::open(fx.catalog_db()).expect("catalog.db open");
+    for (status, result) in [
+        ("succeeded", Some(r#"{\"name\":\"a\"}"#)),
+        ("waiting_restore", None),
+    ] {
+        conn.execute(
+            "INSERT INTO jobs (scope, kind, status, params_json, progress_json, result_json, \
+             error_code, error_message, created_at, updated_at) \
+             VALUES (?1, 'get', ?2, '{\"uuid\":\"u\"}', '{\"phase\":\"fetch\"}', ?3, NULL, NULL, \
+             '2026-11-24T12:00:00+09:00', '2026-11-24T12:01:00+09:00')",
+            rusqlite::params!["api-bucket:amazing-backup/", status, result],
+        )
+        .expect("jobs行挿入(実装前はtable不在でfailを許容)");
+    }
+    drop(conn);
+
+    let (code, stdout, stderr) = fx.manage("catalog", &["rebuild"]);
+    assert_eq!(code, 0, "rebuild: {stdout}{stderr}");
+
+    // rebuild後もjobs行は保持される(永続class=cache置換の対象外)
+    let conn = rusqlite::Connection::open(fx.catalog_db()).expect("catalog.db open");
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))
+        .unwrap_or_else(|e| panic!("jobs行数読取(実装前はtable不在でfailを許容): {e}"));
+    assert_eq!(n, 2, "rebuild後もjobs行は保持(永続class)");
+    let waiting: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM jobs WHERE status = 'waiting_restore'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("status読取");
+    assert_eq!(waiting, 1, "status値もrebuildをまたいで保持");
+}
+
 /// [covers:catalog.rebuild-preserves-rename-and-location-update]
 /// W3(TASK-22): manage catalog rebuild(ローカルregistryからの再構築)は
 /// rename/location_update eventを反映したentriesを構築する(設計4.2: 再構築で

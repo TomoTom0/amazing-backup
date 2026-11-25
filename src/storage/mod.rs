@@ -30,7 +30,8 @@ use crate::s3::S3Backend;
 use std::path::{Path, PathBuf};
 
 /// 新体系コマンド共通の設定option群(各subcommandの末尾に置かれる)。
-#[derive(clap::Args, Debug)]
+/// CloneはserveのAppState構築(JobManagerがcontextを保持)のため。
+#[derive(clap::Args, Debug, Clone)]
 pub struct CtxArgs {
     /// pipeline設定(照会系は省略可。省略時はXDG規定path・TASK-19)
     #[arg(long)]

@@ -969,6 +969,35 @@ EntityDetailViewのtitle編集formと所在行編集form)。検証: cargo test 4
 (25suite)・vitest 169pass(29file)・verify-conditions PASS(383条件)・実機確認
 (serve+fake seamでrename→CLI list files/queryに新title・catalog rebuild後も保持)。
 
+2026-11-25: TASK-27(TASK-17 W4: job機構+get・転送タブ)。条件書テスト先行で
+server +7(POST /api/jobs/get発行body検証とqueued応答・jobs-listのW4実質化
+(jobs table一覧・進行中優先・status/kind絞り込み)・jobs-detail・jobs-cancel
+(queuedのみ・409)・jobs-get-execution(queued→running→succeededとfailed)・
+jobs-get-waiting-restore(waiting_restore遷移・semaphore解放・timer・時刻注入seam)・
+jobs-semaphore-serialization・jobs-interrupted-on-restartの7新規+server.jobs-list
+を文言改訂=id不変)・catalog +2(jobs table schema+行API・jobs tableの永続class=
+rebuild保持。schema-migrationを14 tables化へ文言改訂=id不変)・frontend +4
+(job発行client+store・job詳細/取消client+store・polling(参照カウント式)・転送
+取得formの4新規+frontend.jobs-client-and-storeをW4拡張schemaへ文言改訂=id不変)
+の13条件を追加し383→399条件(excluded 72件のまま)。実装: catalog.rs(jobs table
+migration+JobRow・insert_job/job_by_id/update_job/list_jobs/next_queued_job/
+waiting_restore_jobs/cancel_queued_job/interrupt_active_jobs・初回openのmigration
+直列化とbusy_timeout・create_new競合許容)・server.rs(JobManager=直列worker
+(同時実行1・書込semaphoreと相互直列化・waiting_restore遷移時にsemaphore解放)・
+waiting_restore定期確認timer(RESTORE_CHECK_INTERVAL_MIN=15分)と時刻注入seam
+(JobManager::set_time_offset_ms=AuthStateと同一流儀)・起動時interrupted一括化
+(worker起動前にrun_blockingでsweep)・4 endpoint・graceful shutdownの有界待ち)・
+storage/get.rs(plain_conflict_outcome=印刷なしの平文衝突判定を分離)・frontend
+(JobItemのW4拡張schema+fetchJobs絞り込み+fetchJobDetail/postJobsGet/postJobCancel
+・jobs storeのissueGet/rerunGet/cancelJob/activeJobs/参照カウント式polling・
+transfer store新規・TransferView(取得form+job一覧+再実行/取消button+polling)・
+HomeView実行中job区画の実データ化+polling・App.vue nav転送tab status dot・
+EntityDetailView版行の「取得」button=転送タブprefill導線)。検証: cargo test
+430pass・vitest 191pass(30file)・verify-conditions PASS(399条件)・実機確認
+(serve+fake seamでStandard tier取得job発行→succeeded配置・DEEP_ARCHIVEは
+waiting_restore(RestoreObject発行)→serve再起動でinterrupted・時刻seamによる
+waiting_restore→succeeded遷移はunit testで観測)。
+
 2026-11-21: PR#9(TASK-9〜20集約)コードレビュー指摘3件(P2)への対応
 (TASK-23/24/25。条件書catalog +2・frontend +1で372→375条件)。
 - catalog.written-index-validator-bound-to-uploaded-version: 書込系DB反映
@@ -1066,10 +1095,10 @@ upload/restore/configのexcludedへ、TASK-10のdocs運用系・不採用判断�
 | registry.toml | registry | src/registry.rs | 8 | TASK-18設計3.2/5.3(schema2 records往復・旧schema拒否・sweep/location_remove・sha_uuid_lookup合流正本) + TASK-17 W3(TASK-22: rename/location_update recordのparse/reduce/roundtrip・reset温存・entity_titleのrename後勝ち) |
 | metadata.toml | metadata | src/metadata.rs | 5 | TASK-18設計2章/5.5(MetadataDoc導出・変更時のみPUT・latest_source_path 3形態・title変更キーローテーション) + TASK-17 W3(TASK-22: rename由来のtitle追従と旧キー掃除) |
 | docs.toml | docs | src/docs.rs | 10 | TASK-4設計3章・3.9(各ページbyte一致・version置換3段検出=変換関数unit/integration出力/正本sync・config marker置換=render_init_template再利用・終了コード表doc間一致・SKILL.md形式・snippet pointer形式・ページ一覧・invalid-syntax usage error 64・書込失敗0/4)+TASK-7(config-marker-replacedを2profile新schemaのtemplate syncへ文言改訂・id不変) |
-| catalog.toml | catalog | src/catalog.rs | 26 | TASK-9設計2章(DB・D1/D11: path権限・schema・table契約)・4章(同期・D10: validator・freshness)・5章(CLI照会cache・D7)・12章P1+3章(D6: scan対象明示登録=pipeline.toml [profiles.<n>.catalog.scan]・対象選択・4状態分類・--sha256合流・pending_items全置換・push_intents記録)・12章P5+レビュー(既存dir/DB file権限是正)+レビュー再指摘#6(置換失敗・索引object不在時の失効)+TASK-13(api_keys tableの永続class=rebuild保持・schema-migrationの9 tables化改訂)+TASK-19 W2(tag/collection系永続class 4table(tags/collections/collection_items/audit_log)のrebuild保持・schema-migrationの13 tables化改訂)+PR#9レビュー指摘(書込反映のvalidator束縛=upload応答VersionId一致時のみfresh化・fetch反映のmtime基線保持=existing_source_mtimesの2条件) + TASK-17 W3(TASK-22: rebuild保持) |
-| server.toml | server | src/server.rs | 44 | TASK-9設計1章(D2 serve)・6章(API)・8章(server.toml)・9章(D4)・10章(dist二階建て)・12章P2(serve基盤7条件)+P3(読取API 11条件: entities/versions/pins/locations/pending/sync/diff・error体系=指摘#14)+P4(auth-status応答形式・auth endpoint routing・保護API開放=未認証401への置換の3条件。認証契約の詳細はwebauthn.toml)+P5(POST /api/pending/scan・GET /api/pendingのstatus絞り込みの2条件)+レビュー(読取APIのscope既定=serve起動時実効profile)+TASK-13(api-key認証5条件: 認証成立・key不一致401・LAN外403・失効後401・status api_keys件数。auth-endpoints-routingへapi-key endpoint追加の改訂)+TASK-18 W1(runs-list・jobs-listの2条件)+TASK-19 W2(tag/folder/collection読取・tag/collection書込・audit_log記録・entitiesのtag/collection/untagged絞り込みの10条件)+TASK-17 W3(TASK-22: POST rename・POST locationの2条件+write-api-auth-gate文言改訂(id不変)) |
+| catalog.toml | catalog | src/catalog.rs | 28 | TASK-9設計2章(DB・D1/D11: path権限・schema・table契約)・4章(同期・D10: validator・freshness)・5章(CLI照会cache・D7)・12章P1+3章(D6: scan対象明示登録=pipeline.toml [profiles.<n>.catalog.scan]・対象選択・4状態分類・--sha256合流・pending_items全置換・push_intents記録)・12章P5+レビュー(既存dir/DB file権限是正)+レビュー再指摘#6(置換失敗・索引object不在時の失効)+TASK-13(api_keys tableの永続class=rebuild保持・schema-migrationの9 tables化改訂)+TASK-19 W2(tag/collection系永続class 4table(tags/collections/collection_items/audit_log)のrebuild保持・schema-migrationの13 tables化改訂)+PR#9レビュー指摘(書込反映のvalidator束縛=upload応答VersionId一致時のみfresh化・fetch反映のmtime基線保持=existing_source_mtimesの2条件) + TASK-17 W3(TASK-22: rebuild保持) + TASK-17 W4(TASK-27: jobs table schemaと行API・jobs永続classの2条件+schema-migration 14 tables化) |
+| server.toml | server | src/server.rs | 51 | TASK-9設計1章(D2 serve)・6章(API)・8章(server.toml)・9章(D4)・10章(dist二階建て)・12章P2(serve基盤7条件)+P3(読取API 11条件: entities/versions/pins/locations/pending/sync/diff・error体系=指摘#14)+P4(auth-status応答形式・auth endpoint routing・保護API開放=未認証401への置換の3条件。認証契約の詳細はwebauthn.toml)+P5(POST /api/pending/scan・GET /api/pendingのstatus絞り込みの2条件)+レビュー(読取APIのscope既定=serve起動時実効profile)+TASK-13(api-key認証5条件: 認証成立・key不一致401・LAN外403・失効後401・status api_keys件数。auth-endpoints-routingへapi-key endpoint追加の改訂)+TASK-18 W1(runs-list・jobs-listの2条件)+TASK-19 W2(tag/folder/collection読取・tag/collection書込・audit_log記録・entitiesのtag/collection/untagged絞り込みの10条件)+TASK-17 W3(TASK-22: POST rename・POST locationの2条件+write-api-auth-gate文言改訂(id不変)) + TASK-17 W4(TASK-27: job系7条件=POST /api/jobs/get・GET /api/jobs(/:id)・cancel・JobManager実行・waiting_restore timerと時刻seam・semaphore相互直列化・起動時interrupted+server.jobs-listをW4実質化へ文言改訂(id不変)) |
 | webauthn.toml | webauthn | src/server.rs | 15 | TASK-9設計8章(passkey認証契約: bootstrap token生成/原子的消費/期限10分/再起動失効/登録閉鎖/追加登録条件・challenge一度限り・120秒・anonymous session結合・register+login flow(server-to-server・soft passkey合成応答)・session ID付替/cookie属性/期限24h・logout・未認証401)・6章(auth endpoint群)・11章(server-to-server自動検証=指摘#12)・12章P4+レビュー(challenge上限と期限切れ掃除) |
-| frontend.toml | frontend | frontend/src/ | 49 | TASK-9設計7章(frontend構成)・6章(error body形式)・4章(D10 staleness)・8章(passkey認証UI)・12章P3(api client型ガード・apiGet結果mapping・sync store・GET /api/sync応答・fail-closed扱い)+P4(auth status client/store・logout状態管理・401 unauthenticated扱い・authUi getterによるLoginView UI誘導状態)+P5(pending client/store型ガードと一覧取得・scan実行runScanの2条件)+P6(diff client/store型ガードと結果保持(404 not_found=未実行扱い)・diff実行runDiff・diffView getterによるDiffView UI誘導状態+summary集計の3条件)+レビュー(pending/diffの再実行error別状態の2条件)+レビュー高4(entities client/store・手動sync refresh・entitiesView/detail状態・routes登録の5条件)+レビュー再指摘①〜④(絞込同時適用・sync後の詳細失効・詳細/versions error分離・旧result無しのdiff実行失敗表示の4条件)+TASK-13(postApiKeyAuth client・api-key欄表示基盤=authUi非依存の未認証時常時表示+authenticateWithApiKey・専用失敗状態apiKeyErrorの3条件+login-view-auth-ui-state・unauthenticated-401-handlingの文言改訂)+TASK-18 W1(runs/jobs client+store・ui-refresh localStorageの3条件+nav文言改訂)+TASK-19 W2(3ビュー切替+検索・tag編集・collection管理UI・request世代管理・fetchState再試行等の13条件)+PR#9レビュー指摘(詳細要求対象切替時の旧entity詳細clear・旧uuid向け応答棄却=detailTargetUuid導入の1条件)+TASK-17 W3(TASK-22: rename/location client+store・2段階確認composableの3条件) |
+| frontend.toml | frontend | frontend/src/ | 53 | TASK-9設計7章(frontend構成)・6章(error body形式)・4章(D10 staleness)・8章(passkey認証UI)・12章P3(api client型ガード・apiGet結果mapping・sync store・GET /api/sync応答・fail-closed扱い)+P4(auth status client/store・logout状態管理・401 unauthenticated扱い・authUi getterによるLoginView UI誘導状態)+P5(pending client/store型ガードと一覧取得・scan実行runScanの2条件)+P6(diff client/store型ガードと結果保持(404 not_found=未実行扱い)・diff実行runDiff・diffView getterによるDiffView UI誘導状態+summary集計の3条件)+レビュー(pending/diffの再実行error別状態の2条件)+レビュー高4(entities client/store・手動sync refresh・entitiesView/detail状態・routes登録の5条件)+レビュー再指摘①〜④(絞込同時適用・sync後の詳細失効・詳細/versions error分離・旧result無しのdiff実行失敗表示の4条件)+TASK-13(postApiKeyAuth client・api-key欄表示基盤=authUi非依存の未認証時常時表示+authenticateWithApiKey・専用失敗状態apiKeyErrorの3条件+login-view-auth-ui-state・unauthenticated-401-handlingの文言改訂)+TASK-18 W1(runs/jobs client+store・ui-refresh localStorageの3条件+nav文言改訂)+TASK-19 W2(3ビュー切替+検索・tag編集・collection管理UI・request世代管理・fetchState再試行等の13条件)+PR#9レビュー指摘(詳細要求対象切替時の旧entity詳細clear・旧uuid向け応答棄却=detailTargetUuid導入の1条件)+TASK-17 W3(TASK-22: rename/location client+store・2段階確認composableの3条件) + TASK-17 W4(TASK-27: job発行/詳細/取消client+store・polling・転送取得formの4条件+frontend.jobs-client-and-storeをW4拡張schemaへ文言改訂(id不変)) |
 
 - 分割理由: test-structureの`[meta].source_file`(検証対象の実装ファイル・ファイル単位に1つ)が
   7エリアでそれぞれ別moduleに対応し、単一ファイルでは特定できないため。分割によりidの`<area>`部と
