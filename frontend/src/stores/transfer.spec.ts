@@ -75,9 +75,11 @@ describe('transfer store(form初期値・prefill)', () => {
     expect(transfer.uuid).toBe('22222222-2222-2222-2222-222222222222')
 
     // 別対象の明示選択は新しい対象で再適用する(旧対象のversionIdは残さない)
+    transfer.pin = 'oldpin'
     transfer.prefillFromQuery({ get: '99999999-9999-9999-9999-999999999999' })
     expect(transfer.uuid).toBe('99999999-9999-9999-9999-999999999999')
     expect(transfer.versionId).toBe('')
+    expect(transfer.pin).toBe('')
 
     // getが無いqueryでは何も適用しない(別store instance=piniaを作り直して観測)
     setActivePinia(createPinia())

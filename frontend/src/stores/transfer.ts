@@ -51,6 +51,9 @@ export const useTransferStore = defineStore('transfer', {
       this.prefillKey = key
       this.uuid = target
       this.versionId = versionId
+      // pinはserver側でversion_idより優先されるため、前回form入力のpinが
+      // 残ると明示選択した版ではなくピン留め版が取得されてしまう
+      this.pin = ''
     },
     /** formのリセット(既定値へ戻す) */
     reset(): void {

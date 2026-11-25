@@ -217,7 +217,13 @@ pub fn cmd_serve(args: &ServeArgs) -> i32 {
             return 1;
         }
     };
-    runtime.block_on(run_server(cfg, args))
+    let code = runtime.block_on(run_server(cfg, args));
+    // runtimeのdropは実行中spawn_blocking(jobの実処理)の完了を無界に待つため、
+    // worker joinの有界待ち(10秒)だけでは停止全体が有界にならない。明示的に
+    // 有界shutdownし、超過分はprocess終了で中断する(実行中jobは次回起動時の
+    // interrupted一括化で回復する=設計5.4)
+    runtime.shutdown_timeout(std::time::Duration::from_secs(10));
+    code
 }
 
 /// server本体(async側。同期層呼び出しはspawn_blocking経由のみ)。

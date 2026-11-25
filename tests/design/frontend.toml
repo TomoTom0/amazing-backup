@@ -737,4 +737,4 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.3(取得form:
 description = "転送タブの取得form状態(transfer store): form値(uuid/versionId/pin/out/tier/days/overwrite・既定はtier=Standard・days=7・overwrite=false=CLI getと同一)とprefillFromQuery(?get=<uuid>&version_id=...を1度だけ適用=手動入力をprefillで上書きしない。getが無いqueryでは適用しない)・reset(既定値へ戻す)・submitGet(uuid/out必須のclient側最低限検証→jobs storeのissueGetへ接続。submitting実行中状態・clientError・lastSubmitError(jobs storeのlastIssueErrorの転写))を持つ。upload form(push)はW5実装のため含めない (vitest)"
 given = "transfer storeの初期state参照・prefillFromQuery(get付き・2度呼出・get無し)・reset・submitGet(空欄・成功・422失敗)の実行とfetch呼出のmethod/URL/body観測"
 expect_return_shape = "初期値は空欄+既定(tier=Standard・days=7・overwrite=false)。prefillはuuid/versionIdへ適用され2度目・get無しでは適用されない。resetは既定値へ戻す。submitGet空欄はclientError+fetch無し・成功はPOST /api/jobs/get(form値body: 空のversion_id/pinはkeyを送らない)+GET /api/jobs再取得・issuing/submittingは実行中のみtrue・失敗はlastSubmitError"
-source_lines = "frontend/src/stores/transfer.spec.ts:100; frontend/src/stores/transfer.spec.ts:45"
+source_lines = "frontend/src/stores/transfer.spec.ts:111; frontend/src/stores/transfer.spec.ts:45"
