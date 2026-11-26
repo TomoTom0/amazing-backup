@@ -12,18 +12,24 @@ import {
 import { useTransferStore } from '../stores/transfer'
 
 // TASK-17設計2.3・9章W4/W5(TASK-27/28): 転送タブ=取得form + upload form + job一覧 + polling。
-// - 取得form(W4): uuid・版・出力dir・tier・days・overwrite(?get=<uuid>&version_id=... prefill)
+// - 取得form(W4): uuid・版(省略=最新・version_id/pin指定)・出力dir・tier・days・
+//   overwriteはtransfer storeが持ち、詳細画面の版行「取得」からの導線
+//   (?get=<uuid>&version_id=...)をprefillする(job発行までは転送タブで確認=2.2)
 // - upload form(W5): server側path列挙+title(?upload=<path> prefill) →
 //   dry-run予測+接続先確認(実効profile・bucket・prefix・recipients指紋一覧) →
 //   2段階確認(W3の部品)を経てupload jobを発行(POST /api/jobs/push)
 // - job一覧: get/push両対応・進行N/M・現在path・対象ごとの結果(失敗対象行とerror code)・
-//   再実行(冪等)・取消(queuedのみ)
+//   再実行(冪等)・取消(queuedのみ)を進行中/完了行に置く(実行中の取消は409=完了まで
+//   実行のため表示しない)。一覧はjobs store(GET /api/jobs。pollingは設計5.3・ui-refresh
+//   の間隔既定10秒)
+// - 実描画の観測は実browser(条件書frontend.tomlのexcluded参照。form値のprefill・発行・
+//   取消・再実行の成否はtransfer/jobs storeの状態で担保)
 
 const route = useRoute()
 const jobs = useJobsStore()
 const transfer = useTransferStore()
 
-/** route queryのstring化(重複時は先頭) */
+/** route queryのstring化(?get=&version_id=&upload=。重複時は先頭) */
 const queryString = (key: string): string | undefined => {
   const value = route.query[key]
   if (typeof value === 'string') return value
@@ -34,7 +40,7 @@ const queryString = (key: string): string | undefined => {
   return undefined
 }
 
-/** route queryからget / upload formをprefill */
+/** route queryからget / upload formをprefill(1度だけ=手動入力を上書きしない) */
 const prefill = (): void => {
   transfer.prefillFromQuery({
     get: queryString('get'),
@@ -43,6 +49,7 @@ const prefill = (): void => {
   })
 }
 
+/** 実行中jobがある間のjob一覧自動更新(設計5.3: 転送タブ表示中はpolling) */
 onMounted(() => {
   prefill()
   void jobs.fetchJobs()
@@ -56,17 +63,23 @@ watch(
   },
 )
 
+/** polling停止(転送タブを離れる時。nav dot用のpolling(App.vue)は認証状態側で
+ *  start/stopするため互いに独立=ここでは表示中の追従を停止するのみ) */
 onUnmounted(() => {
   jobs.stopPolling()
 })
 
+/** job一覧表示の並びはserver応答(進行中優先・id降順)のまま */
 const jobRows = computed(() => jobs.items)
 
+/** 取消できるのはqueuedのみ(実行中は409=完了まで実行) */
 const cancellable = (status: string): boolean => status === 'queued'
 
+/** 再実行は完了系(job.paramsが無いと再発行できない) */
 const rerunnable = (status: string): boolean =>
   ['succeeded', 'failed', 'interrupted', 'cancelled'].includes(status)
 
+/** job状態の表示語彙(status dotのst-* classと同一語彙) */
 const statusLabel: Record<string, string> = {
   queued: '待機中(queued)',
   running: '実行中(running)',
@@ -77,6 +90,7 @@ const statusLabel: Record<string, string> = {
   cancelled: '取り消し済み(cancelled)',
 }
 
+/** 進行の表示(N/M件。progressが無い行は未開始扱いで表示しない) */
 const progressText = (progress: { done: number; total: number } | null): string => {
   if (progress === null) return '-'
   return `${progress.done}/${progress.total}`
@@ -90,10 +104,12 @@ const fmtSize = (size: number | null): string => {
   return `${size} B`
 }
 
+/** get formのsubmit(jobs storeのissueGetへ) */
 const submitGet = (): void => {
   void transfer.submitGet()
 }
 
+/** upload formのdry-run実行(接続先・予測の確認。storeのrunDryRunへ) */
 const runDryRun = (): void => {
   void transfer.runDryRun()
 }

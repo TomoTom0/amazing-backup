@@ -148,11 +148,11 @@ export const useTransferStore = defineStore('transfer', {
       this.uploadTargets = [{ path: '', title: '' }]
       this.uploadPrefillApplied = false
       this.uploadPrefillKey = null
-      this.dryRunning = false
       this.lastDryRunError = null
       this.uploadSubmitting = false
       this.uploadClientError = null
       this.lastUploadSubmitError = null
+      // dryRunning(要求中状態)は失効と同時に解除される
       this.invalidateUploadConfirm()
     },
     /** 取得jobの発行(W4) */
@@ -179,8 +179,12 @@ export const useTransferStore = defineStore('transfer', {
     },
     /** dry-run確認の失効(dry-run結果と確認済み状態を「dry-run未実行」へ戻す。2段階確認
      *  buttonはdry-run結果と一緒に表示されるため、View部品ごと取り除かれてarmed状態も
-     *  解除される) */
+     *  解除される)。要求中のdry-runがあれば要求中状態も解除する(その要求の応答は世代の
+     *  不一致で破棄されdryRunningを戻さないため、解除しないとformが操作不可のまま残る)。
+     *  失効後に開始した新しい要求は自身でdryRunningを立て直し、古い応答の後着は世代検査で
+     *  抜けるため新しい要求の要求中状態は保たれる */
     invalidateUploadConfirm(): void {
+      this.dryRunning = false
       this.uploadGeneration++
       this.dryRunResult = null
       this.confirmedTargets = null

@@ -46,7 +46,10 @@ export function jobTargetSummary(job: JobItem): string {
 
 /**
  * jobs store(TASK-17設計2.1・2.3・5.3・9章W4/W5): ホーム実行中job区画・転送タブの
- * job一覧・取得/upload jobの発行・再実行・取消・polling制御。
+ * job一覧・取得/upload jobの発行・再実行・取消・polling制御。pollingは設計5.3(転送タブ・
+ * ホームの実行中job追従。間隔はui-refresh storeのintervalMs既定10秒・無効可)。job詳細の
+ * 取得失敗・発行失敗・取消失敗はそれぞれ別状態(detailError/lastIssueError/
+ * lastCancelError)で保持する(P5 lastScanError・P6 lastRunErrorと同一構成)。
  */
 export const useJobsStore = defineStore('jobs', {
   state: () => ({
@@ -56,14 +59,15 @@ export const useJobsStore = defineStore('jobs', {
     /** 選択jobの詳細(GET /api/jobs/:id) */
     detail: null as JobItem | null,
     detailError: null as ApiError | null,
-    /** job発行の実行中状態(Viewは発行buttonを無効化) */
+    /** 取得・upload job発行の実行中状態(Viewは発行buttonを無効化) */
     issuing: false,
     lastIssueError: null as ApiError | null,
     /** 取消失敗の別状態(実行中は409=取消できない案内の基盤) */
     lastCancelError: null as ApiError | null,
     /** pollingの世代(startPolling毎に増加=旧loopの停止判定。0=未起動) */
     pollingEpoch: 0,
-    /** polling利用箇所の参照数 */
+    /** polling利用箇所の参照数(App.vueのnav dot用・転送タブ・ホームの表示中追従が
+     *  独立にstart/stopできる=参照カウント。0になった時点でpollingを停止する) */
     pollingHolders: 0,
   }),
   getters: {
@@ -98,7 +102,8 @@ export const useJobsStore = defineStore('jobs', {
       this.detail = null
       this.detailError = result.error
     },
-    /** 取得jobの発行(発行後は一覧を再取得=転送タブのjob一覧へ即時反映) */
+    /** 取得jobの発行(発行後は一覧を再取得=転送タブのjob一覧へ即時反映。
+     *  失敗(422等)はlastIssueErrorで保持し一覧は変更しない) */
     async issueGet(params: GetJobRequest): Promise<boolean> {
       this.issuing = true
       const result = await postJobsGet(params)
@@ -124,7 +129,8 @@ export const useJobsStore = defineStore('jobs', {
       this.lastIssueError = result.error
       return false
     },
-    /** get jobの再実行(同一paramsで再発行=冪等) */
+    /** get jobの再実行(同一paramsで再発行=冪等。失敗・interrupted・取消済みjobの
+     *  再実行buttonから呼ばれる) */
     async rerunGet(job: JobItem): Promise<boolean> {
       if (job.kind !== 'get' || job.params === null) {
         this.lastIssueError = { code: 'internal', message: 'jobのparamsが読み取れません' }
@@ -170,7 +176,10 @@ export const useJobsStore = defineStore('jobs', {
       }
       this.lastCancelError = result.error
     },
-    /** polling開始(参照カウント式) */
+    /** polling開始(設計5.3: ui-refreshのintervalMs間隔でfetchJobs。参照カウント=
+     *  App.vueのnav dot用と転送タブ・ホームの表示中追従が独立にstart/stopできる。
+     *  最初の要求でloopを1本だけ起動し・間隔は毎tick読み直す=設定変更は次tickから
+     *  反映される) */
     startPolling(): void {
       this.pollingHolders++
       if (this.pollingHolders === 1) {
@@ -178,7 +187,8 @@ export const useJobsStore = defineStore('jobs', {
         this.scheduleNextPoll(epoch)
       }
     },
-    /** polling停止(参照を1つ解放。最後の参照でloopを停止する) */
+    /** polling停止(参照を1つ解放。最後の参照でloopを停止する=進行中の待機timerの
+     *  発火後に停止) */
     stopPolling(): void {
       if (this.pollingHolders > 0) {
         this.pollingHolders--

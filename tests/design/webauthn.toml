@@ -62,7 +62,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(指摘#8契約: in
 description = "bootstrap tokenは原子的消費(consumed flagのatomic swap・1回限り)。有効tokenでのregister/startは一度だけ成功(登録options+challengeを返す)し、使用済み同一tokenでの再register/startは401 unauthenticatedで拒否される(並行使用を許さないatomic swapが契約。観測は逐次呼び出しで担保) (unit, server-to-server)"
 given = "有効tokenが注入されたserver stateでのregister/startと、同一tokenでの再register/start"
 expect_return_shape = "1回目は200(登録options応答)・2回目は401 unauthenticated"
-source_lines = "src/server.rs:6086"
+source_lines = "src/server.rs:6101"
 
 [[condition]]
 id = "webauthn.bootstrap-token-expiry"
@@ -71,7 +71,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(指摘#8契約: �
 description = "bootstrap tokenの期限は10分。期限切れtokenでのregister/startは401 unauthenticatedで拒否される(期限切れは不一致と同じ登録閉鎖=fail-closed)。観測はP4実装が提供する時刻注入seam経由(実時間10分の経過待ちをしない) (unit, server-to-server)"
 given = "時刻注入seamでtoken発行から10分経過した状態でのregister/start(発行済みtoken)"
 expect_return_shape = "401 unauthenticated(登録optionsは返らない)"
-source_lines = "src/server.rs:6113"
+source_lines = "src/server.rs:6128"
 
 [[condition]]
 id = "webauthn.bootstrap-token-restart-invalidation"
@@ -80,7 +80,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(指摘#8契約: in
 description = "bootstrap tokenはin-memory保持(永続DBに置かない)のためserve再起動で失効する。同一tokenは新規server state(再起動相当)では無効 (unit, server-to-server)"
 given = "token生成済みserver stateでのregister/start成功後、新規server state(再起動相当)での同一tokenによるregister/start"
 expect_return_shape = "同一state内では200・新規stateでは401 unauthenticated(tokenは永続化されていない)"
-source_lines = "src/server.rs:6133"
+source_lines = "src/server.rs:6148"
 
 [[condition]]
 id = "webauthn.register-closed-without-valid-token"
@@ -89,7 +89,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(指摘#8契約: cr
 description = "credential数0かつtoken不一致(token無し・誤値)なら登録は閉鎖(fail-closed)される。register/startは登録options・challengeを返さず401 unauthenticatedで応答する(無条件登録開放を許さない) (unit, server-to-server)"
 given = "credential数0(未登録)のserver stateでのregister/start(token無しbody・不一致token)"
 expect_return_shape = "いずれも401 unauthenticated({\"error\":{\"code\",\"message\"}}形式)"
-source_lines = "src/server.rs:6053"
+source_lines = "src/server.rs:6068"
 
 [[condition]]
 id = "webauthn.additional-register-requires-login-and-token"
@@ -98,7 +98,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(追加登録・失
 description = "登録済み(credential数>0)での追加登録はlogin済みsession+bootstrap tokenの両方が必要。未login状態でのtoken提示のみではregister/startは拒否される(single user=D9での乗っ取り登録防止) (unit, server-to-server)"
 given = "credentials tableへ1件挿入済み・未login状態でのregister/start(有効token)"
 expect_return_shape = "401 unauthenticated(未loginでの追加登録は閉鎖)"
-source_lines = "src/server.rs:6149"
+source_lines = "src/server.rs:6164"
 
 [[condition]]
 id = "webauthn.challenge-single-use-expiry"
@@ -107,7 +107,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(challenge: in-memo
 description = "challengeは期限120秒・一度限り消費。login/finishで使用済みchallengeの再使用は401 unauthenticatedで拒否され、期限120秒経過も同様に拒否される(実時間待ちをしない観測はP4実装の時刻注入seam経由) (unit, server-to-server)"
 given = "login/start->login/finish成功後の同一challengeでの再login/finish"
 expect_return_shape = "再使用は401 unauthenticated(challenge消費済み)"
-source_lines = "src/server.rs:6168"
+source_lines = "src/server.rs:6183"
 
 [[condition]]
 id = "webauthn.challenge-reclaim-and-cap"
@@ -116,7 +116,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(challenge: in-memo
 description = "未完了challengeは無制限に蓄積しない: start時に(1)期限切れchallengeの回収 (2)同一session(anonymous session cookie)の保留challengeは最新1件のみ=再startで旧challengeを無効化(1session 1pending) (3)全体件数上限(64)・超過時は期限が最も古いものから破棄。破棄されたchallengeでのfinishは401 unauthenticated(消費済みと同じ扱い) (unit, server-to-server)"
 given = "登録済みcredentialがあるstateでの同一cookieによるlogin/start 2回(旧challengeでのfinish)と、別session 65回のlogin/start(先頭challengeでのfinish)"
 expect_return_shape = "同一sessionの旧challengeは401(再startで無効・最新challengeは200)。上限超過後の最古challengeは401(破棄済み)"
-source_lines = "src/server.rs:5875"
+source_lines = "src/server.rs:5890"
 
 [[condition]]
 id = "webauthn.challenge-bound-to-session-cookie"
@@ -125,7 +125,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(challenge: 発行�
 description = "challengeは発行時のanonymous session cookieと結合する。login/startで発行されたchallengeを別cookie(別session・cookie無しを含む)でlogin/finishへ送出しても拒否される(別browserへのchallenge転用防止) (unit, server-to-server)"
 given = "login/start応答のchallenge+anonymous session cookie A・finishを別cookie B(およびcookie無し)で送出"
 expect_return_shape = "いずれも401 unauthenticated(challengeとsessionの結合不一致)"
-source_lines = "src/server.rs:6224"
+source_lines = "src/server.rs:6239"
 
 [[condition]]
 id = "webauthn.register-login-flow-server-to-server"
@@ -134,7 +134,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 11章(webauthn契約=to
 description = "server-to-serverでpasskey登録・login flowを完結できる: webauthn-rs 0.6系にvirtual authenticator支援は無いため(2026-11-05調査)、WebAuthn仕様準拠の合成認証応答(soft passkey)でregister/start->finish(credentialがcredentials table=永続classへ保存)・login/start->finish(認証済みsession確立)を完結する。test helperの署名合成はP4実装時にwebauthn-rsの応答型・base64url符号化へ接続する (unit, server-to-server)"
 given = "credential数0のserver state・有効bootstrap token・合成passkey応答helper(P4実装時に署名合成を充実)"
 expect_return_shape = "register/finishは200でcredentials tableへ1件保存。login/finishは200で認証済みsession cookieが発行され、当該sessionで保護API(GET /api/entities)が応答する(認証済みでの読取API応答=server.protected-api-open-with-authと共通)"
-source_lines = "src/server.rs:6258"
+source_lines = "src/server.rs:6273"
 
 [[condition]]
 id = "webauthn.login-session-id-rotation"
@@ -143,7 +143,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(session: login成�
 description = "login成功時にsession IDを付け替える(session固定化対策)。login/start時のanonymous session cookieとlogin/finish成功応答の認証済みsession cookieのID値は異なる(pre-login sessionの継続使用を許さない) (unit, server-to-server)"
 given = "login/start応答のSet-Cookie(anonymous session)とlogin/finish成功応答のSet-Cookie(認証済みsession)"
 expect_return_shape = "両cookieのsession ID値は異なる(付替え済み)"
-source_lines = "src/server.rs:6317"
+source_lines = "src/server.rs:6332"
 
 [[condition]]
 id = "webauthn.session-cookie-attributes"
@@ -152,7 +152,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(session: cookie Ht
 description = "session cookieはHttpOnly+SameSite=Strict(rp_originがhttps時はSecure。v1のlocalhost既定rp_origin=httpではSecureは付かない)。Set-Cookie応答headerの属性として観測する (unit, server-to-server)"
 given = "login/start・login/finish応答のSet-Cookie header(localhost既定rp_origin構成)"
 expect_return_shape = "HttpOnly・SameSite=Strictを含む(既定http originではSecure属性無し)"
-source_lines = "src/server.rs:6349"
+source_lines = "src/server.rs:6364"
 
 [[condition]]
 id = "webauthn.session-expiry-24h"
@@ -161,7 +161,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(session: 期限24�
 description = "sessionの期限は24時間(非活動で失効)。期限切れsessionでの保護API accessは401 unauthenticated(未認証扱い)。実時間待ちをしない観測はP4実装の時刻注入seam経由 (unit, server-to-server)"
 given = "時刻注入seamでlogin成功から24時間経過した状態での保護API access(認証済みsession cookie)"
 expect_return_shape = "401 unauthenticated(期限切れsessionは未認証扱い)"
-source_lines = "src/server.rs:6375"
+source_lines = "src/server.rs:6390"
 
 [[condition]]
 id = "webauthn.logout-invalidates-session"
@@ -170,7 +170,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: PO
 description = "POST /api/auth/logoutはsessionを破棄する。logout成功後の同一cookieでの保護API accessは401 unauthenticatedになる(未認証=要認証endpointであるlogout自体も未認証では401) (unit, server-to-server)"
 given = "login済みsessionでのPOST /api/auth/logout成功後・同一cookieでのGET /api/entities"
 expect_return_shape = "logoutは200。続く保護API accessは401 unauthenticated"
-source_lines = "src/server.rs:6393"
+source_lines = "src/server.rs:6408"
 
 [[condition]]
 id = "webauthn.unauthenticated-protected-api-401"
@@ -179,7 +179,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(error体系: unaut
 description = "未認証での保護endpoint accessは401 unauthenticated(503 configurationではない=P2〜P3のprotected_fail_closedをP4の認証gateが置換える)。応答bodyは既存error体系形式({\"error\":{\"code\",\"message\"}}・code=unauthenticated)で、保護対象dataは含まれない (unit, server-to-server)"
 given = "cookie無しでのGET /api/entities(P4認証gate構成後のrouter)"
 expect_return_shape = "401で{\"error\":{\"code\":\"unauthenticated\",\"message\":...}}形式・entities dataは応答bodyに含まれない"
-source_lines = "src/server.rs:6431"
+source_lines = "src/server.rs:6446"
 
 [[excluded]]
 item = "実機login確認(実browser+実際のpasskeyでの登録・login)"

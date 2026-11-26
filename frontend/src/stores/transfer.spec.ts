@@ -411,3 +411,85 @@ describe('transfer store(upload form・prefill・dry-run確認ガード・submit
     expect(transfer.lastUploadSubmitError?.code).toBe('validation_failed')
   })
 })
+
+/** 呼出毎の応答を保留するfetch mock(test側で届ける順序を制御する) */
+const deferredDryRunFetch = (): Array<(response: Response) => void> => {
+  const resolvers: Array<(response: Response) => void> = []
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvers.push(resolve)
+        }),
+    ),
+  )
+  return resolvers
+}
+
+// [covers:frontend.transfer-dry-run-busy-state]
+describe('transfer store(dry-run要求中状態と確認の失効)', () => {
+  it('要求中にprefill再適用や対象変更で確認が失効したら要求中状態を解除し、後着した古い応答は結果を書き換えない', async () => {
+    const resolvers = deferredDryRunFetch()
+    const transfer = useTransferStore()
+    transfer.updateUploadTarget(0, { path: '/nas/a.zip', title: 'a' })
+    const first = transfer.runDryRun()
+    expect(transfer.dryRunning).toBe(true)
+
+    // 要求中に別対象のupload導線(?upload=)でprefillが再適用される(Viewは要求中も
+    // route queryの変化でprefillする)。失効と同時に要求中状態も解除する
+    //(解除しないとformが操作不可のまま残る)
+    transfer.prefillFromQuery({ upload: '/nas/b.zip' })
+    expect(transfer.dryRunning).toBe(false)
+    expect(transfer.dryRunResult).toBeNull()
+    expect(transfer.isUploadConfirmed).toBe(false)
+
+    // 古い応答の後着は破棄(結果も要求中状態も書き換えない)
+    resolvers[0]?.(responseOf(200, dryRunResp))
+    expect(await first).toBe(false)
+    expect(transfer.dryRunning).toBe(false)
+    expect(transfer.dryRunResult).toBeNull()
+    expect(transfer.isUploadConfirmed).toBe(false)
+
+    // 対象編集による失効でも同じく要求中状態を解除する
+    const second = transfer.runDryRun()
+    expect(transfer.dryRunning).toBe(true)
+    transfer.updateUploadTarget(0, { title: 'edited' })
+    expect(transfer.dryRunning).toBe(false)
+    resolvers[1]?.(responseOf(200, dryRunResp))
+    expect(await second).toBe(false)
+    expect(transfer.dryRunning).toBe(false)
+    expect(transfer.dryRunResult).toBeNull()
+
+    // 失効後は新しい入力でdry-runをやり直せる
+    const third = transfer.runDryRun()
+    expect(transfer.dryRunning).toBe(true)
+    resolvers[2]?.(responseOf(200, dryRunResp))
+    expect(await third).toBe(true)
+    expect(transfer.dryRunning).toBe(false)
+    expect(transfer.isUploadConfirmed).toBe(true)
+  })
+
+  it('古い応答の後着は新しい要求の要求中状態を解除しない', async () => {
+    const resolvers = deferredDryRunFetch()
+    const transfer = useTransferStore()
+    transfer.updateUploadTarget(0, { path: '/nas/a.zip', title: 'first' })
+    const stale = transfer.runDryRun()
+    transfer.updateUploadTarget(0, { title: 'second' })
+    const current = transfer.runDryRun()
+    expect(transfer.dryRunning).toBe(true)
+
+    // 古い応答が先に届いても新しい要求の要求中状態と結果は保つ
+    resolvers[0]?.(responseOf(200, dryRunResp))
+    expect(await stale).toBe(false)
+    expect(transfer.dryRunning).toBe(true)
+    expect(transfer.dryRunResult).toBeNull()
+    expect(transfer.isUploadConfirmed).toBe(false)
+
+    // 新しい応答で確定する
+    resolvers[1]?.(responseOf(200, dryRunResp))
+    expect(await current).toBe(true)
+    expect(transfer.dryRunning).toBe(false)
+    expect(transfer.isUploadConfirmed).toBe(true)
+  })
+})

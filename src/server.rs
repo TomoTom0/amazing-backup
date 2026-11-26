@@ -1799,7 +1799,7 @@ async fn post_push_dry_run(
                         "uuid": serde_json::Value::Null,
                         "title": serde_json::Value::Null,
                         "warning": serde_json::Value::Null,
-                        "error": { "code": api_error_of(&e).code, "message": e.to_string() },
+                        "error": push_file_error_json(&e),
                     }));
                 }
             }
@@ -2178,10 +2178,7 @@ fn push_result_json(outcome: &crate::storage::backup::PushRunOutcome) -> serde_j
                 "status": if f.error.is_some() { "failed" } else { "ok" },
             });
             if let Some(e) = &f.error {
-                row["error"] = serde_json::json!({
-                    "code": api_error_of(e).code,
-                    "message": e.to_string(),
-                });
+                row["error"] = push_file_error_json(e);
             }
             row
         })
@@ -2195,6 +2192,24 @@ fn push_result_json(outcome: &crate::storage::backup::PushRunOutcome) -> serde_j
             "failed": outcome.summary.failed,
         },
     })
+}
+
+/// push jobのper-file失敗行・dry-runの対象解決失敗行のerror{code,message}(TASK-28設計
+/// D-P2/D-P3。code変換はapi_error_ofと同一経路)。messageは対象error(BackupError::Target=
+/// 不在・拡張子違反・title未指定など利用者の指定した対象に起因する失敗)に限り対象を特定
+/// できる詳細文言とし、それ以外のstorage層内部error(暗号化・registry書込・S3通信等)は
+/// api_error_ofの一般化文言にする(正本3.1: 内部errorの無加工返却禁止・秘密情報境界。
+/// 内部cache path等の詳細はlogのみ)。
+fn push_file_error_json(e: &BackupError) -> serde_json::Value {
+    let api = api_error_of(e);
+    let message = match e {
+        BackupError::Target(m) => m.clone(),
+        _ => {
+            eprintln!("serve: pushの対象処理エラー詳細(logのみ): {e}");
+            api.message.to_string()
+        }
+    };
+    serde_json::json!({ "code": api.code, "message": message })
 }
 
 /// push job実行の同期本体(spawn_blocking内で実行)。preflight(設定読込・versioning確認・
@@ -10541,5 +10556,95 @@ mod tests {
             parse(&tracker.apply(&PushProgress::FinalizeStart)),
             serde_json::json!({"phase": "finalize", "total": 2, "done": 2, "current_path": null})
         );
+    }
+
+    /// [covers:server.jobs-push-error-message]
+    /// 失敗行のerror{code,message}(D-P3): codeはapi_error_ofと同一の変換。messageは
+    /// 対象error(BackupError::Target=利用者の指定した対象・titleに起因する失敗)は対象を
+    /// 特定できる詳細文言のまま(D-P2の応答例と同一)。暗号化・registry書込・S3通信等の
+    /// storage層内部errorはapi_error_ofの一般化文言とする(正本3.1: 内部errorの無加工返却
+    /// 禁止・秘密情報境界。内部path等の詳細はlogのみ)。
+    #[test]
+    fn push_result_json_generalizes_internal_file_errors() {
+        use crate::errors::BackupError;
+        use crate::storage::backup::{PushFileResult, PushRunOutcome, PushRunSummary};
+        let file = |action: Option<&'static str>, error: Option<BackupError>| PushFileResult {
+            path: "/data/a.zip".to_string(),
+            name: Some("a.zip".to_string()),
+            action,
+            uuid: None,
+            error,
+        };
+        const INTERNAL_DETAIL: &str =
+            "平文の暗号化に失敗(/srv/amazing-backup/cache/a.zip.age.part): 書き込めません";
+        const UPSTREAM_DETAIL: &str = "S3 PutObject失敗(bucket=internal-bucket, key=x): 403";
+        let outcome = PushRunOutcome {
+            files: vec![
+                file(Some("new"), None),
+                file(
+                    None,
+                    Some(BackupError::Target(
+                        "対象ファイルが存在しない: /data/absent.zip".to_string(),
+                    )),
+                ),
+                file(
+                    None,
+                    Some(BackupError::Internal(INTERNAL_DETAIL.to_string())),
+                ),
+                file(
+                    None,
+                    Some(BackupError::Transfer(UPSTREAM_DETAIL.to_string())),
+                ),
+                file(
+                    None,
+                    Some(BackupError::Config(
+                        "pipeline.toml(/srv/config/pipeline.toml): 不正".to_string(),
+                    )),
+                ),
+                file(
+                    None,
+                    Some(BackupError::Process("sha256照合不一致".to_string())),
+                ),
+                file(
+                    None,
+                    Some(BackupError::Usage("uuidの形式が不正".to_string())),
+                ),
+            ],
+            summary: PushRunSummary::default(),
+            fatal_error: None,
+        };
+        let value = push_result_json(&outcome);
+        let files = value["files"].as_array().expect("files");
+        let error_of = |index: usize| files[index]["error"].clone();
+
+        // 成功行はerrorを持たない
+        assert!(files[0].get("error").is_none());
+        // 対象error: 対象を特定できる詳細文言(どの対象がなぜ失敗したか)
+        assert_eq!(
+            error_of(1),
+            serde_json::json!({
+                "code": "not_found",
+                "message": "対象ファイルが存在しない: /data/absent.zip",
+            })
+        );
+        // storage層内部error: codeはapi_error_ofと同一・messageは一般化文言
+        for (index, code, message) in [
+            (2usize, "internal", "内部エラーが発生しました"),
+            (3, "upstream", "上流ストレージ(S3)との通信に失敗しました"),
+            (4, "configuration", "設定の読み込みに失敗しました"),
+            (5, "validation_failed", "処理・検証に失敗しました"),
+            (6, "invalid_request", "リクエストの形式が不正です"),
+        ] {
+            assert_eq!(
+                error_of(index),
+                serde_json::json!({ "code": code, "message": message }),
+                "files[{index}]のerror"
+            );
+        }
+        // 内部path・bucket名等の生の詳細文言は応答へ含めない
+        let serialized = value.to_string();
+        assert!(!serialized.contains("/srv/amazing-backup/cache"));
+        assert!(!serialized.contains("internal-bucket"));
+        assert!(!serialized.contains("/srv/config"));
     }
 }
