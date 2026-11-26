@@ -4,7 +4,7 @@ import { useSyncStore } from '../stores/sync'
 import { usePendingStore } from '../stores/pending'
 import { useDiffStore } from '../stores/diff'
 import { useRunsStore } from '../stores/runs'
-import { useJobsStore } from '../stores/jobs'
+import { jobTargetSummary, useJobsStore } from '../stores/jobs'
 import SyncStatus from '../components/SyncStatus.vue'
 
 // TASK-17設計2.1(ホーム=状態の要約)・9章W1: sync状態・backup概况(前回backup)・
@@ -142,7 +142,7 @@ const pendingLabel: Record<string, string> = {
         <tbody>
           <tr v-for="job in jobs.activeJobs" :key="job.id">
             <td>{{ job.kind }}</td>
-            <td class="mono">{{ job.params?.uuid ?? '-' }}</td>
+            <td class="mono job-current-path">{{ jobTargetSummary(job) }}</td>
             <td>
               <span :class="`job-status st-${job.status}`">{{ job.status }}</span>
             </td>

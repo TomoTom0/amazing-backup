@@ -397,7 +397,10 @@ fn serve_pending_scan_unauthenticated_401() {
 // 詳細観測はsrc/server.rs内handler単体testが担う)。
 
 /// [covers:server.jobs-get-issue]
-/// job系API(POST /api/jobs/get・GET /api/jobs/:id・POST /api/jobs/:id/cancel)は
+/// [covers:server.jobs-push-issue]
+/// [covers:server.push-dry-run]
+/// job系API(POST /api/jobs/get・POST /api/jobs/push・POST /api/push/dry-run・
+/// GET /api/jobs/:id・POST /api/jobs/:id/cancel)は
 /// 未認証401(job系APIも同一session gate=設計6章D-W11)。serve経由でrouter実装への
 /// gate適用を回帰観測する。
 #[test]
@@ -413,6 +416,8 @@ fn serve_jobs_api_unauthenticated_401() {
     // なる(Content-Length: 0の素朴requestで観測)
     for (method, path) in [
         ("POST", "/api/jobs/get"),
+        ("POST", "/api/jobs/push"),
+        ("POST", "/api/push/dry-run"),
         ("GET", "/api/jobs/1"),
         ("POST", "/api/jobs/1/cancel"),
     ] {

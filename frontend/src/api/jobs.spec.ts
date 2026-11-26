@@ -40,6 +40,36 @@ const jobItem = {
   updated_at: '2026-11-24T10:05:00+09:00',
 }
 
+// W5(TASK-28設計D-P3): kind=pushのjob要素。result=files(対象単位・失敗行のみerror)
+// +summary。progress.phaseはqueued→resolve→upload→finalize。
+const pushJob = {
+  id: 2,
+  kind: 'push',
+  status: 'failed',
+  params: {
+    targets: [{ path: '/data/a.zip', title: 'alpha' }, { path: '/data/absent.zip', title: null }],
+  },
+  progress: { phase: 'finalize', total: 3, done: 3, current_path: null },
+  result: {
+    files: [
+      { path: '/data/a.zip', name: 'a.zip', action: 'new', uuid: '1111', status: 'ok' },
+      { path: '/data/b.zip', name: 'b.zip', action: 'skip', uuid: '2222', status: 'ok' },
+      {
+        path: '/data/absent.zip',
+        name: null,
+        action: null,
+        uuid: null,
+        status: 'failed',
+        error: { code: 'not_found', message: '対象エラー: 対象ファイルが存在しない: /data/absent.zip' },
+      },
+    ],
+    summary: { ok: 1, skip: 1, merge: 0, failed: 1 },
+  },
+  error: { code: 'not_found', message: '対象が見つかりません' },
+  created_at: '2026-11-25T10:00:00+09:00',
+  updated_at: '2026-11-25T10:01:00+09:00',
+}
+
 const responseOf = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), {
     status,
@@ -86,9 +116,92 @@ describe('GET /api/jobs応答の型ガード(isJobsResponse)', () => {
     expect(isJobResponse({ job: { ...jobItem, result: { name: 'a', dest: 'a', skip: true } } })).toBe(
       true,
     )
+    // W5(TASK-28): kind=push(params={targets:[{path,title}]}・result={files:
+    // [{path,name,action,uuid,status,error?}],summary:{ok,skip,merge,failed}})
+    expect(isJobsResponse({ jobs: [pushJob] })).toBe(true)
+    // 実行中(queued/running=result=null。phaseはresolve/upload)も受理する
+    expect(
+      isJobsResponse({
+        jobs: [
+          {
+            ...pushJob,
+            status: 'running',
+            progress: { phase: 'upload', total: 3, done: 1, current_path: '/data/b.zip' },
+            result: null,
+            error: null,
+          },
+        ],
+      }),
+    ).toBe(true)
   })
 
-  it('W4 schema違反はfalse', () => {
+  it('W4/W5 schema違反はfalse', () => {
+    // kind=pushのparams/result違反もfalse
+    expect(
+      isJobsResponse({
+        jobs: [
+          {
+            ...pushJob,
+            params: { targets: [{ path: 123, title: null }] },
+          },
+        ],
+      }),
+    ).toBe(false)
+    // resultのfiles/summary欠落
+    expect(isJobsResponse({ jobs: [{ ...pushJob, result: { files: [] } }] })).toBe(false)
+    expect(
+      isJobsResponse({
+        jobs: [
+          {
+            ...pushJob,
+            result: { summary: { ok: 1, skip: 1, merge: 0, failed: 1 } },
+          },
+        ],
+      }),
+    ).toBe(false)
+    if (pushJob.result === null) throw new Error('test fixture')
+    const summary = pushJob.result.summary
+    // files要素の違反: action語彙('failed'はstatusであってactionでない)・status違反・
+    // 失敗行のerror欠落
+    expect(
+      isJobsResponse({
+        jobs: [
+          {
+            ...pushJob,
+            result: {
+              files: [{ path: '/x', name: 'x', action: 'failed', uuid: null, status: 'failed' }],
+              summary,
+            },
+          },
+        ],
+      }),
+    ).toBe(false)
+    expect(
+      isJobsResponse({
+        jobs: [
+          {
+            ...pushJob,
+            result: {
+              files: [{ path: '/x', name: 'x', action: 'new', uuid: '1111', status: 'bogus' }],
+              summary,
+            },
+          },
+        ],
+      }),
+    ).toBe(false)
+    expect(
+      isJobsResponse({
+        jobs: [
+          {
+            ...pushJob,
+            result: {
+              files: [{ path: '/x', name: 'x', action: null, uuid: null, status: 'failed' }],
+              summary,
+            },
+          },
+        ],
+      }),
+    ).toBe(false)
     // jobs欠落・jobs非配列・要素のfield欠落・id非number
     expect(isJobsResponse({})).toBe(false)
     expect(isJobsResponse({ jobs: 'x' })).toBe(false)
@@ -224,7 +337,10 @@ describe('jobs client(fetchJobDetail・postJobCancel)', () => {
     expect(ok.ok).toBe(true)
     if (ok.ok) {
       expect(ok.data.job.id).toBe(1)
-      expect(ok.data.job.params?.uuid).toBe('11111111-1111-1111-1111-111111111111')
+      expect(ok.data.job.kind).toBe('get')
+      if (ok.data.job.kind === 'get') {
+        expect(ok.data.job.params?.uuid).toBe('11111111-1111-1111-1111-111111111111')
+      }
     }
     const notFound = await fetchJobDetail(999)
     expect(notFound.ok).toBe(false)

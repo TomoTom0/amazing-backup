@@ -549,20 +549,56 @@ export type JobProgress = {
 /** get jobの結果(succeeded時。skipは既存平文sha一致の冪等skip時のみ) */
 export type GetJobResult = { name: string; dest: string; skip?: boolean }
 
-/** GET /api/jobs のjob schema(W4(TASK-27)拡張: params/progress/result/error。
- *  paramsはget jobの発行body(kind=getの現在対象。push jobはW5で拡張)。
- *  resultはget jobの結果・errorは失敗時の{code,message}) */
-export type JobItem = {
+/** push jobの対象1件param(POST /api/jobs/push保存表現。title未指定はnull) */
+export type PushJobTargetParam = { path: string; title: string | null }
+
+/** push jobの発行params(kind=pushのjobs table params_json) */
+export type PushJobParams = { targets: PushJobTargetParam[] }
+
+/** push jobの結果の対象1件(TASK-28設計D-P3。actionはskip/merge/re_put/newで、平文sha
+ *  判明前に失敗した等の失敗行はnull。status=failedの時のみerrorを持つ) */
+export type PushJobResultFile = {
+  path: string
+  name: string | null
+  action: 'skip' | 'merge' | 're_put' | 'new' | null
+  uuid: string | null
+  status: 'ok' | 'failed'
+  error?: { code: string; message: string }
+}
+
+/** push jobの結果(succeeded/failed双方で対象単位の結果+集計を保持。
+ *  filesは入力順。部分成功の可視化に使う) */
+export type PushJobResult = {
+  files: PushJobResultFile[]
+  summary: { ok: number; skip: number; merge: number; failed: number }
+}
+
+/** GET /api/jobs の共通job field */
+type JobItemBase = {
   id: number
-  kind: string
   status: string
-  params: GetJobParams | null
   progress: JobProgress | null
-  result: GetJobResult | null
   error: { code: string; message: string } | null
   created_at: string
   updated_at: string
 }
+
+/** kind=get のjob要素 */
+export type GetJobItem = JobItemBase & {
+  kind: 'get'
+  params: GetJobParams | null
+  result: GetJobResult | null
+}
+
+/** kind=push のjob要素(W5拡張) */
+export type PushJobItem = JobItemBase & {
+  kind: 'push'
+  params: PushJobParams | null
+  result: PushJobResult | null
+}
+
+/** GET /api/jobs のjob schema(W4 get + W5 push の判別可能な共用体) */
+export type JobItem = GetJobItem | PushJobItem
 
 /** GET /api/jobs の応答形式({"jobs":[...]}。並びは進行中優先・id降順) */
 export type JobsResponse = { jobs: JobItem[] }
@@ -578,6 +614,17 @@ function isGetJobParams(v: unknown): v is GetJobParams {
   return (
     (versionId === null || typeof versionId === 'string') &&
     (pin === null || typeof pin === 'string')
+  )
+}
+
+/** push jobの発行paramsの型ガード */
+function isPushJobParams(v: unknown): v is PushJobParams {
+  if (!isRecord(v) || !Array.isArray(v['targets'])) return false
+  return v['targets'].every(
+    (t) =>
+      isRecord(t) &&
+      typeof t['path'] === 'string' &&
+      (t['title'] === null || typeof t['title'] === 'string'),
   )
 }
 
@@ -602,25 +649,78 @@ function isGetJobResult(v: unknown): v is GetJobResult {
   return skip === undefined || typeof skip === 'boolean'
 }
 
-/** job要素の型ガード(id/kind/status/created_at/updated_at+W4のparams/progress/
+const PUSH_RESULT_ACTIONS: readonly string[] = ['skip', 'merge', 're_put', 'new']
+
+function isPushJobResultFile(v: unknown): v is PushJobResultFile {
+  if (!isRecord(v) || typeof v['path'] !== 'string') return false
+  const name = v['name']
+  const action = v['action']
+  const uuid = v['uuid']
+  const status = v['status']
+  if (!(name === null || typeof name === 'string')) return false
+  if (!(action === null || (typeof action === 'string' && PUSH_RESULT_ACTIONS.includes(action)))) {
+    return false
+  }
+  if (!(uuid === null || typeof uuid === 'string')) return false
+  const error = v['error']
+  if (status === 'failed') {
+    return (
+      isRecord(error) &&
+      typeof error['code'] === 'string' &&
+      typeof error['message'] === 'string'
+    )
+  }
+  return status === 'ok' && (error === undefined || error === null)
+}
+
+/** push job結果の型ガード(files+summary。失敗行のみerror{code,message}を持つ) */
+function isPushJobResult(v: unknown): v is PushJobResult {
+  if (!isRecord(v)) return false
+  const summary = v['summary']
+  if (
+    !isRecord(summary) ||
+    typeof summary['ok'] !== 'number' ||
+    typeof summary['skip'] !== 'number' ||
+    typeof summary['merge'] !== 'number' ||
+    typeof summary['failed'] !== 'number'
+  ) {
+    return false
+  }
+  const files = v['files']
+  if (!Array.isArray(files)) return false
+  return files.every((file) => isPushJobResultFile(file))
+}
+
+/** job要素の型ガード(id/kind/status/created_at/updated_at+W4/W5のparams/progress/
  *  result/error。params/progress/result/errorはnullを許容する) */
 function isJobItem(v: unknown): v is JobItem {
   if (!isRecord(v)) return false
   if (typeof v['id'] !== 'number' || typeof v['kind'] !== 'string') return false
   if (typeof v['status'] !== 'string') return false
   if (typeof v['created_at'] !== 'string' || typeof v['updated_at'] !== 'string') return false
+  const kind = v['kind']
   const params = v['params']
   const progress = v['progress']
   const result = v['result']
   const error = v['error']
-  if (!(params === null || isGetJobParams(params))) return false
   if (!(progress === null || isJobProgress(progress))) return false
-  if (!(result === null || isGetJobResult(result))) return false
   if (error !== null) {
     if (!isRecord(error)) return false
     if (typeof error['code'] !== 'string' || typeof error['message'] !== 'string') return false
   }
-  return true
+  if (kind === 'get') {
+    return (
+      (params === null || isGetJobParams(params)) &&
+      (result === null || isGetJobResult(result))
+    )
+  }
+  if (kind === 'push') {
+    return (
+      (params === null || isPushJobParams(params)) &&
+      (result === null || isPushJobResult(result))
+    )
+  }
+  return false
 }
 
 /** GET /api/jobs応答の型ガード(jobs配列+各要素のW4 schema一致のみtrue) */
@@ -675,6 +775,140 @@ export function postJobsGet(params: GetJobRequest): Promise<ApiResult<JobRespons
  *  object。実行中・完了済みは409 duplicateのerror扱い) */
 export function postJobCancel(id: number): Promise<ApiResult<JobResponse>> {
   return apiPost(`/api/jobs/${id}/cancel`, null, isJobResponse)
+}
+
+// --- push dry-run / push job(TASK-17 W5・設計2.3/3.2/9章W5) ---
+
+/** push対象1件の入力(titleは省略可) */
+export type PushTargetInput = {
+  path: string
+  title?: string
+}
+
+/** POST /api/jobs/push・POST /api/push/dry-run 共通request body */
+export type PushJobRequest = {
+  targets: PushTargetInput[]
+}
+
+/** POST /api/push/dry-run の接続先情報(実効profile・bucket・prefix・recipients指紋。
+ *  2.3「接続先確認」の実体) */
+export type PushConnectionInfo = {
+  profile: string
+  bucket: string
+  prefix: string
+  recipients: string[]
+}
+
+/** POST /api/push/dry-run の対象1件の予測(TASK-28設計D-P2。action語彙はCLI表示の
+ *  skip/re-put/merge/newに対応するsnake_case+対象解決失敗のerror) */
+export type PushDryRunTarget = {
+  path: string
+  /** error行(対象解決失敗)は未確定のためnull */
+  name: string | null
+  size: number | null
+  action: 'skip' | 're_put' | 'merge' | 'new' | 'error'
+  /** newと同一run内の先行newへの合流mergeはnull(実UUID未発行) */
+  uuid: string | null
+  title: string | null
+  /** new予測でtitle未指定の時のみCLI WARNING文相当 */
+  warning: string | null
+  /** 同一run内の先行newへの合流mergeの時、先行対象のtargets内index */
+  merge_target_index?: number | null
+  /** error行のみ */
+  error?: { code: string; message: string }
+}
+
+/** POST /api/push/dry-run の集計(countはerror行を含む応答targets数。total_sizeは
+ *  解決成功対象のみの合計) */
+export type PushDryRunSummary = {
+  count: number
+  total_size: number
+  skip: number
+  re_put: number
+  merge: number
+  new: number
+  failed: number
+}
+
+/** POST /api/push/dry-run の応答形式 */
+export type PushDryRunResponse = {
+  connection: PushConnectionInfo
+  targets: PushDryRunTarget[]
+  summary: PushDryRunSummary
+}
+
+const DRY_RUN_ACTIONS: readonly string[] = ['skip', 're_put', 'merge', 'new', 'error']
+
+function isPushDryRunTarget(v: unknown): v is PushDryRunTarget {
+  if (!isRecord(v) || typeof v['path'] !== 'string') return false
+  const action = v['action']
+  if (typeof action !== 'string' || !DRY_RUN_ACTIONS.includes(action)) return false
+  const nullableString = (x: unknown): boolean => x === null || typeof x === 'string'
+  if (
+    !nullableString(v['name']) ||
+    !(v['size'] === null || typeof v['size'] === 'number') ||
+    !nullableString(v['uuid']) ||
+    !nullableString(v['title']) ||
+    !nullableString(v['warning'])
+  ) {
+    return false
+  }
+  const mergeTargetIndex = v['merge_target_index']
+  if (
+    !(
+      mergeTargetIndex === undefined ||
+      mergeTargetIndex === null ||
+      typeof mergeTargetIndex === 'number'
+    )
+  ) {
+    return false
+  }
+  const error = v['error']
+  if (action === 'error') {
+    return (
+      isRecord(error) && typeof error['code'] === 'string' && typeof error['message'] === 'string'
+    )
+  }
+  return error === undefined || error === null
+}
+
+/** POST /api/push/dry-run応答の型ガード */
+export function isPushDryRunResponse(v: unknown): v is PushDryRunResponse {
+  if (!isRecord(v)) return false
+  const conn = v['connection']
+  if (!isRecord(conn)) return false
+  if (
+    typeof conn['profile'] !== 'string' ||
+    typeof conn['bucket'] !== 'string' ||
+    typeof conn['prefix'] !== 'string' ||
+    !isStringArray(conn['recipients'])
+  ) {
+    return false
+  }
+  const targets = v['targets']
+  if (!Array.isArray(targets)) return false
+  if (!targets.every((target) => isPushDryRunTarget(target))) return false
+  const sum = v['summary']
+  if (!isRecord(sum)) return false
+  return (
+    typeof sum['count'] === 'number' &&
+    typeof sum['total_size'] === 'number' &&
+    typeof sum['skip'] === 'number' &&
+    typeof sum['re_put'] === 'number' &&
+    typeof sum['merge'] === 'number' &&
+    typeof sum['new'] === 'number' &&
+    typeof sum['failed'] === 'number'
+  )
+}
+
+/** push予測の実行(保護API・POST /api/push/dry-run。S3 API無しの同期実行) */
+export function postPushDryRun(params: PushJobRequest): Promise<ApiResult<PushDryRunResponse>> {
+  return apiPost('/api/push/dry-run', params, isPushDryRunResponse)
+}
+
+/** upload(push)jobの発行(保護API・POST /api/jobs/push。即時応答はqueuedのjob object) */
+export function postJobsPush(params: PushJobRequest): Promise<ApiResult<JobResponse>> {
+  return apiPost('/api/jobs/push', params, isJobResponse)
 }
 
 // --- tags/folders/collections(TASK-17設計2.2(バックアップ一覧の3ビュー)・3.2

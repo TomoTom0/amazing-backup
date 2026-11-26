@@ -323,6 +323,7 @@ const pendingLabel: Record<string, string> = {
           <th>path</th>
           <th>size</th>
           <th>mtime</th>
+          <th>操作</th>
         </tr>
       </thead>
       <tbody>
@@ -331,6 +332,13 @@ const pendingLabel: Record<string, string> = {
           <td class="mono">{{ item.path }}</td>
           <td class="mono">{{ fmtSize(item.size) }}</td>
           <td class="mono">{{ item.mtime }}</td>
+          <td>
+            <router-link
+              v-if="item.status === 'unbacked'"
+              :to="{ path: '/transfer', query: { upload: item.path } }"
+              class="btn-quiet"
+            >upload</router-link>
+          </td>
         </tr>
       </tbody>
     </table>

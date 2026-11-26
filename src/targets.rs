@@ -104,6 +104,118 @@ pub fn resolve_targets_storage(
     resolve_targets_opts(positionals, from_list, false)
 }
 
+/// TASK-17 W5(TASK-28設計D-P3): 構造化対象`(path, title)`列の共通resolver。
+/// CLI `resolve_targets_storage`(位置引数+from-list parse→候補列挙のwrapper)と
+/// 同一規則(realpath解決・通常file検査・.zip/.7z拡張子whitelist・realpath重複検査・
+/// size/mtime取得)で1件ずつ解決し、失敗は全体Errにせず入力順のper-file結果として
+/// 返す(server側のdry-run・job実行は失敗対象を結果に残して続行する。CLIの全体Err・
+/// 終了3の挙動は`resolve_targets_storage`側で不変)。
+pub fn resolve_entries_storage(entries: &[(PathBuf, Option<String>)]) -> Vec<ResolvedEntry> {
+    let mut seen_realpaths = std::collections::HashSet::new();
+    entries
+        .iter()
+        .map(|(raw, title)| ResolvedEntry {
+            raw_path: raw.clone(),
+            result: resolve_entry_storage(raw, title, &mut seen_realpaths),
+        })
+        .collect()
+}
+
+/// TASK-17 W5(TASK-28): 構造化対象1件の解決結果(失敗も入力順に保ちper-file失敗として
+/// 扱う。全体ErrのCLI経路は本型を使わない)。
+#[derive(Debug)]
+pub struct ResolvedEntry {
+    /// 入力path(解決失敗行の表示用)
+    pub raw_path: PathBuf,
+    pub result: Result<Target, BackupError>,
+}
+
+/// 構造化対象1件の解決(realpath重複は先頭行を受理し後続行を失敗させる)。
+fn resolve_entry_storage(
+    raw: &Path,
+    title: &Option<String>,
+    seen_realpaths: &mut std::collections::HashSet<PathBuf>,
+) -> Result<Target, BackupError> {
+    let (abs, source_name) = inspect_candidate(raw, None).map_err(BackupError::Target)?;
+    if !seen_realpaths.insert(abs.clone()) {
+        return Err(BackupError::Target(format!(
+            "realpathが重複している: {}",
+            abs.display()
+        )));
+    }
+    target_from_metadata(abs, source_name, title)
+}
+
+/// 候補1件のrealpath解決・通常file検査・拡張子検査・name override形式検査(3.1-1/2)。
+/// 戻り値=(realpath, 出力名)。Errはerror集約用の文言。
+fn inspect_candidate(raw: &Path, name_override: Option<&str>) -> Result<(PathBuf, String), String> {
+    let abs = match raw.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return Err(format!("対象ファイルが存在しない: {}", raw.display())),
+    };
+    let meta = match std::fs::metadata(&abs) {
+        Ok(m) => m,
+        Err(_) => {
+            return Err(format!(
+                "対象ファイルのmetadata取得に失敗: {}",
+                abs.display()
+            ));
+        }
+    };
+    if !meta.is_file() {
+        return Err(format!(
+            "対象は通常fileでない(directory等): {}",
+            abs.display()
+        ));
+    }
+    let ext_ok = ["zip", "7z"].iter().any(|e| {
+        abs.extension()
+            .map(|x| x.to_string_lossy().eq_ignore_ascii_case(e))
+            .unwrap_or(false)
+    });
+    if !ext_ok {
+        return Err(format!("拡張子が対象外(.zip/.7zのみ): {}", abs.display()));
+    }
+    let basename = abs
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let source_name = match name_override {
+        Some(n) => {
+            // name overrideはbasename形式のみ許容(2.5・3.1。出力path・S3キーの
+            // traversalや空nameを防止する対象エラー)
+            if !is_valid_basename(n) {
+                return Err(format!(
+                    "from-listのnameはbasename形式のみ許容される(空・パス区切り・\".\"・\"..\"は不可): {n:?} ({})",
+                    raw.display()
+                ));
+            }
+            n.to_string()
+        }
+        None => basename,
+    };
+    Ok((abs, source_name))
+}
+
+/// 解決済み候補のmetadataからTargetを組み立て(size/mtime取得)。
+fn target_from_metadata(
+    abs: PathBuf,
+    source_name: String,
+    title: &Option<String>,
+) -> Result<Target, BackupError> {
+    let meta = std::fs::metadata(&abs).map_err(|e| {
+        BackupError::Target(format!("対象のmetadata取得に失敗 ({}): {e}", abs.display()))
+    })?;
+    let mtime = systemtime_to_jst(meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH));
+    Ok(Target {
+        size: meta.len(),
+        source_path: abs,
+        source_name,
+        mtime,
+        title: title.clone(),
+    })
+}
+
 fn resolve_targets_opts(
     positionals: &[PathBuf],
     from_list: Option<&Path>,
@@ -119,64 +231,21 @@ fn resolve_targets_opts(
             candidates.push((entry.path, entry.name, entry.title));
         }
     }
+    resolve_candidates_opts(candidates, enforce_unique_names)
+}
 
+fn resolve_candidates_opts(
+    candidates: Vec<(PathBuf, Option<String>, Option<String>)>,
+    enforce_unique_names: bool,
+) -> BackupResult<Vec<Target>> {
     // 3.1-1/2: realpath解決・通常file検査・拡張子検査(エラー集約)
     let mut errors: Vec<String> = Vec::new();
     let mut resolved: Vec<(PathBuf, String, Option<String>)> = Vec::new();
     for (raw, name_override, title) in &candidates {
-        let abs = match raw.canonicalize() {
-            Ok(p) => p,
-            Err(_) => {
-                errors.push(format!("対象ファイルが存在しない: {}", raw.display()));
-                continue;
-            }
-        };
-        let meta = match std::fs::metadata(&abs) {
-            Ok(m) => m,
-            Err(_) => {
-                errors.push(format!(
-                    "対象ファイルのmetadata取得に失敗: {}",
-                    abs.display()
-                ));
-                continue;
-            }
-        };
-        if !meta.is_file() {
-            errors.push(format!(
-                "対象は通常fileでない(directory等): {}",
-                abs.display()
-            ));
-            continue;
+        match inspect_candidate(raw, name_override.as_deref()) {
+            Ok((abs, source_name)) => resolved.push((abs, source_name, title.clone())),
+            Err(msg) => errors.push(msg),
         }
-        let ext_ok = ["zip", "7z"].iter().any(|e| {
-            abs.extension()
-                .map(|x| x.to_string_lossy().eq_ignore_ascii_case(e))
-                .unwrap_or(false)
-        });
-        if !ext_ok {
-            errors.push(format!("拡張子が対象外(.zip/.7zのみ): {}", abs.display()));
-            continue;
-        }
-        let basename = abs
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let source_name = match name_override {
-            Some(n) => {
-                // name overrideはbasename形式のみ許容(2.5・3.1。出力path・S3キーの
-                // traversalや空nameを防止する対象エラー)
-                if !is_valid_basename(n) {
-                    errors.push(format!(
-                        "from-listのnameはbasename形式のみ許容される(空・パス区切り・\".\"・\"..\"は不可): {n:?} ({})",
-                        raw.display()
-                    ));
-                    continue;
-                }
-                n.clone()
-            }
-            None => basename,
-        };
-        resolved.push((abs, source_name, title.clone()));
     }
 
     // 3.1-3: realpath重複検査
@@ -203,17 +272,7 @@ fn resolve_targets_opts(
 
     let mut targets = Vec::with_capacity(resolved.len());
     for (abs, source_name, title) in resolved {
-        let meta = std::fs::metadata(&abs).map_err(|e| {
-            BackupError::Target(format!("対象のmetadata取得に失敗 ({}): {e}", abs.display()))
-        })?;
-        let mtime = systemtime_to_jst(meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH));
-        targets.push(Target {
-            size: meta.len(),
-            source_path: abs,
-            source_name,
-            mtime,
-            title,
-        });
+        targets.push(target_from_metadata(abs, source_name, &title)?);
     }
     Ok(targets)
 }
@@ -427,5 +486,66 @@ mod tests {
         assert_eq!(entries[0].name, None);
         assert_eq!(entries[0].title, None, "title省略可");
         assert_eq!(entries[1].title.as_deref(), Some("旅のしおり"), "title欄");
+    }
+
+    /// [covers:server.jobs-push-failure]
+    /// 構造化対象列の共通resolver(TASK-17 W5): 1件でも不正対象があっても全体Errに
+    /// せず入力順のper-file結果を返す(不在・directory・拡張子違反は当該件のみの
+    /// Target error。realpath重複は先頭行を受理し後続行をerror)。CLI経路
+    /// (resolve_targets_storage)の全体Err(全件列挙)は不変。
+    #[test]
+    fn resolve_entries_keeps_per_file_results() {
+        let tmp = TempDir::new("w5-resolve-entries");
+        let a = write_zip(tmp.path(), "a.zip", b"A");
+        let b = write_zip(tmp.path(), "b.7z", b"B");
+        std::fs::create_dir_all(tmp.path().join("alias")).expect("alias dir");
+        std::fs::create_dir_all(tmp.path().join("dir.zip")).expect("dir");
+        let txt = tmp.path().join("c.txt");
+        write_file(&txt, b"C");
+        let entries = vec![
+            (a.clone(), Some("alpha".to_string())),
+            (tmp.path().join("absent.zip"), None),
+            (tmp.path().join("alias").join("..").join("a.zip"), None),
+            (tmp.path().join("dir.zip"), None),
+            (txt, None),
+            (b.clone(), None),
+        ];
+
+        let resolved = resolve_entries_storage(&entries);
+        assert_eq!(resolved.len(), entries.len(), "入力順・入力件数で返る");
+        let ok0 = resolved[0].result.as_ref().expect("a.zipは解決される");
+        assert_eq!(ok0.source_path, a.canonicalize().unwrap());
+        assert_eq!(ok0.title.as_deref(), Some("alpha"), "titleは引き継がれる");
+        for (index, expect) in [
+            (1, "対象ファイルが存在しない"),
+            (2, "realpathが重複している"),
+            (3, "対象は通常fileでない"),
+            (4, "拡張子が対象外"),
+        ] {
+            let msg = target_error(
+                resolved[index]
+                    .result
+                    .as_ref()
+                    .expect_err("不正対象はper-fileのerror"),
+            );
+            assert!(msg.contains(expect), "行{index}: {msg}");
+        }
+        assert!(resolved[5].result.is_ok(), "不正対象の後も解決される");
+
+        // CLI経路は全体Err(全件列挙)のまま
+        let positionals: Vec<PathBuf> = entries.iter().map(|(p, _)| p.clone()).collect();
+        let whole_err = resolve_targets_storage(&positionals, None).unwrap_err();
+        let msgs = target_error(&whole_err);
+        for expect in [
+            "対象ファイルが存在しない",
+            "realpathが重複している",
+            "対象は通常fileでない",
+            "拡張子が対象外",
+        ] {
+            assert!(
+                msgs.contains(expect),
+                "CLIの全体Errに全件列挙される: {msgs}"
+            );
+        }
     }
 }
