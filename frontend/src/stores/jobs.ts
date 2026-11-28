@@ -4,9 +4,12 @@ import {
   fetchJobs,
   postJobCancel,
   postJobsGet,
+  postJobsPush,
   type ApiError,
   type GetJobRequest,
   type JobItem,
+  type PushJobRequest,
+  type PushJobResultFile,
 } from '../api/client'
 import { useUiRefreshStore } from './ui-refresh'
 
@@ -17,10 +20,34 @@ export const ACTIVE_JOB_STATUSES: readonly string[] = [
   'waiting_restore',
 ]
 
+/** push jobの結果から失敗対象行(status==='failed')のみを抽出する(設計5.5・9章W5)。
+ *  push job以外・結果未確定時は空 */
+export function failedPushItems(job: JobItem): PushJobResultFile[] {
+  if (job.kind !== 'push' || job.result === null) return []
+  return job.result.files.filter((file) => file.status === 'failed')
+}
+
+/** push jobの結果行(対象単位。job行の下にinline展開するdata源。設計D-P4) */
+export function pushJobFiles(job: JobItem): PushJobResultFile[] {
+  if (job.kind !== 'push' || job.result === null) return []
+  return job.result.files
+}
+
+/** job一覧・ホーム実行中job区画の対象列表示(getはuuid・pushは先頭path+件数) */
+export function jobTargetSummary(job: JobItem): string {
+  if (job.kind === 'get') {
+    return job.params?.uuid ?? '-'
+  }
+  const targets = job.params?.targets
+  if (!targets || targets.length === 0) return '-'
+  const first = targets[0]?.path ?? '-'
+  return targets.length === 1 ? first : `${first} (+${targets.length - 1}件)`
+}
+
 /**
- * jobs store(TASK-17設計2.1・2.3・5.3・9章W4): ホーム実行中job区画・転送タブの
- * job一覧・取得jobの発行・取消・polling制御。pollingは設計5.3(転送タブ・ホームの
- * 実行中job追従。間隔はui-refresh storeのintervalMs既定10秒・無効可)。job詳細の
+ * jobs store(TASK-17設計2.1・2.3・5.3・9章W4/W5): ホーム実行中job区画・転送タブの
+ * job一覧・取得/upload jobの発行・再実行・取消・polling制御。pollingは設計5.3(転送タブ・
+ * ホームの実行中job追従。間隔はui-refresh storeのintervalMs既定10秒・無効可)。job詳細の
  * 取得失敗・発行失敗・取消失敗はそれぞれ別状態(detailError/lastIssueError/
  * lastCancelError)で保持する(P5 lastScanError・P6 lastRunErrorと同一構成)。
  */
@@ -32,7 +59,7 @@ export const useJobsStore = defineStore('jobs', {
     /** 選択jobの詳細(GET /api/jobs/:id) */
     detail: null as JobItem | null,
     detailError: null as ApiError | null,
-    /** 取得job発行の実行中状態(Viewは発行buttonを無効化) */
+    /** 取得・upload job発行の実行中状態(Viewは発行buttonを無効化) */
     issuing: false,
     lastIssueError: null as ApiError | null,
     /** 取消失敗の別状態(実行中は409=取消できない案内の基盤) */
@@ -89,10 +116,23 @@ export const useJobsStore = defineStore('jobs', {
       this.lastIssueError = result.error
       return false
     },
-    /** jobの再実行(同一paramsで再発行=冪等。失敗・interrupted・取消済みjobの
+    /** upload(push)jobの発行(POST /api/jobs/push→一覧再取得) */
+    async issuePush(params: PushJobRequest): Promise<boolean> {
+      this.issuing = true
+      const result = await postJobsPush(params)
+      this.issuing = false
+      if (result.ok) {
+        this.lastIssueError = null
+        await this.fetchJobs()
+        return true
+      }
+      this.lastIssueError = result.error
+      return false
+    },
+    /** get jobの再実行(同一paramsで再発行=冪等。失敗・interrupted・取消済みjobの
      *  再実行buttonから呼ばれる) */
     async rerunGet(job: JobItem): Promise<boolean> {
-      if (job.params === null) {
+      if (job.kind !== 'get' || job.params === null) {
         this.lastIssueError = { code: 'internal', message: 'jobのparamsが読み取れません' }
         return false
       }
@@ -106,6 +146,25 @@ export const useJobsStore = defineStore('jobs', {
         days: params.days,
         overwrite: params.overwrite,
       })
+    },
+    /** push jobの再実行(同一targetsで再発行=成功済み対象はskipされ冪等) */
+    async rerunPush(job: JobItem): Promise<boolean> {
+      if (job.kind !== 'push' || job.params === null) {
+        this.lastIssueError = { code: 'internal', message: 'jobのparamsが読み取れません' }
+        return false
+      }
+      return this.issuePush({
+        targets: job.params.targets.map((t) =>
+          t.title === null ? { path: t.path } : { path: t.path, title: t.title },
+        ),
+      })
+    },
+    /** kindに応じたjob再実行(get/push共通の再実行button入口) */
+    async rerunJob(job: JobItem): Promise<boolean> {
+      if (job.kind === 'push') {
+        return this.rerunPush(job)
+      }
+      return this.rerunGet(job)
     },
     /** queued jobの取消(成功時一覧再取得。実行中・完了済みの409はlastCancelError) */
     async cancelJob(id: number): Promise<void> {

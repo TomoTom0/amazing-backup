@@ -181,7 +181,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CONF-005(from-list schem
 description = "from-list tomlの path 欠落・未知キーは設定エラー。[[targets]]にはtitle欄(任意文字列・validate_title)を追加でき、省略可(合流時は現行title継続・新規発行時にtitle必須)。name欄の拒否(新経路)は現行どおり (unit)"
 given = "path無しentryと未知キー入りentryを含む from-list toml、title欄付きentry、title省略entry"
 expect_return_shape = "path無し・未知キーは ConfigError(exit code 2)。title欄付き・title省略は受理される"
-source_lines = "src/targets.rs:390; tests/config_storage.rs:231"
+source_lines = "src/targets.rs:449; tests/config_storage.rs:231"
 
 [[condition]]
 id = "config.recipient-fingerprint-duplicate-error"

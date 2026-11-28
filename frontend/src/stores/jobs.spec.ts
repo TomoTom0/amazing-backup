@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { useJobsStore } from './jobs'
+import { useJobsStore, failedPushItems } from './jobs'
 import { useUiRefreshStore } from './ui-refresh'
 import type { JobItem } from '../api/client'
 
@@ -420,5 +420,147 @@ describe('jobs store(polling)', () => {
     // 反映される: 15秒進めるとt=20(旧間隔timer)・t=25(新間隔)の2fetchが加わる
     await vi.advanceTimersByTimeAsync(15_000)
     expect(calls).toHaveLength(3)
+  })
+})
+
+const queuedPushJob: JobItem = {
+  id: 10,
+  kind: 'push',
+  status: 'queued',
+  params: {
+    targets: [
+      { path: '/data/a.zip', title: 'alpha' },
+      { path: '/data/b.zip', title: null },
+    ],
+  },
+  progress: { phase: 'queued', total: 2, done: 0, current_path: null },
+  result: null,
+  error: null,
+  created_at: '2026-11-25T10:00:00+09:00',
+  updated_at: '2026-11-25T10:00:00+09:00',
+}
+
+const failedPushJob: JobItem = {
+  ...queuedPushJob,
+  id: 11,
+  status: 'failed',
+  progress: { phase: 'finalize', total: 2, done: 2, current_path: null },
+  result: {
+    files: [
+      { path: '/data/a.zip', name: 'a.zip', action: 'new', uuid: '1111', status: 'ok' },
+      {
+        path: '/data/absent-b.zip',
+        name: null,
+        action: null,
+        uuid: null,
+        status: 'failed',
+        error: {
+          code: 'not_found',
+          message: '対象エラー: 対象ファイルが存在しない: /data/absent-b.zip',
+        },
+      },
+    ],
+    summary: { ok: 1, skip: 0, merge: 0, failed: 1 },
+  },
+  error: { code: 'not_found', message: '対象が見つかりません' },
+}
+
+// [covers:frontend.jobs-push-issue-client]
+describe('jobs store(issuePush・rerunPush・rerunJob・failedPushItems)', () => {
+  it('issuePushはPOST /api/jobs/push後に一覧を再取得する(失敗はlastIssueError)', async () => {
+    const calls: string[] = []
+    const bodies: unknown[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        calls.push(`${init?.method ?? 'GET'} ${url}`)
+        bodies.push(init?.body ? JSON.parse(String(init.body)) : null)
+        if (init?.method === 'POST') {
+          return Promise.resolve(responseOf(200, { job: queuedPushJob }))
+        }
+        return Promise.resolve(responseOf(200, { jobs: [queuedPushJob] }))
+      }),
+    )
+    const jobs = useJobsStore()
+    const pending = jobs.issuePush({
+      targets: [{ path: '/data/a.zip', title: 'alpha' }, { path: '/data/b.zip' }],
+    })
+    expect(jobs.issuing).toBe(true)
+    const ok = await pending
+    expect(ok).toBe(true)
+    expect(jobs.issuing).toBe(false)
+    expect(jobs.lastIssueError).toBeNull()
+    expect(calls).toEqual(['POST /api/jobs/push', 'GET /api/jobs'])
+    expect(bodies[0]).toEqual({
+      targets: [{ path: '/data/a.zip', title: 'alpha' }, { path: '/data/b.zip' }],
+    })
+    expect(jobs.items).toHaveLength(1)
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          responseOf(422, { error: { code: 'validation_failed', message: '対象が空です' } }),
+        ),
+      ),
+    )
+    const ok2 = await jobs.issuePush({ targets: [] })
+    expect(ok2).toBe(false)
+    expect(jobs.lastIssueError?.code).toBe('validation_failed')
+  })
+
+  it('rerunJobはkind=pushでPOST /api/jobs/push・kind=getでPOST /api/jobs/getを再発行する', async () => {
+    const calls: string[] = []
+    const bodies: unknown[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        calls.push(`${init?.method ?? 'GET'} ${url}`)
+        bodies.push(init?.body ? JSON.parse(String(init.body)) : null)
+        if (url === '/api/jobs/push') {
+          return Promise.resolve(responseOf(200, { job: queuedPushJob }))
+        }
+        if (url === '/api/jobs/get') {
+          return Promise.resolve(responseOf(200, { job: waitingJob }))
+        }
+        return Promise.resolve(responseOf(200, { jobs: [] }))
+      }),
+    )
+    const jobs = useJobsStore()
+    expect(await jobs.rerunJob(failedPushJob)).toBe(true)
+    expect(await jobs.rerunJob(doneJob)).toBe(true)
+    expect(calls).toEqual([
+      'POST /api/jobs/push',
+      'GET /api/jobs',
+      'POST /api/jobs/get',
+      'GET /api/jobs',
+    ])
+    // null titleは省略して再送する
+    expect(bodies[0]).toEqual({
+      targets: [{ path: '/data/a.zip', title: 'alpha' }, { path: '/data/b.zip' }],
+    })
+    // params=nullはinternal error
+    expect(await jobs.rerunPush({ ...failedPushJob, params: null })).toBe(false)
+    expect(jobs.lastIssueError?.code).toBe('internal')
+  })
+
+  it('failedPushItemsはpush jobの失敗対象行(status==="failed")のみを返す', () => {
+    expect(failedPushItems(failedPushJob)).toEqual([
+      {
+        path: '/data/absent-b.zip',
+        name: null,
+        action: null,
+        uuid: null,
+        status: 'failed',
+        error: {
+          code: 'not_found',
+          message: '対象エラー: 対象ファイルが存在しない: /data/absent-b.zip',
+        },
+      },
+    ])
+    expect(failedPushItems(doneJob)).toEqual([])
+    expect(failedPushItems(queuedPushJob)).toEqual([])
   })
 })

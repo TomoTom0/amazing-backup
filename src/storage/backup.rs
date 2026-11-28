@@ -1102,3 +1102,812 @@ pub(crate) struct UploadItem {
 struct MergedItem {
     uuid: String,
 }
+
+// ---------------------------------------------------------------------------
+// TASK-17 W5(TASK-28): serve API(POST /api/push/dry-run・JobManager push worker)が
+// 呼ぶ同期storage層(TASK-28設計D-P2/D-P3・設計1章D-W1: serveはCLIと同一のstorage層を
+// 使う)。
+//
+// 本節は対話入力・表示(println)・終了code変換を持たない「run本体」で、serverが直接
+// 呼ぶ。CLI側(cmd_backup_push・dry_run_push)の本節への呼替えは後続タスクで行う
+// (現時点ではCLI側の該当logicと二重化しているが、判定規則・レコード形式・記録順序
+// 「file_write追記→PUT→file_upload追記」はCLIと同一)。
+
+/// POST /api/push/dry-runの対象1件予測(TASK-28設計D-P2)。対象解決失敗のerror行は
+/// 呼出側(server handler)がresolverの失敗として組むため本構造体には含まれない。
+#[derive(Debug, Clone)]
+pub(crate) struct DryRunTarget {
+    /// 解決済みsource_path(realpath)
+    pub(crate) path: String,
+    pub(crate) name: String,
+    pub(crate) size: u64,
+    /// skip / re_put / merge / new(CLI dry-runの表示区分に対応。JSON語彙はsnake_case)
+    pub(crate) action: &'static str,
+    /// skip・re_putと既知entityへのmergeはuuid。newと同一run内の先行newへのmergeはNone
+    pub(crate) uuid: Option<String>,
+    /// 指定title(未指定なら既知entityの現行title。新規はNoneのまま)
+    pub(crate) title: Option<String>,
+    /// new予測でtitle未指定の時のみCLI WARNING文相当(他はNone)
+    pub(crate) warning: Option<String>,
+    /// 同一run内の先行newへの合流mergeの時、先行対象のindex(呼出しのtargets内)
+    pub(crate) merge_target_index: Option<usize>,
+}
+
+/// POST /api/push/dry-runの予測一式(解決成功対象のみ。対象解決失敗の行と
+/// summaryのcount/failedは呼出側が組み立てる)。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DryRunPlan {
+    pub(crate) targets: Vec<DryRunTarget>,
+    /// 解決成功対象のみの合計
+    pub(crate) total_size: u64,
+    pub(crate) skip: usize,
+    pub(crate) re_put: usize,
+    pub(crate) merge: usize,
+    pub(crate) new: usize,
+}
+
+/// dry-run内の同一sha合流先(先行対象がnewなら実UUID未発行のためindexで参照。
+/// CLIのdry_run_pushが表示に使う仮IDはAPI応答へ流さない)。
+#[derive(Debug, Clone)]
+enum DryRunMergeRef {
+    Uuid(String),
+    NewTarget(usize),
+}
+
+fn dry_run_row(
+    p: &Planned,
+    path: String,
+    action: &'static str,
+    uuid: Option<String>,
+    title: Option<String>,
+    merge_target_index: Option<usize>,
+) -> DryRunTarget {
+    DryRunTarget {
+        path,
+        name: p.target.source_name.clone(),
+        size: p.target.size,
+        action,
+        uuid,
+        title,
+        warning: None,
+        merge_target_index,
+    }
+}
+
+/// backup push --dry-run相当の予測(TASK-28設計D-P2)。判定規則はCLI dry-runと同一
+/// (所在skip判定・crash残存re-put・sha照合合流・同一run内同一shaの2件目以降merge)。
+/// 入力は解決済み構造化対象+読込済みreduced registry(対象解決・registry読込は呼出側
+/// の責務。関数内部では解決・読込を行わない=job実行側と入力契約を同一にする)。
+/// 平文sha256のみ計算し(暗号化しない)・S3 API呼出なし・registry追記なし。
+pub(crate) fn plan_push_dry(
+    targets: &[crate::targets::Target],
+    cfg: &PipelineConfig,
+    aws: &config::AwsConfig,
+    canonical_bucket: &str,
+    reduced: &Reduced,
+) -> BackupResult<DryRunPlan> {
+    let planned = plan_push(targets, cfg)?;
+    let entity_titles = registry::entity_titles(reduced);
+    let mut plan = DryRunPlan::default();
+    // dry-run内でもrun_map相当を更新(同一run内同一shaの2件目以降をmerge表示にする)
+    let mut run_map: HashMap<String, DryRunMergeRef> = HashMap::new();
+    for (index, p) in planned.iter().enumerate() {
+        let mtime_str = mtime_jst_precise(&p.target.source_path)?;
+        let w = reduced.file_writes.iter().find(|w| {
+            w.identity_hash == p.identity
+                && w.source_size == p.target.size
+                && w.source_mtime == mtime_str
+        });
+        let upload_recorded = w.is_some_and(|w| {
+            reduced.file_uploads.iter().any(|u| {
+                u.uuid == w.uuid
+                    && registry::record_bucket_matched(&u.s3_bucket, &aws.bucket, canonical_bucket)
+            })
+        });
+        let path = p.target.source_path.display().to_string();
+        plan.total_size += p.target.size;
+        // (1) 所在skip: file_write成功記録の3点一致+同一uuidのbucket一致file_upload存在
+        if let (Some(w), true) = (w, upload_recorded) {
+            plan.skip += 1;
+            let title = p
+                .target
+                .title
+                .clone()
+                .or_else(|| entity_titles.get(&w.uuid).cloned());
+            plan.targets.push(dry_run_row(
+                p,
+                path,
+                "skip",
+                Some(w.uuid.clone()),
+                title,
+                None,
+            ));
+            continue;
+        }
+        // 平文sha256のみ計算(暗号化しない。全文readを避けるためstreaming計算)
+        let sha = sha256_hex_streaming(&p.target.source_path)?;
+        if let Some(w) = w {
+            // (2.5) crash残存(file_writeのみ記録)のre-put予測
+            plan.re_put += 1;
+            run_map.insert(sha, DryRunMergeRef::Uuid(w.uuid.clone()));
+            let title = p
+                .target
+                .title
+                .clone()
+                .or_else(|| entity_titles.get(&w.uuid).cloned());
+            plan.targets.push(dry_run_row(
+                p,
+                path,
+                "re_put",
+                Some(w.uuid.clone()),
+                title,
+                None,
+            ));
+            continue;
+        }
+        let merge_ref = run_map.get(&sha).cloned().or_else(|| {
+            registry::sha_uuid_lookup(reduced, &sha, &aws.bucket, canonical_bucket)
+                .map(DryRunMergeRef::Uuid)
+        });
+        match merge_ref {
+            // (3a) 合流予測(既知entityへの合流はuuidで示す)
+            Some(DryRunMergeRef::Uuid(uuid)) => {
+                plan.merge += 1;
+                let title = p
+                    .target
+                    .title
+                    .clone()
+                    .or_else(|| entity_titles.get(&uuid).cloned());
+                plan.targets
+                    .push(dry_run_row(p, path, "merge", Some(uuid), title, None));
+            }
+            // (3a') 同一run内の先行newへの合流(実UUID未発行のためindexで参照)
+            Some(DryRunMergeRef::NewTarget(preceding)) => {
+                plan.merge += 1;
+                plan.targets.push(dry_run_row(
+                    p,
+                    path,
+                    "merge",
+                    None,
+                    p.target.title.clone(),
+                    Some(preceding),
+                ));
+            }
+            // (3b) 新規発行予測(uuid未発行)
+            None => {
+                let warning = p.target.title.as_ref().map_or_else(
+                    || {
+                        Some(format!(
+                            "{} は新規発行予測ですがtitleが未指定です(実行時は対象エラーになります)",
+                            p.target.source_name
+                        ))
+                    },
+                    |_| None,
+                );
+                run_map.insert(sha, DryRunMergeRef::NewTarget(index));
+                plan.new += 1;
+                let mut row = dry_run_row(p, path, "new", None, p.target.title.clone(), None);
+                row.warning = warning;
+                plan.targets.push(row);
+            }
+        }
+    }
+    Ok(plan)
+}
+
+/// push run本体の進行通知(TASK-28設計D-P3のcallback契約。run本体はDBを知らず
+/// 対象開始・対象完了・finalize開始の3種を通知する)。
+#[derive(Debug)]
+pub(crate) enum PushProgress<'a> {
+    /// 対象開始(当該対象のsource_path)
+    FileStart { path: &'a str },
+    /// 対象完了(失敗を含む)
+    FileDone,
+    /// 全対象完了後のrun末尾処理(manifest・索引再構築・metadata sync・DB反映)開始
+    FinalizeStart,
+}
+
+/// push run本体の対象1件結果(jobのresult_json(files)のdata源)。
+#[derive(Debug)]
+pub(crate) struct PushFileResult {
+    /// 処理対象のsource_path(解決済みならrealpath・解決失敗なら入力path)
+    pub(crate) path: String,
+    /// 対象のbasename(解決失敗等で未確定ならNone)
+    pub(crate) name: Option<String>,
+    /// skip / merge / re_put / new(平文sha判明前に失敗した等の失敗行はNone)
+    pub(crate) action: Option<&'static str>,
+    /// uuidが確定済みならSome(新規発行のPUT失敗でも発行済みuuidを欠落させない)
+    pub(crate) uuid: Option<String>,
+    /// 失敗時のerror(None=成功)
+    pub(crate) error: Option<BackupError>,
+}
+
+/// push run本体の集計(jobのresult_json(summary))。
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct PushRunSummary {
+    /// 新規発行・再PUTのupload成功件数(CLIのrun集計のok)
+    pub(crate) ok: usize,
+    pub(crate) skip: usize,
+    pub(crate) merge: usize,
+    pub(crate) failed: usize,
+}
+
+/// push run本体の戻り値(TASK-28設計D-P3の戻り値契約: files+summary+fatal_error)。
+#[derive(Debug)]
+pub(crate) struct PushRunOutcome {
+    pub(crate) files: Vec<PushFileResult>,
+    pub(crate) summary: PushRunSummary,
+    /// run末尾処理(manifest・索引再構築・metadata sync・DB反映)の失敗=継続不能error。
+    /// 発生時もfiles+summaryの部分結果は残る
+    pub(crate) fatal_error: Option<BackupError>,
+}
+
+impl PushRunOutcome {
+    /// run全体をfailedとする時のerror(優先順位: fatal_error > 最初のper-file error)。
+    pub(crate) fn error(&self) -> Option<&BackupError> {
+        self.fatal_error
+            .as_ref()
+            .or_else(|| self.files.iter().find_map(|f| f.error.as_ref()))
+    }
+
+    /// 対象失敗・run末尾処理失敗が無いこと(cache dir掃除の可否)。
+    pub(crate) fn is_ok(&self) -> bool {
+        self.error().is_none()
+    }
+}
+
+/// push run本体の実行options(server=明示的非対話・CLI=入力adapter。TASK-28設計D-P3)。
+pub(crate) struct PushRunOptions<'a> {
+    /// 1対象の失敗後も残対象を続行する(server jobはtrue固定=設計5.5。CLIの--keep-going)
+    pub(crate) keep_going: bool,
+    /// 新規発行でtitle未指定の時のtitle供給hook(CLIのtty対話入力。serverはNone=
+    /// 当該対象の失敗)
+    pub(crate) title_supplier: Option<&'a mut dyn FnMut() -> BackupResult<String>>,
+}
+
+/// push run本体の実行環境(呼出側が読込済みの設定・registry・backend)。
+pub(crate) struct PushRunEnv<'a> {
+    pub(crate) aws: &'a config::AwsConfig,
+    pub(crate) cfg: &'a PipelineConfig,
+    pub(crate) canonical_bucket: &'a str,
+    pub(crate) backend: &'a dyn crate::s3::S3Backend,
+    pub(crate) reduced: &'a Reduced,
+}
+
+/// push run本体(per-file loopとrun末尾処理で共有するrun単位state)。
+/// loop(push_files)と末尾処理(push_finalize)を分けて公開しているのは、CLI組み替え時に
+/// 両者の間へ--pinの組み立て処理(CLI側の維持責任範囲)を挟めるようにするため。
+pub(crate) struct PushRun<'a> {
+    aws: &'a config::AwsConfig,
+    cfg: &'a PipelineConfig,
+    canonical_bucket: &'a str,
+    backend: &'a dyn crate::s3::S3Backend,
+    reduced: &'a Reduced,
+    registry_path: PathBuf,
+    batch_id: String,
+    batch_date: String,
+    run_dir: PathBuf,
+    state: RunState,
+    uploaded: Vec<UploadItem>,
+    summary: PushRunSummary,
+    files: Vec<PushFileResult>,
+}
+
+impl<'a> PushRun<'a> {
+    /// run開始(batch_idは呼出側で組み立て・run dirを作成)。
+    pub(crate) fn new(
+        env: &PushRunEnv<'a>,
+        batch_id: String,
+        batch_date: String,
+    ) -> BackupResult<Self> {
+        let run_dir = env.cfg.output_dir.join(&batch_id);
+        std::fs::create_dir_all(&run_dir)
+            .map_err(|e| BackupError::Process(format!("run dirの作成に失敗: {e}")))?;
+        Ok(PushRun {
+            aws: env.aws,
+            cfg: env.cfg,
+            canonical_bucket: env.canonical_bucket,
+            backend: env.backend,
+            reduced: env.reduced,
+            registry_path: env.cfg.registry_path.clone(),
+            batch_id,
+            batch_date,
+            run_dir,
+            state: RunState::new(env.reduced),
+            uploaded: Vec::new(),
+            summary: PushRunSummary::default(),
+            files: Vec::new(),
+        })
+    }
+
+    /// cache dir掃除(keep_artifacts="run"・run成功時のみ呼ぶ。掃除対象は当該run分の
+    /// <batch_id> dirのみ。失敗runの残りは消さない)。
+    pub(crate) fn cleanup_run_dir(&self) {
+        if matches!(self.cfg.keep_artifacts, config::KeepArtifacts::Run) {
+            let _ = std::fs::remove_dir_all(&self.run_dir);
+        }
+    }
+
+    /// 失敗1行を確定する(失敗対象も結果に残す=設計5.5)。
+    fn failed(
+        &mut self,
+        path: &str,
+        name: Option<String>,
+        uuid: Option<String>,
+        e: BackupError,
+    ) -> PushFileResult {
+        self.summary.failed += 1;
+        PushFileResult {
+            path: path.to_string(),
+            name,
+            action: None,
+            uuid,
+            error: Some(e),
+        }
+    }
+
+    /// 成功1行を確定する。
+    fn ok(
+        &mut self,
+        path: &str,
+        name: String,
+        action: &'static str,
+        uuid: String,
+    ) -> PushFileResult {
+        match action {
+            "skip" => self.summary.skip += 1,
+            "merge" => self.summary.merge += 1,
+            _ => self.summary.ok += 1,
+        }
+        PushFileResult {
+            path: path.to_string(),
+            name: Some(name),
+            action: Some(action),
+            uuid: Some(uuid),
+            error: None,
+        }
+    }
+
+    /// per-file loop(対象解決失敗の行も失敗として処理。各対象の開始・完了を通知)。
+    /// keep_going=falseの時は最初の失敗で打ち切る(CLIの--keep-going未指定時)。
+    pub(crate) fn push_files(
+        &mut self,
+        entries: &[crate::targets::ResolvedEntry],
+        opts: &mut PushRunOptions,
+        on_progress: &mut dyn FnMut(PushProgress),
+    ) {
+        for entry in entries {
+            let path = match &entry.result {
+                Ok(target) => target.source_path.display().to_string(),
+                Err(_) => entry.raw_path.display().to_string(),
+            };
+            on_progress(PushProgress::FileStart { path: &path });
+            let result = match &entry.result {
+                Ok(target) => self.push_one(target, &path, opts),
+                // 対象解決失敗(不在・通常fileでない・拡張子違反・realpath重複の後続行)
+                Err(e) => self.failed(&path, None, None, clone_backup_error(e)),
+            };
+            let failed = result.error.is_some();
+            on_progress(PushProgress::FileDone);
+            self.files.push(result);
+            if failed && !opts.keep_going {
+                break;
+            }
+        }
+    }
+
+    /// 対象1件の処理(所在skip→暗号化→crash救済再PUT/sha照合合流/新規発行)。
+    /// 処理中の失敗はerror入りの行として返す(継続可否はpush_filesのkeep_goingで
+    /// 決める)。
+    fn push_one(
+        &mut self,
+        target: &crate::targets::Target,
+        path: &str,
+        opts: &mut PushRunOptions,
+    ) -> PushFileResult {
+        let name = target.source_name.clone();
+        // 各stepの失敗は当該対象の失敗行として返す(uuid確定後の失敗はuuidを欠落させない)
+        macro_rules! step {
+            ($uuid:expr, $e:expr) => {
+                match $e {
+                    Ok(v) => v,
+                    Err(e) => return self.failed(path, Some(name.clone()), $uuid, e),
+                }
+            };
+        }
+        let mut planned = step!(None, plan_push(std::slice::from_ref(target), self.cfg));
+        let p = planned.remove(0);
+        let mtime_str = step!(None, mtime_jst_precise(&p.target.source_path));
+        // (1) 所在skip / uuid再利用の判定(4.1): file_write成功記録一致
+        // (identity_hash+size+mtime)かつfile_upload記録がuuid照合+bucket一致で存在。
+        // file_write一致でもfile_upload無し(crash残存)はskipせず(2.5)再PUT分岐へ。
+        let w = self.reduced.file_writes.iter().find(|w| {
+            w.identity_hash == p.identity
+                && w.source_size == p.target.size
+                && w.source_mtime == mtime_str
+        });
+        let upload_recorded = w.is_some_and(|w| {
+            self.reduced.file_uploads.iter().any(|u| {
+                u.uuid == w.uuid
+                    && registry::record_bucket_matched(
+                        &u.s3_bucket,
+                        &self.aws.bucket,
+                        self.canonical_bucket,
+                    )
+            })
+        });
+        if let (Some(w), true) = (w, upload_recorded) {
+            // skip対象もmetadata sync対象に含める(2.3の差分比較により変更無ければ
+            // PUTは行われず、metadata object不在(404)時の復旧もrunを通じて機能する)
+            self.state.touch(&w.uuid);
+            return self.ok(path, name, "skip", w.uuid.clone());
+        }
+        let reuse_uuid = w.filter(|_| !upload_recorded).map(|w| w.uuid.clone());
+
+        // (2) 暗号化(平文sha256入手)
+        let age_path = self.run_dir.join(format!("{}.age", p.target.source_name));
+        let res = step!(
+            None,
+            crate::crypto::encrypt_stream(&p.target.source_path, &age_path, &self.cfg.public_keys)
+        );
+        let recorded_at = now_jst();
+
+        if let Some(uuid) = reuse_uuid {
+            // (2.5) crash救済のuuid再利用再PUT分岐: sha照合・新規発行を経ず
+            // 同uuidのdefault.ageへ再PUTしfile_uploadを記録(孤児uuid不発生)。
+            let current_title = self.state.run_entity_titles.get(&uuid).cloned();
+            let title = step!(
+                Some(uuid.clone()),
+                resolve_title(current_title.as_deref(), p.target.title.as_deref())
+            );
+            if current_title.as_deref() != Some(title.as_str()) {
+                // title変更時のみfile_writeを再追記(新title・新batch_id)
+                step!(
+                    Some(uuid.clone()),
+                    append_file_write(
+                        &self.registry_path,
+                        &self.aws.prefix,
+                        &self.batch_id,
+                        &self.batch_date,
+                        &uuid,
+                        &title,
+                        &p,
+                        &mtime_str,
+                        &res,
+                        &recorded_at,
+                        &age_path,
+                    )
+                );
+                self.state.set_title(&uuid, &title);
+            }
+            let key = step!(
+                Some(uuid.clone()),
+                crate::layout::data_object_key(&self.aws.prefix, &uuid)
+            );
+            let vid = step!(
+                Some(uuid.clone()),
+                self.backend
+                    .put(&self.aws.bucket, &key, &age_path, &self.aws.storage_class)
+            );
+            let upload = file_upload_record(
+                &self.batch_id,
+                &uuid,
+                &title,
+                &key,
+                self.aws,
+                &vid,
+                &p,
+                &res,
+                &recorded_at,
+            );
+            step!(
+                Some(uuid.clone()),
+                registry::append_record(&self.registry_path, &upload)
+            );
+            self.state.run_uploads.push(upload);
+            self.state
+                .run_map
+                .insert(res.source_sha256.clone(), uuid.clone());
+            self.uploaded.push(UploadItem {
+                uuid: uuid.clone(),
+                title: title.clone(),
+                name: p.target.source_name.clone(),
+                category: p.category.clone(),
+                label: p.label.clone(),
+                source_path: path.to_string(),
+                s3_key: key.clone(),
+                version_id: vid.clone(),
+                date: self.batch_date.clone(),
+                version_ts: recorded_at,
+                source_sha256: res.source_sha256,
+                age_sha256: res.age_sha256,
+                source_size: p.target.size,
+                age_size: res.age_size,
+                age_path: age_path.display().to_string(),
+            });
+            self.state.touch(&uuid);
+            return self.ok(path, name, "re_put", uuid);
+        }
+
+        // (3) sha照合(run内map優先 → registry lookup)
+        let sha = res.source_sha256.clone();
+        let found = self.state.run_map.get(&sha).cloned().or_else(|| {
+            registry::sha_uuid_lookup(self.reduced, &sha, &self.aws.bucket, self.canonical_bucket)
+        });
+        let (action, uuid) = match found {
+            Some(uuid) => {
+                // (3a) 合流: uploadしない・file_write追記(新所在)→索引locations追加
+                let current_title = self.state.run_entity_titles.get(&uuid).cloned();
+                let title = step!(
+                    Some(uuid.clone()),
+                    resolve_title(current_title.as_deref(), p.target.title.as_deref())
+                );
+                step!(
+                    Some(uuid.clone()),
+                    append_file_write(
+                        &self.registry_path,
+                        &self.aws.prefix,
+                        &self.batch_id,
+                        &self.batch_date,
+                        &uuid,
+                        &title,
+                        &p,
+                        &mtime_str,
+                        &res,
+                        &recorded_at,
+                        &age_path,
+                    )
+                );
+                self.state.run_map.insert(sha, uuid.clone());
+                self.state.set_title(&uuid, &title);
+                self.state.touch(&uuid);
+                ("merge", uuid)
+            }
+            None => {
+                // (3b) 新規発行。記録順序は「file_write追記 → PUT → file_upload追記」
+                // (4.4: registry記録がS3変更に先行=crash救済)
+                let title = match p.target.title.clone() {
+                    Some(t) => t,
+                    None => match opts.title_supplier.as_mut() {
+                        Some(supply) => step!(None, (*supply)()),
+                        // 非対話+title無しの新規発行は当該対象の失敗(対象エラー)
+                        None => {
+                            let e = BackupError::Target(format!(
+                                "新規発行にはtitleが必要です: {}",
+                                p.target.source_path.display()
+                            ));
+                            return self.failed(path, Some(name), None, e);
+                        }
+                    },
+                };
+                let uuid = crate::layout::generate_uuid();
+                step!(
+                    Some(uuid.clone()),
+                    append_file_write(
+                        &self.registry_path,
+                        &self.aws.prefix,
+                        &self.batch_id,
+                        &self.batch_date,
+                        &uuid,
+                        &title,
+                        &p,
+                        &mtime_str,
+                        &res,
+                        &recorded_at,
+                        &age_path,
+                    )
+                );
+                self.state.set_title(&uuid, &title);
+                let key = step!(
+                    Some(uuid.clone()),
+                    crate::layout::data_object_key(&self.aws.prefix, &uuid)
+                );
+                let vid = step!(
+                    Some(uuid.clone()),
+                    self.backend
+                        .put(&self.aws.bucket, &key, &age_path, &self.aws.storage_class)
+                );
+                let upload = file_upload_record(
+                    &self.batch_id,
+                    &uuid,
+                    &title,
+                    &key,
+                    self.aws,
+                    &vid,
+                    &p,
+                    &res,
+                    &recorded_at,
+                );
+                step!(
+                    Some(uuid.clone()),
+                    registry::append_record(&self.registry_path, &upload)
+                );
+                self.state.run_uploads.push(upload);
+                self.state.run_map.insert(sha, uuid.clone());
+                self.uploaded.push(UploadItem {
+                    uuid: uuid.clone(),
+                    title: title.clone(),
+                    name: p.target.source_name.clone(),
+                    category: p.category.clone(),
+                    label: p.label.clone(),
+                    source_path: path.to_string(),
+                    s3_key: key.clone(),
+                    version_id: vid.clone(),
+                    date: self.batch_date.clone(),
+                    version_ts: recorded_at,
+                    source_sha256: res.source_sha256,
+                    age_sha256: res.age_sha256,
+                    source_size: p.target.size,
+                    age_size: res.age_size,
+                    age_path: age_path.display().to_string(),
+                });
+                self.state.touch(&uuid);
+                ("new", uuid)
+            }
+        };
+        self.ok(path, name, action, uuid)
+    }
+
+    /// run末尾処理(run manifest組み立て・索引再構築+PUT・metadata sync・catalog DB反映)。
+    /// 失敗は継続不能error(fatal_error)として呼出側へ返す(per-file結果は保持済み)。
+    pub(crate) fn push_finalize(&self) -> BackupResult<()> {
+        // run manifest(file record schema=3: file upload後に構築。file recordにuuid/title入・
+        // identity_hash/folder無しの所在記録と実s3_key+version_idを記録)
+        if !self.uploaded.is_empty() {
+            // ヘッダのrecipientsは現在設定の指紋列(load時検証で計算済みの値。D-5)
+            let manifest_body = crate::manifest::build_manifest_v3(
+                &self.batch_id,
+                &now_jst(),
+                &self
+                    .uploaded
+                    .iter()
+                    .map(|u| crate::manifest::ManifestV3File {
+                        uuid: u.uuid.clone(),
+                        title: u.title.clone(),
+                        name: u.name.clone(),
+                        category: u.category.clone(),
+                        label: u.label.clone(),
+                        source_path: u.source_path.clone(),
+                        s3_key: u.s3_key.clone(),
+                        version_id: u.version_id.clone(),
+                        date: u.date.clone(),
+                        version_ts: u.version_ts.clone(),
+                        batch_id: self.batch_id.clone(),
+                        source_sha256: u.source_sha256.clone(),
+                        age_sha256: u.age_sha256.clone(),
+                        source_size: u.source_size,
+                        age_size: u.age_size,
+                    })
+                    .collect::<Vec<_>>(),
+                &self.cfg.recipient_fingerprints,
+            )?;
+            let manifest_local = self.run_dir.join("manifest.jsonl.age");
+            crate::crypto::encrypt_bytes(
+                manifest_body.as_bytes(),
+                &manifest_local,
+                &self.cfg.public_keys,
+            )?;
+            let manifest_key =
+                crate::layout::manifest_object_key(&self.aws.prefix, &self.batch_id)?;
+            let m_vid = self.backend.put(
+                &self.aws.bucket,
+                &manifest_key,
+                &manifest_local,
+                &self.aws.storage_class,
+            )?;
+            let m_size = std::fs::metadata(&manifest_local)
+                .map(|m| m.len() as i64)
+                .unwrap_or(-1);
+            registry::append_record(
+                &self.registry_path,
+                &registry::ManifestV2Record {
+                    schema: 1,
+                    record_type: "manifest".into(),
+                    recorded_at: now_jst(),
+                    batch_id: self.batch_id.clone(),
+                    s3_key: manifest_key,
+                    s3_bucket: self.aws.bucket.clone(),
+                    s3_region: self.aws.region.clone(),
+                    version_id: m_vid,
+                    s3_size: m_size,
+                    s3_checksum_sha256: String::new(),
+                    s3_checksum_type: "FULL_OBJECT".into(),
+                    uploaded_at: now_jst(),
+                },
+            )?;
+        }
+
+        // 索引の再構築+配置(run末尾で常時・冪等)。前回runがregistry記録後に失敗した
+        // 場合の再実行が全skipでも、ここで未反映分を拾って索引が更新される(H-2)
+        let records_now = registry::load_registry(&self.registry_path)?;
+        let reduced_now = registry::reduce_records(&records_now);
+        let entries =
+            crate::index::build_entries(&reduced_now, &self.aws.bucket, self.canonical_bucket);
+        let uploaded_index_vid = crate::index::upload_index(
+            self.backend,
+            &self.aws.bucket,
+            &self.aws.prefix,
+            &self.cfg.public_keys,
+            &entries,
+            &self.batch_id,
+            &now_jst(),
+            &self.registry_path,
+        )?;
+        // touched_entities各uuidのmetadata sync(2.3: 変更時のみPUT+旧titleキー掃除)
+        for uuid in &self.state.touched_entities {
+            crate::metadata::sync_entity_metadata(
+                self.backend,
+                self.aws,
+                self.canonical_bucket,
+                self.cfg,
+                &reduced_now,
+                uuid,
+            )?;
+        }
+        // TASK-9 書込系のDB反映(JSONL append成功→同一process内で当該scope反映)。
+        // 反映失敗時は警告(logのみ)でpush自体は継続=JSONLが正本
+        let header = crate::index::IndexHeader {
+            schema: crate::index::INDEX_SCHEMA,
+            record_type: "index_header".into(),
+            updated_at: now_jst(),
+            run_id: self.batch_id.clone(),
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            entries: entries.len() as i64,
+        };
+        let mtimes = crate::catalog::SourceMtimes::from_reduced(&reduced_now);
+        if let Err(warn) = crate::catalog::reflect_written_index(
+            self.backend,
+            &self.aws.bucket,
+            &self.aws.prefix,
+            &header,
+            &entries,
+            &mtimes,
+            &uploaded_index_vid,
+        ) {
+            eprintln!(
+                "serve: catalog DB({})への反映に失敗しました(当該scopeのcacheは失効扱い。backupは継続します): {warn}",
+                crate::catalog::catalog_db_path().display()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// push run本体(TASK-28設計D-P3: per-file loop→finalize開始の通知→run末尾処理)。
+/// 戻り値Errはrun開始前の継続不能失敗(run dir作成等)のみ。per-fileの失敗は
+/// outcome.filesに、run末尾処理の失敗はoutcome.fatal_errorに入る。
+pub(crate) fn run_push<'a>(
+    env: &PushRunEnv<'a>,
+    entries: &[crate::targets::ResolvedEntry],
+    opts: &mut PushRunOptions,
+    on_progress: &mut dyn FnMut(PushProgress),
+) -> BackupResult<(PushRunOutcome, PushRun<'a>)> {
+    let batch_date = crate::targets::jst_today();
+    let batch_id = format!(
+        "{}-{}",
+        batch_date.replace('-', ""),
+        &sha256_hex(format!("{:?}", std::time::SystemTime::now()).as_bytes())[..8]
+    );
+    let mut run = PushRun::new(env, batch_id, batch_date)?;
+    run.push_files(entries, opts, on_progress);
+    on_progress(PushProgress::FinalizeStart);
+    let fatal_error = run.push_finalize().err();
+    let outcome = PushRunOutcome {
+        summary: run.summary,
+        files: std::mem::take(&mut run.files),
+        fatal_error,
+    };
+    Ok((outcome, run))
+}
+
+/// BackupErrorの複製(対象単位error記録とjob全体のerror_code記録の両立用)。
+fn clone_backup_error(e: &BackupError) -> BackupError {
+    match e {
+        BackupError::Internal(m) => BackupError::Internal(m.clone()),
+        BackupError::Config(m) => BackupError::Config(m.clone()),
+        BackupError::Target(m) => BackupError::Target(m.clone()),
+        BackupError::Process(m) => BackupError::Process(m.clone()),
+        BackupError::Transfer(m) => BackupError::Transfer(m.clone()),
+        BackupError::Usage(m) => BackupError::Usage(m.clone()),
+    }
+}

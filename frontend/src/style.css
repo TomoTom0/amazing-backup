@@ -707,6 +707,47 @@ a.tag-chip:hover {
   gap: 0.4rem !important;
 }
 
+/* 転送タブのupload form(W5・対象行+接続先確認box+失敗対象行) */
+.transfer-upload-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.transfer-upload-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr auto;
+  gap: 0.5rem;
+  align-items: end;
+}
+
+.transfer-upload-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.transfer-confirm-box {
+  margin-top: 0.9rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+/* 対象ごとの結果(dry-run予測行・push jobのper-file結果)の失敗行強調
+   (error code+対象path) */
+.job-file-failed td {
+  color: var(--error);
+}
+
+/* push job行の下へinline展開するper-file結果(<details>・JS不要方式) */
+.job-files-row td {
+  padding-top: 0;
+}
+
+.job-files-table {
+  margin-top: 0.35rem;
+}
+
 /* ---------------------------------------------------------------------------
  * 19. media query(動きの停止・窄幅)
  * ------------------------------------------------------------------------- */

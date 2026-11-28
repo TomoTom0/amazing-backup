@@ -168,16 +168,29 @@
 #     settings table(restore_check_interval_min)はW7範囲のため本条件では作らない
 #   [meta]はテスト先行で始め・同一session内でW4実装後に全件verify(cargo test全binary
 #   緑・vitest緑・verify-conditions PASS)を確認してverified=trueへ復帰した。
+# 2026-11-25: TASK-28(TASK-17 W5: push job)対応でテスト先行の条件追加。2026-11-26に
+#   設計適合へ再編(design tmp/tasks/tm-28/design_w5-push-job.md D-P8どおりの7条件構成へ:
+#   push-dry-run・jobs-push-issue・jobs-push-exec・jobs-push-failure・jobs-push-rerun-skip・
+#   jobs-push-finalize・push-audit。jobs-cancel・jobs-interrupted-on-restartはid不変で
+#   kind非依存適用のpush側文言追記)。出典:
+#   tmp/tasks/tm-17/design_webui-overall.md 2.3(転送タブupload form・接続先確認)・
+#   3.2(POST /api/jobs/push・POST /api/push/dry-run)・4.1(audit_log)・5.1〜5.5(job機構・
+#   per-file進行・keep_going=true固定・失敗対象行と最初のerror区分記録)・6章(auth_gate)・
+#   9章W5行(受入条件: UIからpushしてCLI list filesと整合・dry-run予測表示・失敗対象行の
+#   表示・再実行でskipされる・audit logへrecipients指紋記録)・11章。
+# 2026-11-26: PR #13自動レビュー指摘対応で+1条件(server.jobs-push-error-message=per-file失敗行・
+#   dry-run error行のerror{code,message}。対象errorは詳細文言・storage層内部errorは一般化文言。
+#   出典: TASK-17設計3.1(一般化message)・TASK-28設計D-P2/D-P3)。frontend.tomlも同日に+1条件。
 
 [meta]
 feature = "server"
 source_file = "src/server.rs"
 verified = true
-verified_at = "2026-11-25"
-verified_by = "claude"
+verified_at = "2026-11-26"
+verified_by = "opencode(glm-5.4)"
 test_command = "cargo test"
-source_hash = "b297f3cc0b86805f2a2d4128364c105d65d56d9f"
-note = "TASK-9設計1章(serve subcommand・async実行境界)・6章(API)・8章(server.toml)・9章(D4 localhost既定)・10章(dist二階建て)・12章P2+P3(読取API)+P4(auth endpoint枠・保護API開放)+P5(pending API実質)の条件化。P2分7条件・P3分11条件・P4分3条件は2026-11-05実装後に全件passで検証記録を復帰済み。2026-11-05 TASK-13(api-key認証)実装後にcargo test --lib server::全緑(38 tests・api-key系5test+routing改訂含む)を確認してverified=trueへ復帰・source_hashを更新。2026-11-06 TASK-13レビュー指摘対応(LAN境界IP条件追加+乱数読取helper共通化=src/server.rs変更)でverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-06 全件verify(cargo test全binary緑・is_lan_ip_boundary_ips含む・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新。2026-11-14 TASK-17 W1(TASK-18)条件追加(runs/jobs API 2条件+handler単体test 2件)でテスト先行のためverified=falseへ(W1実装後に全件verifyでtrueへ復帰)。2026-11-14 全件verify(cargo test 392 passed(lib 140+integration 25 suite)・frontend vitest 98tests緑・build成功・verify-conditions PASS 347条件)を確認してverified=trueへ復帰・source_hashを更新(W1分: GET /api/runs(batch_id集約・date降順)・GET /api/jobs(W1は空応答))。2026-11-14 コードレビュー指摘対応(runs同日sortをrun内最新version_ts降順の実行順へ・同日逆順test追加・server.runs-list文言改訂=同date内実順保証)後に全件verify(cargo test全binary緑・verify-conditions PASS 347条件)を確認してsource_hashを更新。2026-11-14 TASK-17 W2(TASK-19)条件追加(tag/collections系API+audit_log 9条件+handler単体test 8件+serve経由401回帰test 1件)でテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。2026-11-15 全件verify(cargo test全binary緑・vitest 126tests緑・build成功・verify-conditions PASS 364条件)を確認してverified=trueへ復帰・source_hashを更新(W2分: GET /api/tags・/api/folders・/api/collections(+/:id)・PUT /api/entities/:uuid/tags・collections CRUD・items追加/除去・entitiesへtag/collection絞り込み・audit_log記録)。2026-11-15 レビュー指摘対応(rename応答uuids・成功audit操作tx内化・tags重複正規化・counts現存JOIN・untagged param・foldersラベルなし行=条件7改訂+1新規)後に全件verify(cargo test全binary緑・vitest緑・build成功・verify-conditions PASS)を確認・source_hashを更新。2026-11-21 TASK-17 W3(TASK-22)条件追加(rename/location API 2条件+write-api-auth-gate文言改訂(id不変))でテスト先行のためverified=falseへ(W3実装後に全件verifyでtrueへ復帰)。2026-11-21 TASK-22(TASK-17 W3)実装後に全件verify(cargo test 417pass=25suite・vitest 169pass=29file・verify-conditions PASS 383条件・実機確認=serve+fake seamでrename→CLI list files/queryへ新title反映・catalog rebuild後も保持)を確認してverified=trueへ復帰・source_hashを更新(W3分実装含む)。2026-11-25 TASK-27(TASK-17 W4: job機構+get)条件追加(jobs table正本のjob系API+JobManager 7条件+server.jobs-listのW4実質化改訂=id不変)後・同一sessionで実装も行い全件verify(cargo test 429pass・vitest 191pass・verify-conditions PASS 399条件・実機確認=serve+fake seamでStandard tier取得job発行→succeeded配置・DEEP_ARCHIVEはwaiting_restore→時刻seamでsucceeded・serve再起動でinterrupted)を確認してverified=trueを維持・source_hashを更新(W4分: POST /api/jobs/get・GET /api/jobs(/:id)・cancel・JobManager直列worker・waiting_restore定期確認timer・時刻注入seam・起動時interrupted一括化)"
+source_hash = "e7a562ad4bc456bf956c4408bf36384960444a6f"
+note = "TASK-9設計1章(serve subcommand・async実行境界)・6章(API)・8章(server.toml)・9章(D4 localhost既定)・10章(dist二階建て)・12章P2+P3(読取API)+P4(auth endpoint枠・保護API開放)+P5(pending API実質)の条件化。P2分7条件・P3分11条件・P4分3条件は2026-11-05実装後に全件passで検証記録を復帰済み。2026-11-05 TASK-13(api-key認証)実装後にcargo test --lib server::全緑(38 tests・api-key系5test+routing改訂含む)を確認してverified=trueへ復帰・source_hashを更新。2026-11-06 TASK-13レビュー指摘対応(LAN境界IP条件追加+乱数読取helper共通化=src/server.rs変更)でverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-06 全件verify(cargo test全binary緑・is_lan_ip_boundary_ips含む・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新。2026-11-14 TASK-17 W1(TASK-18)条件追加(runs/jobs API 2条件+handler単体test 2件)でテスト先行のためverified=falseへ(W1実装後に全件verifyでtrueへ復帰)。2026-11-14 全件verify(cargo test 392 passed(lib 140+integration 25 suite)・frontend vitest 98tests緑・build成功・verify-conditions PASS 347条件)を確認してverified=trueへ復帰・source_hashを更新(W1分: GET /api/runs(batch_id集約・date降順)・GET /api/jobs(W1は空応答))。2026-11-14 コードレビュー指摘対応(runs同日sortをrun内最新version_ts降順の実行順へ・同日逆順test追加・server.runs-list文言改訂=同date内実順保証)後に全件verify(cargo test全binary緑・verify-conditions PASS 347条件)を確認してsource_hashを更新。2026-11-14 TASK-17 W2(TASK-19)条件追加(tag/collections系API+audit_log 9条件+handler単体test 8件+serve経由401回帰test 1件)でテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。2026-11-15 全件verify(cargo test全binary緑・vitest 126tests緑・build成功・verify-conditions PASS 364条件)を確認してverified=trueへ復帰・source_hashを更新(W2分: GET /api/tags・/api/folders・/api/collections(+/:id)・PUT /api/entities/:uuid/tags・collections CRUD・items追加/除去・entitiesへtag/collection絞り込み・audit_log記録)。2026-11-15 レビュー指摘対応(rename応答uuids・成功audit操作tx内化・tags重複正規化・counts現存JOIN・untagged param・foldersラベルなし行=条件7改訂+1新規)後に全件verify(cargo test全binary緑・vitest緑・build成功・verify-conditions PASS)を確認・source_hashを更新。2026-11-21 TASK-17 W3(TASK-22)条件追加(rename/location API 2条件+write-api-auth-gate文言改訂(id不変))でテスト先行のためverified=falseへ(W3実装後に全件verifyでtrueへ復帰)。2026-11-21 TASK-22(TASK-17 W3)実装後に全件verify(cargo test 417pass=25suite・vitest 169pass=29file・verify-conditions PASS 383条件・実機確認=serve+fake seamでrename→CLI list files/queryへ新title反映・catalog rebuild後も保持)を確認してverified=trueへ復帰・source_hashを更新(W3分実装含む)。2026-11-25 TASK-27(TASK-17 W4: job機構+get)条件追加(jobs table正本のjob系API+JobManager 7条件+server.jobs-listのW4実質化改訂=id不変)後・同一sessionで実装も行い全件verify(cargo test 429pass・vitest 191pass・verify-conditions PASS 399条件・実機確認=serve+fake seamでStandard tier取得job発行→succeeded配置・DEEP_ARCHIVEはwaiting_restore→時刻seamでsucceeded・serve再起動でinterrupted)を確認してverified=trueを維持・source_hashを更新(W4分: POST /api/jobs/get・GET /api/jobs(/:id)・cancel・JobManager直列worker・waiting_restore定期確認timer・時刻注入seam・起動時interrupted一括化)。2026-11-26 TASK-28(TASK-17 W5: push job・dry-run・upload form)条件追加でテスト先行のためverified=falseへ(W5実装後に全件verifyでtrueへ復帰)。2026-11-26 TASK-28実装後に全件verify(cargo test 439pass=25suite・vitest 202pass=31file・frontend build成功・clippyはW5新規code由来のwarning 0件・verify-conditions PASS 409条件)を確認してverified=trueへ復帰・source_hashを更新(W5分: POST /api/jobs/push・POST /api/push/dry-run・JobManagerのrun_push_job(phase queued→resolve→upload→finalize)・発行時audit(job_push))。2026-11-26 PR #13自動レビュー指摘2件(P2)対応でserver +1条件(jobs-push-error-message=per-file失敗行・dry-run error行のerror{code,message}=対象errorは詳細文言・storage層内部errorは一般化文言)をテスト先行で追加し、対応後に全件verify(cargo test 440pass=25suite・clippyはW5新規code由来のwarning 0件・verify-conditions PASS 411条件・serve/CLI実processとheadless browserによるfake S3 seamのsmoke確認)を確認してverified=trueを維持・source_hashを更新"
 
 [[condition]]
 id = "server.serve-subcommand-health"
@@ -195,7 +208,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(server.toml: liste
 description = "server.toml([server] listen_addr・port・rp_id・rp_origin)はserver共通設定のみを持ちbackup profile(pipeline/aws)とは分離する。listen_addr/portはserveのlistenへ反映する(listen_addr既定127.0.0.1・port既定40510=D5本番serve。rp_id既定\"localhost\"・rp_origin既定\"http://localhost:<port>\"はP4のWebAuthnで使用=本条件の観測対象外) (integration, fake seam)"
 given = "port(空きport)を明示したserver.tomlでのserve起動と、[server]からport keyを省略したserver.tomlでのserve起動"
 expect_return_shape = "明示時は当該portでHTTP応答し、port省略時は40510で応答する(listenは127.0.0.1)"
-source_lines = "src/server.rs:3872; src/server.rs:3902; src/server.rs:3912; tests/server_api.rs:52"
+source_lines = "src/server.rs:4506; src/server.rs:4536; src/server.rs:4546; tests/server_api.rs:52"
 
 [[condition]]
 id = "server.config-init-generates-server-toml"
@@ -249,7 +262,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(D8 endpoint一覧:
 description = "GET /api/entitiesは実効profileのscopeのentity一覧をentry_summary_json互換schema(uuid/title/locations[]/versions=count/latest_date/latest_size/pins[])で返す({\"entities\": [...], \"page\": n, \"total_pages\": n}形式・page=1始点)。TASK-17 W2(TASK-19)で各summary行へtags: string[](昇順=行のtag列chip表示の基盤・設計2.2。frontend EntitySummaryのtags必須化と整合)を追加した(2026-11-14実装時の契約統一)。query(title部分一致/uuid前方一致/所在path部分一致=CLI queryと同一規則)・category(location.category一致)・label(location.label一致。空文字列指定=ラベルなし(location.label=\"\")の完全一致=設計2.2「(ラベルなし)」選択のserver側契約・2026-11-14コードレビュー中10対応)・page・scope(scope=<bucket>:<prefix>明示・他scopeのentityは混入しない=設計2章scope分離)の絞り込みが機能する(tag/collection絞り込みの追加はserver.entities-tag-collection-filters・tag無し選択はserver.entities-untagged-filterが担保) (unit, fake seam)"
 given = "ABH配下catalog.dbの実効scope(api-bucket+amazing-backup/)に2entity(alpha=category docs/label work・beta=unfiled=label無し)と対照scope(other-bucket)に1entity(gamma)を注入した状態でのrouter oneshot"
 expect_return_shape = "200でentities配列はalpha/betaの2要素(gammaは含まれない)。?query=beta・?category=docs・?label=work・?label=(空文字=ラベルなし一致でbeta)はいずれも1要素に絞り込まれ、?scope=other-bucket:amazing-backup/はgammaのみ"
-source_lines = "src/server.rs:4147; src/server.rs:8462"
+source_lines = "src/server.rs:4781; src/server.rs:9132"
 
 [[condition]]
 id = "server.entity-detail-endpoint"
@@ -258,7 +271,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: �
 description = "GET /api/entities/:uuidはversion_list付きentry_summary_json互換(versions/pins/locationsを含む詳細)を返す。TASK-17 W2(TASK-19)でtags(昇順)・collections(所属collection名一覧・name昇順=詳細の所属collection表示)を追加した(2026-11-14実装時の契約統一)。対象uuidが存在しない場合はnot_found 404のerror body(詳細はserver.error-code-status-mapping/error-body-generalizedと共通) (unit, fake seam)"
 given = "catalog.dbの実効scopeに1entity(alpha・1版+1pin+1location)を注入した状態でのrouter oneshot"
 expect_return_shape = "200でuuid/title/locations/pins/version_list(版毎のdate/version_ts/version_id/batch_id/source_size)/tags/collectionsを含む。不在uuidは404"
-source_lines = "src/server.rs:4286"
+source_lines = "src/server.rs:4920"
 
 [[condition]]
 id = "server.entity-versions-endpoint"
@@ -267,7 +280,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: ve
 description = "GET /api/entities/:uuid/versionsはlist versions --format json相当のentity object(uuid/title/locations/versions[](date/version_ts/version_id/source_size/state=現行|noncurrent)/pins[])を返す。不在uuidはnot_found 404 (unit, fake seam)"
 given = "catalog.dbの実効scopeに1entity(alpha・1版)を注入した状態でのrouter oneshot"
 expect_return_shape = "200でversions配列は1要素(全key入り・stateは現行)。不在uuidは404"
-source_lines = "src/server.rs:4353"
+source_lines = "src/server.rs:4987"
 
 [[condition]]
 id = "server.pins-list-endpoint"
@@ -276,7 +289,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: pi
 description = "GET /api/pinsはlist pins --format json相当(entity単位のuuid/title/pins[](pin/date/source_size))のpin一覧を{\"pins\": [...]}形式で返す (unit, fake seam)"
 given = "catalog.dbの実効scopeにpin 1件を持つentity(alpha)を注入した状態でのrouter oneshot"
 expect_return_shape = "200でpins配列は1要素(alphaのtitleとpin行のpin/date/source_sizeを含む)"
-source_lines = "src/server.rs:4403"
+source_lines = "src/server.rs:5037"
 
 [[condition]]
 id = "server.locations-list-endpoint"
@@ -285,7 +298,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: lo
 description = "GET /api/locationsはlocation一覧を{\"locations\": [{uuid, title, source_path, category, label, identity_hash, last_backup}]}形式で返す(uuid/titleはentity所属の案内用・他fieldはlocation_json語彙) (unit, fake seam)"
 given = "catalog.dbの実効scopeにlocation 1件(/data/alpha・category docs)を持つentity(alpha)を注入した状態でのrouter oneshot"
 expect_return_shape = "200でlocations配列は1要素(全key入り・source_path=/data/alpha)"
-source_lines = "src/server.rs:4439"
+source_lines = "src/server.rs:5073"
 
 [[condition]]
 id = "server.pending-endpoint-schema"
@@ -294,7 +307,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: �
 description = "GET /api/pendingはpending_itemsのschema(source_root/path/size/mtime/status/last_scan_at)で{\"pending\": [...]}形式で応答する。P3時点ではscan(P5実装)が無いため空配列で応答する(endpointとschemaの枠のみの中身はP5対象) (unit, fake seam)"
 given = "ABH配下catalog.db(pending_items空=scan未実行)でのrouter oneshot"
 expect_return_shape = "200でpending配列は空(実装前のP2段階では503 fallback)"
-source_lines = "src/server.rs:4481"
+source_lines = "src/server.rs:5115"
 
 [[condition]]
 id = "server.sync-state-endpoint"
@@ -303,7 +316,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: sy
 description = "GET /api/syncはsync_state 1行分(scope=<bucket>:<prefix>形式・status(fresh|stale|error)・index_etag/index_version_id(validator)・fetched_at/last_write_at/last_verified_at・entry_count)を返す。sync_state行が無い(未sync)場合もstatus=\"unknown\"で200応答する(frontendのstaleness表示が常に描画できる。404にしない) (unit, fake seam)"
 given = "ABH配下catalog.db(未sync状態と、実効scopeへのP1 API注入(sync_state=fresh・validator=etag-1/vid-1)後)でのrouter oneshot"
 expect_return_shape = "未sync時は200+status=unknown。注入後は200+status=fresh・scope=api-bucket:amazing-backup/・validator・各時刻・entry_count=1"
-source_lines = "src/server.rs:4603"
+source_lines = "src/server.rs:5237"
 
 [[condition]]
 id = "server.sync-refresh-endpoint"
@@ -312,7 +325,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: �
 description = "POST /api/syncは手動refresh(起動時syncと同一のP1同期層=manage::catalog_sync_once相当)を実行し最新のsync_state(GET /api/syncと同形式)で応答する。未書込namespace(索引object・registryともに無い)では空cacheのfresh確定として成功する。serve内のsyncはsingle-flight(semaphore 1)で直列化する(設計1章。並列実行の観測は本条件では規定しない) (unit, fake seam)"
 given = "最小config(実効profile dev)と空のfake S3 state(未書込namespace)でのrouter oneshot"
 expect_return_shape = "200+status=fresh+fetched_at刻み済み。続くGET /api/syncにも反映される"
-source_lines = "src/server.rs:4656"
+source_lines = "src/server.rs:5290"
 
 [[condition]]
 id = "server.read-api-uses-serve-profile"
@@ -321,7 +334,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 8章(単一の実効pro
 description = "読取API(entities/versions/pins/locations/pending/sync/diff各GET)のscope省略時既定はserve起動時に一度だけ解決した実効profileのscope(AppState保持。--profile/--aws-config/--config起動引数を反映)。更新対象(POST /api/sync・scan・diff)と表示対象(読取API)が同じscopeになる(serve --profile stg指定時に表示だけ既定profileへ戻らない)。?scope=<bucket>:<prefix>明示は従来どおり優先 (unit, fake seam)"
 given = "dev(既定)+stg(--profile指定相当)の2 profile構成のaws.toml/pipeline.tomlと両scopeへのcatalog.db注入でのrouter oneshot(profile指定なしと--profile stg相当のAppState)"
 expect_return_shape = "profile指定なしはdev scopeのentityのみ・stg相当AppStateはstg scopeのentityのみ(scope解決は起動時1回の結果に従う)"
-source_lines = "src/server.rs:4686"
+source_lines = "src/server.rs:5320"
 
 [[condition]]
 id = "server.diff-endpoints"
@@ -330,7 +343,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: di
 description = "POST /api/diffはdiff実行(全体突合=cmd_diffのJSON語彙{entries/files/missing/unexpected})を行いperformed_at付きで応答・結果を保存する。GET /api/diffは保存済みの最終diff結果(POSTと同一内容)を返す。未実行時のGETはnot_found 404。未書込namespaceでは空結果(entries=0)で成功する(P3はendpointとschemaの枠・実データでの突合詳細はP5/P6と接続) (unit, fake seam)"
 given = "最小configと空のfake S3 state(未書込namespace)でのrouter oneshot(GET->POST->GETの順)"
 expect_return_shape = "最初のGETは404 not_found。POSTは200+{performed_at, entries=0, files, missing, unexpected}。実行後のGETは200でPOSTと同一内容"
-source_lines = "src/server.rs:4788"
+source_lines = "src/server.rs:5422"
 
 [[condition]]
 id = "server.error-code-status-mapping"
@@ -339,7 +352,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(指摘#14: invalid
 description = "APIのerrorは原因別error code+HTTP statusに変換する(invalid_request=400・unauthenticated=401・forbidden=403・not_found=404・duplicate=409・validation_failed=422・configuration=503・upstream=502・internal=500)。P3時点でhandler観測可能な代表はinvalid_request(query param形式不正)=400・not_found(対象不在)=404・upstream(S3転送・remote索引問題)=502(unauthenticated 401はP4認証構成後・configuration 503はserver.protected-endpoints-fail-closedで観測) (unit, fake seam)"
 given = "catalog.db注入済みでの ?page=abc(形式不正)と不在uuidと、registry file在り+FAKE_S3_FAIL_HEAD_FOR=索引keyのHEAD失敗注入でのPOST /api/sync"
 expect_return_shape = "page=abcは400 invalid_request・不在uuidは404 not_found・syncのS3失敗は502 upstream(いずれも{\"error\":{...}}形式)"
-source_lines = "src/server.rs:4818"
+source_lines = "src/server.rs:5452"
 
 [[condition]]
 id = "server.error-body-generalized"
@@ -348,7 +361,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(指摘#14: error b
 description = "APIのerror bodyは{\"error\":{\"code\",\"message\"}}形式でmessageは一般化された文言とし、内部error文字列(一時dir等の内部path・内部構造の文言)を無加工で含まない(詳細はserver logのみ)。AWS秘密鍵・age秘密鍵・bootstrap token・session鍵をAPI応答へ出さない秘密情報境界(設計2章)のうちAPI応答面の担保 (unit, fake seam)"
 given = "400(page=abc)・404(不在uuid)・502(HEAD失敗注入のPOST /api/sync)の各error応答"
 expect_return_shape = "全error応答が{\"error\":{\"code\",\"message\"}}形式(messageは空でないstring)で、messageにABH・一時dir等の内部pathが含まれない"
-source_lines = "src/server.rs:4855"
+source_lines = "src/server.rs:5489"
 
 [[condition]]
 id = "server.auth-status-endpoint"
@@ -357,7 +370,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GE
 description = "GET /api/auth/statusは認証不要で認証状態と登録credential数を{\"authenticated\": <bool>, \"credentials\": <数>}形式で200応答する(未認証・未登録でも応答=LoginViewのUI誘導(register/loginどちらを案内するか)の判断基盤。応答形式は設計6章に詳細が無いため本条件書の解釈として確定) (unit, fake seam)"
 given = "credential数0の未認証状態と、credentials tableへ1件挿入後でのrouter oneshot"
 expect_return_shape = "未登録・未認証は200+{\"authenticated\":false,\"credentials\":0}・挿入後は200+credentials=1"
-source_lines = "src/server.rs:5344"
+source_lines = "src/server.rs:5978"
 
 [[condition]]
 id = "server.auth-endpoints-routing"
@@ -366,7 +379,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: PO
 description = "設計6章のauth endpoint群(POST /api/auth/register/start,/finish・POST /api/auth/login/start,/finish・POST /api/auth/logout)とTASK-13追加のPOST /api/auth/api-keyは/api/配下にroutingされ、未認証requestでも404 fallbackではなく定義済みendpointとして応答する(register/startはtoken必須のためtoken無しは401 unauthenticated・logoutは要認証のため未認証401・api-keyはLAN内ならkey検証へ進む=不正keyは401。token/challenge/session契約の詳細はwebauthn area・api-key契約の詳細はserver.api-key-*が担保) (unit, fake seam)"
 given = "各auth endpointへの未認証request(token無しbody・cookie無し。api-keyはLAN内既定remote addrでのbody {\"api_key\": \"<不正key>\"})"
 expect_return_shape = "register/start・logoutは401 unauthenticated・login/start・register/finish・login/finishも404でない定義済み応答・api-keyは404でなく401(LAN内のためkey検証へ進み不正keyは401)(実装前はapi-keyのroutingが無くfallbackの404でfailを許容=TASK-13改訂分のassertのみ赤)"
-source_lines = "src/server.rs:5374"
+source_lines = "src/server.rs:6008"
 
 [[condition]]
 id = "server.protected-api-open-with-auth"
@@ -375,7 +388,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 12章P4(passkey認証=�
 description = "P4実装後は保護APIの未認証応答が503(configuration)から401(unauthenticated)へ置換わる(protected_fail_closed middlewareのsession検証gateへの置換)。認証済みsessionではP3読取API(entities等)が応答する。未認証401のerror body詳細はwebauthn.unauthenticated-protected-api-401・認証済みでのflow完結観測はwebauthn.register-login-flow-server-to-serverと共通 (integration, fake seam)"
 given = "serve起動状態でのGET /api/entities(未認証・cookie無し)"
 expect_return_shape = "HTTP 401で{\"error\":{\"code\":\"unauthenticated\",...}}形式(503 configurationでない=P2〜P3のfail-closedからの置換観測。実装前は503のままでfailを許容)"
-source_lines = "src/server.rs:5640; tests/server_api.rs:324"
+source_lines = "src/server.rs:6274; tests/server_api.rs:324"
 
 [[excluded]]
 item = "dist埋め込み時の静的配信応答(release build実機)とVite dev proxy(40512)の実browser接続確認"
@@ -391,7 +404,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: PO
 description = "POST /api/pending/scanは保護API(未認証401=auth_gate)でscanを実行する(manage catalog scanと同一のP5同期層・scan対象はpipeline.toml [profiles.<n>.catalog.scan]・spawn_blocking経由・syncと同一のsingle-flight直列化)。request body無し。応答はscan実行後の最新一覧をGET /api/pendingと同一schema({\"pending\":[...]})で返す。scan対象未登録でも200で0件 (unit+integration, fake seam)"
 given = "pipeline.tomlへ[profiles.dev.catalog.scan] roots=<dir>(比較基準となるbackup記録なし=x.zip/y.zip配置)を追記した状態でのrouter oneshot(POST->GET)と、serve起動状態での未認証POST"
 expect_return_shape = "router oneshotは200でpending配列2要素(各itemはsource_root/path/size/mtime/status/last_scan_at入り・比較基準なしのためstatus=unbacked・last_scan_at非空)で続くGET /api/pendingにも反映される。serve経由の未認証POSTは401 {\"error\":{\"code\":\"unauthenticated\"}}(保護対象dataは応答に含まれない)(実装前はroutingが無くfallbackの404でfailを許容・未認証401観測はauth_gate実装済みのため緑)"
-source_lines = "src/server.rs:4524; tests/server_api.rs:363"
+source_lines = "src/server.rs:5158; tests/server_api.rs:363"
 
 [[condition]]
 id = "server.pending-list-status-filter"
@@ -400,7 +413,7 @@ source = "tmp/tasks/tm-9/design_catalog-frontend-auth.md 6章(endpoint一覧: GE
 description = "GET /api/pendingはP3のschema枠(server.pending-endpoint-schema)に対し実効scopeのpending_itemsを実質応答する: query param ?status=<unbacked|changed|ok|unknown>で単一statusへ絞り込み(省略時全件)。各itemのlast_scan_atは直近scan時刻。不正なstatus値は400 invalid_request(既存error体系=server.error-code-status-mappingと共通) (unit, fake seam)"
 given = "POST /api/pending/scan実行後(unbacked項目あり)での GET /api/pending?status=unbacked・?status=ok・?status=bogus"
 expect_return_shape = "?status=unbackedは200でunbacked項目のみ。?status=okは200で空配列。?status=bogusは400 invalid_request({\"error\":{...}}形式)(実装前はparam無視の200でfailを許容)"
-source_lines = "src/server.rs:4573"
+source_lines = "src/server.rs:5207"
 
 [[excluded]]
 item = "release CIのfrontend先行build job+artifact共有(現行4 matrix jobへの先行job追加)"
@@ -439,7 +452,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) D13・2.3(POST /
 description = "POST /api/auth/api-keyはapi_keyのSHA-256 hexでapi_keys table(永続class)を検索し、LAN内接続+登録済みkey一致ならpasskey login finishと同一手順でsessionを確立する(session.cycle_id()=session固定化対策→session.insert(\"authenticated\", true)→establish_session_id(&session, \"api_key\"))。応答はlogin finishと同一の{\"status\":\"ok\"}形式・Set-Cookieにsession cookie。確立したsession cookieで以降の保護API(auth_gate)を通過する(D13=api-keyはsession交換に単純化。api-key検索はrun_blocking経由=設計2.3) (unit, fake seam)"
 given = "api_keys tableへkey挿入(rusqlite直接=insert_api_key APIと同一schema)済み・remote addr=127.0.0.1(LAN内)での POST /api/auth/api-key {\"api_key\": <key>} と、そのSet-CookieでのGET /api/entities"
 expect_return_shape = "POSTは200+{\"status\":\"ok\"}+session cookie(Set-Cookie)。続くGET /api/entitiesは200(session認証で保護API通過)(実装前はroutingが無くfallbackの404でfailを許容)"
-source_lines = "src/server.rs:5881"
+source_lines = "src/server.rs:6515"
 
 [[condition]]
 id = "server.api-key-invalid-key-401"
@@ -448,7 +461,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.3(SHA-256(api_
 description = "api_keyのSHA-256 hexがapi_keysに登録されていない(不一致・不在)場合はLAN内でも401 {\"error\":{\"code\":\"unauthenticated\"}}で応答する(passkey login finish検証失敗と同一の一般化message=keyの存在特定防止。ログインsessionは確立しない) (unit, fake seam)"
 given = "api_keys tableへ別key挿入済み・remote addr=127.0.0.1(LAN内)での POST /api/auth/api-key {\"api_key\": <登録されていないkey>}"
 expect_return_shape = "401で{\"error\":{\"code\":\"unauthenticated\", \"message\":...}形式(403 forbidden_sourceでない=LAN内はkey検証へ進む)(実装前はroutingが無くfallbackの404でfailを許容)"
-source_lines = "src/server.rs:5907"
+source_lines = "src/server.rs:6541"
 
 [[condition]]
 id = "server.api-key-outside-lan-403"
@@ -457,7 +470,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) D14・2.3(remote
 description = "remote addrがLAN内(正規化: SocketAddrのto_ipv4_mappedでIPv4へ写せるものはIPv4へ正規化後に判定。IPv4=loopback 127.0.0.0/8・RFC1918 private(10/8・172.16/12・192.168/16)・link-local 169.254/16。IPv6=::1・fc00::/7 ULA・fe80::/10 link-local)に含まれない場合はkey検証の前に403 {\"error\":{\"code\":\"forbidden_source\"}}で受理を拒否する(正keyでもLAN外は認証不可=D14。passkey認証は従来どおり条件を追加しない=本条件はapi-key endpointのみの条件) (unit, fake seam)"
 given = "api_keys tableへ正key挿入済みでの、remote addr=8.8.8.8(LAN外IPv4)・[::ffff:8.8.8.8](IPv4-mapped IPv6)での POST /api/auth/api-key {\"api_key\": <正key>} と、remote addr=127.0.0.1(LAN内)での POST {\"api_key\": <不正key>}"
 expect_return_shape = "LAN外IPv4は正keyでも403 forbidden_source・IPv4-mappedも正規化後にLAN外判定で403・LAN内は403でない(不正keyは401=key検証へ進む。test seamのremote addrはRequest extensionのConnectInfo挿入=本番のinto_make_service_with_connect_infoと同一機構)(実装前はroutingが無くfallbackの404でfailを許容)"
-source_lines = "src/server.rs:5927"
+source_lines = "src/server.rs:6561"
 
 [[condition]]
 id = "server.api-key-lan-boundary-table"
@@ -466,7 +479,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 1章D14のLAN内
 description = "is_lan_ipは各rangeの境界IPで正しくLAN内/外を判定する: RFC1918 172.16.0.0/12(172.15.255.255=外・172.16.0.0=内・172.31.255.255=内・172.32.0.0=外)・link-local 169.254.0.0/16(169.253.x=外・169.254.x=内・169.255.x=外)・ULA fc00::/7(fbff::=外・fc00::=内・fdff::=内)・link-local fe80::/10(fe7f::=外・fe80::=内・febf::=内・fec0::=外)。v4-mapped(::ffff:10.0.0.1)はIPv4へ正規化後にLAN内と判定する (unit)"
 given = "境界IP表(上記rangeの内外境界IPとv4-mappedアドレス)のis_lan_ip直接呼出"
 expect_return_shape = "表の各IPが期待するLAN内(true)/LAN外(false)を返す"
-source_lines = "src/server.rs:5967"
+source_lines = "src/server.rs:6601"
 
 [[condition]]
 id = "server.api-key-removal-invalidates-login"
@@ -475,7 +488,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.3(api-key失�
 description = "api-key失効(manage auth removeによるapi_keys行削除)後は同一keyでのapi-key認証は401になる(失効keyでの新規login不可)。失効は既存sessionを破棄しない(失効前に確立したsession cookieは引き続き保護APIを通過する=in-memory 24h・passkey removeと同一挙動) (unit, fake seam)"
 given = "api-key認証成功(session cookie取得済み)後にapi_keysの当該行を削除(rusqlite直接=manage auth remove相当)しての POST /api/auth/api-key {\"api_key\": <同一key>} と、取得済みcookieでのGET /api/entities"
 expect_return_shape = "同一keyのPOSTは401(key検証はapi_keys検索によるため)。取得済みcookieでのGET /api/entitiesは200のまま(既存sessionは破棄しない)(実装前はroutingが無くfallbackの404でfailを許容)"
-source_lines = "src/server.rs:6001"
+source_lines = "src/server.rs:6635"
 
 [[condition]]
 id = "server.auth-status-api-keys-count"
@@ -484,7 +497,7 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.4(GET /api/aut
 description = "GET /api/auth/statusの応答へapi_keys(件数)を追加する({\"authenticated\", \"credentials\", \"api_keys\"}。credentialsはpasskey件数のまま=api_keysはapi_keys tableの件数。LoginViewのapi-key欄表示の判断基盤) (unit, fake seam)"
 given = "api_keys 0件の状態と、api_keysへ1行挿入(rusqlite直接)後での GET /api/auth/status"
 expect_return_shape = "0件は200+api_keys=0・挿入後は200+api_keys=1(credentials・authenticatedは従来どおり)(実装前はapi_keys keyが応答に無くfailを許容)"
-source_lines = "src/server.rs:6035"
+source_lines = "src/server.rs:6669"
 
 [[excluded]]
 item = "api-key認証へのrate limit/試行回数制限"
@@ -523,7 +536,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(GET /api/ru
 description = "GET /api/runsはcatalogのversionsをbatch_id単位で集約したrun一覧を{\"runs\":[{batch_id,date,entity_count}]}形式で応答する(ホームの前回backup・管理のbackup実行履歴(W7)の基盤)。集約規則(設計に詳細が規定されない点の解釈。実装はこれに従う): entity_count=当該batch_idのversion数(=runの対象実体数)・date=当該runのversion日時の最新・並びはdate降順(直近runが先頭=ホームの前回backup表示は先頭要素で成立。同date内はrun内の最新version_ts降順=実行順で並べる。batch_idの接尾辞は時刻のhashのため辞書順は実行順を保証せずsort keyには使わない。version_tsは応答schemaに含めない内部sort key=JST固定ISO8601のため辞書順比較で時刻順)。scopeは読取API共通(server.read-api-uses-serve-profileと同一扱い: 省略時は実効profileのscopeで他scopeのrunは混入しない・?scope=<bucket>:<prefix>明示は優先)。保護API(未認証401=既存auth_gateが構造的に対象のため本条件では観測しない) (unit, fake seam)"
 given = "ABH配下catalog.dbの実効scope(api-bucket+amazing-backup/)へrun-1(batch 20261105-abcdef01=alpha 1version)とrun-2(batch 20261106-abcdef02=beta+deltaの2version)を注入し、対照scope(other-bucket)へrun-3(batch 20261107-abcdef03=gamma)を注入した状態でのrouter oneshot(GET /api/runs・GET /api/runs?scope=other-bucket:amazing-backup/)。加えて同日(2026-11-06)の2run(batch 20261106-zzzzzz99=version_ts 10:00が実行前・batch 20261106-aaaaaa10=version_ts 23:00が実行後=batch_id辞書順と実行順が逆)を注入した状態でのrouter oneshot(GET /api/runs)"
 expect_return_shape = "実効scopeは200でruns配列2要素(先頭=run-2: batch_id/date/entity_count=2・2番目=run-1: entity_count=1=date降順)。run-3(対照scope)は含まれない。scope明示はrun-3のみ1要素。同日の2runはversion_tsが新しいrun(20261106-aaaaaa10)が先頭(batch_id降順だと誤ってzzzzzz99が先頭になる)。応答要素はbatch_id/date/entity_countのみ(version_tsを含まない)"
-source_lines = "src/server.rs:6081; src/server.rs:6180"
+source_lines = "src/server.rs:6715; src/server.rs:6814"
 
 [[condition]]
 id = "server.jobs-list"
@@ -532,7 +545,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(GET /api/jo
 description = "GET /api/jobsはjobs tableから実効scopeのjob一覧を{\"jobs\":[...]}形式(要素はjob object={id,kind,status,params,progress,result,error,created_at,updated_at})で応答する(W4(TASK-27)で実質化=W1の常に空配列から置換。job状態の正本はjobs table=設計5.4)。並びは進行中(queued/running/waiting_restore)を先頭groupへ・各group内はid降順(新しい順。進行中jobが一覧上位に来る=ホーム実行中job区画・転送タブの追従基盤)。jobが1件も無ければ空配列で200。?status=<queued|running|waiting_restore|succeeded|failed|interrupted|cancelled>・?kind=<get|push>(W5語彙込み)絞り込みが機能し不正値は400 invalid_request(pendingのstatus絞り込みと共通)。scope絞り込みparamは設計3.2どおり持たない=実効1 scopeで対照scopeの行は混入しない。保護APIで未認証は401 unauthenticated(設計6章: job系APIも同一session gate。/api/*の既存gateが構造的に対応するため本条件で観測) (unit, fake seam)"
 given = "api_env(jobが無い状態)とAuthFlow(auth構成router)での未認証GET /api/jobs。加えてapi_envのjobs tableへsucceeded→running→failed→queuedの順に4行+対照scope(other-bucket)へ1行注入した状態でのrouter oneshot(GET /api/jobs・?status=running・?kind=get・?status=bogus・?kind=bogus)"
 expect_return_shape = "job無しは200+空配列・未認証は401+{\"error\":{\"code\":\"unauthenticated\"}}。注入後は200でid並び=[queued,running,failed,succeeded](進行中優先・id降順・対照scopeは混入しない)。?status=runningはrunning行のみ・?kind=getは4件。bogusは400 invalid_request"
-source_lines = "src/server.rs:6235"
+source_lines = "src/server.rs:6869"
 
 # --- TASK-17 W2(TASK-19: tag/collection・3ビュー・2026-11-14テスト先行) ---
 
@@ -543,7 +556,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(GET /api/en
 description = "GET /api/entitiesは?tag=<tag名>で当該tagを持つentityへ・?collection=<collections.id>で当該collection構成のentityへ絞り込む(folder絞り込み用の新paramは設けず既存label=で成立=設計3.2。collection絞り込みの値はid(改名に追従しないためnameでない)=設計に規定されない点の解釈)。tag絧り込み・collection絞り込みとも実効scope内のみ(他scopeのtag行・collection行は混入しない)。一致なしのtagは空配列200 (unit, fake seam)"
 given = "ABH配下catalog.dbの実効scope(api-bucket+amazing-backup/)へ3entity(alpha/beta/gamma)を注入しPUT tagsでalpha={docs,work}・beta={docs}と付与しcollection(grp)へalphaを追加した状態でのrouter oneshot(GET /api/entities?tag=docs・?tag=work・?tag=nosuch・?collection=<id>)。対照scope(other-bucket)のtags行はrusqlite直接注入"
 expect_return_shape = "?tag=docsはalpha+betaの2要素・?tag=workはalphaのみ・?tag=nosuchは空配列・?collection=<id>はalphaのみ(対照scopeのtag行はいずれにも混入しない)(実装前はPUT tagsのroutingが無くfallback 404でfailを許容)"
-source_lines = "src/server.rs:7422"
+source_lines = "src/server.rs:8092"
 
 [[condition]]
 id = "server.entities-untagged-filter"
@@ -552,7 +565,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 2.2(tagビュ�
 description = "GET /api/entitiesは?untagged=1でtagを1つも持たないentityのみへ絞り込む(設計2.2「tag無しも選択可」のserver側契約。tag絞り込み(?tag=)との同時指定は矛盾するため400 invalid_request・untaggedの値が1以外も400 invalid_request。tag・collection以外の既存絞り込み(query/category/label/scope/page)との併用は可=AND絞り込み) (unit, fake seam)"
 given = "実効scopeに3entity(alpha={docs,work}・beta={docs}をPUT tagsで付与・gamma=tag無し)を注入した状態でのrouter oneshot(GET /api/entities?untagged=1・?tag=docs&untagged=1・?untagged=0)"
 expect_return_shape = "?untagged=1は200でgammaのみの1要素・?tag=docs&untagged=1は400 invalid_request・?untagged=0は400 invalid_request(いずれも{\"error\":{...}}形式)"
-source_lines = "src/server.rs:8461"
+source_lines = "src/server.rs:9131"
 
 [[condition]]
 id = "server.tags-list"
@@ -561,7 +574,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(GET /api/ta
 description = "GET /api/tagsはtag一覧を{\"tags\":[{tag,entity_count}]}形式で応答する(設計に並び・計上規則が規定されない点の解釈: 並びはtag名昇順・entity_countは当該tagを持つ実効scope内のentity数=対照scopeのtag行は計上しない。entity_countの集計は同一scopeの現存entities(cache table)とのJOINで行う=sync/rebuildでcacheから消えたentityのtag行は計上しない(tag行自体は永続classのため保持され・entity復帰時にtagも復帰する)=2026-11-14コードレビュー中11対応。全tag保有entityが消えたtagは一覧に出ない。scopeは読取API共通=server.read-api-uses-serve-profileと同一扱い) (unit, fake seam)"
 given = "実効scopeに2entity(alpha/beta)を注入しPUT tagsでalpha={docs,work}・beta={docs}と付与した状態でのrouter oneshot(GET /api/tags)。対照scope(other-bucket)のtags行(docs)と・実効scope内でcacheに無いuuidのtags行(docs・ghost=現存entityが0)はrusqlite直接注入"
 expect_return_shape = "200でtags配列は[{tag:docs,entity_count:2},{tag:work,entity_count:1}]の2要素(tag昇順・対照scopeのdocsとcache外uuidのdocs/ghostは計上しない=ghostは一覧に出ない)(実装前はPUT tagsのroutingが無くfallback 404でfailを許容)"
-source_lines = "src/server.rs:7532; src/server.rs:8524"
+source_lines = "src/server.rs:8202; src/server.rs:9194"
 
 [[condition]]
 id = "server.folders-list"
@@ -570,7 +583,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(GET /api/fo
 description = "GET /api/foldersはlabelのdirectory区切りで階層導出したfolder一覧を{\"folders\":[{label,path,entity_count}]}形式で応答する(設計に詳細が規定されない点の解釈。実装はこれに従う): 各行=labelの階層nodeごと(中間nodeも1行)・path=nodeのrootからの完全path(既存label=絞り込みの値と一致=folder絞り込みは新param無しで成立)・label=nodeの最終区切り要素・entity_count=当該node配下のentity数(子folder配下を含む合計=tree表示の基盤)・並びはpath昇順。ラベルなし(location.label=\"\")のlocationを持つentityは配列先頭行{label:\"\",path:\"\",entity_count:ラベルなしentity数}で応答する(設計2.2「(ラベルなし)」nodeのserver側契約=2026-11-14コードレビュー中10対応。行の選択は既存label=絞り込みの空文字完全一致(label=)と対応する。ラベルなしentityが0件の時はこの行を出さない=他nodeと同一の「実在から導出」規則)。scopeは読取API共通 (unit, fake seam)"
 given = "実効scopeに4entity(beta=label work・alpha=label work/report・delta=label docs/2026/report・gamma=label無し)を注入した状態でのrouter oneshot(GET /api/folders)"
 expect_return_shape = "200でfolders配列は6要素・先頭がラベルなし行\"\"(1=gamma)で以降path昇順[\"\"(1), docs(1), docs/2026(1), docs/2026/report(1), work(2), work/report(1)]。workのentity_countは直下beta+配下alphaの合計2(階層集約)。各要素はlabel/path/entity_countのみ(実装前はroutingが無くfallback 404でfailを許容)"
-source_lines = "src/server.rs:7569"
+source_lines = "src/server.rs:8239"
 
 [[condition]]
 id = "server.collections-list-and-detail"
@@ -579,7 +592,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(GET /api/co
 description = "GET /api/collectionsはcollection一覧を{\"collections\":[{id,name,entity_count}]}形式で応答する(設計に規定されない点の解釈: 並びはname昇順・entity_count=構成entity数。entity_countの集計は同一scopeの現存entities(cache table)とのJOINで行う=sync/rebuildでcacheから消えたentityの構成行は計上しない(構成行自体は保持され・entity復帰時に再び計上される)=2026-11-14コードレビュー中11対応)。GET /api/collections/:idは詳細{\"collection\":{id,name,uuids}}(構成uuid一覧・追加順)を応答する。不在idは404 not_found。scopeは読取API共通(対照scopeのcollectionは一覧に混入しない) (unit, fake seam)"
 given = "実効scopeに2entity(alpha/beta)を注入しcollection zeta(alpha構成)・alpha-beta(beta構成)・ghost(cacheに無いuuidのみの構成行をrusqlite直接注入)を作成した状態でのrouter oneshot(GET /api/collections・GET /api/collections/<zeta id>・GET /api/collections/99999)。対照scope(other-bucket)のcollections行はrusqlite直接注入"
 expect_return_shape = "一覧は200でcollections配列3要素(name昇順: alpha-beta(1), ghost(0=現存entityのみ計上), zeta(1)・対照scopeは混入しない)。詳細は200で{id,name:zeta,uuids:[alpha]}。不在idは404 not_found({\"error\":{...}}形式)(実装前はPOST /api/collectionsのroutingが無くfallback 404でfailを許容)"
-source_lines = "src/server.rs:7616; src/server.rs:8525"
+source_lines = "src/server.rs:8286; src/server.rs:9195"
 
 [[condition]]
 id = "server.entity-tags-replace"
@@ -588,7 +601,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(PUT /api/en
 description = "PUT /api/entities/:uuid/tagsはbody {\"tags\":[...]}で当該entityのtag一覧を丸ごと置換する(冪等・差し替え=削除+追加が同一操作。空配列は全tag削除。body内の重複tagは同一tagのため正規化(set化・重複を除いた一覧)して受理=2026-11-14コードレビュー中5対応)。応答は操作後の対象状態としてGET /api/entities/:uuidと同一のEntityDetail形式(uuid/title/locations/versions=count/latest_date/latest_size/pins/version_list+tags(昇順)+collections(所属collection名一覧))を返す(3.1方針「書込応答は読取系と同一schema・操作後に再GET不要」=2026-11-14実装時の契約統一裁定)。tag名規則 ^[a-z0-9][a-z0-9-]{0,63}$ に違反する値は422 validation_failed(64文字は受理・65文字は違反)。対象uuidが実効scopeに不在なら404 not_found (unit, fake seam)"
 given = "実効scopeに1entity(alpha)を注入した状態でのrouter oneshot(PUT {tags:[docs,work]}→PUT {tags:[docs]}→同再送→PUT {tags:[]}→PUT {tags:[docs,docs]}(重複)→PUT {tags:[Bad|-x|65文字|64文字]}→不在uuidへのPUT)"
 expect_return_shape = "置換は200で応答はEntityDetail形式(uuid/title/version_list/collectionsキー入り+tagsは操作後の一覧: 2件→1件→同1件(冪等)→0件)。重複body {tags:[docs,docs]}は200でtagsは正規化され[docs]の1件。Bad/-x/65文字は422 validation_failed・64文字は200。不在uuidは404 not_found(実装前はroutingが無くfallback 404でfailを許容=期待応答の得られないfail)"
-source_lines = "src/server.rs:7685; src/server.rs:8590"
+source_lines = "src/server.rs:8355; src/server.rs:9260"
 
 [[condition]]
 id = "server.collection-crud"
@@ -597,7 +610,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(POST /api/c
 description = "POST /api/collectionsはbody {\"name\"}でcollectionを作成する(応答は詳細schema{\"collection\":{id,name,uuids}}=3.1方針。設計にname規則が規定されない点の解釈: 空nameは422 validation_failed)。同(scope,name)は409 duplicate(UNIQUE制約由来)。PUT /api/collections/:idはbody {\"name\"}で改名(応答は詳細schema。uuidsは改名後の実際の構成uuid一覧=GET /api/collections/:idと同一内容=2026-11-14コードレビュー高2対応)・改名先が既存collectionと同名なら409・不在idは404。DELETE /api/collections/:idは削除し{\"status\":\"ok\"}で応答(削除は構成参照の解除のみ=collection_itemsはCASCADEで消え・entityのtag・一覧は影響しない) (unit, fake seam)"
 given = "実効scopeに2entity(alpha/beta)を注入した状態でのrouter oneshot(POST {name:trip}→同名POST→空name POST→PUT改名→改名先同名PUT(対照としてoccupiedをrusqlite直接作成)→不在id PUT→items追加(alpha)後のPUT改名(構成持ち改名)→DELETE→GET /api/collections/:id・GET /api/entities)"
 expect_return_shape = "作成は200+{collection:{id,name:trip,uuids:[]}}・同名は409 duplicate・空nameは422・改名は200+name=vacation(id不変)・改名先同名は409・不在idは404・構成持ちcollectionの改名応答はuuids=[alpha](操作後の実際の構成)・削除は200+{status:ok}で削除後の詳細は404・GET /api/entitiesはalpha/betaとも従来どおり(削除はentityへ影響しない)(実装前はroutingが無くfallback 404でfailを許容)"
-source_lines = "src/server.rs:7775; src/server.rs:8589"
+source_lines = "src/server.rs:8445; src/server.rs:9259"
 
 [[condition]]
 id = "server.collection-items"
@@ -606,7 +619,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(POST /api/c
 description = "POST /api/collections/:id/itemsはbody {\"uuids\":[...]}で構成entityを一括追加する(応答は操作後の詳細schema{\"collection\":{id,name,uuids}}・uuidsは追加順)。不在collectionは404 not_found・catalogに無いuuidは404 not_found・既に構成のuuidの再追加は冪等に成功(追加済みskip=UNIQUE PKとの整合。設計に規定されない点の解釈)。DELETE /api/collections/:id/items/:uuidは構成から除去(応答は操作後の詳細schema)・非構成uuidは404・不在collectionは404 (unit, fake seam)"
 given = "実効scopeに2entity(alpha/beta)を注入しcollection(grp)を作成した状態でのrouter oneshot(POST {uuids:[alpha,beta]}→POST {uuids:[alpha]}(再追加)→POST {uuids:[不在uuid]}→POST /api/collections/99999/items→DELETE alpha→DELETE alpha再→DELETE /api/collections/99999/items/beta)"
 expect_return_shape = "一括追加は200+uuids=[alpha,beta](追加順)・再追加は200でuuidsは2件のまま(冪等)・不在uuidは404・不在collectionは404・除去は200+uuids=[beta]・非構成uuidの除去は404(実装前はPOST /api/collectionsのroutingが無くfallback 404でfailを許容)"
-source_lines = "src/server.rs:7870"
+source_lines = "src/server.rs:8540"
 
 [[condition]]
 id = "server.write-api-audit-log-recorded"
@@ -615,7 +628,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.1(audit_log t
 description = "W2の書込API(tags系・collections系)はUI書込操作としてaudit_logへ記録される: 成功操作はoutcome=\"ok\"・失敗操作(422・409等)も記録されoutcome=\"failed\"+error_code(2.5の成否表示の基盤)。成功audit記録は書込操作と同一transactionで確定し・audit記録が不能な場合は操作もrollbackされて500 internal errorで応答する=成功応答した変更が履歴に残らない状況を作らない(2026-11-14コードレビュー中4対応。SQLite local DBでinsert失敗=disk障害時は操作も失敗が自然なため。失敗audit(422/409/404時)は操作が行われていないため別transactionでよい)。書込flow内のstorage層失敗も監査記録の共通経路を通る(failed/internal記録後に500=コードレビュー中5対応)。各列はscope(=実効scopeのbucket:prefix形式)・recorded_at(非空)・action(操作種別)・detail_json(対象特定情報(uuid・collection id/name等)を含むJSON文字列)。action語彙(設計に規定されない点の解釈): tags_replace/collection_create/collection_rename/collection_delete/collection_items_add/collection_items_remove (unit, fake seam)"
 given = "実効scopeに1entity(alpha)を注入した状態でPUT tags成功→PUT tags規則違反(422)→collection作成→items追加→改名→削除を実行した後のABH配下catalog.db audit_log表直接読取(rusqlite・id昇順)。加えてaudit_log表をDROPした状態(rusqlite直接=記録不能状況の注入)でのPUT tags→GET /api/entities/:uuid"
 expect_return_shape = "6操作ぶんの行がid昇順で記録される: 1行目はaction=tags_replace・outcome=ok・detail_jsonにalphaのuuidを含む・scope=api-bucket:amazing-backup/・recorded_at非空。2行目はaction=tags_replace・outcome=failed・error_code=validation_failed。以降にcollection_create/collection_items_add/collection_rename/collection_deleteのok行。全行でoutcome/scope/recorded_atは非空。audit_log表DROP後のPUT tagsは500 internal({\"error\":{...}}形式)で・tags tableへの書込もrollbackされている(GET /api/entities/:uuidのtagsは空のまま)(実装前はtags table・audit_log table不在でfailを許容)"
-source_lines = "src/server.rs:7965; src/server.rs:8644"
+source_lines = "src/server.rs:8635; src/server.rs:9314"
 
 [[condition]]
 id = "server.write-api-auth-gate"
@@ -624,7 +637,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 6章(書き込�
 description = "書込API群(PUT /api/entities/:uuid/tags・POST /api/collections・PUT/DELETE /api/collections/:id・POST /api/collections/:id/items・DELETE /api/collections/:id/items/:uuid・W3(TASK-22)のPOST /api/entities/:uuid/rename・POST /api/entities/:uuid/location)は読取APIと同一のauth_gate(session検証)で保護され、未認証は401 {\"error\":{\"code\":\"unauthenticated\"}}(読取/書込の権限区別を設けない=single user。応答に保護対象データは含まれない) (unit+integration, fake seam)"
 given = "AuthFlow(auth構成router)での未認証書込API呼出(W2系6種=PUT tags・POST/PUT/DELETE collections・POST items・DELETE items+W3系2種=POST rename・POST location)と、serve起動状態での未認証書込API呼出(同種=routerへのgate適用の回帰観測)"
 expect_return_shape = "いずれも401+{\"error\":{\"code\":\"unauthenticated\",...}}形式で保護対象データを含まない(401観測はauth_gate実装済みのため実装前後とも緑=W1のserver.jobs-listと同一位置づけ。serve経由は実装前はrouting不在のfallback 404でfailを許容)"
-source_lines = "src/server.rs:8050; tests/server_api.rs:460"
+source_lines = "src/server.rs:8720; tests/server_api.rs:465"
 
 # --- TASK-17 W3(TASK-22: 書き込み系registry event・2026-11-21テスト先行) ---
 
@@ -635,7 +648,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(POST /api/e
 description = "POST /api/entities/:uuid/renameはbody {\"title\"}でentityのtitleを変更する: 対象の存在判定はregistry由来の現行state(build_entries結果。対象uuidが無ければ404=ローカルregistryが知らないentityの索引再構築による消失を防ぐ)。title規則(layout::validate_title: 64文字//改行/制御文字)違反は422 validation_failed・同一titleのままの再送は冪等に成功(rename記録は追記されるが導出結果不変)。titleが他entityの現行titleと重複する場合は許容のうえ応答へwarning field(CLI warn_if_title_duplicateと同一文言)を添える。実行はRenameRecord追記→rebuild_and_upload_index(索引全体再構築+S3 PUT+catalog DB反映)→sync_entity_metadata(新titleキーPUT+旧titleキー掃除)の順=4.2。応答は操作後の対象状態のEntityDetail形式(GET /api/entities/:uuidと同一schema+tags/collections+warning(重複時のみ))。audit_logへaction=entity_renameで成功/失敗を記録(成功auditは操作完了後の記録=registry+S3書込をまたぐ単一transactionが存在しないためW2の同一tx方式と異なり操作後記録とする)。書込はW2書込APIと同一のsingle-flight(semaphore 1)で直列化 (unit, fake seam)"
 given = "registryに2entity(alpha/beta)のfile_write+file_uploadを用意した実効scopeでのrouter oneshot(POST rename {title:renamed}→GET /api/entities/:uuid→registry追記確認(rename record・index PUT呼出)→title重複(rename beta→alpha)→規則違抵抗title(/入り・66文字)→不在uuid)"
 expect_return_shape = "変更は200+EntityDetail形式(title=renamed・locations/versions/tags/collectionsキー込み)で・応答後のGETでも新title(registry由来state反映)。registryへRenameRecord(old_title=alpha,new_title=renamed)が追記され索引object(sys/index.jsonl.age)のPUTとmetadata新キーPUT・旧キー掃除が行われる。重複titleは200+warning field(CLI同一文言)・規則違反は422 validation_failed・不在uuidは404 not_found・audit_logに成功/失敗行(action=entity_rename)(実装前はrouting不在のfallback 404でfailを許容)"
-source_lines = "src/server.rs:8145"
+source_lines = "src/server.rs:8815"
 
 [[condition]]
 id = "server.entity-location-endpoint"
@@ -644,7 +657,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(POST /api/e
 description = "POST /api/entities/:uuid/locationはbody {\"source_path\",\"category\",\"label\"}で所在の分類を変更する: 対象locationは(uuid, source_path)完全一致で特定(不一致・不在uuidは404 not_found)。categoryはcategory名規則(layout::validate_category_name=^[a-z0-9][a-z0-9-]{0,63}$)違反で422・labelはnormalize_label規則(先頭/・./../要素・空要素拒否。空文字列=ラベルなしは正当)違反で422 validation_failed。実行はLocationUpdateRecord追記→rebuild_and_upload_index(metadata sync無し)の順=4.2。応答は操作後の対象状態のEntityDetail形式。audit_logへaction=entity_location_updateで成功/失敗を記録。書込はsingle-flight(semaphore 1) (unit, fake seam)"
 given = "registryに1entity(alpha・category=docs,label=workの所在)を用意した実効scopeでのrouter oneshot(POST location {source_path一致,category:photos,label:sub}→POST {label:\"\"}(ラベルなし=正当)→POST {source_path:不一致}→POST {category:Bad}→POST {label:/x}→不在uuid)"
 expect_return_shape = "変更は200+EntityDetail形式(locations[0]のcategory=photos,label=sub)で・応答後のGETでも新分類。ラベルなし指定も200(label=\"\")。source_path不一致・不在uuidは404 not_found・category/label規則違反は422 validation_failed・audit_logに成功/失敗行(action=entity_location_update)・registryへLocationUpdateRecordが追記される(実装前はrouting不在のfallback 404でfailを許容)"
-source_lines = "src/server.rs:8299"
+source_lines = "src/server.rs:8969"
 
 # --- TASK-17 W4(TASK-27: job機構+get・2026-11-24テスト先行) ---
 
@@ -655,7 +668,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(POST /api/j
 description = "POST /api/jobs/getはbody {uuid(必須),version_id?,pin?,out(必須・server側path),tier?(省略Standard),days?(省略7),overwrite?(省略false)}を検証してget jobをqueuedで発行する: 必須field欠落・型違反は400 invalid_request・値域規則違反(tier=Standard/Bulk以外・days=1〜315外・空uuid・空out)は422 validation_failed(書込APIの既存区分と共通)。応答は{\"job\":<job object>}(status=queued・paramsは発行body(省略既定込み)のecho・progress={phase:queued,total:1,done:0}・result/error=null)。jobs tableへ行が入る(GET /api/jobsに現れる)。対象の索引解決は発行時に行わずjob実行時の失敗(status=failed+error)として記録する(長時間jobのため発行を解決で止めない)。job発行は書込semaphoreを取らずjob行insertのみ(3.3: 書込はjob queueへ入る=semaphore待ちの対象は実行時)。保護APIで未認証401(job系APIも同一session gate。serve経由でも観測) (unit+integration, fake seam)"
 given = "api_envでのrouter oneshot(発行成功1件・400系5種・422系5種・body無し)とjobs table行数観測・AuthFlowでの未認証POST /api/jobs/get・GET /api/jobs/1・POST /api/jobs/1/cancel・serve起動状態での未認証job系API 3種呼出"
 expect_return_shape = "発行は200+{\"job\":{status:queued,params:{uuid,out,tier:Standard,days:7,overwrite:false,...},progress:{phase:queued,total:1},result:null,error:null}}・jobs table 1行。400/422系は{\"error\":{...}}形式。未認証は401 unauthenticated"
-source_lines = "src/server.rs:6360; tests/server_api.rs:399"
+source_lines = "src/server.rs:7014; tests/server_api.rs:399"
 
 [[condition]]
 id = "server.jobs-detail"
@@ -664,16 +677,16 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(GET /api/jo
 description = "GET /api/jobs/:idはjob詳細を{\"job\":<job object>}形式で応答する(params=発行body・progress={phase,total,done,current_path}・result=get成功時{name,dest}(sha一致skip時はskip:true付き)・error=失敗時{code,message}・成功時はnull)。不在id・他scopeのidは404 not_found・非数値idは400 invalid_request (unit, fake seam)"
 given = "api_envのjobs tableへresult付きsucceeded行とerror付きfailed行を注入した状態でのrouter oneshot(GET /api/jobs/:id・不在id・対照scopeのid・非数値id)"
 expect_return_shape = "200でjob object(status/params/progress/result/error/created_at/updated_at各fieldが期待値)。succeeded行のerror=null・failed行のerror={code:not_found,message:...}。不在・他scopeは404 not_found・非数値は400"
-source_lines = "src/server.rs:6485"
+source_lines = "src/server.rs:7139"
 
 [[condition]]
 id = "server.jobs-cancel"
 target_function = "server::handler POST /api/jobs/:id/cancel"
 source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(POST /api/jobs/:id/cancel=待機中(queued)jobの取消。実行中は409(完了まで実行=冪等再実行で回復))・9章W4行"
-description = "POST /api/jobs/:id/cancelはqueuedのjobのみ取消する: 成功はstatus=cancelledへ更新し操作後のjob object({\"job\":{...}})で応答する。status=\"cancelled\"は設計3.2に取消後の状態値規定が無いための解釈(取消の記録=再実行対象として一覧に残る・jobs tableは履歴兼用のため行は消さない)。queued以外(running/waiting_restore=実行中・succeeded/failed/interrupted/cancelled=確定済み)は409 duplicate(409を担うerror code。実行中は完了まで実行=冪等再実行で回復)。status確認後にworkerが実行開始した競合も409。不在idは404 not_found・非数値idは400 invalid_request (unit, fake seam)"
-given = "api_envのjobs tableへqueued・running・succeeded行を注入した状態でのrouter oneshot(queued取消→同再取消→running取消→succeeded取消→不在id→非数値id→GET /api/jobs?status=cancelled)"
+description = "POST /api/jobs/:id/cancelはqueuedのjobのみ取消する(kind非依存=get/push両jobに同一適用・W5のpush jobの取消も本契約): 成功はstatus=cancelledへ更新し操作後のjob object({\"job\":{...}})で応答する。status=\"cancelled\"は設計3.2に取消後の状態値規定が無いための解釈(取消の記録=再実行対象として一覧に残る・jobs tableは履歴兼用のため行は消さない)。queued以外(running/waiting_restore=実行中・succeeded/failed/interrupted/cancelled=確定済み)は409 duplicate(409を担うerror code。実行中は完了まで実行=冪等再実行で回復)。status確認後にworkerが実行開始した競合も409。不在idは404 not_found・非数値idは400 invalid_request (unit, fake seam)"
+given = "api_envのjobs tableへqueued(kind=get)・queued(kind=push)・running・succeeded行を注入した状態でのrouter oneshot(queued取消(get・push両方)→同再取消→running取消→succeeded取消→不在id→非数値id→GET /api/jobs?status=cancelled)"
 expect_return_shape = "queued取消は200+{\"job\":{status:cancelled}}・再取消/running/succeededは409 duplicate・不在は404・非数値は400。取消行はcancelled絞り込みの一覧に1件現れる"
-source_lines = "src/server.rs:6599; src/server.rs:7182"
+source_lines = "src/server.rs:7253; src/server.rs:7852"
 
 [[condition]]
 id = "server.jobs-get-execution"
@@ -682,7 +695,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 5.1(job化はge
 description = "get jobの実行: workerはqueued順に1件ずつsemaphoreをacquireしてからrunningへ遷移し実行する(同時実行1)。実行は既存storage層関数(open_session→read_index_for_query→resolve_fetch_target→平文衝突検査→ensure_restored→fetch_verify_decrypt)の並び=CLI getと同一経路。Standard tier(非archive)対象は即時に取得・sha照合・復号・<out>/<title>配置まで進みstatus=succeeded+result={name,dest}+progress={phase:fetch,done:1}を記録する。平文衝突のsha一致は冪等skip(succeeded+result.skip=true)。対象不在uuid等の失敗はstatus=failed+error_code(BackupError→API code既定変換。解決失敗=not_found)・error_messageは一般化文言 (unit, fake seam)"
 given = "実ssh鍵pair+実ageで暗号化した対象objectとregistry由来索引をfake S3へ用意したjob_exec_setup(STANDARD)でのworker起動+POST /api/jobs/get(存在uuid・不在uuid)→終状態待ち合わせ"
 expect_return_shape = "存在uuidはstatus=succeeded・result={name:alpha,dest:alpha}・error無し・<out>/alphaへ平文が配置される(内容一致)・progress.done=1。不在uuidはstatus=failed・error_code=not_found。即時応答はqueued(5.1)"
-source_lines = "src/server.rs:6916"
+source_lines = "src/server.rs:7586"
 
 [[condition]]
 id = "server.jobs-get-waiting-restore"
@@ -691,7 +704,7 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 5.2(queued→ru
 description = "DEEP_ARCHIVE対象のget job: running(復元要否判定・復元job発行)→waiting_restore(status遷移。progress={phase:restore,current_path=<s3_key>,next_check_at=<現在+15分>})へ遷移しsemaphoreを解放する(waiting_restore中の書込API(PUT tags)がsemaphore待ちで停止しない)。timer(既定15分=RESTORE_CHECK_INTERVAL_MIN)がwaiting_restoreのjobのhead-object Restore headerを確認し(読取・semaphore外): 進行中(ongoing)ならwaiting_restoreのままnext_check_atを更新・復元済みなら再acquireして取得を再開(running→succeeded・result/配置は実行条件と同一)。時刻注入seam(JobManager::set_time_offset_ms=AuthStateと同一流儀の#[cfg(test)] setter)で現在時刻へoffsetを加算し確認時刻の到来をreal-time待ち無しで進められる(12-48h待ちの短縮検証) (unit, fake seam)"
 given = "job_exec_setup(DEEP_ARCHIVE)でのworker起動+POST /api/jobs/get→waiting_restore待ち・restore状態meta(seed_restore)をongoing/restoredへ切替えつつset_time_offset_ms(16分/32分)でtimer確認を進める観測・waiting_restore中のPUT tags(timeout付き)"
 expect_return_shape = "復元job発行(RestoreObject呼出)後status=waiting_restore・progressにphase=restoreとnext_check_at。waiting_restore中のPUT tagsは5秒内に200完了(semaphore解放)。ongoing中の確認(16分進行)はwaiting_restoreのまま。restored後(32分進行)はsucceeded・<out>/alpha配置・error無し"
-source_lines = "src/server.rs:7007"
+source_lines = "src/server.rs:7677"
 
 [[condition]]
 id = "server.jobs-semaphore-serialization"
@@ -700,13 +713,89 @@ source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.1(書込実�
 description = "job実行は書込API(sync/scan/書込系)と同一のsingle-flight semaphoreをacquireしてから行う(相互直列化): semaphoreが他者(test等)に保持されている間はjobはqueuedのまま(workerは実行を開始しない)・解放されると実行される。waiting_restore遷移時の解放はserver.jobs-get-waiting-restoreで観測する (unit, fake seam)"
 given = "job_exec_setup(STANDARD)でのworker起動後・test側がstate.sync_permits(書込APIと同一のsemaphore)を保持したままPOST /api/jobs/get→300ms待ち→permit解放+notify→終状態待ち"
 expect_return_shape = "permit保持中はjob行のstatus=queuedのまま・解放後にsucceededへ到達する"
-source_lines = "src/server.rs:7129"
+source_lines = "src/server.rs:7799"
 
 [[condition]]
 id = "server.jobs-interrupted-on-restart"
 target_function = "server::JobManager::interrupt_jobs_at_boot(起動時一括更新) / run_server起動処理"
 source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 5.4(server再起動時: 起動処理でstatusがqueued/running/waiting_restoreの行をinterruptedへ一括更新しUIに再実行案内を表示する。自動再開はしない)・D-W7(jobの正本はjobs table・再起動時interrupted=自動再開しない)・9章W4行(server再起動でinterruptedになる)"
-description = "serve起動処理はstatusがqueued/running/waiting_restoreのjob行をinterruptedへ一括更新する(自動再開しない=get/pushとも冪等設計のため再発行で安全に回復する=意図しない対象・費用(DEEP_ARCHIVE復元)の再発行を避ける)。完了系(succeeded/failed/interrupted/cancelled)の行と他scopeの行は変更しない。実行はrun_blocking経由・worker起動より前(旧queuedをworkerが拾う前にinterruptedへ確定させる)。updated_atを刻む (unit, fake seam)"
-given = "api_envのjobs tableへqueued・running・waiting_restore・succeeded・failed+対照scope queuedを注入した状態でのJobManager::interrupt_jobs_at_boot呼出と各status読戻し"
+description = "serve起動処理はstatusがqueued/running/waiting_restoreのjob行をinterruptedへ一括更新する(kind非依存=D-P7: push jobのqueued/runningも同様にinterruptedへ・自動再開しない=get/pushとも冪等設計のため再発行で安全に回復する=意図しない対象・費用(DEEP_ARCHIVE復元)の再発行を避ける)。完了系(succeeded/failed/interrupted/cancelled)の行と他scopeの行は変更しない。実行はrun_blocking経由・worker起動より前(旧queuedをworkerが拾う前にinterruptedへ確定させる)。updated_atを刻む (unit, fake seam)"
+given = "api_envのjobs tableへqueued(kind=push)・running(kind=get)・waiting_restore(kind=get)・succeeded・failed+対照scope queuedを注入した状態でのJobManager::interrupt_jobs_at_boot呼出と各status読戻し"
 expect_return_shape = "更新行数=3(実効scopeのqueued/running/waiting_restore)・当該3行はinterruptedへ・succeeded/failedは不変・対照scopeのqueuedは不変"
-source_lines = "src/server.rs:6648"
+source_lines = "src/server.rs:7312"
+
+# --- TASK-17 W5(TASK-28: push job・dry-run・audit_log recipients指紋・2026-11-25テスト先行) ---
+
+[[condition]]
+id = "server.push-dry-run"
+target_function = "server::handler POST /api/push/dry-run / storage::backup::plan_push_dry"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(POST /api/push/dry-run=push予測(即時応答・job化しない。dry-runはS3 API無しで早いため現行sync/diffと同様の同期実行))・2.3(upload form: 対象(path+title)→接続先確認(実効profile・bucket・prefix・recipients指紋一覧=CLI pushの接続先表示のUI版))・6章(upload開始時の接続先確認・同一session gate)・9章W5行(dry-run予測表示)・9章W6行(dry-run指紋確認)・TASK-28設計(tmp/tasks/tm-28/design_w5-push-job.md) D-P2(応答schema・action語彙re_put・対象解決失敗のerror行で続行・merge_target_index・server経由のpush_intents非記録・semaphore取得)"
+description = "POST /api/push/dry-runはPOST /api/jobs/pushと同一のbody {\"targets\":[{\"path\",\"title\"?}]}を検証して同期予測を実行する(必須欠落・型違反は400 invalid_request・空targets・空path・相対path・入力文字列のpath重複・title規則違反(空文字列含む)は422 validation_failed)。S3 API呼び出し・age暗号化・registry追記・push_intents記録は一切行わず、{\"connection\":{profile,bucket,prefix,recipients},\"targets\":[{path,name,size,action,uuid,title,warning,merge_target_index?,error?}],\"summary\":{count,total_size,skip,re_put,merge,new,failed}}で応答する: action語彙はskip/re_put/merge/new(snake_case)。対象解決失敗(不在file・directory・拡張子対象外・realpath重複の後続行)はname/size=null+action=\"error\"+error{code,message}(api_error_fromと同一のcode変換)の行となり解決済み対象の予測は続行する。skip/re_put/mergeで既知entityへの合流はuuidを含むが、同一run内の先行newへの合流mergeはuuid=null+merge_target_index(targets配列内の先行対象index)で参照する(CLIの仮IDはAPI応答へ流さない)。newはtitle未指定時のみwarning(CLI WARNING文相当)を付与する。summaryはcount=応答targets数(error行を含む)・total_sizeは解決成功対象のみの合計・failedはerror行数。dry-runはsync_permitsをacquireしてから実行する(3.2の同期実行=registry読取中のpush job並走防止)。保護APIで未認証401 (unit+integration, fake seam)"
+given = "api_env(test pubkey付きpipeline.toml)でa.zip(新規title付き)・b.zip(新規title無し=warning)・c.zip(a.zipと同内容=同一batch内merge)・既存skip対象・crash残存re_put対象・不在file(absent.zip)を混ぜたtargetsでのPOST /api/push/dry-runと400/422各異常系・fake S3 calls.log・registry行数・catalog DB push_intents表観測・AuthFlow/serveでの未認証401"
+expect_return_shape = "200でconnection(profile=dev,bucket,prefix,recipients=[SHA256:...])・targets各行のaction(skip/re_put/new/merge/error)・error行のname/size=nullとerror.code・mergeのmerge_target_index・title未指定newのwarning・summary(count=6含むerror行・total_sizeは解決済み5件分・skip=1,re_put=1,merge=1,new=2,failed=1)。S3 calls.logへの新規記録0件・registry行数不変・push_intentsは0件(server経由では記録しない)。400/422は{\"error\":{...}}形式・未認証は401 unauthenticated"
+source_lines = "src/server.rs:9352; tests/server_api.rs:401"
+
+[[condition]]
+id = "server.jobs-push-issue"
+target_function = "server::handler POST /api/jobs/push"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.2(POST /api/jobs/push=upload job発行(body {targets:[{path,title?}]}))・5.1(POST /api/jobs/*はjob行をjobs tableへinsert(queued)して即時応答)・5.2(progress_json={phase,total,done,current_path})・6章(job系APIも同一auth_gate)・9章W5行・TASK-28設計(tmp/tasks/tm-28/design_w5-push-job.md) D-P1(形式検証=空配列・空path・相対path(is_absolute)・入力文字列path重複・title規則違反(空文字列含む)の422・path実在等はjob実行時)"
+description = "POST /api/jobs/pushはbody {\"targets\":[{\"path\",\"title\"?}]}を検証してpush jobをqueuedで発行する: 必須field欠落・型違反は400 invalid_request・規則違反(空targets・空path・相対path=server側絶対path必須・入力文字列のpath重複・validate_title違反(空文字列含む))は422 validation_failed。titleは対象毎に省略可(null許容でecho)。応答は{\"job\":<job object>}(kind=\"push\"・status=\"queued\"・params={\"targets\":[{\"path\",\"title\"}]}・progress={\"phase\":\"queued\",\"total\":N,\"done\":0,\"current_path\":null}・result=null・error=null)。jobs tableへ行が入りGET /api/jobs?kind=pushに現れる。対象のFS解決・通常file検査・拡張子・realpathはjob実行時に行い発行時検証しない(書込semaphoreも実行時にacquire)。alias・symlink等で実pathが重複する組は入力文字列一致では検出できずjob実行時のrealpath重複検証に委ねる。保護APIで未認証401 (unit+integration, fake seam)"
+given = "api_envでのPOST /api/jobs/push(正常2件・400系・422系=空targets/空path/相対path/path重複/title規則違反・body無し)・GET /api/jobs?kind=push・AuthFlowおよびserve起動状態での未認証POST /api/jobs/push"
+expect_return_shape = "正常は200+{\"job\":{kind:\"push\",status:\"queued\",params:{targets:[{path,title:\"alpha\"},{path,title:null}]},progress:{phase:\"queued\",total:2,done:0,current_path:null}}}・GET /api/jobs?kind=pushに1件。400/422は{\"error\":{...}}形式・未認証は401 unauthenticated"
+source_lines = "src/server.rs:9697; tests/server_api.rs:400"
+
+[[condition]]
+id = "server.jobs-push-exec"
+target_function = "server::JobManager worker(run_push_job) / storage::backup::run_push(per-file loop+run末尾処理)・execute_push_step"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 1章(serveは既存CLIと同一のstorage層関数を呼ぶ)・5.1(queued順に1件ずつspawn_blockingで実行・同時実行1・semaphore統合・permitは実行中保持)・5.2(progress_jsonを対象file単位で更新)・9章W5行(受入条件: UIからpushしてCLI list filesと整合・job進行のper-file表示)・TASK-28設計(tmp/tasks/tm-28/design_w5-push-job.md) D-P3(遷移queued→running→succeeded/failed(waiting_restore無し)・phase語彙queued/resolve/upload/finalize・callback契約file_start/file_done/finalize_start・resultのfiles+summary・非対話title未満=対象エラー)"
+description = "push jobの実行: workerはsemaphoreをacquireしてqueued→runningへclaim(phase=resolve)し、対象開始ごとにcurrent_pathを設定(phase=upload)・対象完了ごとにdoneを+1(current_path=null)でprogress_jsonを更新しながら、全対象完了後にphase=finalize(manifest組立・索引再構築・metadata sync・catalog DB反映)へ遷移してsucceededになる。result_jsonは{\"files\":[{\"path\",\"name\",\"action\",\"uuid\",\"status\",\"error\"?}],\"summary\":{ok,skip,merge,failed}}(actionはskip/merge/re_put/new・statusはok/failed・失敗行はerror{code,message}・暗号化失敗等のaction未確定失敗はaction=null・新規発行のPUT失敗はuuid発行済みのためuuidを残す)。新規発行対象のtitle未指定は非対話のため対象エラー(status=failed・action=nullの失敗行)として残りrunは継続する。実行後はGET /api/entitiesおよびCLI list files相当で新実体(uuid/title/versions)が整合して見える (unit, fake seam)"
+given = "実ssh鍵pair+実age環境(job_exec_setup)での2対象アーカイブ(a.zip title=alpha・b.7z title=beta)に対するPOST /api/jobs/push→succeeded待ち→job詳細(progress・result)観測→GET /api/entitiesおよびCLI list files相当(read_index_cached)の照合"
+expect_return_shape = "status=succeeded・progress={phase:\"finalize\",total:2,done:2,current_path:null}(実行中はphase resolve→upload・current_path=対象pathで更新)・result.summary={ok:2,skip:0,merge:0,failed:0}・result.files各行は{path,name,action:\"new\",uuid,status:\"ok\"}・GET /api/entitiesとCLI照会の両方にalpha/betaが現れuuid/title/versions=1が一致"
+source_lines = "src/server.rs:10520; src/server.rs:9888"
+
+[[condition]]
+id = "server.jobs-push-failure"
+target_function = "server::JobManager worker(run_push_job) / storage::backup::run_push(keep_going=true固定)・execute_push_step"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 5.5(pushのper-file失敗はserver jobではkeep_going=true固定=最後まで継続し失敗対象を結果に残す=最初のerror区分を記録。UIは失敗対象行とerror codeを一覧表示)・9章W5行(失敗対象行の表示)・TASK-28設計(tmp/tasks/tm-28/design_w5-push-job.md) D-P3(対象解決失敗(不存在・拡張子違反)もper-file失敗として続行・error_code優先順位 fatal_error>最初のper-file error・成功対象の部分結果もresultに残る)"
+description = "push jobの失敗時継続: server push jobはkeep_going=true固定・非対話で動作し、対象解決失敗(不在file・拡張子違反)や新規title未指定の対象があっても解決済み・残対象を最後まで処理してmanifest/索引/catalog DBへ反映する。失敗対象が1件でもあればjob全体はstatus=failed+error_code=最初の失敗の区分(api_error_from変換)・error_message=最初の失敗の一般化messageとなり、resultには失敗対象行(status=\"failed\"+error{code,message})と成功対象行が共に残る(部分成功の可視化)。失敗原因解消後の再実行では成功済み対象はskipされ残り対象のみが処理されてsucceededとなる (unit, fake seam)"
+given = "job_exec_setupで3対象(ok.zip title=gamma・absent.zip不在・new_notitle.zip title未指定)を含むPOST /api/jobs/push→failed待ち→result.filesとGET /api/entities観測→失敗原因解消後(absent.zip作成・notitleへtitle付与)の再発行→succeeded待ち"
+expect_return_shape = "初回jobはstatus=failed・error.code=\"not_found\"・result.summary={ok:1,skip:0,merge:0,failed:2}・result.filesにok.zip(action=\"new\",status=\"ok\")と失敗2行(status=\"failed\"・error.code=\"not_found\")が残り・GET /api/entitiesにはgammaが反映済み。修正後の再発行はok.zipがaction=\"skip\"でsucceededになる"
+source_lines = "src/server.rs:10254; src/targets.rs:491"
+
+[[condition]]
+id = "server.jobs-push-rerun-skip"
+target_function = "server::JobManager worker(run_push_job) / storage::backup::run_push(冪等skip・crash残存re_put)・execute_push_step"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 5.5(get/pushとも冪等のため「再実行」buttonで回復)・9章W5行(受入条件: 再実行でskipされる)・TASK-28設計(tmp/tasks/tm-28/design_w5-push-job.md) D-P6(所在skip=identity_hash+size+mtimeの3点一致+bucket一致file_upload存在・crash残存=同uuid再PUT・skipでもrun末尾の索引PUT等は実行)"
+description = "push jobの再実行の冪等性: 1回目のnew発行(upload済み)対象を同一targetsで再発行すると全対象が所在skip判定(identity_hash+size+mtimeの3点一致+同一uuidのbucket一致file_upload記録)でupload省略となりjob=succeededで完了する(版数は増えない。ただしskipでもrun末尾の索引PUT・metadata sync・catalog DB反映は実行される)。crash残存(file_writeのみ記録済み・bucket一致file_upload無し)の対象は同uuidのdefault.ageへ再PUTされfile_uploadが追記される(re_put・新規uuid不発行) (unit, fake seam)"
+given = "job_exec_setupでの2対象アーカイブ(title付き)に対するPOST /api/jobs/push(1回目new→succeeded)→同一targetsの再発行(2回目)→succeeded待ち→result.files・版数観測。別環境でfile_writeのみ記録したcrash残存対象の再発行→result.filesのactionとuuid観測"
+expect_return_shape = "2回目はstatus=succeeded・result.summary={ok:0,skip:2,merge:0,failed:0}・files全行action=\"skip\"・版数は1のまま増えない。crash残存対象はfiles行action=\"re_put\"でuuidはcrash前と同一のuuid"
+source_lines = "src/server.rs:10060"
+
+[[condition]]
+id = "server.jobs-push-finalize"
+target_function = "server::JobManager worker(run_push_job) / storage::backup::run_push(fatal_error契約)・execute_push_step"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 5.5(job内の失敗はstatus=failed+error code+対象単位の結果(result_json)を記録)・TASK-28設計(tmp/tasks/tm-28/design_w5-push-job.md) D-P3(戻り値契約=files+summary+fatal_error・fatal_error時も部分結果はresultに残る・error_code優先順位 fatal_error>最初のper-file error)"
+description = "push jobのfinalize失敗: 全対象のper-file処理が成功した後にrun末尾の後処理(manifest・索引再構築PUT・metadata sync・DB反映)が失敗した場合、jobはstatus=failed+error_code=fatal_errorの区分(Transfer→upstream等・api_error_from変換)・progress={phase:\"finalize\",total,done=total}となり、resultには処理済み対象のfiles+summaryが部分結果として保持される(どこまで処理済みかの追跡)。fatal_errorは最初のper-file errorより優先する(本条件はper-file失敗0件で観測) (unit, fake seam)"
+given = "job_exec_setupで索引object keyへのPUT失敗注入(FAKE_S3_FAIL_CP_FOR=<prefix>sys/index.jsonl.age)を行った状態での1対象(title付き)POST /api/jobs/push→failed待ち→job詳細(result・progress・error)観測"
+expect_return_shape = "status=failed・error.code=\"upstream\"・progress={phase:\"finalize\",total:1,done:1}・result.summary={ok:1,skip:0,merge:0,failed:0}・result.filesに対象1行(action=\"new\",status=\"ok\",uuid付き)が保持される"
+source_lines = "src/server.rs:10420"
+
+[[condition]]
+id = "server.push-audit"
+target_function = "server::handler POST /api/jobs/push(audit_log記録)"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 4.1(audit_log table=UI書込操作の履歴)・9章W5行(audit logへrecipients指紋記録)・TASK-28設計(tmp/tasks/tm-28/design_w5-push-job.md) D-P5(発行時に1件・action=job_push・detail={targets,recipients}・recipients=pipeline.toml検証時に計算済みのSHA256指紋(鍵設定順)・毎回load_pipelineで最新設定を読み直す・outcome=発行操作の成否・成功記録の失敗はlogのみ)"
+description = "POST /api/jobs/pushの発行時にaudit_logへ1件のaction=\"job_push\"記録を行う: detail_jsonは{\"targets\":[{\"path\",\"title\"}],\"recipients\":[\"SHA256:...\"]}(targets=発行bodyのecho・recipients=発行時点の現行pipeline.tomlのrecipient指紋一覧。job_idやbatch_id・成否件数は含めない=jobs tableとregistryが処理結果の正本)。outcomeは発行操作の成否(ok=queued insert成功・発行時検証422やDB失敗はfailed+error_code)。発行のたびにload_pipelineを呼び現行設定を読み直す(cacheしない)。成功auditの書込失敗はlogのみで発行応答に影響させない(W3の成功auditと同一扱い)。dry-run・job実行完了時のaudit追記は行わない(処理結果はjobs table・registryが正本) (unit, fake seam)"
+given = "api_envでのPOST /api/jobs/push(正常発行・422検証失敗)→audit_log表直接読取(detail_jsonのtargets/recipients・outcome・error_code観測)"
+expect_return_shape = "正常発行はoutcome=ok・error_code=null・detail_jsonのtargetsが発行bodyと一致しrecipients配列にSHA256指紋1件(実効profileの公開鍵由来)。422失敗はoutcome=failed・error_code=\"validation_failed\"。actionは全行\"job_push\""
+source_lines = "src/server.rs:9698"
+
+# --- TASK-28 W5 PR #13自動レビュー指摘対応(2026-11-26): per-file失敗行のerror message ---
+
+[[condition]]
+id = "server.jobs-push-error-message"
+target_function = "server::push_file_error_json / push_result_json(per-file失敗行のerror{code,message})・POST /api/push/dry-runのerror行"
+source = "TASK-17設計(tmp/tasks/tm-17/design_webui-overall.md) 3.1(error体系: error bodyは一般化message。内部error無加工返却禁止・秘密情報境界維持)・5.5(job内の失敗はstatus=failed+error_code+対象単位の結果)・TASK-28設計(tmp/tasks/tm-28/design_w5-push-job.md) D-P2(error{code,message}・code変換はapi_error_fromと同一経路・対象解決失敗の応答例は対象を特定する詳細文言)・D-P3(失敗対象はstatus=failed+error{code,message}=api_error_fromと同一のcode変換)・PR #13自動レビュー指摘(per-file errorの無加工返却=内部cache pathの露出)"
+description = "push jobのper-file失敗行のerror{code,message}: codeはBackupError区分をapi_error_ofと同一に変換した値(Internal→internal・Config→configuration・Target→not_found・Process→validation_failed・Transfer→upstream・Usage→invalid_request)。messageは対象error(BackupError::Target=不在・通常fileでない・拡張子違反・realpath重複・新規発行のtitle未指定など利用者の指定対象に起因する失敗)に限り対象を特定できる詳細文言とし、それ以外(暗号化・registry書込・S3通信等のstorage層内部error)はapi_error_ofと同一の一般化文言とする(内部cache path・bucket名・設定file path等が応答へ出ない。詳細はserverのlogのみ)。POST /api/push/dry-runの対象解決失敗行(action=error)も同一の変換を使う (unit)"
+given = "PushRunOutcome(filesに成功1行・Target error 1行・Internal/Transfer/Config/Process/Usage error各1行)をpush_result_jsonへ渡した時のresult_json(files[].error)とserialize結果"
+expect_return = "成功行はerrorを持たない。Targetは{code:\"not_found\",message:対象を特定する詳細文言(入力の文言のまま)}。Internal/Transfer/Config/Process/Usageは{code:api_error_ofと同一,message:一般化文言(内部エラーが発生しました/上流ストレージ(S3)との通信に失敗しました/設定の読み込みに失敗しました/処理・検証に失敗しました/リクエストの形式が不正です)}。serialize結果に内部path・bucket名・設定file pathの文字列を含まない"
+source_lines = "src/server.rs:10561"

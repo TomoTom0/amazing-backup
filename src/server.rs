@@ -762,6 +762,12 @@ fn internal(message: &'static str) -> ApiError {
 /// 無加工返却禁止。秘密情報境界: 設定file path等を応答へ出さない)。
 fn api_error_from(e: BackupError) -> ApiError {
     eprintln!("serve: API処理エラー詳細(logのみ): {e}");
+    api_error_of(&e)
+}
+
+/// BackupError区分→API error(code+HTTP status+一般化message)の変換表(log出力を
+/// 伴わない。対象単位の失敗行などapi_error_fromと同一のcode変換を複数回行う経路で使う)。
+fn api_error_of(e: &BackupError) -> ApiError {
     match e {
         BackupError::Internal(_) => internal("内部エラーが発生しました"),
         BackupError::Config(_) => configuration("設定の読み込みに失敗しました"),
@@ -1001,8 +1007,10 @@ fn build_router(state: AppState) -> axum::Router {
         .route("/api/runs", axum::routing::get(get_runs))
         .route("/api/jobs", axum::routing::get(get_jobs))
         .route("/api/jobs/get", axum::routing::post(post_jobs_get))
+        .route("/api/jobs/push", axum::routing::post(post_jobs_push))
         .route("/api/jobs/{id}", axum::routing::get(get_job_detail))
         .route("/api/jobs/{id}/cancel", axum::routing::post(post_job_cancel))
+        .route("/api/push/dry-run", axum::routing::post(post_push_dry_run))
         .fallback(fallback);
     if has_auth {
         router = router
@@ -1678,6 +1686,178 @@ async fn post_jobs_get(
     Ok(axum::Json(serde_json::json!({ "job": job_json(&job) })))
 }
 
+/// POST /api/jobs/push(TASK-17設計3.2・9章W5・TASK-28設計D-P1/D-P5: upload job発行)。
+/// body {"targets":[{"path","title"?}]}を検証してjob行をqueuedでinsertし即時応答する
+/// (対象のFS解決や書込semaphore獲得はjob実行時に行う)。発行時にaudit_logへ1件
+/// (action=job_push・発行bodyのtargetsと発行時点のrecipients指紋)を記録する。
+async fn post_jobs_push(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let params = parse_push_targets_body(&body)?;
+    let scope = state.scope.clone();
+    let ctx = state.sync_ctx.clone();
+    let issuance = run_blocking(move || {
+        let db = crate::catalog::CatalogDb::open()?;
+        // 発行時点のrecipients指紋(毎回load_pipelineで現行設定を読み直す=D-P5)。
+        // 読めない場合は指示時の確認記録が残せないため発行しない
+        let recipients = match load_recipient_fingerprints(&ctx) {
+            Ok(r) => r,
+            Err(e) => {
+                audit_push_issuance(
+                    &db,
+                    &scope,
+                    &params.targets_json(),
+                    &[],
+                    "failed",
+                    Some(api_error_of(&e).code),
+                );
+                return Err(e);
+            }
+        };
+        // 発行時の形式検証(422)。失敗も発行操作の履歴としてauditへ残す
+        if let Err(api) = params.validate() {
+            audit_push_issuance(
+                &db,
+                &scope,
+                &params.targets_json(),
+                &recipients,
+                "failed",
+                Some(api.code),
+            );
+            return Ok(Err(api));
+        }
+        let params_json =
+            serde_json::to_string(&params.to_json()).expect("push job params serialize");
+        let progress_json = PushProgressTracker::queued(params.targets.len()).progress_json();
+        let job = match db.insert_job(&scope.0, &scope.1, "push", &params_json, &progress_json) {
+            Ok(job) => job,
+            Err(e) => {
+                audit_push_issuance(
+                    &db,
+                    &scope,
+                    &params.targets_json(),
+                    &recipients,
+                    "failed",
+                    Some("internal"),
+                );
+                return Err(e);
+            }
+        };
+        // 成功audit(書込失敗はlogのみで発行応答に影響させない)
+        audit_push_issuance(&db, &scope, &params.targets_json(), &recipients, "ok", None);
+        Ok(Ok(job))
+    })
+    .await?;
+    let job = issuance?;
+    state.jobs.notify_worker();
+    Ok(axum::Json(serde_json::json!({ "job": job_json(&job) })))
+}
+
+/// POST /api/push/dry-run(TASK-17設計3.2・9章W5・TASK-28設計D-P2: push予測の即時応答。
+/// job化しない)。S3 API・age暗号化・registry追記・push_intents記録を行わず、接続先
+/// (実効profile・bucket・prefix・recipients指紋=2.3「接続先確認」の実体)と各対象の
+/// skip/re_put/merge/new予測(対象解決失敗はerror行として残対象の予測を続行)+集計を
+/// 返す。
+async fn post_push_dry_run(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let params = parse_push_targets_body(&body)?;
+    params.validate()?;
+    // sync/diff/scanと同じ同期実行として書込semaphoreを取り、registry読取・sha計算中の
+    // push job並走を防ぐ(正本3.2)
+    let _permit = acquire_write_permit(&state).await?;
+    let ctx = state.sync_ctx.clone();
+    let value = run_blocking(move || {
+        let aws = crate::storage::load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
+        let cfg = crate::config::load_pipeline(
+            &crate::storage::pipeline_config_path(&ctx.config),
+            &aws.profile,
+        )?;
+        let canonical_bucket =
+            crate::config::canonical_bucket(&crate::storage::aws_config_path(&ctx.aws_config))?;
+        let records = crate::registry::load_registry(&cfg.registry_path)?;
+        let reduced = crate::registry::reduce_records(&records);
+        // 対象解決(失敗は該当対象のerror行とし、解決済み対象の予測は続行する)
+        let entries = crate::targets::resolve_entries_storage(&params.to_raw_targets());
+        let mut error_rows: Vec<Option<serde_json::Value>> = vec![None; entries.len()];
+        let mut resolved: Vec<crate::targets::Target> = Vec::with_capacity(entries.len());
+        let mut input_index_of: Vec<usize> = Vec::with_capacity(entries.len());
+        for (input_index, entry) in entries.into_iter().enumerate() {
+            match entry.result {
+                Ok(target) => {
+                    resolved.push(target);
+                    input_index_of.push(input_index);
+                }
+                Err(e) => {
+                    error_rows[input_index] = Some(serde_json::json!({
+                        "path": entry.raw_path.display().to_string(),
+                        "name": serde_json::Value::Null,
+                        "size": serde_json::Value::Null,
+                        "action": "error",
+                        "uuid": serde_json::Value::Null,
+                        "title": serde_json::Value::Null,
+                        "warning": serde_json::Value::Null,
+                        "error": push_file_error_json(&e),
+                    }));
+                }
+            }
+        }
+        let plan = crate::storage::backup::plan_push_dry(
+            &resolved,
+            &cfg,
+            &aws,
+            &canonical_bucket,
+            &reduced,
+        )?;
+        let mut targets: Vec<serde_json::Value> = error_rows
+            .into_iter()
+            .map(|row| row.unwrap_or(serde_json::Value::Null))
+            .collect();
+        for (resolved_index, t) in plan.targets.iter().enumerate() {
+            let input_index = input_index_of[resolved_index];
+            let mut row = serde_json::json!({
+                "path": t.path,
+                "name": t.name,
+                "size": t.size,
+                "action": t.action,
+                "uuid": t.uuid,
+                "title": t.title,
+                "warning": t.warning,
+            });
+            if let Some(preceding) = t.merge_target_index {
+                row["merge_target_index"] = serde_json::json!(input_index_of[preceding]);
+            }
+            targets[input_index] = row;
+        }
+        let failed = targets
+            .iter()
+            .filter(|t| t.get("action").and_then(|a| a.as_str()) == Some("error"))
+            .count();
+        Ok(serde_json::json!({
+            "connection": {
+                "profile": aws.profile,
+                "bucket": aws.bucket,
+                "prefix": aws.prefix,
+                "recipients": cfg.recipient_fingerprints,
+            },
+            "targets": targets,
+            "summary": {
+                "count": targets.len(),
+                "total_size": plan.total_size,
+                "skip": plan.skip,
+                "re_put": plan.re_put,
+                "merge": plan.merge,
+                "new": plan.new,
+                "failed": failed,
+            },
+        }))
+    })
+    .await?;
+    Ok(axum::Json(value))
+}
+
 // ---------------------------------------------------------------------------
 // TASK-17 W4(TASK-27)job機構(設計4.1 jobs table・5章)。jobs tableを正本とする
 // 長時間job(get。pushはW5)の直列実行worker(JobManager)。
@@ -1763,6 +1943,354 @@ fn opt_str_of(v: &serde_json::Value, key: &str) -> Option<Option<String>> {
     }
 }
 
+/// push job / dry-runの対象1件param(path必須・title省略可)。
+#[derive(Debug, Clone)]
+struct PushTargetParam {
+    path: std::path::PathBuf,
+    title: Option<String>,
+}
+
+/// push jobの発行params(POST /api/jobs/push・POST /api/push/dry-run共通body)。
+#[derive(Debug, Clone)]
+struct PushJobParams {
+    targets: Vec<PushTargetParam>,
+}
+
+impl PushJobParams {
+    /// params_jsonとして保存する表現(発行bodyをそのまま保存。titleはnull許容でecho)。
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "targets": self.targets_json() })
+    }
+
+    /// 対象列のJSON表現(params_json・audit detail共通)。
+    fn targets_json(&self) -> Vec<serde_json::Value> {
+        self.targets
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "path": t.path.display().to_string(),
+                    "title": t.title,
+                })
+            })
+            .collect()
+    }
+
+    /// jobs tableのparams_jsonからの読み戻し(serverが保存した値のため形式検証は
+    /// 最低限のみ)。
+    fn from_json(v: &serde_json::Value) -> Option<PushJobParams> {
+        let arr = v.get("targets")?.as_array()?;
+        if arr.is_empty() {
+            return None;
+        }
+        let targets = arr
+            .iter()
+            .map(|item| {
+                let path_str = item.get("path")?.as_str()?;
+                if path_str.is_empty() {
+                    return None;
+                }
+                Some(PushTargetParam {
+                    path: std::path::PathBuf::from(path_str),
+                    title: opt_str_of(item, "title")?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(PushJobParams { targets })
+    }
+
+    fn to_raw_targets(&self) -> Vec<(std::path::PathBuf, Option<String>)> {
+        self.targets
+            .iter()
+            .map(|t| (t.path.clone(), t.title.clone()))
+            .collect()
+    }
+
+    /// 発行・dry-run共通の形式検証(TASK-28設計D-P1: 空targets・空path・相対path・
+    /// 入力文字列としてのpath重複・title規則違反(空文字列含む)は422 validation_failed)。
+    /// pathの実在・通常file・拡張子・realpath重複(alias・symlink)はjob実行時の対象
+    /// 解決に委ねる(長時間jobの発行を解決で止めない)。
+    fn validate(&self) -> Result<(), ApiError> {
+        if self.targets.is_empty() {
+            return Err(validation_failed("対象を1件以上指定してください"));
+        }
+        let mut seen_paths = std::collections::HashSet::new();
+        for t in &self.targets {
+            if t.path.as_os_str().is_empty() {
+                return Err(validation_failed("pathを指定してください"));
+            }
+            if !t.path.is_absolute() {
+                return Err(validation_failed(
+                    "pathはserver側の絶対pathで指定してください",
+                ));
+            }
+            if !seen_paths.insert(t.path.clone()) {
+                return Err(validation_failed("pathが重複しています"));
+            }
+            if let Some(title) = t.title.as_deref()
+                && let Err(e) = crate::layout::validate_title(title)
+            {
+                eprintln!("serve: push targetsのtitle規則違反: {e}");
+                return Err(validation_failed("titleの形式が不正です"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// POST /api/jobs/push・POST /api/push/dry-run bodyの形の検証(必須field欠落・型違反は
+/// 400 invalid_request)。規則違反(422)は呼出側で`PushJobParams::validate`により判定
+/// する(発行時は失敗もaudit_logへ記録するため)。
+fn parse_push_targets_body(body: &axum::body::Bytes) -> Result<PushJobParams, ApiError> {
+    let v: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| invalid_request("リクエストの形式が不正です"))?;
+    let arr = v
+        .get("targets")
+        .and_then(|t| t.as_array())
+        .ok_or_else(|| invalid_request("targetsは配列で指定してください"))?;
+    let mut targets = Vec::with_capacity(arr.len());
+    for item in arr {
+        if !item.is_object() {
+            return Err(invalid_request(
+                "targetsの各要素はオブジェクトで指定してください",
+            ));
+        }
+        let path_str = item
+            .get("path")
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| invalid_request("pathは文字列で指定してください"))?;
+        let title = opt_str_of(item, "title")
+            .ok_or_else(|| invalid_request("titleは文字列で指定してください"))?;
+        targets.push(PushTargetParam {
+            path: std::path::PathBuf::from(path_str),
+            title,
+        });
+    }
+    Ok(PushJobParams { targets })
+}
+
+/// 発行時点の実効profileのrecipient指紋列(load_pipelineが検証時に計算済みの
+/// `SHA256:<base64>`・鍵設定順。TASK-28設計D-P5: dry-run・発行・job実行は毎回
+/// load_pipelineを呼び現行pipeline.tomlを読み直す(cacheしない))。
+fn load_recipient_fingerprints(ctx: &crate::storage::CtxArgs) -> BackupResult<Vec<String>> {
+    let aws = crate::storage::load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
+    let cfg = crate::config::load_pipeline(
+        &crate::storage::pipeline_config_path(&ctx.config),
+        &aws.profile,
+    )?;
+    Ok(cfg.recipient_fingerprints)
+}
+
+/// push job発行のaudit_log記録(action=job_push。TASK-28設計D-P5: detailは発行bodyの
+/// targetsと発行時点のrecipients指紋のみ。job_id・成否件数等の処理結果は含めない=
+/// 処理結果の正本はjobs tableとregistry)。
+fn audit_push_issuance(
+    db: &crate::catalog::CatalogDb,
+    scope: &(String, String),
+    targets: &[serde_json::Value],
+    recipients: &[String],
+    outcome: &str,
+    error_code: Option<&str>,
+) {
+    let detail = serde_json::json!({ "targets": targets, "recipients": recipients });
+    audit_outcome(
+        db, &scope.0, &scope.1, "job_push", &detail, outcome, error_code,
+    );
+}
+
+/// push jobの進行tracker(設計5.2: progress_json={phase,total,done,current_path}を対象
+/// file単位で更新)。phase語彙: queued(発行直後)→resolve(対象解決・plan_push)→upload
+/// (per-file処理中: 暗号化・registry追記・PUT・合流判定)→finalize(manifest組立・索引
+/// 再構築・metadata sync・DB反映)。next_check_atは使わない(get専用)。
+#[derive(Debug)]
+struct PushProgressTracker {
+    total: usize,
+    done: usize,
+    phase: &'static str,
+    current_path: Option<String>,
+}
+
+impl PushProgressTracker {
+    /// 発行直後の状態(phase=queued)。
+    fn queued(total: usize) -> Self {
+        Self {
+            total,
+            done: 0,
+            phase: "queued",
+            current_path: None,
+        }
+    }
+
+    /// 実行開始時の状態(phase=resolve)。
+    fn running(total: usize) -> Self {
+        Self {
+            total,
+            done: 0,
+            phase: "resolve",
+            current_path: None,
+        }
+    }
+
+    /// run本体の進行通知の反映(対象開始=phaseをuploadへ・current_pathへ当該pathを設定。
+    /// 対象完了=done+1・current_path=null。finalize開始=phaseをfinalizeへ)。
+    fn apply(&mut self, event: &crate::storage::backup::PushProgress<'_>) -> String {
+        use crate::storage::backup::PushProgress;
+        match event {
+            PushProgress::FileStart { path } => {
+                self.phase = "upload";
+                self.current_path = Some((*path).to_string());
+            }
+            PushProgress::FileDone { .. } => {
+                self.done += 1;
+                self.current_path = None;
+            }
+            PushProgress::FinalizeStart => {
+                self.phase = "finalize";
+                self.current_path = None;
+            }
+        }
+        self.progress_json()
+    }
+
+    fn progress_json(&self) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "phase": self.phase,
+            "total": self.total,
+            "done": self.done,
+            "current_path": self.current_path,
+        }))
+        .expect("push progress serialize")
+    }
+}
+
+/// push jobのresult_json(TASK-28設計D-P3: {files:[{path,name,action,uuid,status,error?}],
+/// summary:{ok,skip,merge,failed}}。失敗行のみerror{code,message}(code変換は
+/// api_error_fromと同一)を持つ)。
+fn push_result_json(outcome: &crate::storage::backup::PushRunOutcome) -> serde_json::Value {
+    let files: Vec<serde_json::Value> = outcome
+        .files
+        .iter()
+        .map(|f| {
+            let mut row = serde_json::json!({
+                "path": f.path,
+                "name": f.name,
+                "action": f.action,
+                "uuid": f.uuid,
+                "status": if f.error.is_some() { "failed" } else { "ok" },
+            });
+            if let Some(e) = &f.error {
+                row["error"] = push_file_error_json(e);
+            }
+            row
+        })
+        .collect();
+    serde_json::json!({
+        "files": files,
+        "summary": {
+            "ok": outcome.summary.ok,
+            "skip": outcome.summary.skip,
+            "merge": outcome.summary.merge,
+            "failed": outcome.summary.failed,
+        },
+    })
+}
+
+/// push jobのper-file失敗行・dry-runの対象解決失敗行のerror{code,message}(TASK-28設計
+/// D-P2/D-P3。code変換はapi_error_ofと同一経路)。messageは対象error(BackupError::Target=
+/// 不在・拡張子違反・title未指定など利用者の指定した対象に起因する失敗)に限り対象を特定
+/// できる詳細文言とし、それ以外のstorage層内部error(暗号化・registry書込・S3通信等)は
+/// api_error_ofの一般化文言にする(正本3.1: 内部errorの無加工返却禁止・秘密情報境界。
+/// 内部cache path等の詳細はlogのみ)。
+fn push_file_error_json(e: &BackupError) -> serde_json::Value {
+    let api = api_error_of(e);
+    let message = match e {
+        BackupError::Target(m) => m.clone(),
+        _ => {
+            eprintln!("serve: pushの対象処理エラー詳細(logのみ): {e}");
+            api.message.to_string()
+        }
+    };
+    serde_json::json!({ "code": api.code, "message": message })
+}
+
+/// push job実行の同期本体(spawn_blocking内で実行)。preflight(設定読込・versioning確認・
+/// registry読込)→対象解決→per-file loop→run末尾処理(TASK-28設計D-P3)。serverは
+/// keep_going=true固定・非対話(title未指定の新規発行は対象エラー)。run本体の進行通知を
+/// progress_jsonへ反映する(callback内のDB更新失敗は警告のみでrunを継続)。戻り値Errは
+/// preflight失敗(対象処理開始前)のみ。
+fn execute_push_step(
+    ctx: &crate::storage::CtxArgs,
+    params: &PushJobParams,
+    job_id: i64,
+) -> BackupResult<JobStep> {
+    let mut tracker = PushProgressTracker::running(params.targets.len());
+    let aws = crate::storage::load_aws(&ctx.aws_config, ctx.profile.as_deref())?;
+    let cfg = crate::config::load_pipeline(
+        &crate::storage::pipeline_config_path(&ctx.config),
+        &aws.profile,
+    )?;
+    let canonical_bucket =
+        crate::config::canonical_bucket(&crate::storage::aws_config_path(&ctx.aws_config))?;
+    let backend = crate::cli::select_backend(&aws)?;
+    crate::storage::require_versioning(backend.as_ref(), &aws)?;
+    let records = crate::registry::load_registry(&cfg.registry_path)?;
+    let reduced = crate::registry::reduce_records(&records);
+    let entries = crate::targets::resolve_entries_storage(&params.to_raw_targets());
+    let env = crate::storage::backup::PushRunEnv {
+        aws: &aws,
+        cfg: &cfg,
+        canonical_bucket: &canonical_bucket,
+        backend: backend.as_ref(),
+        reduced: &reduced,
+    };
+    let mut opts = crate::storage::backup::PushRunOptions {
+        keep_going: true,
+        title_supplier: None,
+    };
+    let progress_db = match crate::catalog::CatalogDb::open() {
+        Ok(db) => Some(db),
+        Err(e) => {
+            eprintln!(
+                "serve: catalog DBを開けないためjobの進行を反映しません(logのみ): id={job_id}: {e}"
+            );
+            None
+        }
+    };
+    let mut on_progress = |event: crate::storage::backup::PushProgress<'_>| {
+        let progress = tracker.apply(&event);
+        if let Some(db) = progress_db.as_ref()
+            && let Err(e) = db.update_job(job_id, "running", &progress, None, None, None)
+        {
+            eprintln!("serve: jobの進行更新に失敗(logのみ・実行は継続): id={job_id}: {e}");
+        }
+    };
+    let (outcome, run) =
+        crate::storage::backup::run_push(&env, &entries, &mut opts, &mut on_progress)?;
+    // cache dir掃除(対象失敗・run末尾処理失敗が無いrunのみ)
+    if outcome.is_ok() {
+        run.cleanup_run_dir();
+    }
+    let result_json =
+        serde_json::to_string(&push_result_json(&outcome)).expect("push result serialize");
+    let progress = tracker.progress_json();
+    let Some(e) = outcome.error() else {
+        return Ok(JobStep::Terminal {
+            status: "succeeded",
+            progress,
+            result_json: Some(result_json),
+            error_code: None,
+            error_message: None,
+        });
+    };
+    eprintln!("serve: push job失敗(logのみ): id={job_id}: {e}");
+    let api = api_error_of(e);
+    Ok(JobStep::Terminal {
+        status: "failed",
+        progress,
+        result_json: Some(result_json),
+        error_code: Some(api.code),
+        error_message: Some(api.message.to_string()),
+    })
+}
 /// POST /api/jobs/get bodyの検証(必須field欠落・型違反は400 invalid_request・
 /// 規則違反(tier/daysの値域・空uuid/out)は422 validation_failed=既存書込APIと
 /// 同一の区分)。
@@ -2165,8 +2693,23 @@ impl JobManager {
     }
 
     /// 1 jobの実行(permitをclosureへmove=stepのreturnで解放。terminalは結果を
-    /// 確定し・waiting_restoreはstatus遷移のみ行う)。
+    /// 確定し・waiting_restoreはstatus遷移のみ行う)。W5(TASK-28)でpushを追加。
     async fn run_job(self: &std::sync::Arc<Self>, job: crate::catalog::JobRow) {
+        match job.kind.as_str() {
+            "get" => self.run_get_job(job).await,
+            "push" => self.run_push_job(job).await,
+            _ => {
+                self.fail_job(
+                    job.id,
+                    "internal",
+                    "未知のjob種別のため失敗しました",
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn run_get_job(self: &std::sync::Arc<Self>, job: crate::catalog::JobRow) {
         let params_value: serde_json::Value =
             serde_json::from_str(&job.params_json).unwrap_or(serde_json::Value::Null);
         let Some(params) = GetJobParams::from_json(&params_value) else {
@@ -2251,6 +2794,97 @@ impl JobManager {
         }
     }
 
+    /// push jobの実行(TASK-17 W5・TASK-28設計D-P3: semaphore獲得→claim(phase=resolve)→
+    /// per-file loop(対象開始・完了ごとにprogress更新)→finalize→succeeded/failed。
+    /// keep_going=true固定・非対話。waiting_restoreは発生しない(permitは実行中保持)。
+    async fn run_push_job(self: &std::sync::Arc<Self>, job: crate::catalog::JobRow) {
+        let params_value: serde_json::Value =
+            serde_json::from_str(&job.params_json).unwrap_or(serde_json::Value::Null);
+        let Some(params) = PushJobParams::from_json(&params_value) else {
+            self.fail_job(
+                job.id,
+                "internal",
+                "jobの実行paramsが読み取れないため失敗しました",
+            )
+            .await;
+            return;
+        };
+        let total = params.targets.len();
+        // semaphore acquire(書込APIと相互直列化)。失敗はqueuedのまま戻る(getと同一)
+        let Ok(permit) = self.permits.clone().acquire_owned().await else {
+            eprintln!(
+                "serve: job semaphoreのacquireに失敗(logのみ): id={}",
+                job.id
+            );
+            return;
+        };
+        // runningへ遷移(対象解決・plan_pushの段階=phase resolve)。遷移はstatus='queued'
+        // の条件付きclaimで行う(取消済みjobを実行しない)
+        let claim_progress = PushProgressTracker::running(total).progress_json();
+        if !self.claim_queued_job(job.id, &claim_progress).await {
+            eprintln!("serve: jobのclaimが不成立のため実行しません: id={}", job.id);
+            return;
+        }
+        let ctx = self.ctx.clone();
+        let job_id = job.id;
+        // permitはclosure内へmove=per-file処理の終了まで保持(pushはwaiting_restore遷移が
+        // 無いため途中解放は不要)
+        let outcome = tokio::task::spawn_blocking(move || {
+            let _held = permit;
+            execute_push_step(&ctx, &params, job_id)
+        })
+        .await;
+        match outcome {
+            Ok(Ok(JobStep::Terminal {
+                status,
+                progress,
+                result_json,
+                error_code,
+                error_message,
+            })) => {
+                let _ = self
+                    .update_job_row(
+                        job.id,
+                        status,
+                        &progress,
+                        result_json.as_deref(),
+                        error_code,
+                        error_message.as_deref(),
+                    )
+                    .await;
+            }
+            Ok(Err(e)) => {
+                // preflight失敗(設定・versioning確認・registry読込)=対象処理開始前の
+                // 失敗のためresult無しでfailedへ(進行はresolveのまま)
+                let api_error = api_error_from(e);
+                let progress = PushProgressTracker::running(total).progress_json();
+                let _ = self
+                    .update_job_row(
+                        job.id,
+                        "failed",
+                        &progress,
+                        None,
+                        Some(api_error.code),
+                        Some(api_error.message),
+                    )
+                    .await;
+            }
+            Ok(Ok(JobStep::WaitingRestore { .. })) => {
+                // pushはwaiting_restoreを持たない(設計D-P3)。ここへ来たら内部error
+                eprintln!(
+                    "serve: push jobがwaiting_restoreを返しました(想定外): id={}",
+                    job.id
+                );
+                self.fail_job(job.id, "internal", "内部エラーが発生しました")
+                    .await;
+            }
+            Err(e) => {
+                eprintln!("serve: push job spawn_blockingのjoinに失敗: {e}");
+                self.fail_job(job.id, "internal", "内部エラーが発生しました")
+                    .await;
+            }
+        }
+    }
     /// waiting_restore jobの定期確認。戻り値=1件でも処理した(loopを直ちに回す)。
     async fn check_waiting_restore(self: &std::sync::Arc<Self>) -> bool {
         let (bucket, prefix) = self.scope.clone();
@@ -6324,13 +6958,30 @@ mod tests {
     /// jobs test用: jobs tableへ1行注入(insert_job+update_jobでstatus指定。
     /// 戻り値=id)。
     fn job_seed_row(bucket: &str, prefix: &str, status: &str, error_code: Option<&str>) -> i64 {
+        job_seed_row_kind(bucket, prefix, "get", status, error_code)
+    }
+
+    /// kind指定job行の注入(W5: push jobの取消・起動時interruptのkind非依存適用観測)。
+    fn job_seed_row_kind(
+        bucket: &str,
+        prefix: &str,
+        kind: &str,
+        status: &str,
+        error_code: Option<&str>,
+    ) -> i64 {
         let db = crate::catalog::CatalogDb::open().expect("catalog DB open");
-        let row = db
-            .insert_job(
-                bucket,
-                prefix,
-                "get",
-                &serde_json::to_string(&serde_json::json!({
+        let (params_json, progress_json) = match kind {
+            "push" => (
+                serde_json::to_string(&serde_json::json!({
+                    "targets": [
+                        { "path": "/tmp/amazing-backup-job-push-seed.zip", "title": "seed" }
+                    ],
+                }))
+                .expect("push params serialize"),
+                PushProgressTracker::queued(1).progress_json(),
+            ),
+            _ => (
+                serde_json::to_string(&serde_json::json!({
                     "uuid": W2_ALPHA_UUID,
                     "version_id": None::<String>,
                     "pin": None::<String>,
@@ -6340,8 +6991,11 @@ mod tests {
                     "overwrite": false,
                 }))
                 .expect("params serialize"),
-                &job_progress_json("queued", false, None, None),
-            )
+                job_progress_json("queued", false, None, None),
+            ),
+        };
+        let row = db
+            .insert_job(bucket, prefix, kind, &params_json, &progress_json)
             .expect("job行挿入");
         if status != "queued" || error_code.is_some() {
             db.update_job(
@@ -6603,6 +7257,8 @@ mod tests {
     fn api_jobs_cancel_queued_only() {
         let env = api_env("srv-w4-jobs-cancel");
         let queued = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "queued", None);
+        let queued_push =
+            job_seed_row_kind(API_TEST_BUCKET, API_TEST_PREFIX, "push", "queued", None);
         let running = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "running", None);
         let done = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "succeeded", None);
 
@@ -6612,6 +7268,14 @@ mod tests {
             resp.get("job").and_then(|j| j.get("status")).and_then(|s| s.as_str()),
             Some("cancelled"),
             "取消後のjob object(status=cancelled): {resp}"
+        );
+        // push jobのqueued取消も同一契約(kind非依存・W5観測)
+        let (status, resp) = api("POST", &format!("/api/jobs/{queued_push}/cancel"));
+        assert_eq!(status, 200, "push jobのqueued取消は200: {resp}");
+        assert_eq!(
+            resp.get("job").and_then(|j| j.get("kind")).and_then(|s| s.as_str()),
+            Some("push"),
+            "取消後もkind=push: {resp}"
         );
         // 取消済みの再取消も409(取消対象が無い)
         let (status, resp) = api("POST", &format!("/api/jobs/{queued}/cancel"));
@@ -6639,8 +7303,8 @@ mod tests {
         assert_eq!(status, 200, "一覧: {list}");
         assert_eq!(
             list.get("jobs").and_then(|v| v.as_array()).map(|j| j.len()),
-            Some(1),
-            "取消行はcancelled絞り込みに現れる: {list}"
+            Some(2),
+            "取消行(get・push)はcancelled絞り込みに現れる: {list}"
         );
         drop(env);
     }
@@ -6654,6 +7318,8 @@ mod tests {
     fn api_jobs_interrupted_at_boot_sweep() {
         let env = api_env("srv-w4-jobs-interrupt");
         let q = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "queued", None);
+        // push jobのqueued行も同様にinterrupt対象(kind非依存・D-P7/W5観測)
+        let qp = job_seed_row_kind(API_TEST_BUCKET, API_TEST_PREFIX, "push", "queued", None);
         let r = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "running", None);
         let w = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "waiting_restore", None);
         let s = job_seed_row(API_TEST_BUCKET, API_TEST_PREFIX, "succeeded", None);
@@ -6665,7 +7331,10 @@ mod tests {
             API_TEST_PREFIX.to_string(),
         ))
         .expect("起動時sweep");
-        assert_eq!(updated, 3, "実効scopeの3行(queued/running/waiting_restore)が対象");
+        assert_eq!(
+            updated, 4,
+            "実効scopeの4行(queued get/push・running・waiting_restore)が対象"
+        );
 
         let status_of = |id: i64| {
             let db = crate::catalog::CatalogDb::open().expect("catalog DB open");
@@ -6674,7 +7343,8 @@ mod tests {
                 .expect("行がある")
                 .status
         };
-        assert_eq!(status_of(q), "interrupted", "queued→interrupted");
+        assert_eq!(status_of(q), "interrupted", "queued(get)→interrupted");
+        assert_eq!(status_of(qp), "interrupted", "queued(push)→interrupted");
         assert_eq!(status_of(r), "interrupted", "running→interrupted");
         assert_eq!(status_of(w), "interrupted", "waiting_restore→interrupted");
         assert_eq!(status_of(s), "succeeded", "succeededは変更しない");
@@ -8674,5 +9344,1307 @@ mod tests {
             "書込はrollbackされtagsは空のまま: {body}"
         );
         drop(env);
+    }
+
+    // -----------------------------------------------------------------------
+    // TASK-17 W5(TASK-28: push job・dry-run・audit_log recipients指紋)の単体test。
+
+    /// [covers:server.push-dry-run]
+    /// POST /api/push/dry-run: 同期予測(connection+targets+summary・error行で続行・
+    /// merge_target_index)・S3/暗号化/registry/push_intents非接触・400/422・未認証401。
+    #[test]
+    fn api_push_dry_run_predicts_without_side_effects() {
+        let env = api_env("srv-w5-push-dry-run");
+        let data_dir = env._tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let a_zip = data_dir.join("a.zip");
+        let b_zip = data_dir.join("b.zip");
+        let c_zip = data_dir.join("c.zip");
+        let skip_zip = data_dir.join("skip.zip");
+        let reput_zip = data_dir.join("reput.zip");
+        crate::testutil::write_file(&a_zip, b"content-alpha");
+        crate::testutil::write_file(&b_zip, b"content-beta-unbacked-notitle");
+        // c.zipはa.zipと同一内容(同一batch内の2件目=merge予測・先行newのindex参照)
+        crate::testutil::write_file(&c_zip, b"content-alpha");
+        crate::testutil::write_file(&skip_zip, b"content-skip");
+        crate::testutil::write_file(&reput_zip, b"content-reput");
+
+        let skip_abs = skip_zip.canonicalize().expect("canonicalize skip");
+        let reput_abs = reput_zip.canonicalize().expect("canonicalize reput");
+        let skip_mtime = crate::storage::mtime_jst_precise(&skip_abs).expect("mtime");
+        let reput_mtime = crate::storage::mtime_jst_precise(&reput_abs).expect("mtime");
+        let registry_path = env.home.join("registry.jsonl");
+        // skip対象: file_write + bucket一致file_upload
+        crate::registry::append_record(
+            &registry_path,
+            &crate::registry::FileWriteRecord {
+                schema: 3,
+                record_type: "file_write".into(),
+                recorded_at: "2026-11-25T09:00:00+09:00".into(),
+                batch_id: "20261125-00000001".into(),
+                batch_date: "2026-11-25".into(),
+                uuid: W2_ALPHA_UUID.into(),
+                title: "skip-entity".into(),
+                source_path: skip_abs.display().to_string(),
+                source_name: "skip.zip".into(),
+                source_size: b"content-skip".len() as u64,
+                source_mtime: skip_mtime,
+                source_sha256: job_sha256_hex(b"content-skip"),
+                age_path: "20261125/skip.zip.age".into(),
+                age_size: 100,
+                age_sha256: "a".repeat(64),
+                recipients: vec!["SHA256:fp0".into()],
+                category: "unfiled".into(),
+                label: String::new(),
+                identity_hash: crate::layout::identity_hash(&skip_abs),
+                s3_key: format!("{API_TEST_PREFIX}data/{W2_ALPHA_UUID}/default.age"),
+            },
+        )
+        .expect("append skip write");
+        crate::registry::append_record(
+            &registry_path,
+            &crate::registry::FileUploadRecord {
+                schema: 2,
+                record_type: "file_upload".into(),
+                recorded_at: "2026-11-25T09:00:01+09:00".into(),
+                batch_id: "20261125-00000001".into(),
+                version_ts: "2026-11-25T09:00:01+09:00".into(),
+                uuid: W2_ALPHA_UUID.into(),
+                title: "skip-entity".into(),
+                s3_key: format!("{API_TEST_PREFIX}data/{W2_ALPHA_UUID}/default.age"),
+                s3_bucket: API_TEST_BUCKET.into(),
+                s3_region: "ap-northeast-1".into(),
+                version_id: "v1".into(),
+                s3_size: 100,
+                s3_checksum_sha256: "a".repeat(64),
+                s3_checksum_type: "FULL_OBJECT".into(),
+                source_sha256: job_sha256_hex(b"content-skip"),
+                age_sha256: "a".repeat(64),
+                source_size: b"content-skip".len() as u64,
+                age_size: 100,
+                uploaded_at: "2026-11-25T09:00:02+09:00".into(),
+            },
+        )
+        .expect("append skip upload");
+        // crash残存re-put対象: file_writeのみ(file_upload無し)
+        crate::registry::append_record(
+            &registry_path,
+            &crate::registry::FileWriteRecord {
+                schema: 3,
+                record_type: "file_write".into(),
+                recorded_at: "2026-11-25T09:05:00+09:00".into(),
+                batch_id: "20261125-00000002".into(),
+                batch_date: "2026-11-25".into(),
+                uuid: W2_BETA_UUID.into(),
+                title: "reput-entity".into(),
+                source_path: reput_abs.display().to_string(),
+                source_name: "reput.zip".into(),
+                source_size: b"content-reput".len() as u64,
+                source_mtime: reput_mtime,
+                source_sha256: job_sha256_hex(b"content-reput"),
+                age_path: "20261125/reput.zip.age".into(),
+                age_size: 100,
+                age_sha256: "b".repeat(64),
+                recipients: vec!["SHA256:fp0".into()],
+                category: "unfiled".into(),
+                label: String::new(),
+                identity_hash: crate::layout::identity_hash(&reput_abs),
+                s3_key: format!("{API_TEST_PREFIX}data/{W2_BETA_UUID}/default.age"),
+            },
+        )
+        .expect("append reput write");
+
+        let reg_before = std::fs::read_to_string(&registry_path).expect("registry before");
+        let calls_log = env._tmp.path().join("s3state").join("calls.log");
+
+        let (status, resp) = api_body(
+            "POST",
+            "/api/push/dry-run",
+            serde_json::json!({
+                "targets": [
+                    { "path": skip_zip.display().to_string() },
+                    { "path": reput_zip.display().to_string() },
+                    { "path": a_zip.display().to_string(), "title": "alpha-new" },
+                    { "path": b_zip.display().to_string() },
+                    { "path": c_zip.display().to_string(), "title": "alpha-dup-sha" },
+                    { "path": data_dir.join("absent.zip").display().to_string() }
+                ]
+            }),
+        );
+        assert_eq!(status, 200, "dry-runは200: {resp}");
+        let conn = resp.get("connection").expect("connection");
+        assert_eq!(conn.get("profile").and_then(|v| v.as_str()), Some("dev"));
+        assert_eq!(
+            conn.get("bucket").and_then(|v| v.as_str()),
+            Some(API_TEST_BUCKET)
+        );
+        assert_eq!(
+            conn.get("prefix").and_then(|v| v.as_str()),
+            Some(API_TEST_PREFIX)
+        );
+        let recipients = conn
+            .get("recipients")
+            .and_then(|v| v.as_array())
+            .expect("recipients array");
+        assert_eq!(recipients.len(), 1);
+        assert!(
+            recipients[0]
+                .as_str()
+                .is_some_and(|s| s.starts_with("SHA256:")),
+            "recipient指紋: {recipients:?}"
+        );
+
+        let targets = resp
+            .get("targets")
+            .and_then(|v| v.as_array())
+            .expect("targets array");
+        assert_eq!(targets.len(), 6, "6対象の予測(error行を含む): {resp}");
+        let actions: Vec<&str> = targets
+            .iter()
+            .filter_map(|i| i.get("action").and_then(|a| a.as_str()))
+            .collect();
+        assert_eq!(
+            actions,
+            vec!["skip", "re_put", "new", "new", "merge", "error"],
+            "action語彙はsnake_case(skip/re_put/merge/new)+解決失敗のerror: {targets:?}"
+        );
+        // skip/re_putは既知uuid
+        assert_eq!(
+            targets[0].get("uuid").and_then(|v| v.as_str()),
+            Some(W2_ALPHA_UUID)
+        );
+        assert_eq!(
+            targets[1].get("uuid").and_then(|v| v.as_str()),
+            Some(W2_BETA_UUID)
+        );
+        // newはuuid未発行
+        assert!(targets[2].get("uuid").is_some_and(|v| v.is_null()));
+        // 同一run内の先行newへの合流merge: uuid=null+merge_target_index(=先行newのindex)
+        assert!(targets[4].get("uuid").is_some_and(|v| v.is_null()));
+        assert_eq!(
+            targets[4]
+                .get("merge_target_index")
+                .and_then(|v| v.as_u64()),
+            Some(2),
+            "merge_target_indexは先行new(a.zip)のindex: {targets:?}"
+        );
+        // b.zip(新規+title未指定)はwarning付き
+        assert!(
+            targets[3]
+                .get("warning")
+                .and_then(|w| w.as_str())
+                .is_some_and(|w| w.contains("title")),
+            "新規title未指定のwarning: {}",
+            targets[3]
+        );
+        // 解決失敗(absent.zip)のerror行: name/size=null+error{code,message}で
+        // 解決済み対象の予測は続行する(D-P2の解決境界)
+        let err_row = &targets[5];
+        assert!(err_row.get("name").is_some_and(|v| v.is_null()));
+        assert!(err_row.get("size").is_some_and(|v| v.is_null()));
+        let err = err_row
+            .get("error")
+            .expect("error行にはerror{code,message}");
+        assert_eq!(err.get("code").and_then(|c| c.as_str()), Some("not_found"));
+        assert!(
+            err.get("message")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m.contains("対象ファイルが存在しない")),
+            "error.messageは対象解決の詳細: {err_row:?}"
+        );
+        let summary = resp.get("summary").expect("summary");
+        assert_eq!(summary.get("count").and_then(|v| v.as_u64()), Some(6));
+        assert_eq!(
+            summary.get("total_size").and_then(|v| v.as_u64()),
+            Some(
+                (b"content-skip".len()
+                    + b"content-reput".len()
+                    + b"content-alpha".len() * 2
+                    + b"content-beta-unbacked-notitle".len()) as u64
+            ),
+            "total_sizeは解決成功対象のみの合計(skip・re_put・a/b/c.zipの5件分。error行は
+            含めない): {summary}"
+        );
+        assert_eq!(summary.get("skip").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(summary.get("re_put").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(summary.get("merge").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(summary.get("new").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(summary.get("failed").and_then(|v| v.as_u64()), Some(1));
+
+        // 入力文字列のpath重複は発行時検証(422)で拒むが、alias(表記が異なりrealpathが
+        // 同一)の重複(後続行)と拡張子違反は対象解決の失敗行として現れ、他対象の予測は
+        // 続行する(D-P1/D-P2/D-P3の解決境界)
+        std::fs::create_dir_all(data_dir.join("alias")).expect("alias dir");
+        let notes_txt = data_dir.join("notes.txt");
+        crate::testutil::write_file(&notes_txt, b"not-an-archive");
+        let alias_a = data_dir.join("alias").join("..").join("a.zip");
+        let (st, resp2) = api_body(
+            "POST",
+            "/api/push/dry-run",
+            serde_json::json!({ "targets": [
+                { "path": a_zip.display().to_string(), "title": "alpha-alias" },
+                { "path": alias_a.display().to_string(), "title": "alpha-dup" },
+                { "path": notes_txt.display().to_string() }
+            ]}),
+        );
+        assert_eq!(st, 200, "失敗行を含むdry-runも200: {resp2}");
+        let rows = resp2
+            .get("targets")
+            .and_then(|v| v.as_array())
+            .expect("targets array");
+        assert_eq!(rows[0].get("action").and_then(|a| a.as_str()), Some("new"));
+        assert_eq!(
+            rows[1].get("action").and_then(|a| a.as_str()),
+            Some("error")
+        );
+        assert!(
+            rows[1]["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("realpathが重複している")),
+            "realpath重複の後続行はerror行: {rows:?}"
+        );
+        assert_eq!(
+            rows[2].get("action").and_then(|a| a.as_str()),
+            Some("error")
+        );
+        assert!(
+            rows[2]["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("拡張子が対象外")),
+            "拡張子違反はerror行: {rows:?}"
+        );
+        assert_eq!(resp2["summary"]["failed"], 2, "{resp2}");
+        assert_eq!(resp2["summary"]["new"], 1, "{resp2}");
+
+        // S3 API呼出なし・registry追記なし・push_intentsはserver経由では記録しない(D-P2)。
+        // push_intentsはdry-runより前にschemaを作っておいて件数を数える(0件であること)
+        assert!(!calls_log.exists(), "dry-runはS3 APIを一切呼ばない");
+        assert_eq!(
+            std::fs::read_to_string(&registry_path).expect("registry after"),
+            reg_before,
+            "dry-runはregistryへ追記しない"
+        );
+        drop(crate::catalog::CatalogDb::open().expect("catalog DB open"));
+        {
+            let db_conn = rusqlite::Connection::open(env.home.join("catalog.db")).expect("db open");
+            let count: i64 = db_conn
+                .query_row("SELECT COUNT(*) FROM push_intents", [], |r| r.get(0))
+                .expect("push_intents count");
+            assert_eq!(count, 0, "server経由のdry-runはpush_intentsを記録しない");
+        }
+
+        // 400 / 422 検証
+        let (st, r) = api_body("POST", "/api/push/dry-run", serde_json::json!({}));
+        assert_eq!(st, 400, "targets欠落は400: {r}");
+        expect_error_body(&r, "invalid_request");
+
+        let (st, r) = api_body(
+            "POST",
+            "/api/push/dry-run",
+            serde_json::json!({"targets": []}),
+        );
+        assert_eq!(st, 422, "空targetsは422: {r}");
+        expect_error_body(&r, "validation_failed");
+
+        let (st, r) = api_body(
+            "POST",
+            "/api/push/dry-run",
+            serde_json::json!({"targets": [{"path": a_zip.display().to_string(), "title": "bad/title"}]}),
+        );
+        assert_eq!(st, 422, "title規則違反は422: {r}");
+        expect_error_body(&r, "validation_failed");
+
+        let (st, r) = api_body(
+            "POST",
+            "/api/push/dry-run",
+            serde_json::json!({"targets": [{"path": a_zip.display().to_string(), "title": ""}]}),
+        );
+        assert_eq!(st, 422, "空文字列titleは422(UIはnullへ変換して送る): {r}");
+        expect_error_body(&r, "validation_failed");
+
+        let (st, r) = api_body(
+            "POST",
+            "/api/push/dry-run",
+            serde_json::json!({"targets": [{"path": "relative/path/a.zip"}]}),
+        );
+        assert_eq!(st, 422, "相対pathは422(server側絶対path必須): {r}");
+        expect_error_body(&r, "validation_failed");
+
+        let (st, r) = api_body(
+            "POST",
+            "/api/push/dry-run",
+            serde_json::json!({"targets": [
+                {"path": a_zip.display().to_string()},
+                {"path": a_zip.display().to_string()}
+            ]}),
+        );
+        assert_eq!(st, 422, "入力文字列のpath重複は422: {r}");
+        expect_error_body(&r, "validation_failed");
+        drop(env);
+
+        // 未認証は401
+        let flow = AuthFlow::new("srv-w5-push-dry-run-auth");
+        let (st, r, _) = flow.call(
+            "POST",
+            "/api/push/dry-run",
+            Some(serde_json::json!({"targets": [{"path": "/tmp/a.zip"}]})),
+            None,
+        );
+        assert_eq!(st, 401, "未認証のPOST /api/push/dry-runは401: {r}");
+        expect_error_body(&r, "unauthenticated");
+    }
+
+    /// [covers:server.jobs-push-issue]
+    /// [covers:server.push-audit]
+    /// POST /api/jobs/push: body検証(400/422=相対path・path重複・空title含む)と
+    /// queued push jobの即時応答・GET /api/jobs?kind=push反映・発行時audit(job_push)・
+    /// 未認証401。
+    #[test]
+    fn api_jobs_push_issues_queued_job() {
+        let env = api_env("srv-w5-jobs-push-issue");
+        let (status, resp) = api_body(
+            "POST",
+            "/api/jobs/push",
+            serde_json::json!({
+                "targets": [
+                    { "path": "/tmp/nonexistent-at-issue-a.zip", "title": "alpha" },
+                    { "path": "/tmp/nonexistent-at-issue-b.7z" }
+                ]
+            }),
+        );
+        assert_eq!(status, 200, "発行はFS解決を行わず200即時応答: {resp}");
+        let job = resp.get("job").expect("job wrap");
+        assert_eq!(job.get("kind").and_then(|v| v.as_str()), Some("push"));
+        assert_eq!(job.get("status").and_then(|v| v.as_str()), Some("queued"));
+        assert_eq!(
+            job.get("progress")
+                .and_then(|p| p.get("phase"))
+                .and_then(|v| v.as_str()),
+            Some("queued"),
+            "progress.phase=queued: {resp}"
+        );
+        assert_eq!(
+            job.get("progress")
+                .and_then(|p| p.get("total"))
+                .and_then(|v| v.as_i64()),
+            Some(2),
+            "progress.total=対象数2: {resp}"
+        );
+        assert_eq!(
+            job.get("progress")
+                .and_then(|p| p.get("done"))
+                .and_then(|v| v.as_i64()),
+            Some(0),
+            "progress.done=0: {resp}"
+        );
+        let targets = job
+            .get("params")
+            .and_then(|p| p.get("targets"))
+            .and_then(|t| t.as_array())
+            .expect("params.targets");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(
+            targets[0].get("title").and_then(|v| v.as_str()),
+            Some("alpha")
+        );
+        assert!(targets[1].get("title").is_some_and(|v| v.is_null()));
+
+        let (st, list) = api("GET", "/api/jobs?kind=push");
+        assert_eq!(st, 200, "kind=push一覧: {list}");
+        assert_eq!(
+            list.get("jobs").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(1),
+            "push jobが1件: {list}"
+        );
+
+        // 発行時audit(D-P5): job_push 1件・detail={targets,recipients}・outcome=ok
+        {
+            let conn = rusqlite::Connection::open(env.home.join("catalog.db")).expect("db open");
+            let mut stmt = conn
+                .prepare(
+                    "SELECT action, detail_json, outcome, error_code \
+                     FROM audit_log WHERE action = 'job_push' ORDER BY id",
+                )
+                .expect("prepare audit_log");
+            let rows: Vec<(String, String, String, Option<String>)> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .expect("query audit_log")
+                .map(|r| r.expect("row"))
+                .collect();
+            assert_eq!(rows.len(), 1, "発行時に1件: {rows:?}");
+            assert_eq!(rows[0].2, "ok");
+            assert_eq!(rows[0].3, None);
+            let d: serde_json::Value = serde_json::from_str(&rows[0].1).expect("detail json");
+            let audit_targets = d
+                .get("targets")
+                .and_then(|v| v.as_array())
+                .expect("targets array in audit");
+            assert_eq!(audit_targets.len(), 2, "targetsは発行bodyのecho: {d}");
+            assert!(
+                audit_targets[0].get("path").is_some_and(|v| v.is_string()),
+                "pathを含む: {d}"
+            );
+            let fps = d
+                .get("recipients")
+                .and_then(|v| v.as_array())
+                .expect("recipients array in audit");
+            assert_eq!(fps.len(), 1, "実効profileのrecipient指紋1件: {d}");
+            assert!(
+                fps[0].as_str().is_some_and(|s| s.starts_with("SHA256:")),
+                "SHA256指紋が記録される: {d}"
+            );
+            assert!(
+                d.get("job_id").is_none() && d.get("batch_id").is_none(),
+                "job_id/batch_idは含めない(処理結果はjobs tableとregistryが正本): {d}"
+            );
+        }
+
+        // 400系
+        for (body, what) in [
+            (serde_json::json!({}), "targets欠落"),
+            (serde_json::json!({"targets": "bad"}), "targets非配列"),
+            (serde_json::json!({"targets": [123]}), "要素非object"),
+            (serde_json::json!({"targets": [{"title": "a"}]}), "path欠落"),
+            (
+                serde_json::json!({"targets": [{"path": "/a.zip", "title": 1}]}),
+                "title非文字列",
+            ),
+        ] {
+            let (st, r) = api_body("POST", "/api/jobs/push", body);
+            assert_eq!(st, 400, "{what}は400: {r}");
+            expect_error_body(&r, "invalid_request");
+        }
+        // 422系(空targets・空path・title規則違反・空文字列title・相対path・path重複)
+        for (body, what) in [
+            (serde_json::json!({"targets": []}), "空targets"),
+            (serde_json::json!({"targets": [{"path": ""}]}), "空path"),
+            (
+                serde_json::json!({"targets": [{"path": "/a.zip", "title": "a/b"}]}),
+                "titleスラッシュ違反",
+            ),
+            (
+                serde_json::json!({"targets": [{"path": "/a.zip", "title": ""}]}),
+                "title空文字列",
+            ),
+            (
+                serde_json::json!({"targets": [{"path": "relative/a.zip"}]}),
+                "相対path",
+            ),
+            (
+                serde_json::json!({"targets": [
+                    {"path": "/tmp/dup-a.zip"},
+                    {"path": "/tmp/dup-a.zip"}
+                ]}),
+                "入力path重複",
+            ),
+        ] {
+            let (st, r) = api_body("POST", "/api/jobs/push", body);
+            assert_eq!(st, 422, "{what}は422: {r}");
+            expect_error_body(&r, "validation_failed");
+        }
+        let (st, _) = api("POST", "/api/jobs/push");
+        assert_eq!(st, 400, "body無しは400");
+
+        // 発行時検証422のaudit: outcome=failed+error_code=validation_failed(D-P5)
+        {
+            let conn = rusqlite::Connection::open(env.home.join("catalog.db")).expect("db open");
+            let mut stmt = conn
+                .prepare(
+                    "SELECT action, outcome, error_code FROM audit_log \
+                     WHERE action = 'job_push' ORDER BY id",
+                )
+                .expect("prepare audit_log");
+            let rows: Vec<(String, String, Option<String>)> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .expect("query audit_log")
+                .map(|r| r.expect("row"))
+                .collect();
+            // ok 1件(上記正常発行) + failed 1件(422のうち最後の1系統のみでなく
+            // 発行時検証422は毎回記録される: 本testでは422系6件ぶんのfailed行)
+            let ok_count = rows.iter().filter(|r| r.1 == "ok").count();
+            let failed_count = rows.iter().filter(|r| r.1 == "failed").count();
+            assert_eq!(ok_count, 1, "okは正常発行1件: {rows:?}");
+            assert_eq!(failed_count, 6, "422系6件はfailed記録: {rows:?}");
+            assert!(
+                rows.iter()
+                    .filter(|r| r.1 == "failed")
+                    .all(|r| r.2.as_deref() == Some("validation_failed")),
+                "failed行のerror_code=validation_failed: {rows:?}"
+            );
+        }
+        drop(env);
+
+        let flow = AuthFlow::new("srv-w5-jobs-push-issue-auth");
+        let (st, r, _) = flow.call(
+            "POST",
+            "/api/jobs/push",
+            Some(serde_json::json!({"targets": [{"path": "/tmp/a.zip", "title": "a"}]})),
+            None,
+        );
+        assert_eq!(st, 401, "未認証のPOST /api/jobs/pushは401: {r}");
+        expect_error_body(&r, "unauthenticated");
+    }
+
+    /// [covers:server.jobs-push-exec]
+    /// push jobの実行: 進行のper-file更新(phase語彙 queued→resolve→upload→
+    /// finalize・current_path・done)とresult(files+summary)・GET /api/entitiesと
+    /// CLI list files(read_index_cached)の整合。
+    #[test]
+    fn api_jobs_push_exec_progress_result_and_cli_consistency() {
+        let Some(fx) = job_exec_setup("srv-w5-job-push-exec", "STANDARD") else {
+            eprintln!("SKIP: ssh-keygen/ageが使えない環境");
+            return;
+        };
+        let src_dir = fx.env._tmp.path().join("push-src");
+        std::fs::create_dir_all(&src_dir).expect("push-src dir");
+        let p1 = src_dir.join("new1.zip");
+        let p2 = src_dir.join("new2.7z");
+        crate::testutil::write_file(&p1, b"w5-push-payload-one");
+        crate::testutil::write_file(&p2, b"w5-push-payload-two");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime");
+        let mgr = fx.state.jobs.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        rt.block_on(async move {
+            let _worker = tokio::task::spawn(async move { mgr.worker_loop(shutdown_rx).await });
+            let body = serde_json::json!({
+                "targets": [
+                    { "path": p1.display().to_string(), "title": "pushed-one.zip" },
+                    { "path": p2.display().to_string(), "title": "pushed-two.7z" }
+                ]
+            });
+            let (status, resp) =
+                job_call(fx.router.clone(), "POST", "/api/jobs/push", Some(body)).await;
+            assert_eq!(status, 200, "初回push発行200: {resp}");
+            let id1 = resp
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(|v| v.as_i64())
+                .expect("job id 1");
+            job_wait_status(id1, "succeeded").await;
+
+            let (_, detail1) =
+                job_call(fx.router.clone(), "GET", &format!("/api/jobs/{id1}"), None).await;
+            let job1 = detail1.get("job").expect("job1");
+            // 進行: 終端はfinalize・全対象完了(D-P3のphase語彙)
+            assert_eq!(
+                job1.get("progress")
+                    .and_then(|p| p.get("phase"))
+                    .and_then(|v| v.as_str()),
+                Some("finalize"),
+                "progress.phase=finalize: {job1}"
+            );
+            assert_eq!(
+                job1.get("progress")
+                    .and_then(|p| p.get("total"))
+                    .and_then(|v| v.as_i64()),
+                Some(2),
+                "progress.total=2: {job1}"
+            );
+            assert_eq!(
+                job1.get("progress")
+                    .and_then(|p| p.get("done"))
+                    .and_then(|v| v.as_i64()),
+                Some(2),
+                "progress.done=2: {job1}"
+            );
+            assert!(
+                job1.get("progress")
+                    .and_then(|p| p.get("current_path"))
+                    .is_some_and(|v| v.is_null()),
+                "終端のcurrent_path=null: {job1}"
+            );
+            // result: files+summary(D-P3)
+            let res1 = job1.get("result").expect("result1");
+            let summary = res1.get("summary").expect("summary");
+            assert_eq!(summary.get("ok").and_then(|v| v.as_i64()), Some(2));
+            assert_eq!(summary.get("skip").and_then(|v| v.as_i64()), Some(0));
+            assert_eq!(summary.get("merge").and_then(|v| v.as_i64()), Some(0));
+            assert_eq!(summary.get("failed").and_then(|v| v.as_i64()), Some(0));
+            let files = res1
+                .get("files")
+                .and_then(|v| v.as_array())
+                .expect("files1");
+            assert_eq!(files.len(), 2, "対象単位の行: {files:?}");
+            for name in ["new1.zip", "new2.7z"] {
+                let row = files
+                    .iter()
+                    .find(|f| f.get("name").and_then(|n| n.as_str()) == Some(name))
+                    .unwrap_or_else(|| panic!("filesに行{name}が必要: {files:?}"));
+                assert_eq!(row.get("action").and_then(|a| a.as_str()), Some("new"));
+                assert_eq!(row.get("status").and_then(|s| s.as_str()), Some("ok"));
+                assert!(
+                    row.get("uuid")
+                        .and_then(|u| u.as_str())
+                        .is_some_and(|u| !u.is_empty()),
+                    "発行済みuuid: {row:?}"
+                );
+                assert!(
+                    row.get("error").is_none() || row.get("error").is_some_and(|e| e.is_null()),
+                    "成功行にerrorは無い: {row:?}"
+                );
+            }
+            // audit_logは発行時のjob_push 1件のみ(job実行完了時のaudit追記は行わない=D-P5)
+            {
+                let conn =
+                    rusqlite::Connection::open(crate::catalog::catalog_db_path()).expect("db open");
+                let mut stmt = conn
+                    .prepare("SELECT action, outcome FROM audit_log ORDER BY id")
+                    .expect("prepare audit_log");
+                let rows: Vec<(String, String)> = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .expect("query audit_log")
+                    .map(|r| r.expect("row"))
+                    .collect();
+                assert_eq!(
+                    rows,
+                    vec![("job_push".to_string(), "ok".to_string())],
+                    "audit_logは発行時のjob_push(ok)1件のみ: {rows:?}"
+                );
+            }
+
+            // GET /api/entities と CLI list files相当(read_index_cached)の整合確認
+            let (st, entities_resp) =
+                job_call(fx.router.clone(), "GET", "/api/entities", None).await;
+            assert_eq!(st, 200, "GET /api/entities: {entities_resp}");
+            let api_titles: Vec<String> = entities_resp
+                .get("entities")
+                .and_then(|v| v.as_array())
+                .expect("entities")
+                .iter()
+                .filter_map(|e| e.get("title").and_then(|t| t.as_str()).map(String::from))
+                .collect();
+            assert!(
+                api_titles.contains(&"pushed-one.zip".to_string())
+                    && api_titles.contains(&"pushed-two.7z".to_string()),
+                "UI一覧に新push対象が現れる: {api_titles:?}"
+            );
+
+            let cli_entries = tokio::task::spawn_blocking(|| {
+                let ctx = crate::storage::CtxArgs {
+                    config: None,
+                    aws_config: None,
+                    key: None,
+                    profile: None,
+                    format: crate::storage::Format::Json,
+                };
+                let session = crate::storage::open_session(&ctx).expect("cli session");
+                let key_path =
+                    crate::storage::resolve_key(&ctx, session.cfg.as_ref()).expect("key");
+                let (_h, entries) =
+                    crate::storage::read_index_cached(&session, &key_path, true).expect("cli list");
+                entries
+            })
+            .await
+            .expect("join cli");
+            let cli_titles: Vec<String> = cli_entries.iter().map(|e| e.title.clone()).collect();
+            assert_eq!(
+                api_titles.len(),
+                cli_titles.len(),
+                "UI entities数とCLI list files数が一致"
+            );
+            for t in ["pushed-one.zip", "pushed-two.7z"] {
+                let e = cli_entries
+                    .iter()
+                    .find(|e| e.title == t)
+                    .expect("CLIに実体が存在");
+                assert_eq!(e.versions.len(), 1, "{t}の版数は1");
+            }
+            let _ = shutdown_tx.send(true);
+        });
+    }
+
+    /// [covers:server.jobs-push-rerun-skip]
+    /// 再実行の冪等: 同一targetsの再発行は全件skip(版数不変)・crash残存
+    /// (file_writeのみ)対象は同uuidの再PUT=re_put。
+    #[test]
+    fn api_jobs_push_rerun_skip_and_crash_reput() {
+        let Some(fx) = job_exec_setup("srv-w5-job-push-rerun", "STANDARD") else {
+            eprintln!("SKIP: ssh-keygen/ageが使えない環境");
+            return;
+        };
+        let router = fx.router.clone();
+        let src_dir = fx.env._tmp.path().join("push-rerun");
+        std::fs::create_dir_all(&src_dir).expect("push-rerun dir");
+        let p1 = src_dir.join("r1.zip");
+        let p2 = src_dir.join("r2.7z");
+        crate::testutil::write_file(&p1, b"w5-rerun-payload-one");
+        crate::testutil::write_file(&p2, b"w5-rerun-payload-two");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime");
+        let mgr = fx.state.jobs.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        rt.block_on(async move {
+            let _worker = tokio::task::spawn(async move { mgr.worker_loop(shutdown_rx).await });
+            let body = serde_json::json!({
+                "targets": [
+                    { "path": p1.display().to_string(), "title": "rerun-one.zip" },
+                    { "path": p2.display().to_string(), "title": "rerun-two.7z" }
+                ]
+            });
+            // 1回目: 2件とも新規発行
+            let (status, resp) =
+                job_call(router.clone(), "POST", "/api/jobs/push", Some(body.clone())).await;
+            assert_eq!(status, 200, "1回目push発行200: {resp}");
+            let id1 = resp
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(|v| v.as_i64())
+                .expect("job id 1");
+            job_wait_status(id1, "succeeded").await;
+
+            // 2回目: 同一targets再発行=全件所在skip(版数は増えない=受入条件4)
+            let (status2, resp2) =
+                job_call(router.clone(), "POST", "/api/jobs/push", Some(body)).await;
+            assert_eq!(status2, 200, "再発行200: {resp2}");
+            let id2 = resp2
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(|v| v.as_i64())
+                .expect("job id 2");
+            job_wait_status(id2, "succeeded").await;
+
+            let (_, detail2) =
+                job_call(router.clone(), "GET", &format!("/api/jobs/{id2}"), None).await;
+            let res2 = detail2
+                .get("job")
+                .and_then(|j| j.get("result"))
+                .expect("result2");
+            let summary2 = res2.get("summary").expect("summary2");
+            assert_eq!(summary2.get("ok").and_then(|v| v.as_i64()), Some(0));
+            assert_eq!(summary2.get("skip").and_then(|v| v.as_i64()), Some(2));
+            assert_eq!(summary2.get("failed").and_then(|v| v.as_i64()), Some(0));
+            let files2 = res2
+                .get("files")
+                .and_then(|v| v.as_array())
+                .expect("files2");
+            assert!(
+                files2
+                    .iter()
+                    .all(|i| i.get("action").and_then(|a| a.as_str()) == Some("skip")),
+                "再実行は全件action=skip: {files2:?}"
+            );
+            assert!(
+                files2.iter().all(|i| i
+                    .get("uuid")
+                    .and_then(|u| u.as_str())
+                    .is_some_and(|u| !u.is_empty())),
+                "skip行もuuidを保持: {files2:?}"
+            );
+            // 版数は1のまま(2回目のupload無し=PUT呼出が無い)
+            fn versions_of(title: &str) -> usize {
+                let ctx = crate::storage::CtxArgs {
+                    config: None,
+                    aws_config: None,
+                    key: None,
+                    profile: None,
+                    format: crate::storage::Format::Json,
+                };
+                let session = crate::storage::open_session(&ctx).expect("cli session");
+                let key_path =
+                    crate::storage::resolve_key(&ctx, session.cfg.as_ref()).expect("key");
+                let (_h, entries) =
+                    crate::storage::read_index_cached(&session, &key_path, true).expect("cli list");
+                entries
+                    .iter()
+                    .find(|e| e.title == title)
+                    .unwrap_or_else(|| panic!("CLIに{title}が無い"))
+                    .versions
+                    .len()
+            }
+            for title in ["rerun-one.zip", "rerun-two.7z"] {
+                let count = tokio::task::spawn_blocking(move || versions_of(title))
+                    .await
+                    .expect("join versions_of");
+                assert_eq!(count, 1, "再実行後も版数1({title})");
+            }
+            let _ = shutdown_tx.send(true);
+        });
+        drop(fx);
+
+        // crash残存(file_writeのみ・bucket一致file_upload無し)は同uuid再PUT=re_put
+        let Some(fx) = job_exec_setup("srv-w5-job-push-crashreput", "STANDARD") else {
+            eprintln!("SKIP: ssh-keygen/ageが使えない環境");
+            return;
+        };
+        let crash_zip = fx.env._tmp.path().join("crash.zip");
+        crate::testutil::write_file(&crash_zip, b"w5-crash-reput-payload");
+        let crash_abs = crash_zip.canonicalize().expect("canonicalize crash");
+        let crash_mtime = crate::storage::mtime_jst_precise(&crash_abs).expect("crash mtime");
+        let crash_uuid = "01988888-0000-7000-8000-000000000001".to_string();
+        crate::registry::append_record(
+            &fx.env.home.join("registry.jsonl"),
+            &crate::registry::FileWriteRecord {
+                schema: 3,
+                record_type: "file_write".into(),
+                recorded_at: "2026-11-26T09:00:00+09:00".into(),
+                batch_id: "20261126-00000009".into(),
+                batch_date: "2026-11-26".into(),
+                uuid: crash_uuid.clone(),
+                title: "crash-entity.zip".into(),
+                source_path: crash_abs.display().to_string(),
+                source_name: "crash.zip".into(),
+                source_size: b"w5-crash-reput-payload".len() as u64,
+                source_mtime: crash_mtime,
+                source_sha256: job_sha256_hex(b"w5-crash-reput-payload"),
+                age_path: "20261126/crash.zip.age".into(),
+                age_size: 100,
+                age_sha256: "c".repeat(64),
+                recipients: vec!["SHA256:fp0".into()],
+                category: "unfiled".into(),
+                label: String::new(),
+                identity_hash: crate::layout::identity_hash(&crash_abs),
+                s3_key: format!("{API_TEST_PREFIX}data/{crash_uuid}/default.age"),
+            },
+        )
+        .expect("append crash write");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime");
+        let mgr = fx.state.jobs.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        rt.block_on(async move {
+            let _worker = tokio::task::spawn(async move { mgr.worker_loop(shutdown_rx).await });
+            let (status, resp) = job_call(
+                fx.router.clone(),
+                "POST",
+                "/api/jobs/push",
+                Some(serde_json::json!({
+                    "targets": [ { "path": crash_zip.display().to_string() } ]
+                })),
+            )
+            .await;
+            assert_eq!(status, 200, "crash残存push発行200: {resp}");
+            let id = resp
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(|v| v.as_i64())
+                .expect("job id");
+            job_wait_status(id, "succeeded").await;
+            let (_, detail) =
+                job_call(fx.router.clone(), "GET", &format!("/api/jobs/{id}"), None).await;
+            let res = detail
+                .get("job")
+                .and_then(|j| j.get("result"))
+                .expect("result");
+            let files = res.get("files").and_then(|v| v.as_array()).expect("files");
+            assert_eq!(files.len(), 1, "crash対象1行: {files:?}");
+            assert_eq!(
+                files[0].get("action").and_then(|a| a.as_str()),
+                Some("re_put"),
+                "crash残存は同uuid再PUT=re_put: {files:?}"
+            );
+            assert_eq!(
+                files[0].get("uuid").and_then(|u| u.as_str()),
+                Some(crash_uuid.as_str()),
+                "uuidはcrash前のfile_writeと同一: {files:?}"
+            );
+            assert_eq!(files[0].get("status").and_then(|s| s.as_str()), Some("ok"));
+            let _ = shutdown_tx.send(true);
+        });
+    }
+
+    /// [covers:server.jobs-push-failure]
+    /// push jobのkeep_going=true固定(対象解決失敗・title未指定のper-file失敗でも
+    /// 残対象を継続し最初のerror区分を記録・解消後の再実行で成功済みはskip)。
+    #[test]
+    fn api_jobs_push_keep_going_continues() {
+        let Some(fx) = job_exec_setup("srv-w5-job-push-keepgoing", "STANDARD") else {
+            eprintln!("SKIP: ssh-keygen/ageが使えない環境");
+            return;
+        };
+        let src_dir = fx.env._tmp.path().join("push-kg");
+        std::fs::create_dir_all(&src_dir).expect("push-kg dir");
+        let ok_zip = src_dir.join("ok.zip");
+        let absent_zip = src_dir.join("absent.zip");
+        let notitle_zip = src_dir.join("notitle.zip");
+        crate::testutil::write_file(&ok_zip, b"w5-keepgoing-ok");
+        crate::testutil::write_file(&notitle_zip, b"w5-keepgoing-notitle");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime");
+        let mgr = fx.state.jobs.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        rt.block_on(async move {
+            let _worker = tokio::task::spawn(async move { mgr.worker_loop(shutdown_rx).await });
+            // 1回目: ok.zip(成功) + absent.zip(不在失敗) + notitle.zip(新規title未指定失敗)
+            let (status, resp) = job_call(
+                fx.router.clone(),
+                "POST",
+                "/api/jobs/push",
+                Some(serde_json::json!({
+                    "targets": [
+                        { "path": ok_zip.display().to_string(), "title": "gamma.zip" },
+                        { "path": absent_zip.display().to_string(), "title": "delta.zip" },
+                        { "path": notitle_zip.display().to_string() }
+                    ]
+                })),
+            )
+            .await;
+            assert_eq!(status, 200, "発行200: {resp}");
+            let id1 = resp
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(|v| v.as_i64())
+                .expect("id1");
+            job_wait_status(id1, "failed").await;
+
+            let (_, detail1) =
+                job_call(fx.router.clone(), "GET", &format!("/api/jobs/{id1}"), None).await;
+            let job1 = detail1.get("job").expect("job1");
+            assert_eq!(
+                job1.get("error")
+                    .and_then(|e| e.get("code"))
+                    .and_then(|c| c.as_str()),
+                Some("not_found"),
+                "最初のerror区分を記録: {job1}"
+            );
+            assert_eq!(
+                job1.get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str()),
+                Some("対象が見つかりません"),
+                "一般化message: {job1}"
+            );
+            let res1 = job1.get("result").expect("失敗時も対象単位のresultを記録");
+            let summary1 = res1.get("summary").expect("summary1");
+            assert_eq!(summary1.get("ok").and_then(|v| v.as_i64()), Some(1));
+            assert_eq!(summary1.get("skip").and_then(|v| v.as_i64()), Some(0));
+            assert_eq!(summary1.get("merge").and_then(|v| v.as_i64()), Some(0));
+            assert_eq!(summary1.get("failed").and_then(|v| v.as_i64()), Some(2));
+            let files1 = res1
+                .get("files")
+                .and_then(|v| v.as_array())
+                .expect("files1");
+            assert_eq!(files1.len(), 3);
+            assert_eq!(
+                files1[0].get("action").and_then(|a| a.as_str()),
+                Some("new")
+            );
+            assert_eq!(files1[0].get("status").and_then(|s| s.as_str()), Some("ok"));
+            assert_eq!(
+                files1[0].get("name").and_then(|n| n.as_str()),
+                Some("ok.zip")
+            );
+            // 対象解決失敗(不在)はaction未確定=null(D-P3)
+            assert!(files1[1].get("action").is_some_and(|a| a.is_null()));
+            assert_eq!(
+                files1[1].get("status").and_then(|s| s.as_str()),
+                Some("failed")
+            );
+            let err1 = files1[1].get("error").expect("error{code,message}");
+            assert_eq!(err1.get("code").and_then(|c| c.as_str()), Some("not_found"));
+            // 新規title未指定もper-file失敗(非対話)
+            assert!(files1[2].get("action").is_some_and(|a| a.is_null()));
+            assert_eq!(
+                files1[2].get("status").and_then(|s| s.as_str()),
+                Some("failed")
+            );
+            let err2 = files1[2].get("error").expect("error{code,message}");
+            assert!(
+                err2.get("message")
+                    .and_then(|m| m.as_str())
+                    .is_some_and(|m| m.contains("title")),
+                "title未指定の対象エラー: {files1:?}"
+            );
+
+            // keep_going=trueによりok.zip(gamma.zip)はS3索引・catalog DBへ反映済み
+            let (_, entities_resp) =
+                job_call(fx.router.clone(), "GET", "/api/entities", None).await;
+            let titles: Vec<String> = entities_resp
+                .get("entities")
+                .and_then(|v| v.as_array())
+                .expect("entities")
+                .iter()
+                .filter_map(|e| e.get("title").and_then(|t| t.as_str()).map(String::from))
+                .collect();
+            assert!(
+                titles.contains(&"gamma.zip".to_string()),
+                "成功対象gamma.zipは反映済み: {titles:?}"
+            );
+
+            // 失敗原因解消後の再発行: absent.zipを作成しnotitle.zipへtitle付与
+            crate::testutil::write_file(&absent_zip, b"w5-keepgoing-now-present");
+            let (_, resp2) = job_call(
+                fx.router.clone(),
+                "POST",
+                "/api/jobs/push",
+                Some(serde_json::json!({
+                    "targets": [
+                        { "path": ok_zip.display().to_string(), "title": "gamma.zip" },
+                        { "path": absent_zip.display().to_string(), "title": "delta.zip" },
+                        { "path": notitle_zip.display().to_string(), "title": "epsilon.zip" }
+                    ]
+                })),
+            )
+            .await;
+            let id2 = resp2
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(|v| v.as_i64())
+                .expect("id2");
+            job_wait_status(id2, "succeeded").await;
+            let (_, detail2) =
+                job_call(fx.router.clone(), "GET", &format!("/api/jobs/{id2}"), None).await;
+            let res2 = detail2
+                .get("job")
+                .and_then(|j| j.get("result"))
+                .expect("result2");
+            let files2 = res2
+                .get("files")
+                .and_then(|v| v.as_array())
+                .expect("files2");
+            let action_of = |name: &str| {
+                files2
+                    .iter()
+                    .find(|f| f.get("name").and_then(|n| n.as_str()) == Some(name))
+                    .and_then(|f| f.get("action").and_then(|a| a.as_str()))
+                    .unwrap_or_else(|| panic!("files2に{name}が無い: {files2:?}"))
+            };
+            assert_eq!(action_of("ok.zip"), "skip", "ok.zipはskip");
+            assert_eq!(action_of("absent.zip"), "new", "残り対象はnew");
+            assert_eq!(action_of("notitle.zip"), "new");
+            let _ = shutdown_tx.send(true);
+        });
+    }
+
+    /// [covers:server.jobs-push-finalize]
+    /// finalize失敗(fake S3の索引PUT失敗): 部分結果(files+summary)はresultに保持・
+    /// job=failed+fatal_errorのerror区分・progress=phase finalize(D-P3の契約)。
+    #[test]
+    fn api_jobs_push_finalize_failure_keeps_partial_results() {
+        let Some(fx) = job_exec_setup("srv-w5-job-push-finalize", "STANDARD") else {
+            eprintln!("SKIP: ssh-keygen/ageが使えない環境");
+            return;
+        };
+        // 索引object keyのPUT失敗注入(panic時にenvが残らないようDrop guard)
+        struct EnvVarGuard(&'static str);
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var(self.0) };
+            }
+        }
+        let _fail_guard = EnvVarGuard("FAKE_S3_FAIL_CP_FOR");
+        unsafe {
+            std::env::set_var(
+                "FAKE_S3_FAIL_CP_FOR",
+                format!("{API_TEST_PREFIX}sys/index.jsonl.age"),
+            );
+        }
+        let src_dir = fx.env._tmp.path().join("push-finalize");
+        std::fs::create_dir_all(&src_dir).expect("push-finalize dir");
+        let p1 = src_dir.join("fin.zip");
+        crate::testutil::write_file(&p1, b"w5-finalize-payload");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime");
+        let mgr = fx.state.jobs.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        rt.block_on(async move {
+            let _worker = tokio::task::spawn(async move { mgr.worker_loop(shutdown_rx).await });
+            let (status, resp) = job_call(
+                fx.router.clone(),
+                "POST",
+                "/api/jobs/push",
+                Some(serde_json::json!({
+                    "targets": [ { "path": p1.display().to_string(), "title": "finalize.zip" } ]
+                })),
+            )
+            .await;
+            assert_eq!(status, 200, "発行200: {resp}");
+            let id = resp
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(|v| v.as_i64())
+                .expect("job id");
+            job_wait_status(id, "failed").await;
+
+            let (_, detail) =
+                job_call(fx.router.clone(), "GET", &format!("/api/jobs/{id}"), None).await;
+            let job = detail.get("job").expect("job");
+            // fatal_error(索引PUT失敗=Transfer)の区分・per-file失敗0件での優先
+            assert_eq!(
+                job.get("error")
+                    .and_then(|e| e.get("code"))
+                    .and_then(|c| c.as_str()),
+                Some("upstream"),
+                "finalize失敗はfatal_errorの区分(upstream): {job}"
+            );
+            // progress: 全対象完了後のfinalize段階
+            assert_eq!(
+                job.get("progress")
+                    .and_then(|p| p.get("phase"))
+                    .and_then(|v| v.as_str()),
+                Some("finalize"),
+                "progress.phase=finalize: {job}"
+            );
+            assert_eq!(
+                job.get("progress")
+                    .and_then(|p| p.get("done"))
+                    .and_then(|v| v.as_i64()),
+                Some(1),
+                "done=1(対象は処理済み): {job}"
+            );
+            // 部分結果: 処理済み対象のfiles+summaryはresultに保持
+            let res = job.get("result").expect("fatal_error時も部分結果を保持");
+            let summary = res.get("summary").expect("summary");
+            assert_eq!(summary.get("ok").and_then(|v| v.as_i64()), Some(1));
+            assert_eq!(summary.get("skip").and_then(|v| v.as_i64()), Some(0));
+            assert_eq!(summary.get("failed").and_then(|v| v.as_i64()), Some(0));
+            let files = res.get("files").and_then(|v| v.as_array()).expect("files");
+            assert_eq!(files.len(), 1, "対象1行: {files:?}");
+            assert_eq!(files[0].get("action").and_then(|a| a.as_str()), Some("new"));
+            assert_eq!(files[0].get("status").and_then(|s| s.as_str()), Some("ok"));
+            assert!(
+                files[0]
+                    .get("uuid")
+                    .and_then(|u| u.as_str())
+                    .is_some_and(|u| !u.is_empty()),
+                "処理済み対象のuuidを保持: {files:?}"
+            );
+            let _ = shutdown_tx.send(true);
+        });
+    }
+
+    /// [covers:server.jobs-push-exec]
+    /// push jobの進行tracker: run本体の進行通知(対象開始・対象完了・finalize開始)が
+    /// phase語彙(queued→resolve→upload→finalize)とcurrent_path・doneへ反映される
+    /// (実行中のprogressの中間状態を決定的に観測する)。
+    #[test]
+    fn push_progress_tracker_maps_run_events_to_phase_vocabulary() {
+        use crate::storage::backup::PushProgress;
+        let parse = |json: &str| serde_json::from_str::<serde_json::Value>(json).expect("json");
+
+        // 発行直後
+        assert_eq!(
+            parse(&PushProgressTracker::queued(2).progress_json()),
+            serde_json::json!({"phase": "queued", "total": 2, "done": 0, "current_path": null})
+        );
+        // claim直後=対象解決・plan_pushの段階
+        let mut tracker = PushProgressTracker::running(2);
+        assert_eq!(parse(&tracker.progress_json())["phase"], "resolve");
+
+        // 対象開始: phase=upload・current_path=当該path(doneは不変)
+        assert_eq!(
+            parse(&tracker.apply(&PushProgress::FileStart {
+                path: "/data/a.zip"
+            })),
+            serde_json::json!({"phase": "upload", "total": 2, "done": 0, "current_path": "/data/a.zip"})
+        );
+        // 対象完了: done+1・current_path=null
+        assert_eq!(
+            parse(&tracker.apply(&PushProgress::FileDone)),
+            serde_json::json!({"phase": "upload", "total": 2, "done": 1, "current_path": null})
+        );
+        let _ = tracker.apply(&PushProgress::FileStart {
+            path: "/data/b.zip",
+        });
+        let _ = tracker.apply(&PushProgress::FileDone);
+        // finalize開始: 全対象完了後のrun末尾処理の段階
+        assert_eq!(
+            parse(&tracker.apply(&PushProgress::FinalizeStart)),
+            serde_json::json!({"phase": "finalize", "total": 2, "done": 2, "current_path": null})
+        );
+    }
+
+    /// [covers:server.jobs-push-error-message]
+    /// 失敗行のerror{code,message}(D-P3): codeはapi_error_ofと同一の変換。messageは
+    /// 対象error(BackupError::Target=利用者の指定した対象・titleに起因する失敗)は対象を
+    /// 特定できる詳細文言のまま(D-P2の応答例と同一)。暗号化・registry書込・S3通信等の
+    /// storage層内部errorはapi_error_ofの一般化文言とする(正本3.1: 内部errorの無加工返却
+    /// 禁止・秘密情報境界。内部path等の詳細はlogのみ)。
+    #[test]
+    fn push_result_json_generalizes_internal_file_errors() {
+        use crate::errors::BackupError;
+        use crate::storage::backup::{PushFileResult, PushRunOutcome, PushRunSummary};
+        let file = |action: Option<&'static str>, error: Option<BackupError>| PushFileResult {
+            path: "/data/a.zip".to_string(),
+            name: Some("a.zip".to_string()),
+            action,
+            uuid: None,
+            error,
+        };
+        const INTERNAL_DETAIL: &str =
+            "平文の暗号化に失敗(/srv/amazing-backup/cache/a.zip.age.part): 書き込めません";
+        const UPSTREAM_DETAIL: &str = "S3 PutObject失敗(bucket=internal-bucket, key=x): 403";
+        let outcome = PushRunOutcome {
+            files: vec![
+                file(Some("new"), None),
+                file(
+                    None,
+                    Some(BackupError::Target(
+                        "対象ファイルが存在しない: /data/absent.zip".to_string(),
+                    )),
+                ),
+                file(
+                    None,
+                    Some(BackupError::Internal(INTERNAL_DETAIL.to_string())),
+                ),
+                file(
+                    None,
+                    Some(BackupError::Transfer(UPSTREAM_DETAIL.to_string())),
+                ),
+                file(
+                    None,
+                    Some(BackupError::Config(
+                        "pipeline.toml(/srv/config/pipeline.toml): 不正".to_string(),
+                    )),
+                ),
+                file(
+                    None,
+                    Some(BackupError::Process("sha256照合不一致".to_string())),
+                ),
+                file(
+                    None,
+                    Some(BackupError::Usage("uuidの形式が不正".to_string())),
+                ),
+            ],
+            summary: PushRunSummary::default(),
+            fatal_error: None,
+        };
+        let value = push_result_json(&outcome);
+        let files = value["files"].as_array().expect("files");
+        let error_of = |index: usize| files[index]["error"].clone();
+
+        // 成功行はerrorを持たない
+        assert!(files[0].get("error").is_none());
+        // 対象error: 対象を特定できる詳細文言(どの対象がなぜ失敗したか)
+        assert_eq!(
+            error_of(1),
+            serde_json::json!({
+                "code": "not_found",
+                "message": "対象ファイルが存在しない: /data/absent.zip",
+            })
+        );
+        // storage層内部error: codeはapi_error_ofと同一・messageは一般化文言
+        for (index, code, message) in [
+            (2usize, "internal", "内部エラーが発生しました"),
+            (3, "upstream", "上流ストレージ(S3)との通信に失敗しました"),
+            (4, "configuration", "設定の読み込みに失敗しました"),
+            (5, "validation_failed", "処理・検証に失敗しました"),
+            (6, "invalid_request", "リクエストの形式が不正です"),
+        ] {
+            assert_eq!(
+                error_of(index),
+                serde_json::json!({ "code": code, "message": message }),
+                "files[{index}]のerror"
+            );
+        }
+        // 内部path・bucket名等の生の詳細文言は応答へ含めない
+        let serialized = value.to_string();
+        assert!(!serialized.contains("/srv/amazing-backup/cache"));
+        assert!(!serialized.contains("internal-bucket"));
+        assert!(!serialized.contains("/srv/config"));
     }
 }
