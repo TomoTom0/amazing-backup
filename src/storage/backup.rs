@@ -356,7 +356,7 @@ fn cmd_backup_push(
         let mut failed = 0usize;
         let mut first_err: Option<i32> = None;
 
-        for p in &planned {
+        for (target_index, p) in planned.iter().enumerate() {
             let mtime_str = mtime_jst_precise(&p.target.source_path)?;
             // (1) 所在skip / uuid再利用の判定(4.1): file_write成功記録一致
             // (identity_hash+size+mtime)かつfile_upload記録がuuid照合+bucket一致で存在。
@@ -388,7 +388,7 @@ fn cmd_backup_push(
             let reuse_uuid = w.filter(|_| !upload_recorded).map(|w| w.uuid.clone());
 
             // (2) 暗号化(平文sha256入手)
-            let age_path = run_dir.join(format!("{}.age", p.target.source_name));
+            let age_path = batch_age_path(&run_dir, target_index, &p.target.source_name);
             let res = match crate::crypto::encrypt_stream(
                 &p.target.source_path,
                 &age_path,
@@ -1079,6 +1079,11 @@ fn dry_run_push(
     Ok(0)
 }
 
+/// バッチ内の一時`.age`ファイルパスを組み立てる(対象番号で一意化し、同一basename同士の衝突を防ぐ)。
+fn batch_age_path(run_dir: &std::path::Path, target_index: usize, source_name: &str) -> PathBuf {
+    run_dir.join(format!("{target_index:04}-{source_name}.age"))
+}
+
 /// pushでuploadした対象1件(manifest・pin組み立て用)。
 pub(crate) struct UploadItem {
     uuid: String,
@@ -1476,14 +1481,14 @@ impl<'a> PushRun<'a> {
         opts: &mut PushRunOptions,
         on_progress: &mut dyn FnMut(PushProgress),
     ) {
-        for entry in entries {
+        for (target_index, entry) in entries.iter().enumerate() {
             let path = match &entry.result {
                 Ok(target) => target.source_path.display().to_string(),
                 Err(_) => entry.raw_path.display().to_string(),
             };
             on_progress(PushProgress::FileStart { path: &path });
             let result = match &entry.result {
-                Ok(target) => self.push_one(target, &path, opts),
+                Ok(target) => self.push_one(target_index, target, &path, opts),
                 // 対象解決失敗(不在・通常fileでない・拡張子違反・realpath重複の後続行)
                 Err(e) => self.failed(&path, None, None, clone_backup_error(e)),
             };
@@ -1501,6 +1506,7 @@ impl<'a> PushRun<'a> {
     /// 決める)。
     fn push_one(
         &mut self,
+        target_index: usize,
         target: &crate::targets::Target,
         path: &str,
         opts: &mut PushRunOptions,
@@ -1545,7 +1551,7 @@ impl<'a> PushRun<'a> {
         let reuse_uuid = w.filter(|_| !upload_recorded).map(|w| w.uuid.clone());
 
         // (2) 暗号化(平文sha256入手)
-        let age_path = self.run_dir.join(format!("{}.age", p.target.source_name));
+        let age_path = batch_age_path(&self.run_dir, target_index, &p.target.source_name);
         let res = step!(
             None,
             crate::crypto::encrypt_stream(&p.target.source_path, &age_path, &self.cfg.public_keys)

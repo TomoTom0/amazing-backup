@@ -186,10 +186,10 @@
 feature = "server"
 source_file = "src/server.rs"
 verified = true
-verified_at = "2026-11-26"
-verified_by = "opencode(glm-5.4)"
+verified_at = "2026-11-28"
+verified_by = "gemini"
 test_command = "cargo test"
-source_hash = "e7a562ad4bc456bf956c4408bf36384960444a6f"
+source_hash = "13ccfc6226242209f5c9b7fbccd02c4141596ee9"
 note = "TASK-9設計1章(serve subcommand・async実行境界)・6章(API)・8章(server.toml)・9章(D4 localhost既定)・10章(dist二階建て)・12章P2+P3(読取API)+P4(auth endpoint枠・保護API開放)+P5(pending API実質)の条件化。P2分7条件・P3分11条件・P4分3条件は2026-11-05実装後に全件passで検証記録を復帰済み。2026-11-05 TASK-13(api-key認証)実装後にcargo test --lib server::全緑(38 tests・api-key系5test+routing改訂含む)を確認してverified=trueへ復帰・source_hashを更新。2026-11-06 TASK-13レビュー指摘対応(LAN境界IP条件追加+乱数読取helper共通化=src/server.rs変更)でverified=falseへ戻す(全件verify後にtrueへ復帰・source_hash更新)。2026-11-06 全件verify(cargo test全binary緑・is_lan_ip_boundary_ips含む・verify-conditions PASS 342条件)を確認してverified=trueへ復帰・source_hashを更新。2026-11-14 TASK-17 W1(TASK-18)条件追加(runs/jobs API 2条件+handler単体test 2件)でテスト先行のためverified=falseへ(W1実装後に全件verifyでtrueへ復帰)。2026-11-14 全件verify(cargo test 392 passed(lib 140+integration 25 suite)・frontend vitest 98tests緑・build成功・verify-conditions PASS 347条件)を確認してverified=trueへ復帰・source_hashを更新(W1分: GET /api/runs(batch_id集約・date降順)・GET /api/jobs(W1は空応答))。2026-11-14 コードレビュー指摘対応(runs同日sortをrun内最新version_ts降順の実行順へ・同日逆順test追加・server.runs-list文言改訂=同date内実順保証)後に全件verify(cargo test全binary緑・verify-conditions PASS 347条件)を確認してsource_hashを更新。2026-11-14 TASK-17 W2(TASK-19)条件追加(tag/collections系API+audit_log 9条件+handler単体test 8件+serve経由401回帰test 1件)でテスト先行のためverified=falseへ(W2実装後に全件verifyでtrueへ復帰)。2026-11-15 全件verify(cargo test全binary緑・vitest 126tests緑・build成功・verify-conditions PASS 364条件)を確認してverified=trueへ復帰・source_hashを更新(W2分: GET /api/tags・/api/folders・/api/collections(+/:id)・PUT /api/entities/:uuid/tags・collections CRUD・items追加/除去・entitiesへtag/collection絞り込み・audit_log記録)。2026-11-15 レビュー指摘対応(rename応答uuids・成功audit操作tx内化・tags重複正規化・counts現存JOIN・untagged param・foldersラベルなし行=条件7改訂+1新規)後に全件verify(cargo test全binary緑・vitest緑・build成功・verify-conditions PASS)を確認・source_hashを更新。2026-11-21 TASK-17 W3(TASK-22)条件追加(rename/location API 2条件+write-api-auth-gate文言改訂(id不変))でテスト先行のためverified=falseへ(W3実装後に全件verifyでtrueへ復帰)。2026-11-21 TASK-22(TASK-17 W3)実装後に全件verify(cargo test 417pass=25suite・vitest 169pass=29file・verify-conditions PASS 383条件・実機確認=serve+fake seamでrename→CLI list files/queryへ新title反映・catalog rebuild後も保持)を確認してverified=trueへ復帰・source_hashを更新(W3分実装含む)。2026-11-25 TASK-27(TASK-17 W4: job機構+get)条件追加(jobs table正本のjob系API+JobManager 7条件+server.jobs-listのW4実質化改訂=id不変)後・同一sessionで実装も行い全件verify(cargo test 429pass・vitest 191pass・verify-conditions PASS 399条件・実機確認=serve+fake seamでStandard tier取得job発行→succeeded配置・DEEP_ARCHIVEはwaiting_restore→時刻seamでsucceeded・serve再起動でinterrupted)を確認してverified=trueを維持・source_hashを更新(W4分: POST /api/jobs/get・GET /api/jobs(/:id)・cancel・JobManager直列worker・waiting_restore定期確認timer・時刻注入seam・起動時interrupted一括化)。2026-11-26 TASK-28(TASK-17 W5: push job・dry-run・upload form)条件追加でテスト先行のためverified=falseへ(W5実装後に全件verifyでtrueへ復帰)。2026-11-26 TASK-28実装後に全件verify(cargo test 439pass=25suite・vitest 202pass=31file・frontend build成功・clippyはW5新規code由来のwarning 0件・verify-conditions PASS 409条件)を確認してverified=trueへ復帰・source_hashを更新(W5分: POST /api/jobs/push・POST /api/push/dry-run・JobManagerのrun_push_job(phase queued→resolve→upload→finalize)・発行時audit(job_push))。2026-11-26 PR #13自動レビュー指摘2件(P2)対応でserver +1条件(jobs-push-error-message=per-file失敗行・dry-run error行のerror{code,message}=対象errorは詳細文言・storage層内部errorは一般化文言)をテスト先行で追加し、対応後に全件verify(cargo test 440pass=25suite・clippyはW5新規code由来のwarning 0件・verify-conditions PASS 411条件・serve/CLI実processとheadless browserによるfake S3 seamのsmoke確認)を確認してverified=trueを維持・source_hashを更新"
 
 [[condition]]
@@ -799,3 +799,12 @@ description = "push jobのper-file失敗行のerror{code,message}: codeはBackup
 given = "PushRunOutcome(filesに成功1行・Target error 1行・Internal/Transfer/Config/Process/Usage error各1行)をpush_result_jsonへ渡した時のresult_json(files[].error)とserialize結果"
 expect_return = "成功行はerrorを持たない。Targetは{code:\"not_found\",message:対象を特定する詳細文言(入力の文言のまま)}。Internal/Transfer/Config/Process/Usageは{code:api_error_ofと同一,message:一般化文言(内部エラーが発生しました/上流ストレージ(S3)との通信に失敗しました/設定の読み込みに失敗しました/処理・検証に失敗しました/リクエストの形式が不正です)}。serialize結果に内部path・bucket名・設定file pathの文字列を含まない"
 source_lines = "src/server.rs:10561"
+
+[[condition]]
+id = "server.jobs-push-same-name-temp-age-isolated"
+target_function = "storage::backup::PushRun::push_files / PushRun::push_one"
+source = "TASK-31 (TASK-28 PR #13所見2・Item 108事前照合)"
+description = "server push job(PushRun)の同一batch内異directory同名ファイル一時.age衝突防止: 別directoryで同名・別内容の2対象(dir_a/x.zip・dir_b/x.zip)を1つのPOST /api/jobs/pushで実行した際、PushRun側でも一時.ageファイル名が対象番号で一意化されて上書きされない。(1) keep_artifacts=\"always\"時は両対象のローカル.ageファイルが別pathで残り、file_write記録のage_path/age_sha256/source_sha256と復号内容が各対象と一致する (2) 既定keep_artifacts=\"run\"で成功したpush jobはrun_dirを一掃して.ageを残さず、失敗を含むpush job(一部対象失敗)は既作成分の.ageを衝突せず残置する (unit, fake seam)"
+given = "job_exec_setupでdir_a/x.zipとdir_b/x.zip(同名・別内容)を1つのPOST /api/jobs/pushで実行(keep_artifacts=\"always\"・keep_artifacts=\"run\"成功・一部失敗残置の各case)"
+expect_return_shape = "両対象のfile_write.age_pathが異なり各.ageの復号内容・ハッシュが一致し、keep_artifacts=\"run\"成功後はcache dirに.ageが残らず、一部失敗時は既作成分の.ageが衝突せず残置される"
+source_lines = "src/server.rs:10651"

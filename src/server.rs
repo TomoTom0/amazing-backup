@@ -10647,4 +10647,196 @@ mod tests {
         assert!(!serialized.contains("internal-bucket"));
         assert!(!serialized.contains("/srv/config"));
     }
+
+    /// [covers:server.jobs-push-same-name-temp-age-isolated]
+    /// TASK-31: server push job(PushRun)で別directoryの同名・別内容2ファイルを同一batchで
+    /// pushした際、一時.ageパスが対象番号で一意化されて衝突しないこと(keep_artifacts="always"
+    /// の両.age保全とハッシュ一致・keep_artifacts="run"の成功時全削除・一部失敗時残置)。
+    #[test]
+    fn api_jobs_push_same_name_files_preserve_distinct_temp_age() {
+        let Some(fx) = job_exec_setup("srv-samename-always", "STANDARD") else {
+            eprintln!("SKIP: ssh-keygen/ageが使えない環境");
+            return;
+        };
+        // keep_artifacts="always" に差し替え
+        let pipe_path = fx.env.home.join("pipeline.toml");
+        let pipe_body = std::fs::read_to_string(&pipe_path).expect("pipeline.toml read");
+        crate::testutil::write_file(
+            &pipe_path,
+            format!(
+                "{pipe_body}\n[profiles.dev.behavior]\nkeep_going = false\nkeep_artifacts = \"always\"\n"
+            )
+            .as_bytes(),
+        );
+        let dir_a = fx.env._tmp.path().join("dir_a");
+        let dir_b = fx.env._tmp.path().join("dir_b");
+        std::fs::create_dir_all(&dir_a).expect("dir_a");
+        std::fs::create_dir_all(&dir_b).expect("dir_b");
+        let file_a = dir_a.join("x.zip");
+        let file_b = dir_b.join("x.zip");
+        let plain_a = b"server-same-name-alpha";
+        let plain_b = b"server-same-name-beta-different";
+        crate::testutil::write_file(&file_a, plain_a);
+        crate::testutil::write_file(&file_b, plain_b);
+
+        let a_str = file_a.display().to_string();
+        let b_str = file_b.display().to_string();
+        let a_real = file_a.canonicalize().unwrap().display().to_string();
+        let b_real = file_b.canonicalize().unwrap().display().to_string();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime");
+        let mgr = fx.state.jobs.clone();
+        let router = fx.router.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        rt.block_on(async move {
+            let _worker = tokio::task::spawn(async move { mgr.worker_loop(shutdown_rx).await });
+            let body = serde_json::json!({
+                "targets": [
+                    { "path": a_str, "title": "srv-alpha" },
+                    { "path": b_str, "title": "srv-beta" }
+                ]
+            });
+            let (status, resp) = job_call(router, "POST", "/api/jobs/push", Some(body)).await;
+            assert_eq!(status, 200, "発行200: {resp}");
+            let id = resp["job"]["id"].as_i64().expect("job id");
+            job_wait_status(id, "succeeded").await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        let reg_text =
+            std::fs::read_to_string(fx.env.home.join("registry.jsonl")).expect("registry read");
+        let writes: Vec<serde_json::Value> = reg_text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|r| r.get("record_type").and_then(|v| v.as_str()) == Some("file_write"))
+            .collect();
+        let fw_a = writes
+            .iter()
+            .find(|r| r["source_path"].as_str() == Some(a_real.as_str()))
+            .expect("file_a write");
+        let fw_b = writes
+            .iter()
+            .find(|r| r["source_path"].as_str() == Some(b_real.as_str()))
+            .expect("file_b write");
+        let age_a = std::path::PathBuf::from(fw_a["age_path"].as_str().unwrap());
+        let age_b = std::path::PathBuf::from(fw_b["age_path"].as_str().unwrap());
+        assert_ne!(age_a, age_b, "PushRunでも一時.ageパスが衝突しない");
+        assert!(age_a.is_file() && age_b.is_file());
+        let secret = fx.env._tmp.path().join("keys").join("jobkey");
+        assert_eq!(
+            crate::crypto::decrypt_sha256(&age_a, &secret).expect("decrypt a"),
+            job_sha256_hex(plain_a)
+        );
+        assert_eq!(
+            crate::crypto::decrypt_sha256(&age_b, &secret).expect("decrypt b"),
+            job_sha256_hex(plain_b)
+        );
+        drop(fx);
+
+        // keep_artifacts="run": 成功時は全削除、一部失敗時は既作成の両.ageが衝突せず残置
+        let Some(fx2) = job_exec_setup("srv-samename-run", "STANDARD") else {
+            eprintln!("SKIP: ssh-keygen/ageが使えない環境");
+            return;
+        };
+        let d2_a = fx2.env._tmp.path().join("d2_a");
+        let d2_b = fx2.env._tmp.path().join("d2_b");
+        let d2_c = fx2.env._tmp.path().join("d2_c");
+        std::fs::create_dir_all(&d2_a).unwrap();
+        std::fs::create_dir_all(&d2_b).unwrap();
+        std::fs::create_dir_all(&d2_c).unwrap();
+        let f2_a = d2_a.join("x.zip");
+        let f2_b = d2_b.join("x.zip");
+        let f2_notitle = d2_c.join("notitle.zip");
+        crate::testutil::write_file(&f2_a, plain_a);
+        crate::testutil::write_file(&f2_b, plain_b);
+        crate::testutil::write_file(&f2_notitle, b"server-no-title-fail");
+
+        let cache_dir = fx2.env.home.join("cache");
+        let reg2_path = fx2.env.home.join("registry.jsonl");
+        let secret2 = fx2.env._tmp.path().join("keys").join("jobkey");
+        let rt2 = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime 2");
+        let mgr2 = fx2.state.jobs.clone();
+        let router2 = fx2.router.clone();
+        let (shutdown_tx2, shutdown_rx2) = tokio::sync::watch::channel(false);
+        rt2.block_on(async move {
+            let _worker = tokio::task::spawn(async move { mgr2.worker_loop(shutdown_rx2).await });
+            // (a) 成功run -> cache dirに.ageが残らない
+            let (st1, r1) = job_call(
+                router2.clone(),
+                "POST",
+                "/api/jobs/push",
+                Some(serde_json::json!({
+                    "targets": [
+                        { "path": f2_a.display().to_string(), "title": "r2-a" },
+                        { "path": f2_b.display().to_string(), "title": "r2-b" }
+                    ]
+                })),
+            )
+            .await;
+            assert_eq!(st1, 200, "成功job発行200: {r1}");
+            let id_ok = r1["job"]["id"].as_i64().unwrap();
+            job_wait_status(id_ok, "succeeded").await;
+
+            // cache dirにrun dir・.ageファイルが残らないことを確認
+            if cache_dir.is_dir() {
+                for entry in std::fs::read_dir(&cache_dir).unwrap().flatten() {
+                    let p = entry.path();
+                    assert!(
+                        !p.is_dir() && p.extension().is_none_or(|e| e != "age"),
+                        "成功job後はcacheが掃除済み: {p:?}"
+                    );
+                }
+            }
+
+            // (b) 一部失敗run(notitle追加で別内容ファイルとして失敗) -> 既作成の両.ageが衝突せず残置
+            // f2_a/f2_bの内容を変えてskipされずに再暗号化させる
+            crate::testutil::write_file(&f2_a, b"server-partial-alpha");
+            crate::testutil::write_file(&f2_b, b"server-partial-beta-2");
+            let (st2, r2) = job_call(
+                router2,
+                "POST",
+                "/api/jobs/push",
+                Some(serde_json::json!({
+                    "targets": [
+                        { "path": f2_a.display().to_string(), "title": "r2-a2" },
+                        { "path": f2_b.display().to_string(), "title": "r2-b2" },
+                        { "path": f2_notitle.display().to_string() }
+                    ]
+                })),
+            )
+            .await;
+            assert_eq!(st2, 200, "部分失敗job発行200: {r2}");
+            let id_fail = r2["job"]["id"].as_i64().unwrap();
+            job_wait_status(id_fail, "failed").await;
+            let _ = shutdown_tx2.send(true);
+        });
+
+        let reg2 = std::fs::read_to_string(&reg2_path).expect("registry2 read");
+        let writes2: Vec<serde_json::Value> = reg2
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|r| r.get("record_type").and_then(|v| v.as_str()) == Some("file_write"))
+            .collect();
+        // job_exec_setup初期1件 + 成功run(2件) + 部分失敗run(2件) = 5件。末尾2件が部分失敗run分
+        assert_eq!(writes2.len(), 5, "file_write 5件: {writes2:?}");
+        let fail_writes = &writes2[3..5];
+        let p_a = std::path::PathBuf::from(fail_writes[0]["age_path"].as_str().unwrap());
+        let p_b = std::path::PathBuf::from(fail_writes[1]["age_path"].as_str().unwrap());
+        assert_ne!(p_a, p_b);
+        assert!(p_a.is_file() && p_b.is_file());
+        assert_eq!(
+            crate::crypto::decrypt_sha256(&p_a, &secret2).expect("decrypt partial a"),
+            job_sha256_hex(b"server-partial-alpha")
+        );
+        assert_eq!(
+            crate::crypto::decrypt_sha256(&p_b, &secret2).expect("decrypt partial b"),
+            job_sha256_hex(b"server-partial-beta-2")
+        );
+    }
 }

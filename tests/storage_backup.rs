@@ -141,17 +141,17 @@ fn backup_push_runs_integrated_pipeline() {
         "metadata_<title>.jsonが配置される(album)"
     );
 
-    // data/outに <batch_id>/<name>.age が生成される(run単位構造)
+    // data/outに <batch_id>/<対象番号>-<name>.age が生成される(run単位構造)
     let batch_ids = run_batch_ids(&fx);
     assert_eq!(batch_ids.len(), 1, "1 run: {batch_ids:?}");
     let run_dir = fx.out_dir.join(&batch_ids[0]);
     assert!(
-        run_dir.join("travel.zip.age").is_file(),
+        run_dir.join("0000-travel.zip.age").is_file(),
         "run単位の成果物: {}",
         run_dir.display()
     );
     assert!(
-        run_dir.join("album.zip.age").is_file(),
+        run_dir.join("0001-album.zip.age").is_file(),
         "run単位の成果物(album): {}",
         run_dir.display()
     );
@@ -2091,4 +2091,198 @@ fn push_from_list_empty_warns_zero() {
         "S3 API呼び出し無し(処理を行わず終了): {}",
         fx.calls()
     );
+}
+
+/// [covers:cli.backup-push-same-name-temp-age-isolated]
+/// TASK-31: 同一batch内の別directory同名ファイル(dir_a/x.zip, dir_b/x.zip)の一時.age名衝突防止。
+/// keep_artifacts="always"で両対象のローカル.age・file_write記録・verify --checksum --roundtrip・
+/// S3 data/pin objectとpin_write記録が各対象の本来の内容で保全・一致すること、および
+/// keep_artifacts="run"で成功後全削除・--keep-going部分失敗時の衝突なし残置を検証する。
+#[test]
+fn backup_push_same_name_files_preserve_distinct_temp_age_and_pins() {
+    // (1) keep_artifacts="always": 一時.age分離保全 + 台帳ハッシュ + --pin + backup verify
+    let Some(fx) = StorageFixture::new(
+        "sb-samename-always",
+        StorageOpts {
+            keep_artifacts: "always",
+            ..sb_opts()
+        },
+    ) else {
+        return;
+    };
+    let a = fx.data_root.join("dir_a").join("x.zip");
+    let b = fx.data_root.join("dir_b").join("x.zip");
+    let plain_a = b"same-name-content-alpha";
+    let plain_b = b"same-name-content-beta-different-length";
+    write_file(&a, plain_a);
+    write_file(&b, plain_b);
+
+    let (code, stdout, stderr) = fx.push_from_list(
+        &[],
+        &[(&a, Some("same-alpha")), (&b, Some("same-beta"))],
+        &["--pin", "pm1"],
+    );
+    assert_eq!(
+        code, 0,
+        "同名2ファイルのbackup push --pinはexit 0: {stdout}{stderr}"
+    );
+
+    let a_real = a.canonicalize().expect("canonical a").display().to_string();
+    let b_real = b.canonicalize().expect("canonical b").display().to_string();
+    let writes: Vec<_> = fx
+        .registry_values()
+        .into_iter()
+        .filter(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_write"))
+        .collect();
+    assert_eq!(writes.len(), 2, "file_writeは2件: {writes:?}");
+    let rec_a = writes
+        .iter()
+        .find(|r| r["source_path"].as_str() == Some(a_real.as_str()))
+        .expect("dir_a/x.zipのfile_write");
+    let rec_b = writes
+        .iter()
+        .find(|r| r["source_path"].as_str() == Some(b_real.as_str()))
+        .expect("dir_b/x.zipのfile_write");
+
+    let age_a = std::path::PathBuf::from(rec_a["age_path"].as_str().expect("age_path a"));
+    let age_b = std::path::PathBuf::from(rec_b["age_path"].as_str().expect("age_path b"));
+    assert_ne!(age_a, age_b, "同一batch内で一時.ageパスが衝突しない");
+    assert!(age_a.is_file(), "dir_aの.ageが保全される: {}", age_a.display());
+    assert!(age_b.is_file(), "dir_bの.ageが保全される: {}", age_b.display());
+
+    // 両ローカル.ageの復号内容・台帳ハッシュ一致
+    assert_eq!(age_decrypt(&fx.age, &age_a, &fx.secret), plain_a);
+    assert_eq!(age_decrypt(&fx.age, &age_b, &fx.secret), plain_b);
+    assert_eq!(rec_a["source_sha256"].as_str(), Some(sha256_hex(plain_a).as_str()));
+    assert_eq!(rec_b["source_sha256"].as_str(), Some(sha256_hex(plain_b).as_str()));
+    assert_eq!(
+        rec_a["age_sha256"].as_str(),
+        Some(sha256_hex(&std::fs::read(&age_a).expect("read age_a")).as_str())
+    );
+    assert_eq!(
+        rec_b["age_sha256"].as_str(),
+        Some(sha256_hex(&std::fs::read(&age_b).expect("read age_b")).as_str())
+    );
+
+    // S3上のdefault.ageとpin key(.age)が両対象とも本来の内容で保存されpin_writeハッシュも一致
+    let uuid_a = rec_a["uuid"].as_str().expect("uuid a");
+    let uuid_b = rec_b["uuid"].as_str().expect("uuid b");
+    assert_ne!(uuid_a, uuid_b);
+    let pin_writes: Vec<_> = fx
+        .registry_values()
+        .into_iter()
+        .filter(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("pin_write"))
+        .collect();
+    assert_eq!(pin_writes.len(), 2, "pin_writeは2件: {pin_writes:?}");
+
+    for (uuid, expected_plain, fw) in [
+        (uuid_a, plain_a as &[u8], rec_a),
+        (uuid_b, plain_b as &[u8], rec_b),
+    ] {
+        let data_obj = fx.object_path(&fx.data_key(uuid));
+        let pin_obj = fx.object_path(&fx.data_pin_key(uuid, "pm1"));
+        assert!(data_obj.is_file(), "default.age存在: {}", data_obj.display());
+        assert!(pin_obj.is_file(), "pin object存在: {}", pin_obj.display());
+        assert_eq!(
+            age_decrypt(&fx.age, &data_obj, &fx.secret),
+            expected_plain,
+            "S3 default.age復号内容一致(uuid={uuid})"
+        );
+        assert_eq!(
+            age_decrypt(&fx.age, &pin_obj, &fx.secret),
+            expected_plain,
+            "S3 --pin object復号内容一致(uuid={uuid})"
+        );
+        let pw = pin_writes
+            .iter()
+            .find(|r| r["uuid"].as_str() == Some(uuid))
+            .expect("uuidのpin_write");
+        assert_eq!(pw["source_sha256"], fw["source_sha256"]);
+        assert_eq!(pw["age_sha256"], fw["age_sha256"]);
+        assert_eq!(
+            pw["age_sha256"].as_str(),
+            Some(sha256_hex(&std::fs::read(&pin_obj).expect("read pin_obj")).as_str())
+        );
+    }
+
+    // backup verify --checksum --roundtrip が同名2対象を含むbatchでも通過する
+    let (vcode, vout, verr) = fx.bin(&["backup", "verify", "--checksum", "--roundtrip"], &[]);
+    assert_eq!(
+        vcode, 0,
+        "同名2対象のbackup verify --checksum --roundtripが通過: {vout}{verr}"
+    );
+
+    // (2) keep_artifacts="run"(既定): 成功後はbatch dir配下の一時.ageが全て削除される
+    let Some(fx_run) = StorageFixture::new("sb-samename-run", sb_opts()) else {
+        return;
+    };
+    let ra = fx_run.data_root.join("dir_a").join("x.zip");
+    let rb = fx_run.data_root.join("dir_b").join("x.zip");
+    write_file(&ra, plain_a);
+    write_file(&rb, plain_b);
+    let (code, stdout, stderr) = fx_run.push_from_list(
+        &[],
+        &[(&ra, Some("run-alpha")), (&rb, Some("run-beta"))],
+        &["--pin", "pm1"],
+    );
+    assert_eq!(code, 0, "keep_artifacts=runのpushはexit 0: {stdout}{stderr}");
+    assert_no_age_files(&fx_run.out_dir, "keep_artifacts=run成功後は全一時.ageを削除");
+    let r_writes: Vec<_> = fx_run
+        .registry_values()
+        .into_iter()
+        .filter(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_write"))
+        .collect();
+    assert_eq!(r_writes.len(), 2);
+    for (path, expected_plain) in [(&ra, plain_a as &[u8]), (&rb, plain_b as &[u8])] {
+        let real = path.canonicalize().unwrap().display().to_string();
+        let fw = r_writes
+            .iter()
+            .find(|r| r["source_path"].as_str() == Some(real.as_str()))
+            .expect("file_write");
+        let uuid = fw["uuid"].as_str().expect("uuid");
+        let pin_obj = fx_run.object_path(&fx_run.data_pin_key(uuid, "pm1"));
+        assert_eq!(age_decrypt(&fx_run.age, &pin_obj, &fx_run.secret), expected_plain);
+    }
+
+    // (3) keep_artifacts="run"で部分失敗(--keep-going)時は残置された両.ageが衝突せず保全される
+    let Some(fx_fail) = StorageFixture::new("sb-samename-fail", sb_opts()) else {
+        return;
+    };
+    let fa = fx_fail.data_root.join("dir_a").join("x.zip");
+    let fb = fx_fail.data_root.join("dir_b").join("x.zip");
+    let fc = fx_fail.data_root.join("dir_c").join("notitle.zip");
+    write_file(&fa, plain_a);
+    write_file(&fb, plain_b);
+    write_file(&fc, b"no-title-causes-target-error");
+    let (code, stdout, stderr) = fx_fail.push_from_list(
+        &[],
+        &[(&fa, Some("fail-alpha")), (&fb, Some("fail-beta")), (&fc, None)],
+        &["--keep-going"],
+    );
+    assert_eq!(
+        code, 3,
+        "非ttyのtitle未指定を含む--keep-goingは対象エラー3: {stdout}{stderr}"
+    );
+    let f_writes: Vec<_> = fx_fail
+        .registry_values()
+        .into_iter()
+        .filter(|r| r.get("record_type").and_then(|t| t.as_str()) == Some("file_write"))
+        .collect();
+    assert_eq!(f_writes.len(), 2, "成功した2件のfile_writeが残る");
+    let fa_real = fa.canonicalize().unwrap().display().to_string();
+    let fb_real = fb.canonicalize().unwrap().display().to_string();
+    let fw_a = f_writes
+        .iter()
+        .find(|r| r["source_path"].as_str() == Some(fa_real.as_str()))
+        .expect("fa write");
+    let fw_b = f_writes
+        .iter()
+        .find(|r| r["source_path"].as_str() == Some(fb_real.as_str()))
+        .expect("fb write");
+    let age_fa = std::path::PathBuf::from(fw_a["age_path"].as_str().unwrap());
+    let age_fb = std::path::PathBuf::from(fw_b["age_path"].as_str().unwrap());
+    assert_ne!(age_fa, age_fb);
+    assert!(age_fa.is_file() && age_fb.is_file());
+    assert_eq!(age_decrypt(&fx_fail.age, &age_fa, &fx_fail.secret), plain_a);
+    assert_eq!(age_decrypt(&fx_fail.age, &age_fb, &fx_fail.secret), plain_b);
 }
