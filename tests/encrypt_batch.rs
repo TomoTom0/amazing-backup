@@ -90,9 +90,9 @@ fn registry_append_fields() {
         serde_json::json!(sha256_hex(&std::fs::read(&src).unwrap())),
         "平文sha256(1pass計算)"
     );
-    // run単位の成果物配置: <out>/<batch_id>/<name>.age
+    // run単位の成果物配置: <out>/<batch_id>/<対象番号>-<name>.age
     let batch_id = rec["batch_id"].as_str().unwrap();
-    let age_file = fx.out_dir.join(batch_id).join("photo.zip.age");
+    let age_file = fx.out_dir.join(batch_id).join("0000-photo.zip.age");
     assert!(
         age_file.is_file(),
         "run単位の.age配置: {}",
@@ -181,7 +181,7 @@ fn reencrypt_without_registry_record() {
     let new_age = fx
         .out_dir
         .join(writes_after[0]["batch_id"].as_str().unwrap())
-        .join("a.zip.age");
+        .join("0000-a.zip.age");
     assert_eq!(
         age_decrypt(&fx.age, &new_age, &fx.secret),
         plain,

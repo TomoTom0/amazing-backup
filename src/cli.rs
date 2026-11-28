@@ -548,7 +548,11 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
                     }
                 };
                 let name = fr.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let Some(rec) = recs.iter().find(|r| r.source_name == name) else {
+                let source_path = fr.get("source_path").and_then(|v| v.as_str());
+                let Some(rec) = recs.iter().find(|r| match source_path {
+                    Some(sp) => r.source_path == sp && r.source_name == name,
+                    None => r.source_name == name,
+                }) else {
                     failures.push(format!(
                         "{mp}: manifestにregistry記録の無いファイルがある ({name})"
                     ));

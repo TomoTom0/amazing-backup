@@ -152,10 +152,10 @@
 feature = "cli"
 source_file = "src/cli.rs"
 verified = true
-verified_at = "2026-11-06"
-verified_by = "claude"
+verified_at = "2026-11-28"
+verified_by = "gemini"
 test_command = "cargo test"
-source_hash = "328e20f3263795ece1bb3e58645def0cb3ea9a52"
+source_hash = "bc400cfd081962b85c06a4d44744b5a870d13dba"
 note = "CLI共通の終了コード・entrypoint系。verifyエリア(verify.toml)と同じく src/cli.rs が source_file。CLI-004はRust化に伴い起動経路parity(bin直接実行とcargo run経由)へ読み替え(設計8章)。TASK-9でFakeS3 seam選択(cli.rs)・--profile廃止が追加され、S3呼び出しの実体はsrc/s3.rs(source_fileはエリア主対象でCLI-007/008の実装箇所はtarget_functionで特定)。2026-11-02 TASK-7(pipeline profile化)のテスト先行更新でverified=falseへ戻した(実装後に全件pass確認のうえ記録)。2026-11-03 TASK-7実装完了(--profile両file選択・backup verifyのaws.toml必須化・検査対象の実効bucket帰属絞り込み・recipients指紋表示はsrc/storage/backup.rs経由)を反映しcargo test全件pass・verify-conditions.py PASSを確認してverified=trueへ復帰・source_hashを更新。2026-11-03 REVIEW-1(code review)指摘対応を反映しsource_hashを再更新。2026-11-03 TASK-23(--from-list単独許容化のrebase統合。paths-required-usage-error条件をrequired_unless_present版へ)を反映しsource_hashを更新。2026-11-05 TASK-9 P6(manage auth)のテスト先行更新でverified=falseへ戻した(manage auth list/remove実装はsrc/storage/manage.rs・src/catalog.rsでsrc/cli.rsは不変のためsource_hash更新なし)。2026-11-05 P6実装後にcargo test全件pass(370 tests)・verify-conditions.py PASSを確認してverified=trueへ復帰。2026-11-05 TASK-13(api-key認証のmanage auth拡張)のテスト先行更新でverified=falseへ戻す(実装はsrc/storage/manage.rs・src/catalog.rsのためsource_hash更新なし)。2026-11-05 TASK-13実装後にcargo test --test catalog_storage全緑(29 tests・manage auth api-key/list統合/remove両table/0件案内合計判定の各test含む)を確認してverified=trueへ復帰(source_hashはsrc/cli.rs不変のため更新なし)。2026-11-06 TASK-13レビュー指摘対応(空文字name usage error化+乱数読取helper共通化=src/storage/manage.rs変更。src/cli.rsは不変)でverified=falseへ戻す(全件verify後にtrueへ復帰)。2026-11-06 全件verify(catalog_storage 30tests緑・manage_auth_api_key_empty_name_is_usage_error含む・cargo test全binary緑・verify-conditions PASS 342条件)を確認してverified=trueへ復帰(src/cli.rs不変のためsource_hash更新なし)"
 
 [[condition]]
@@ -165,7 +165,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-001(5章cli.rs・7.1
 description = "使用法誤り(引数誤り)は exit 64(clapのusage error既定 exit 2 を BackupError::Usage へremapし、設定エラー2と区別する) (unit)"
 given = "不明オプション・サブコマンド不足等のusage誤り実行"
 expect_return = "exit code 64"
-source_lines = "src/cli.rs:698"
+source_lines = "src/cli.rs:702"
 
 [[condition]]
 id = "cli.version-flag"
@@ -183,7 +183,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-003(終了コード�
 description = "終了コード区分(0/2/3/4/5)が7.1の仕様表どおりに出る(各サブコマンドの代表case) (unit)"
 given = "成功(対象なし・全skip含む)・設定エラー・対象エラー・処理エラー・転送エラーの各区画の代表ケース"
 expect_return_shape = "0(成功)・2(設定・環境)・3(対象)・4(処理)・5(転送)が各区画の代表ケースで出る"
-source_lines = "src/cli.rs:712; src/errors.rs:56"
+source_lines = "src/cli.rs:716; src/errors.rs:56"
 
 [[condition]]
 id = "cli.module-entrypoint-parity"
@@ -201,7 +201,7 @@ source = "tmp/tasks/tm-1/design_backup_pipeline.md 8章 CLI-005(2026-10-08レビ
 description = "backup push は<PATH>と--from-listのいずれかを要する: 両方0個(オプションのみ)は usage error 64。--from-list単独・PATH単独・併用はusage errorとならない(required_unless_present化。旧: PATH 1個以上必須) (unit)"
 given = "backup push をオプションのみ・--from-listのみ・PATH 1個(+--from-list併用)で実行する各ケース"
 expect_return = "オプションのみは exit 64。--from-listのみ・PATH 1個(+併用)はusage errorとならない"
-source_lines = "src/cli.rs:1112"
+source_lines = "src/cli.rs:1116"
 
 [[condition]]
 id = "cli.fake-s3-seam"
@@ -369,9 +369,9 @@ source_lines = "tests/storage_query.rs:779"
 id = "cli.backup-push-integrated-run"
 target_function = "cli::cmd_backup_push"
 source = "tmp/tasks/tm-10/design_s3_storage.md 3.2(backup push)・4.1([output])・2.2(index_upload)。TASK-18(tmp/tasks/tm-18/design_key-uuid-versioning.md 1.2(データフロー)・5.7・3.2/3.3・10章): schema2 events・metadata sync追記へ改訂。TASK-20(tmp/tasks/tm-20/design_vocab-rename-label.md 1章・3章・6章): rel_path→label改名・schema 3化(manifest file record schema=3・索引schema=3・file_write schema=3)"
-description = "backup push統合正常系: 対象解決(+title: from-list欄/対話prompt)→分類解決→暗号化→upload(default.age(data/{uuid}/)・manifest(file record schema=3・batch header行はschema=2のまま)・索引再構築(schema=3)・touched_entitiesのmetadata sync)を1実行で行う(順序処理)。暗号化一時物dirはXDG cache dir(規定$XDG_CACHE_HOME/amazing-backup/・AMAZING_BACKUP_HOME指定時は$ABH/cache/)で <cache>/<batch_id>/<name>.age と <batch_id>/manifest.jsonl.age のrun単位構造。registryのeventはrecord_type(file_write(schema=3・label入り)・file_upload(uuid/title入り)・manifest・index_upload)で記録される(他recordのschema値はTASK-20で不変) (integration, fake seam)"
+description = "backup push統合正常系: 対象解決(+title: from-list欄/対話prompt)→分類解決→暗号化→upload(default.age(data/{uuid}/)・manifest(file record schema=3・batch header行はschema=2のまま)・索引再構築(schema=3)・touched_entitiesのmetadata sync)を1実行で行う(順序処理)。暗号化一時物dirはXDG cache dir(規定$XDG_CACHE_HOME/amazing-backup/・AMAZING_BACKUP_HOME指定時は$ABH/cache/)で <cache>/<batch_id>/<対象番号>-<name>.age(例: 0000-<name>.age) と <batch_id>/manifest.jsonl.age のrun単位構造。registryのeventはrecord_type(file_write(schema=3・label入り)・file_upload(uuid/title入り)・manifest・index_upload)で記録される(他recordのschema値はTASK-20で不変) (integration, fake seam)"
 given = "2対象(title指定)を含む backup push 実行後のS3・registry・索引・metadataの確認"
-expect_return_shape = "backup pushは exit 0 で data/{uuid}/default.age・manifest・索引・metadata_{title}.jsonが配置・更新され、cache dirに <batch_id>/<name>.age が生成される。registryにfile_write(schema=3)・file_upload・manifest・index_uploadの各記録がappendされる"
+expect_return_shape = "backup pushは exit 0 で data/{uuid}/default.age・manifest・索引・metadata_{title}.jsonが配置・更新され、cache dirに <batch_id>/<対象番号>-<name>.age が生成される。registryにfile_write(schema=3)・file_upload・manifest・index_uploadの各記録がappendされる"
 source_lines = "tests/storage_backup.rs:89"
 
 [[condition]]
@@ -897,3 +897,12 @@ source = "TASK-13設計(tmp/tasks/tm-13/design_api-key-auth.md) 2.2(生成乱数
 reason = "内部実装の経路共有であり外部観測可能な振る舞い分岐でない(test-structure §8『書かない』: 挙動に差を生まない内部処理)。生成結果の観測可能面(abk_前置・1回表示・hash保存)はcli.manage-auth-api-key-generatesが担保"
 decided_at = "2026-11-05"
 decided_by = "claude"
+
+[[condition]]
+id = "cli.backup-push-same-name-temp-age-isolated"
+target_function = "storage::backup::cmd_backup_push / cli::cmd_verify"
+source = "TASK-31 (tmp/tasks/tm-10/design_s3_storage.md 4.1・TASK-28 PR #13所見2・Item 108事前照合)"
+description = "同一batch内の異directory同名ファイル一時.age名衝突防止: 別directoryで同名・別内容の2対象(dir_a/x.zip・dir_b/x.zip)を同一batchでbackup push --pin <版名> 実行した際、batch内の一時.ageファイル名が対象番号で一意化されて衝突せず、先行対象の.ageが後続に上書きされない。(1) keep_artifacts=\"always\"時は両対象のローカル.ageファイルが別pathで保全され、各々の復号内容・file_write記録のage_path/age_sha256/source_sha256がそれぞれの対象と一致し、backup verify --checksum --roundtripがexit 0で通過する(manifest突合もsource_path単位で照合) (2) S3のdata/{uuid}/default.age・data/{uuid}/{pin}.ageの両方およびpin_write記録のage_sha256/source_sha256が各対象本来の内容と一致する (3) 既定keep_artifacts=\"run\"では成功run後に両一時.ageを含めbatch dirが全削除され、失敗run残置時は既作成分の.ageが衝突せず保持される (integration, fake seam)"
+given = "dir_a/x.zipとdir_b/x.zip(同名・別内容)をfrom-listでtitle指定し同一batchでbackup push --pin pm1実行(keep_artifacts=\"always\"でのverify・S3復号検証、およびkeep_artifacts=\"run\"での成功後削除・--keep-going失敗時残置の検証)"
+expect_return_shape = "両対象のfile_write.age_pathが異なり、各ローカル.ageとS3 default.age・pin keyの復号内容およびregistry記録ハッシュが各対象と一致し、backup verify --checksum --roundtripはexit 0。keep_artifacts=\"run\"成功後はout_dir配下に.ageが残らず、失敗時は既作成分が衝突せず残る"
+source_lines = "tests/storage_backup.rs:2096"
